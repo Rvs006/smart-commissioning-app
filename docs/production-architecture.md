@@ -8,13 +8,13 @@ Build the Smart Commissioning Tool as a real commissioning platform, not a brows
 
 ### What is already useful
 
-- `preview.html`, `smart_commissiong_tool_ui.jsx`, and `Smart Commissioning Tool UI.txt` provide the correct operator workflow, navigation model, detail-inspector pattern, and commissioning language.
+- The original UI prototypes (`preview.html` and `smart_commissiong_tool_ui.jsx`, removed after the baseline commit and available in git history at commit `3471050`) and `Smart Commissioning Tool UI.txt` provide the correct operator workflow, navigation model, detail-inspector pattern, and commissioning language.
 - `device_udmi_payload_validation/` contains real MQTT subscription and UDMI payload validation logic.
 - `Smart Commissioning Tool Specification.pdf` defines the actual product behaviour, data model, and acceptance criteria.
 
 ### What is not production-ready
 
-- The HTML prototypes persist state in browser storage and use mocked scan and validation flows.
+- The HTML prototypes persisted state in browser storage and used mocked scan and validation flows.
 - The UDMI validator is a standalone script with absolute local paths, no app-level API, no shared issue model, and no persistent run history.
 - The workspace does not yet contain the backend data model, import framework, background job system, or secure configuration storage required by the specification.
 
