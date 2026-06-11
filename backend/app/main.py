@@ -1,20 +1,35 @@
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from smart_commissioning_core.db.migrate import upgrade_to_head
 
 from app.api.router import api_router
 from app.core.config import get_settings
+from app.core.runtime import ensure_runtime_directories
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    if settings.auto_migrate:
+        # The backend owns the schema: create/upgrade it before serving.
+        ensure_runtime_directories()
+        upgrade_to_head(settings.database_url)
+    yield
+
 
 app = FastAPI(
     title="Smart Commissioning Tool API",
     version="0.1.0",
     summary="Production scaffold for commissioning configuration, discovery, validation, and reporting.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

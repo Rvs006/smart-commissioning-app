@@ -16,6 +16,7 @@ DEFAULT_PORT = 8000
 
 def _bundle_dependency_imports() -> None:
     """Keep PyInstaller aware of runtime dependencies imported by backend/app."""
+    import alembic  # noqa: F401
     import dramatiq  # noqa: F401
     import fastapi  # noqa: F401
     import fastapi.middleware.cors  # noqa: F401
@@ -71,6 +72,12 @@ def configure_environment(root: Path) -> None:
     os.environ["SCT_FRONTEND_DIST"] = str(frontend_dist)
     os.environ["SMART_COMMISSIONING_RUNS_ROOT"] = str(runtime_root / "runs")
     os.environ["SMART_COMMISSIONING_SECRETS_ROOT"] = str(runtime_root / "secrets")
+    # Run/import/configuration records live in this SQLite file; the API
+    # applies migrations on startup (AUTO_MIGRATE defaults to true).
+    os.environ.setdefault(
+        "DATABASE_URL",
+        f"sqlite:///{(runtime_root / 'smart_commissioning.db').as_posix()}",
+    )
     os.environ.setdefault("ENVIRONMENT", "portable_windows")
     os.environ.setdefault("JOB_EXECUTION_MODE", "inline")
     os.environ.setdefault("ALLOW_INLINE_WORKER_FALLBACK", "true")

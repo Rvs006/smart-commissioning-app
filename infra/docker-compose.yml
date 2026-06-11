@@ -8,6 +8,11 @@ services:
     depends_on:
       - api
 
+  # Run/import/configuration records live in Postgres (DATABASE_URL); the API
+  # applies Alembic migrations on startup (backend owns the schema). Reports
+  # are generated in-memory by the API at download time, so no run-file volume
+  # is shared with the worker anymore. api_runtime only persists file
+  # artifacts the API writes locally: uploaded import files and secret material.
   api:
     build:
       context: ..
@@ -19,16 +24,17 @@ services:
       OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY}
       OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY}
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET}
-      SMART_COMMISSIONING_RUNS_ROOT: /runtime/runs
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
-      - run_data:/runtime/runs
+      - api_runtime:/app/backend/runtime
     depends_on:
       - postgres
       - redis
       - minio
 
+  # The worker reads/writes run rows through the same DATABASE_URL but never
+  # runs migrations; it depends on the api so the schema exists first.
   worker:
     build:
       context: ..
@@ -40,10 +46,8 @@ services:
       OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY}
       OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY}
       OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET}
-      SMART_COMMISSIONING_RUNS_ROOT: /runtime/runs
-    volumes:
-      - run_data:/runtime/runs
     depends_on:
+      - api
       - postgres
       - redis
       - minio
@@ -82,4 +86,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
-  run_data:
+  api_runtime:

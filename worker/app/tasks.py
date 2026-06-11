@@ -1,14 +1,19 @@
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
+from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 from app.config import get_settings
-from app.services.run_store import FileRunStore
+from app.db import get_engine
 
 settings = get_settings()
 broker = RedisBroker(url=settings.redis_url)
 dramatiq.set_broker(broker)
+
+# Shared database-backed run store (same DATABASE_URL as the backend). The
+# backend owns the schema; the worker only reads/writes run rows.
+run_store = DbRunStore(get_engine())
 
 
 def _log_run(run_id: str, job_name: str) -> None:
@@ -38,7 +43,7 @@ def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
     process_udmi_validation_run(
         run_id,
         parameters,
-        run_store=FileRunStore(),
+        run_store=run_store,
         execution_mode="dramatiq_worker",
         live_capture=None,
     )
@@ -53,7 +58,7 @@ def publish_mqtt_config(run_id: str, parameters: dict) -> None:
     process_mqtt_config_publish_run(
         run_id,
         parameters,
-        run_store=FileRunStore(),
+        run_store=run_store,
         execution_mode="dramatiq_worker",
         broker_publisher=None,
     )

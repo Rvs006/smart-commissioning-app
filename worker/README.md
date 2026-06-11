@@ -18,6 +18,18 @@ configuration access yet, so it never publishes to or captures from a live
 broker. The remaining actors are placeholders that define the queue boundary and
 payload shape.
 
+## Database
+
+Run records are read and written through the shared database layer
+(`smart_commissioning_core.db.DbRunStore`). The worker uses the same
+`DATABASE_URL` as the API and defaults to the same SQLite file
+(`../backend/runtime/smart_commissioning.db`) so both processes hit the same
+database in local development.
+
+The worker does NOT run migrations: the backend owns the schema and applies
+Alembic migrations on startup. Start the API (or run its migrations) before
+pointing a worker at a fresh database.
+
 ## Quickstart
 
 `smart-commissioning-core` is not published to PyPI and `pyproject.toml` cannot

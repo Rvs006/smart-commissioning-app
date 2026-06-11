@@ -1,10 +1,10 @@
-import json
-from collections.abc import Callable
-from datetime import UTC, datetime
-from pathlib import Path
-from secrets import token_hex
+from smart_commissioning_core.db.db_run_store import DbRunStore
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.core.runtime import RUNS_ROOT, ensure_runtime_directories
+from app.core.db import get_engine
+from app.core.runtime import ensure_runtime_directories
 from app.schemas.jobs import (
     JobCreateRequest,
     JobStatus,
@@ -32,9 +32,17 @@ REPORT_FORMAT_EXTENSIONS = {
 
 
 class RunService:
-    def __init__(self, root: Path = RUNS_ROOT) -> None:
-        self.root = root
+    """Thin wrapper over the shared database-backed run store.
+
+    The public API mirrors the previous file-backed implementation exactly:
+    method names, RunRecord/JobSummary return models, and FileNotFoundError
+    for missing run ids (routes translate that into 404 responses).
+    """
+
+    def __init__(self, engine: Engine | None = None) -> None:
         ensure_runtime_directories()
+        self._engine = engine if engine is not None else get_engine()
+        self._store = DbRunStore(self._engine)
 
     def create_job_run(
         self,
@@ -73,30 +81,34 @@ class RunService:
         return run, report
 
     def get_run(self, run_id: str) -> RunRecord:
-        return self._load(run_id)
+        return RunRecord.model_validate(self._store.get_run(run_id))
 
-    def list_runs(self, *, job_types: set[JobType] | None = None) -> list[JobSummary]:
-        runs: list[RunRecord] = []
-        for path in sorted(self.root.glob("*.json")):
-            try:
-                run = RunRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if job_types is None or run.job_type in job_types:
-                runs.append(run)
-
-        runs.sort(key=lambda run: run.created_at, reverse=True)
-        return [self._summary(run) for run in runs]
+    def list_runs(
+        self,
+        *,
+        job_types: set[JobType] | None = None,
+        project_id: str | None = None,
+        site_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[JobSummary]:
+        records = self._store.list_runs(
+            project_id,
+            site_id,
+            job_type=job_types,
+            limit=limit,
+            offset=offset,
+        )
+        return [JobSummary.model_validate(record) for record in records]
 
     def runtime_ready(self) -> tuple[bool, str]:
         try:
             ensure_runtime_directories()
-            probe_path = self.root / f".readiness_{token_hex(4)}"
-            probe_path.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
-            probe_path.unlink(missing_ok=True)
-        except OSError as error:
+            with self._engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except (OSError, SQLAlchemyError) as error:
             return False, str(error)
-        return True, "run store is writable"
+        return True, "run store database is reachable"
 
     def update_run_status(
         self,
@@ -107,15 +119,14 @@ class RunService:
         progress_percent: int | None = None,
         error_message: str | None = None,
     ) -> RunRecord:
-        def mutate(run: RunRecord) -> None:
-            run.status = status
-            if stage is not None:
-                run.stage = stage
-            if progress_percent is not None:
-                run.progress_percent = max(0, min(100, progress_percent))
-            run.error_message = error_message
-
-        return self._update_run(run_id, mutate)
+        record = self._store.update_run_status(
+            run_id,
+            status=status,
+            stage=stage,
+            progress_percent=progress_percent,
+            error_message=error_message,
+        )
+        return RunRecord.model_validate(record)
 
     def update_result_summary(
         self,
@@ -124,33 +135,22 @@ class RunService:
         *,
         merge: bool = True,
     ) -> RunRecord:
-        def mutate(run: RunRecord) -> None:
-            if merge:
-                run.result_summary = {**run.result_summary, **result_summary}
-            else:
-                run.result_summary = dict(result_summary)
-
-        return self._update_run(run_id, mutate)
+        record = self._store.update_result_summary(run_id, result_summary, merge=merge)
+        return RunRecord.model_validate(record)
 
     def replace_issues(
         self,
         run_id: str,
         issues: list[ValidationIssueRecord | dict[str, object]],
     ) -> RunRecord:
-        def mutate(run: RunRecord) -> None:
-            run.issues = [ValidationIssueRecord.model_validate(issue) for issue in issues]
-
-        return self._update_run(run_id, mutate)
+        return RunRecord.model_validate(self._store.replace_issues(run_id, issues))
 
     def append_issue(
         self,
         run_id: str,
         issue: ValidationIssueRecord | dict[str, object],
     ) -> RunRecord:
-        def mutate(run: RunRecord) -> None:
-            run.issues.append(ValidationIssueRecord.model_validate(issue))
-
-        return self._update_run(run_id, mutate)
+        return RunRecord.model_validate(self._store.append_issue(run_id, issue))
 
     def _create_run(
         self,
@@ -160,59 +160,13 @@ class RunService:
         job_type: JobType,
         parameters: dict[str, object],
     ) -> RunRecord:
-        now = datetime.now(UTC)
-        run = RunRecord(
-            run_id=f"run_{now.strftime('%Y%m%d%H%M%S')}_{token_hex(4)}",
+        record = self._store.create_run(
             project_id=project_id,
             site_id=site_id,
             job_type=job_type,
-            status="queued",
-            stage="awaiting_worker",
-            progress_percent=0,
             parameters=parameters,
-            result_summary={
-                "queued": True,
-                "worker_required": True,
-            },
-            issues=[],
-            created_at=now,
-            updated_at=now,
         )
-        self._save(run)
-        return run
-
-    def _load(self, run_id: str) -> RunRecord:
-        payload = json.loads(self._path(run_id).read_text(encoding="utf-8"))
-        return RunRecord.model_validate(payload)
-
-    def _update_run(self, run_id: str, mutate: Callable[[RunRecord], None]) -> RunRecord:
-        run = self._load(run_id)
-        mutate(run)
-        run.updated_at = datetime.now(UTC)
-        self._save(run)
-        return run
-
-    def _save(self, run: RunRecord) -> None:
-        path = self._path(run.run_id)
-        temp_path = path.with_suffix(".json.tmp")
-        temp_path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
-        temp_path.replace(path)
-
-    def _path(self, run_id: str) -> Path:
-        if "/" in run_id or "\\" in run_id or ".." in run_id:
-            raise FileNotFoundError(run_id)
-        return self.root / f"{run_id}.json"
-
-    def _summary(self, run: RunRecord) -> JobSummary:
-        return JobSummary(
-            run_id=run.run_id,
-            job_type=run.job_type,
-            status=run.status,
-            stage=run.stage,
-            progress_percent=run.progress_percent,
-            created_at=run.created_at,
-            updated_at=run.updated_at,
-        )
+        return RunRecord.model_validate(record)
 
     def _report_file_name(self, report_type: str, run_id: str, output_format: str) -> str:
         extension = REPORT_FORMAT_EXTENSIONS.get(output_format, "zip")

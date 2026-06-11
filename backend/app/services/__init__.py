@@ -5,9 +5,17 @@ from smart_commissioning_core.mqtt_settings import set_configuration_values_prov
 
 
 def _configuration_values() -> tuple[dict[str, object], dict[str, object]]:
-    from app.services.configuration_service import ConfigurationService
+    from sqlalchemy.exc import SQLAlchemyError
 
-    configuration = ConfigurationService().load()
+    from app.services.configuration_service import DEFAULT_CONFIGURATION, ConfigurationService
+
+    try:
+        configuration = ConfigurationService().load()
+    except SQLAlchemyError:
+        # Best-effort defaults: connection parameter resolution must not fail
+        # when the database is unreachable or not migrated yet (the previous
+        # file-backed load() seeded defaults and could never fail either).
+        configuration = DEFAULT_CONFIGURATION
     return configuration.mqtt.values, configuration.certificates.values
 
 

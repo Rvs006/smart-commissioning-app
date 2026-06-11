@@ -2,11 +2,18 @@ from functools import lru_cache
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from smart_commissioning_core.db.engine import default_sqlite_url
+
+from app.core.runtime import RUNTIME_ROOT
 
 
 class Settings(BaseSettings):
     environment: str = "development"
-    database_url: str = "postgresql+psycopg://smart_commissioning:smart_commissioning@localhost:5432/smart_commissioning"
+    # Portable/edge-friendly default: a SQLite file under the runtime root.
+    # Deployments that run Postgres set DATABASE_URL explicitly (see infra/).
+    database_url: str = default_sqlite_url(RUNTIME_ROOT)
+    # Apply Alembic migrations (smart_commissioning_core.db.migrate) on startup.
+    auto_migrate: bool = True
     redis_url: str = "redis://localhost:6379/0"
     object_storage_endpoint: str = "http://localhost:9000"
     object_storage_access_key: str = "minioadmin"

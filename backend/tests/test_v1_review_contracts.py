@@ -8,9 +8,19 @@ from app.services.configuration_service import DEFAULT_CONFIGURATION, Configurat
 from app.services.discovery_observations import build_observation, parse_port_specification
 from app.services.import_service import ImportService
 from app.services.run_service import RunService
+from smart_commissioning_core.db.base import Base
+from smart_commissioning_core.db.engine import create_engine_from_url, default_sqlite_url
 from smart_commissioning_core.mqtt_config_publish import validate_and_publish_config
 from smart_commissioning_core.mqtt_transport import MqttMessage
 from smart_commissioning_core.udmi_validation import validate_udmi_full_report
+from sqlalchemy.engine import Engine
+
+
+def _temporary_engine(temp_dir: str) -> Engine:
+    """Engine for a per-test SQLite database with the schema created."""
+    engine = create_engine_from_url(default_sqlite_url(Path(temp_dir)))
+    Base.metadata.create_all(engine)
+    return engine
 
 
 class ConfigurationReviewTests(unittest.TestCase):
@@ -61,20 +71,24 @@ class ConfigurationReviewTests(unittest.TestCase):
 
     def test_secret_storage_returns_masked_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            service = ConfigurationService(path=Path(temp_dir) / "configuration.json")
+            engine = _temporary_engine(temp_dir)
+            try:
+                service = ConfigurationService(engine=engine)
 
-            response = service.store_secret(
-                SecretMaterialRequest(
-                    field="CA Certificate",
-                    file_name="ca.pem",
-                    content="-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----",
+                response = service.store_secret(
+                    SecretMaterialRequest(
+                        field="CA Certificate",
+                        file_name="ca.pem",
+                        content="-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----",
+                    )
                 )
-            )
 
-            self.assertTrue(response.secret_ref.startswith("secret://ca-certificate-"))
-            self.assertTrue(response.masked)
-            self.assertEqual(response.validity, "stored")
-            self.assertEqual(len(response.fingerprint), 16)
+                self.assertTrue(response.secret_ref.startswith("secret://ca-certificate-"))
+                self.assertTrue(response.masked)
+                self.assertEqual(response.validity, "stored")
+                self.assertEqual(len(response.fingerprint), 16)
+            finally:
+                engine.dispose()
 
 
 class DiscoveryReviewTests(unittest.TestCase):
@@ -112,29 +126,33 @@ class ImportTemplateReviewTests(unittest.TestCase):
 class ReportReviewTests(unittest.TestCase):
     def test_report_requests_preserve_docx_and_xlsx_formats(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            service = RunService(root=Path(temp_dir))
+            engine = _temporary_engine(temp_dir)
+            try:
+                service = RunService(engine=engine)
 
-            _, excel_report = service.create_report_run(
-                ReportRequest(
-                    project_id="demo-project",
-                    site_id="demo-site",
-                    report_type="issue_report",
-                    output_format="xlsx",
+                _, excel_report = service.create_report_run(
+                    ReportRequest(
+                        project_id="demo-project",
+                        site_id="demo-site",
+                        report_type="issue_report",
+                        output_format="xlsx",
+                    )
                 )
-            )
-            _, word_report = service.create_report_run(
-                ReportRequest(
-                    project_id="demo-project",
-                    site_id="demo-site",
-                    report_type="evidence_pack",
-                    output_format="docx",
+                _, word_report = service.create_report_run(
+                    ReportRequest(
+                        project_id="demo-project",
+                        site_id="demo-site",
+                        report_type="evidence_pack",
+                        output_format="docx",
+                    )
                 )
-            )
 
-            self.assertTrue(excel_report.file_name.endswith(".xlsx"))
-            self.assertEqual(excel_report.output_format, "xlsx")
-            self.assertTrue(word_report.file_name.endswith(".docx"))
-            self.assertEqual(word_report.output_format, "docx")
+                self.assertTrue(excel_report.file_name.endswith(".xlsx"))
+                self.assertEqual(excel_report.output_format, "xlsx")
+                self.assertTrue(word_report.file_name.endswith(".docx"))
+                self.assertEqual(word_report.output_format, "docx")
+            finally:
+                engine.dispose()
 
 
 class UdmiReviewTests(unittest.TestCase):

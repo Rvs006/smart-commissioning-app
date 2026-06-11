@@ -1,12 +1,15 @@
 import ipaddress
-import json
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex
 from typing import Literal
 
-from app.core.runtime import CONFIGURATION_PATH, SECRETS_ROOT, ensure_runtime_directories
+from smart_commissioning_core.db.repositories import ConfigurationRepository
+from sqlalchemy.engine import Engine
+
+from app.core.db import get_engine
+from app.core.runtime import SECRETS_ROOT, ensure_runtime_directories
 from app.schemas.configuration import (
     ConfigurationSection,
     ConfigurationSnapshot,
@@ -14,6 +17,9 @@ from app.schemas.configuration import (
     SecretMaterialRequest,
     SecretMaterialResponse,
 )
+
+DEFAULT_PROJECT_ID = "demo-project"
+DEFAULT_SITE_ID = "demo-site"
 
 DEFAULT_CONFIGURATION = ConfigurationSnapshot(
     device=ConfigurationSection(
@@ -100,24 +106,37 @@ SUPPORTED_CERT_EXTENSIONS = {".pem", ".crt", ".cer", ".key", ".p12", ".pfx"}
 
 
 class ConfigurationService:
-    def __init__(self, path: Path = CONFIGURATION_PATH) -> None:
-        self.path = path
-        ensure_runtime_directories()
+    """Versioned configuration snapshots stored per project+site in the database.
 
-    def load(self) -> ConfigurationSnapshot:
-        if not self.path.exists():
-            self.save(DEFAULT_CONFIGURATION)
+    Secret material stays file-based under the secrets root; configuration
+    payloads only ever hold secret:// references.
+    """
+
+    def __init__(self, engine: Engine | None = None) -> None:
+        ensure_runtime_directories()
+        self._repository = ConfigurationRepository(engine if engine is not None else get_engine())
+
+    def load(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        site_id: str = DEFAULT_SITE_ID,
+    ) -> ConfigurationSnapshot:
+        payload = self._repository.get_current(project_id, site_id)
+        if payload is None:
+            self.save(DEFAULT_CONFIGURATION, project_id=project_id, site_id=site_id)
             return DEFAULT_CONFIGURATION
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
         loaded = ConfigurationSnapshot.model_validate(payload)
         return self._merge_with_defaults(loaded)
 
-    def save(self, configuration: ConfigurationSnapshot) -> ConfigurationSnapshot:
+    def save(
+        self,
+        configuration: ConfigurationSnapshot,
+        *,
+        project_id: str = DEFAULT_PROJECT_ID,
+        site_id: str = DEFAULT_SITE_ID,
+    ) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration)
-        self.path.write_text(
-            configuration.model_dump_json(indent=2),
-            encoding="utf-8",
-        )
+        self._repository.save(project_id, site_id, configuration.model_dump(mode="json"))
         return configuration
 
     def validate(self, configuration: ConfigurationSnapshot) -> ConfigurationValidationResult:
@@ -167,7 +186,13 @@ class ConfigurationService:
 
         return ConfigurationValidationResult(valid=not errors, errors=errors)
 
-    def store_secret(self, request: SecretMaterialRequest) -> SecretMaterialResponse:
+    def store_secret(
+        self,
+        request: SecretMaterialRequest,
+        *,
+        project_id: str = DEFAULT_PROJECT_ID,
+        site_id: str = DEFAULT_SITE_ID,
+    ) -> SecretMaterialResponse:
         field = request.field.strip()
         if field not in {"CA Certificate", "Client Certificate", "Private Key"}:
             raise ValueError("Only CA Certificate, Client Certificate, and Private Key can be stored as secret material.")
@@ -186,9 +211,9 @@ class ConfigurationService:
         secret_path = SECRETS_ROOT / f"{secret_ref.removeprefix('secret://')}.pem"
         secret_path.write_text(content, encoding="utf-8")
 
-        configuration = self.load()
+        configuration = self.load(project_id, site_id)
         configuration.certificates.values[field] = secret_ref
-        self.save(configuration)
+        self.save(configuration, project_id=project_id, site_id=site_id)
 
         return SecretMaterialResponse(
             secret_ref=secret_ref,
