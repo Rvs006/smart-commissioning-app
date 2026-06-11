@@ -172,14 +172,120 @@ export type ReportSummary = {
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const apiBaseUrl = rawApiBaseUrl.replace(/\/$/, "");
 
+const API_KEY_STORAGE_KEY = "sc.apiKey";
+
+export const AUTH_REQUIRED_MESSAGE = "Authentication required — set an API key";
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+function readStoredApiKey(): string | null {
+  try {
+    return window.localStorage.getItem(API_KEY_STORAGE_KEY);
+  } catch {
+    // localStorage can be unavailable (e.g. restrictive embedded contexts).
+    return null;
+  }
+}
+
+export function getApiKey(): string | null {
+  const stored = readStoredApiKey();
+  if (stored) {
+    return stored;
+  }
+  const envKey: unknown = import.meta.env.VITE_API_KEY;
+  return typeof envKey === "string" && envKey.length > 0 ? envKey : null;
+}
+
+export function setApiKey(key: string): void {
+  window.localStorage.setItem(API_KEY_STORAGE_KEY, key);
+}
+
+export function clearApiKey(): void {
+  window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+}
+
+function withApiKey(init?: RequestInit): RequestInit | undefined {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    return init;
+  }
+  const headers = new Headers(init?.headers);
+  headers.set("X-API-Key", apiKey);
+  return { ...init, headers };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, init);
+  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
+
+  if (response.status === 401) {
+    throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+  }
 
   if (!response.ok) {
-    throw new Error(await parseApiError(response));
+    throw new ApiError(await parseApiError(response), response.status);
   }
 
   return (await response.json()) as T;
+}
+
+export type DownloadedFile = {
+  blob: Blob;
+  filename: string | null;
+};
+
+/**
+ * Fetches a binary endpoint with the same auth handling as request().
+ * Direct-navigation anchors cannot attach the X-API-Key header, so all
+ * file downloads must go through this helper in hosted deployments.
+ */
+export async function downloadFile(path: string): Promise<DownloadedFile> {
+  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey());
+
+  if (response.status === 401) {
+    throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+  }
+
+  if (!response.ok) {
+    throw new ApiError(await parseApiError(response), response.status);
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: parseContentDispositionFilename(response.headers.get("Content-Disposition")),
+  };
+}
+
+function parseContentDispositionFilename(header: string | null): string | null {
+  if (!header) {
+    return null;
+  }
+  // RFC 5987 extended parameter (filename*=UTF-8''...) takes priority.
+  const encodedMatch = /filename\*\s*=\s*utf-8''([^;]+)/i.exec(header);
+  if (encodedMatch) {
+    try {
+      const decoded = decodeURIComponent(encodedMatch[1].trim());
+      if (decoded) {
+        return decoded;
+      }
+    } catch {
+      // Malformed percent-encoding: fall back to the plain filename parameter.
+    }
+  }
+  const quotedMatch = /filename\s*=\s*"([^"]*)"/i.exec(header);
+  if (quotedMatch) {
+    return quotedMatch[1] || null;
+  }
+  const bareMatch = /filename\s*=\s*([^;]+)/i.exec(header);
+  const bareFilename = bareMatch?.[1].trim();
+  return bareFilename ? bareFilename : null;
 }
 
 async function parseApiError(response: Response): Promise<string> {
@@ -291,12 +397,22 @@ export function getImportErrors(importId: string): Promise<ImportErrorReport> {
   return request<ImportErrorReport>(`/imports/${importId}/errors`);
 }
 
+export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
+  return `/imports/templates/${encodeURIComponent(importType)}.${format}`;
+}
+
+// URL helpers are display-only. Downloads must use downloadFile() so the
+// X-API-Key header is attached; bare anchors 401 in hosted deployments.
 export function getImportTemplateUrl(importType: ImportType, format: ImportTemplateFormat): string {
-  return `${apiBaseUrl}/imports/templates/${encodeURIComponent(importType)}.${format}`;
+  return `${apiBaseUrl}${getImportTemplatePath(importType, format)}`;
+}
+
+export function getReportDownloadPath(reportId: string): string {
+  return `/reports/${encodeURIComponent(reportId)}/download`;
 }
 
 export function getReportDownloadUrl(reportId: string): string {
-  return `${apiBaseUrl}/reports/${encodeURIComponent(reportId)}/download`;
+  return `${apiBaseUrl}${getReportDownloadPath(reportId)}`;
 }
 
 export function startDiscoveryRun(input: {

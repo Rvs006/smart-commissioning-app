@@ -1,13 +1,14 @@
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   createImport,
   createReport,
+  downloadFile,
   getValidationIssues,
   getValidationRun,
   getImportErrors,
-  getImportTemplateUrl,
-  getReportDownloadUrl,
+  getImportTemplatePath,
+  getReportDownloadPath,
   ImportBatchSummary,
   ImportErrorReport,
   ImportProfileSummary,
@@ -173,6 +174,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("5");
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
+  const templateDownload = useFileDownload();
+  const reportDownload = useFileDownload();
 
   const profilesQuery = useQuery({
     queryFn: listImportProfiles,
@@ -198,6 +201,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["validation-issues", activeUdmiRunId],
   });
 
+  const resetTemplateDownload = templateDownload.reset;
+  const resetReportDownload = reportDownload.reset;
+
   useEffect(() => {
     setSelectedImportType(module.importTypes[0] ?? "");
     setSelectedFile(null);
@@ -207,7 +213,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setActiveUdmiRunId(null);
     setCopyFeedback(null);
     setSelectedResultIndex(0);
-  }, [module.route, module.importTypes]);
+    resetTemplateDownload();
+    resetReportDownload();
+  }, [module.route, module.importTypes, resetTemplateDownload, resetReportDownload]);
 
   const importMutation = useMutation({
     mutationFn: async (input: { importType: ImportType; file: File }) => {
@@ -435,21 +443,46 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </p>
                   </div>
                   <div className="inline-actions">
-                    <a
+                    <button
                       className="secondary-button compact"
-                      download
-                      href={getImportTemplateUrl(selectedImportType, "xlsx")}
+                      disabled={templateDownload.pendingKey !== null}
+                      onClick={() =>
+                        void templateDownload.download(
+                          "template-xlsx",
+                          getImportTemplatePath(selectedImportType, "xlsx"),
+                          `${selectedImportType}_template.xlsx`,
+                        )
+                      }
+                      type="button"
                     >
-                      Download XLSX
-                    </a>
-                    <a
+                      {templateDownload.pendingKey === "template-xlsx"
+                        ? "Downloading..."
+                        : "Download XLSX"}
+                    </button>
+                    <button
                       className="secondary-button compact"
-                      download
-                      href={getImportTemplateUrl(selectedImportType, "csv")}
+                      disabled={templateDownload.pendingKey !== null}
+                      onClick={() =>
+                        void templateDownload.download(
+                          "template-csv",
+                          getImportTemplatePath(selectedImportType, "csv"),
+                          `${selectedImportType}_template.csv`,
+                        )
+                      }
+                      type="button"
                     >
-                      Download CSV
-                    </a>
+                      {templateDownload.pendingKey === "template-csv"
+                        ? "Downloading..."
+                        : "Download CSV"}
+                    </button>
                   </div>
+                </div>
+              )}
+
+              {templateDownload.error && (
+                <div className="state-panel error">
+                  <strong>Template download failed</strong>
+                  <span>{templateDownload.error}</span>
                 </div>
               )}
 
@@ -534,10 +567,31 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <strong>Accepted by API</strong>
               <span>{runOutcome}</span>
               {lastReport && (
-                <a className="secondary-button compact inline-link-button" download href={getReportDownloadUrl(lastReport.report_id)}>
-                  Download {lastReport.output_format.toUpperCase()}
-                </a>
+                <button
+                  className="secondary-button compact inline-link-button"
+                  disabled={reportDownload.pendingKey !== null}
+                  onClick={() =>
+                    void reportDownload.download(
+                      "report",
+                      getReportDownloadPath(lastReport.report_id),
+                      lastReport.file_name ||
+                        `${lastReport.report_id}.${lastReport.output_format}`,
+                    )
+                  }
+                  type="button"
+                >
+                  {reportDownload.pendingKey === "report"
+                    ? "Downloading..."
+                    : `Download ${lastReport.output_format.toUpperCase()}`}
+                </button>
               )}
+            </div>
+          )}
+
+          {reportDownload.error && (
+            <div className="state-panel error">
+              <strong>Report download failed</strong>
+              <span>{reportDownload.error}</span>
             </div>
           )}
 
@@ -1047,6 +1101,8 @@ function DefaultTemplateInspector({
   selectedImportType: ImportType;
   selectedProfile?: ImportProfileSummary;
 }) {
+  const { download, error, pendingKey } = useFileDownload();
+
   return (
     <div className="template-inspector">
       <p className="section-copy">
@@ -1054,13 +1110,41 @@ function DefaultTemplateInspector({
         evidence. Upload this template after filling in the expected devices for the project.
       </p>
       <div className="inline-actions">
-        <a className="primary-button compact" download href={getImportTemplateUrl(selectedImportType, "xlsx")}>
-          Download default XLSX
-        </a>
-        <a className="secondary-button compact" download href={getImportTemplateUrl(selectedImportType, "csv")}>
-          Download CSV copy
-        </a>
+        <button
+          className="primary-button compact"
+          disabled={pendingKey !== null}
+          onClick={() =>
+            void download(
+              "inspector-xlsx",
+              getImportTemplatePath(selectedImportType, "xlsx"),
+              `${selectedImportType}_template.xlsx`,
+            )
+          }
+          type="button"
+        >
+          {pendingKey === "inspector-xlsx" ? "Downloading..." : "Download default XLSX"}
+        </button>
+        <button
+          className="secondary-button compact"
+          disabled={pendingKey !== null}
+          onClick={() =>
+            void download(
+              "inspector-csv",
+              getImportTemplatePath(selectedImportType, "csv"),
+              `${selectedImportType}_template.csv`,
+            )
+          }
+          type="button"
+        >
+          {pendingKey === "inspector-csv" ? "Downloading..." : "Download CSV copy"}
+        </button>
       </div>
+      {error && (
+        <div className="state-panel error">
+          <strong>Template download failed</strong>
+          <span>{error}</span>
+        </div>
+      )}
       <div className="evidence-list template-fields">
         <h4>Template columns</h4>
         {(selectedProfile?.required_columns ?? []).map((column) => (
@@ -1069,6 +1153,47 @@ function DefaultTemplateInspector({
       </div>
     </div>
   );
+}
+
+/**
+ * Drives an authenticated file download. Plain `<a download href>` anchors
+ * navigate outside fetch(), so they cannot carry the X-API-Key header and
+ * 401 in hosted deployments; this routes downloads through downloadFile().
+ */
+function useFileDownload() {
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const download = useCallback(async (key: string, path: string, fallbackFilename: string) => {
+    setPendingKey(key);
+    setError(null);
+    try {
+      const { blob, filename } = await downloadFile(path);
+      triggerBlobDownload(blob, filename ?? fallbackFilename);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Download failed.");
+    } finally {
+      setPendingKey(null);
+    }
+  }, []);
+
+  const reset = useCallback(() => {
+    setPendingKey(null);
+    setError(null);
+  }, []);
+
+  return { download, error, pendingKey, reset };
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 function buildResultDetailItems(route: string, row: Record<string, string>): DetailItem[] {

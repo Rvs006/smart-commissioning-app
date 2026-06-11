@@ -1,0 +1,242 @@
+"""Authentication tests for the API (app.core.auth.require_auth).
+
+Each test class boots the app with its own auth environment: env vars are set
+and the settings cache is cleared in setUpClass before the TestClient is
+created, mirroring the DATABASE_URL pattern in test_runs_api.py.
+
+The database is shared per process (see _shared_test_database_url): route
+modules instantiate their services -- and therefore the SQLAlchemy engine --
+at the first app.main import, so every test class in the test run must point
+at the same database file.
+
+Client addresses are simulated with Starlette's TestClient(client=(host, port))
+parameter. The default "testclient" host is treated as loopback by
+app.core.auth because it is the ASGI test transport's synthetic host and can
+never appear as a real TCP peer address.
+"""
+
+import atexit
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+_API_KEY = "test-auth-secret-key"
+
+# A documentation-range (TEST-NET-3, RFC 5737) address: clearly non-loopback.
+_NON_LOOPBACK = ("203.0.113.9", 51234)
+_LOOPBACK = ("127.0.0.1", 51234)
+
+# Any authenticated route works as a probe; /blueprint is cheap (no DB writes).
+_PROTECTED_PATH = "/api/v1/blueprint"
+
+
+def _shared_test_database_url() -> str:
+    """Process-wide temporary SQLite database shared by all API test modules.
+
+    The directory is removed at interpreter exit (best effort: lingering
+    SQLite handles can block deletion on Windows, hence ignore_errors).
+    """
+    existing = os.environ.get("SCT_TEST_DATABASE_URL")
+    if existing:
+        return existing
+    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
+    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
+    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
+    os.environ["SCT_TEST_DATABASE_URL"] = url
+    return url
+
+
+class _AuthClientTestCase(unittest.TestCase):
+    """Shared scaffolding: env overrides + cache reset + lifespan-entered client."""
+
+    # Subclasses override; None means "ensure the variable is unset".
+    auth_env: dict[str, str | None] = {}
+    client_addr: tuple[str, int] = ("testclient", 50000)
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        overrides: dict[str, str | None] = {
+            "DATABASE_URL": _shared_test_database_url(),
+            "JOB_EXECUTION_MODE": "inline",
+            **cls.auth_env,
+        }
+        cls._previous_env = {}
+        for key, value in overrides.items():
+            cls._previous_env[key] = os.environ.get(key)
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+        from app.core import config as config_module
+        from app.core import db as db_module
+
+        config_module.get_settings.cache_clear()
+        db_module.get_engine.cache_clear()
+
+        from app.main import app
+        from fastapi.testclient import TestClient
+
+        cls.app = app
+        cls._client_context = TestClient(app, client=cls.client_addr)
+        cls.client = cls._client_context.__enter__()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        from app.core import config as config_module
+        from app.core import db as db_module
+
+        cls._client_context.__exit__(None, None, None)
+        db_module.get_engine().dispose()
+        for key, value in cls._previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        config_module.get_settings.cache_clear()
+        db_module.get_engine.cache_clear()
+
+    def _client_for(self, addr: tuple[str, int]):
+        """Extra client simulating a different peer address.
+
+        Not entered as a context manager: the lifespan (migrations) already
+        ran for cls.client, and requests work without re-entering it.
+        """
+        from fastapi.testclient import TestClient
+
+        return TestClient(self.app, client=addr)
+
+
+class ApiKeyModeTests(_AuthClientTestCase):
+    auth_env = {"AUTH_MODE": "api_key", "API_KEY": _API_KEY}
+
+    def test_missing_key_is_401(self) -> None:
+        response = self.client.get(_PROTECTED_PATH)
+        self.assertEqual(response.status_code, 401)
+        self.assertIn("detail", response.json())
+
+    def test_wrong_key_is_401_and_does_not_echo_key_material(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"X-API-Key": "wrong-key"})
+        self.assertEqual(response.status_code, 401)
+        body = response.text
+        self.assertNotIn(_API_KEY, body)
+        self.assertNotIn("wrong-key", body)
+
+    def test_valid_key_via_x_api_key_header(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"X-API-Key": _API_KEY})
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_valid_key_via_bearer_authorization(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"Authorization": f"Bearer {_API_KEY}"})
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_non_bearer_authorization_scheme_is_401(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"Authorization": f"Basic {_API_KEY}"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_health_endpoints_reachable_without_key(self) -> None:
+        self.assertEqual(self.client.get("/api/v1/health").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
+
+    def test_schema_endpoints_hidden_in_api_key_mode(self) -> None:
+        # Hosted deployments must not disclose the API surface to
+        # unauthenticated clients: schema endpoints answer 404.
+        for path in ("/openapi.json", "/docs", "/redoc"):
+            self.assertEqual(self.client.get(path).status_code, 404, path)
+
+
+class ApiKeyModeFailClosedTests(_AuthClientTestCase):
+    """AUTH_MODE=api_key with no key configured rejects everything."""
+
+    auth_env = {"AUTH_MODE": "api_key", "API_KEY": None}
+
+    def test_request_without_key_is_401(self) -> None:
+        self.assertEqual(self.client.get(_PROTECTED_PATH).status_code, 401)
+
+    def test_request_with_any_key_is_401(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"X-API-Key": "anything"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_empty_configured_key_also_fails_closed(self) -> None:
+        # Even an empty presented key never matches an unset configured key.
+        response = self.client.get(_PROTECTED_PATH, headers={"Authorization": "Bearer "})
+        self.assertEqual(response.status_code, 401)
+
+    def test_health_endpoints_stay_probeable(self) -> None:
+        self.assertEqual(self.client.get("/api/v1/health").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
+
+
+class LocalModeTests(_AuthClientTestCase):
+    auth_env = {"AUTH_MODE": "local", "API_KEY": None}
+
+    def test_testclient_host_is_treated_as_loopback(self) -> None:
+        self.assertEqual(self.client.get(_PROTECTED_PATH).status_code, 200)
+
+    def test_loopback_ipv4_client_is_allowed(self) -> None:
+        response = self._client_for(_LOOPBACK).get(_PROTECTED_PATH)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_loopback_ipv6_client_is_allowed(self) -> None:
+        response = self._client_for(("::1", 51234)).get(_PROTECTED_PATH)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_non_loopback_client_is_401(self) -> None:
+        response = self._client_for(_NON_LOOPBACK).get(_PROTECTED_PATH)
+        self.assertEqual(response.status_code, 401)
+
+    def test_non_loopback_client_with_key_is_401_when_no_key_configured(self) -> None:
+        response = self._client_for(_NON_LOOPBACK).get(_PROTECTED_PATH, headers={"X-API-Key": "anything"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_health_reachable_from_non_loopback(self) -> None:
+        self.assertEqual(self._client_for(_NON_LOOPBACK).get("/api/v1/health").status_code, 200)
+
+    def test_schema_endpoints_served_in_local_mode(self) -> None:
+        response = self.client.get("/openapi.json")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("paths", response.json())
+
+
+class LocalModeWithApiKeyTests(_AuthClientTestCase):
+    """local mode + configured key: valid key is accepted from anywhere."""
+
+    auth_env = {"AUTH_MODE": "local", "API_KEY": _API_KEY}
+    client_addr = _NON_LOOPBACK
+
+    def test_non_loopback_without_key_is_401(self) -> None:
+        self.assertEqual(self.client.get(_PROTECTED_PATH).status_code, 401)
+
+    def test_non_loopback_with_valid_key_is_allowed(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"X-API-Key": _API_KEY})
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_non_loopback_with_wrong_key_is_401(self) -> None:
+        response = self.client.get(_PROTECTED_PATH, headers={"X-API-Key": "wrong-key"})
+        self.assertEqual(response.status_code, 401)
+
+    def test_loopback_still_allowed_without_key(self) -> None:
+        response = self._client_for(_LOOPBACK).get(_PROTECTED_PATH)
+        self.assertEqual(response.status_code, 200, response.text)
+
+
+class LoopbackHostUnitTests(unittest.TestCase):
+    """Unit coverage of the ip-address logic backing local mode."""
+
+    def test_loopback_hosts(self) -> None:
+        from app.core.auth import is_loopback_host
+
+        for host in ("127.0.0.1", "127.0.0.5", "127.255.255.254", "::1", "::ffff:127.0.0.1", "testclient"):
+            self.assertTrue(is_loopback_host(host), host)
+
+    def test_non_loopback_hosts(self) -> None:
+        from app.core.auth import is_loopback_host
+
+        for host in ("192.168.1.10", "10.0.0.1", "203.0.113.9", "fe80::1", "::ffff:192.168.1.10", "evil", ""):
+            self.assertFalse(is_loopback_host(host), host)
+
+
+if __name__ == "__main__":
+    unittest.main()

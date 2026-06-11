@@ -1,7 +1,10 @@
+import io
+import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
 
+from app.core.config import get_settings
 from app.schemas.imports import (
     ImportBatchSummary,
     ImportErrorReport,
@@ -12,6 +15,44 @@ from app.services.import_service import ImportService
 
 router = APIRouter()
 service = ImportService()
+
+_READ_CHUNK_BYTES = 1024 * 1024
+
+
+def _upload_too_large(max_upload_bytes: int) -> HTTPException:
+    return HTTPException(
+        status_code=413,
+        detail=f"Uploaded file exceeds the maximum allowed size of {max_upload_bytes} bytes.",
+    )
+
+
+async def _read_upload_capped(file: UploadFile, max_upload_bytes: int) -> bytes:
+    """Read the upload in chunks, rejecting once the cap is exceeded.
+
+    The Content-Length header is checked before this as a fast pre-check, but
+    the header cannot be trusted: this capped read is the authoritative limit.
+    """
+    buffer = bytearray()
+    while chunk := await file.read(_READ_CHUNK_BYTES):
+        buffer.extend(chunk)
+        if len(buffer) > max_upload_bytes:
+            raise _upload_too_large(max_upload_bytes)
+    return bytes(buffer)
+
+
+def _guard_xlsx_decompressed_size(file_bytes: bytes, max_decompressed_bytes: int) -> None:
+    """Basic zip-bomb guard: reject XLSX archives whose declared decompressed
+    size exceeds the configured limit before handing them to openpyxl."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            declared_size = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile as error:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid XLSX archive.") from error
+    if declared_size > max_decompressed_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"XLSX decompressed size exceeds the maximum allowed {max_decompressed_bytes} bytes.",
+        )
 
 
 @router.get("/profiles", response_model=list[ImportProfileSummary])
@@ -43,6 +84,7 @@ def download_import_template(import_type: ImportType, file_type: str) -> Respons
 
 @router.post("", response_model=ImportBatchSummary)
 async def create_import(
+    request: Request,
     import_type: ImportType = Form(...),
     project_id: str | None = Form(default=None),
     site_id: str | None = Form(default=None),
@@ -51,11 +93,25 @@ async def create_import(
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
 
+    settings = get_settings()
+
+    # Fast pre-check on the declared body size (the multipart body is always
+    # at least as large as the file). The header cannot be trusted, so the
+    # capped read below enforces the limit on the bytes actually received.
+    content_length = request.headers.get("content-length")
+    if content_length is not None and content_length.isdigit() and int(content_length) > settings.max_upload_bytes:
+        raise _upload_too_large(settings.max_upload_bytes)
+
+    file_bytes = await _read_upload_capped(file, settings.max_upload_bytes)
+
+    if Path(file.filename).suffix.lower() == ".xlsx":
+        _guard_xlsx_decompressed_size(file_bytes, settings.max_xlsx_decompressed_bytes)
+
     try:
         summary, _ = service.create_import(
             import_type=import_type,
             file_name=Path(file.filename).name,
-            file_bytes=await file.read(),
+            file_bytes=file_bytes,
             project_id=project_id,
             site_id=site_id,
         )

@@ -15,10 +15,21 @@ class Settings(BaseSettings):
     # Apply Alembic migrations (smart_commissioning_core.db.migrate) on startup.
     auto_migrate: bool = True
     redis_url: str = "redis://localhost:6379/0"
-    object_storage_endpoint: str = "http://localhost:9000"
-    object_storage_access_key: str = "minioadmin"
-    object_storage_secret_key: str = "minioadmin"
-    object_storage_bucket: str = "commissioning-evidence"
+    # API authentication (enforced by app.core.auth.require_auth):
+    # - "local" (default): only loopback clients are accepted, matching the
+    #   portable desktop deployment where uvicorn binds 127.0.0.1. If api_key
+    #   is also set, a valid key is accepted from any client address.
+    # - "api_key": every request must present the configured key via the
+    #   X-API-Key header or "Authorization: Bearer <key>".
+    auth_mode: Literal["local", "api_key"] = "local"
+    api_key: str | None = None
+    # Comma-separated allowed CORS origins (env CORS_ORIGINS).
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # Upload limits for /api/v1/imports: cap on the request body / uploaded
+    # file size, and a zip-bomb guard on the declared decompressed size of
+    # XLSX archives.
+    max_upload_bytes: int = 20 * 1024 * 1024
+    max_xlsx_decompressed_bytes: int = 200 * 1024 * 1024
     job_execution_mode: Literal["auto", "queue", "inline"] = "auto"
     allow_inline_worker_fallback: bool = True
 
@@ -27,6 +38,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache

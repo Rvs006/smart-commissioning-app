@@ -10,7 +10,10 @@ def _configuration_values() -> tuple[dict[str, object], dict[str, object]]:
     from app.services.configuration_service import DEFAULT_CONFIGURATION, ConfigurationService
 
     try:
-        configuration = ConfigurationService().load()
+        # mask_secrets=False: this is the internal provider path — the MQTT
+        # connection builder needs the real stored credentials, not the
+        # API-boundary '********' mask.
+        configuration = ConfigurationService().load(mask_secrets=False)
     except SQLAlchemyError:
         # Best-effort defaults: connection parameter resolution must not fail
         # when the database is unreachable or not migrated yet (the previous

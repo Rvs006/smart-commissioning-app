@@ -2,9 +2,15 @@ import os
 import tempfile
 from pathlib import Path
 
+# Exercise the authenticated path: the smoke run uses api_key mode with a
+# throwaway key presented via the X-API-Key header on every request.
+SMOKE_API_KEY = "smoke-udmi-api-key"
+
 
 def main() -> None:
     os.environ["JOB_EXECUTION_MODE"] = "inline"
+    os.environ["AUTH_MODE"] = "api_key"
+    os.environ["API_KEY"] = SMOKE_API_KEY
 
     with tempfile.TemporaryDirectory(prefix="smart-commissioning-db-") as runtime_root:
         database_path = (Path(runtime_root) / "smart_commissioning.db").as_posix()
@@ -16,7 +22,7 @@ def main() -> None:
         from app.main import app
 
         # Context manager so the startup lifespan applies the migrations.
-        with TestClient(app) as client:
+        with TestClient(app, headers={"X-API-Key": SMOKE_API_KEY}) as client:
             create_response = client.post(
                 "/api/v1/validation/udmi/runs",
                 json={

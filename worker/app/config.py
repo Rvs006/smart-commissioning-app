@@ -14,7 +14,6 @@ class WorkerSettings(BaseSettings):
     environment: str = "development"
     redis_url: str = "redis://localhost:6379/0"
     database_url: str = default_sqlite_url(_REPOSITORY_ROOT / "backend" / "runtime")
-    object_storage_bucket: str = "commissioning-evidence"
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -79,6 +79,9 @@ def configure_environment(root: Path) -> None:
         f"sqlite:///{(runtime_root / 'smart_commissioning.db').as_posix()}",
     )
     os.environ.setdefault("ENVIRONMENT", "portable_windows")
+    # Single-user edge profile bound to 127.0.0.1 only, so skip API-key auth;
+    # the hosted compose profile (infra/) sets AUTH_MODE=api_key instead.
+    os.environ.setdefault("AUTH_MODE", "local")
     os.environ.setdefault("JOB_EXECUTION_MODE", "inline")
     os.environ.setdefault("ALLOW_INLINE_WORKER_FALLBACK", "true")
 

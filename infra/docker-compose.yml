@@ -1,12 +1,34 @@
+# Hosted deployment profile for the Smart Commissioning App.
+# (The portable Windows exe under packaging/windows_portable is the edge
+# profile; see infra/README.md for the runbook.)
+#
+# Secrets come from infra/.env (copy infra/.env.example and fill it in).
+# Variables written as ${VAR:?...} make `docker compose` fail fast with a
+# clear error instead of starting with an empty password/key.
+#
+# All published ports bind to 127.0.0.1 only. Put a TLS-terminating reverse
+# proxy in front of the frontend port to expose the app beyond the host.
+
+# Shared by api and worker: both talk to the same Postgres database and the
+# same password-protected Redis. The URLs are assembled here so the password
+# lives in exactly one .env variable each.
+x-app-env: &app-env
+  DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required (copy infra/.env.example to infra/.env)}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (copy infra/.env.example to infra/.env)}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required (copy infra/.env.example to infra/.env)}"
+  REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (copy infra/.env.example to infra/.env)}@redis:6379/0"
+
 services:
+  # Production frontend: static Vite build served by nginx, which also
+  # proxies /api/* to the api service so the browser talks to one origin.
   frontend:
     build:
-      context: ../frontend
-    command: npm run dev -- --host 0.0.0.0
+      context: ..
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-5173}:5173"
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
     depends_on:
-      - api
+      api:
+        condition: service_started
 
   # Run/import/configuration records live in Postgres (DATABASE_URL); the API
   # applies Alembic migrations on startup (backend owns the schema). Reports
@@ -17,73 +39,94 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
+    restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-      OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT}
-      OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY}
-      OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY}
-      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET}
+      <<: *app-env
+      AUTH_MODE: api_key
+      API_KEY: "${API_KEY:?API_KEY is required (generate with openssl rand -hex 32)}"
+      # Comma-separated browser origins allowed by CORS. Browser traffic
+      # normally arrives same-origin through the nginx /api proxy (no CORS
+      # involved); this only matters for direct cross-origin API access.
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
     ports:
-      - "${API_PORT:-8000}:8000"
+      # Loopback-only direct API access for local debugging (psql-style poking,
+      # curl against /api/v1/...). Browsers should go through the frontend.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
       - api_runtime:/app/backend/runtime
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # python:slim ships no curl/wget; probe readiness with stdlib urllib.
+      # urlopen raises (non-zero exit) on connection errors and on 503.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # The worker reads/writes run rows through the same DATABASE_URL but never
-  # runs migrations; it depends on the api so the schema exists first.
+  # runs migrations; it depends on the api (service_started) so the schema
+  # exists before jobs are picked up.
   worker:
     build:
       context: ..
       dockerfile: worker/Dockerfile
+    restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL}
-      OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT}
-      OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY}
-      OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY}
-      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET}
+      <<: *app-env
     depends_on:
-      - api
-      - postgres
-      - redis
-      - minio
+      api:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.9-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required (copy infra/.env.example to infra/.env)}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required (copy infra/.env.example to infra/.env)}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (generate with openssl rand -hex 32)}"
     ports:
-      - "5432:5432"
+      # Loopback-only so developers can reach the database with psql from the
+      # host. Drop this mapping entirely if host access is not needed.
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # $$VAR defers expansion to the container shell; a single $ would be
+      # interpolated by compose on the host instead.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
+  # No published port on purpose: only api and worker need Redis, and they
+  # reach it over the compose network. For ad-hoc debugging from the host use:
+  #   docker compose -f infra/docker-compose.yml exec redis sh -c 'redis-cli -a "$REDIS_PASSWORD" ping'
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     restart: unless-stopped
-    ports:
-      - "6379:6379"
-
-  minio:
-    image: minio/minio:RELEASE.2024-10-02T17-50-41Z
-    command: server /data --console-address ":9001"
-    restart: unless-stopped
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
     environment:
-      MINIO_ROOT_USER: ${OBJECT_STORAGE_ACCESS_KEY}
-      MINIO_ROOT_PASSWORD: ${OBJECT_STORAGE_SECRET_KEY}
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required (generate with openssl rand -hex 32)}"
     volumes:
-      - minio_data:/data
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
 volumes:
   postgres_data:
-  minio_data:
+  redis_data:
   api_runtime:

@@ -1,10 +1,12 @@
 import ipaddress
+import os
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex
 from typing import Literal
 
+from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
 from sqlalchemy.engine import Engine
 
@@ -104,12 +106,110 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
 
 SUPPORTED_CERT_EXTENSIONS = {".pem", ".crt", ".cer", ".key", ".p12", ".pfx"}
 
+SECRET_SENTINEL = "********"
+_SECRET_STORE_KEY_FILE = ".secret_store_key"
+
+
+def _is_secret_sentinel(value: str) -> bool:
+    """True for the all-asterisk placeholder used for stored password values.
+
+    Matches the frontend's isSecretSentinel (/^\\*+$/) so any asterisk run the
+    form echoes back is treated as "keep the stored secret".
+    """
+    return bool(value) and set(value) == {"*"}
+
+
+def _password_kind_fields() -> dict[str, tuple[str, ...]]:
+    """Password-kind fields per section, derived from DEFAULT_CONFIGURATION.
+
+    The defaults mark password-kind fields (the frontend renders them with
+    kind="password") with an all-asterisk value, e.g. "MQTT Password" and
+    "Key Password". secret:// references are NOT password-kind: they are
+    already-opaque pointers at secret material stored on disk.
+    """
+    fields: dict[str, tuple[str, ...]] = {}
+    for section_name in ConfigurationSnapshot.model_fields:
+        section = getattr(DEFAULT_CONFIGURATION, section_name)
+        marked = tuple(field for field, value in section.values.items() if _is_secret_sentinel(value))
+        if marked:
+            fields[section_name] = marked
+    return fields
+
+
+PASSWORD_KIND_FIELDS = _password_kind_fields()
+
+
+def _write_private_file(path: Path, content: bytes) -> None:
+    """Write bytes with owner-only (0o600) permissions.
+
+    On Windows POSIX mode bits only map onto the read-only attribute, so both
+    the os.open mode and the chmod below are best-effort there; real isolation
+    must come from the ACL on the secrets root directory.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
+    os.chmod(path, 0o600)
+
+
+def _secret_store_key() -> bytes:
+    """Return the Fernet key for secret material at rest, creating it on first use."""
+    SECRETS_ROOT.mkdir(parents=True, exist_ok=True)
+    key_path = SECRETS_ROOT / _SECRET_STORE_KEY_FILE
+    if key_path.exists():
+        return key_path.read_bytes().strip()
+    key = Fernet.generate_key()
+    _write_private_file(key_path, key)
+    return key
+
+
+def _secret_path(secret_ref: str) -> Path:
+    name = secret_ref.removeprefix("secret://").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise ValueError("Invalid secret reference.")
+    return SECRETS_ROOT / f"{name}.pem"
+
+
+def write_secret_material(secret_ref: str, content: str) -> None:
+    """Encrypt secret material with the store key and write it owner-only."""
+    token = Fernet(_secret_store_key()).encrypt(content.encode("utf-8"))
+    _write_private_file(_secret_path(secret_ref), token)
+
+
+def read_secret_material(secret_ref: str) -> str:
+    """Resolve a secret:// reference to its decrypted file contents.
+
+    Legacy plaintext files (written before encryption-at-rest existed) stay
+    readable via the fallback below; they only become encrypted if the
+    material is uploaded again.
+    """
+    raw = _secret_path(secret_ref).read_bytes()
+    try:
+        return Fernet(_secret_store_key()).decrypt(raw).decode("utf-8")
+    except InvalidToken:
+        return raw.decode("utf-8")
+
+
+def _previous_section_values(payload: dict[str, object] | None, section_name: str) -> dict[str, object]:
+    """Values dict of one section from a stored payload, defensively typed."""
+    if not isinstance(payload, dict):
+        return {}
+    section = payload.get(section_name)
+    if not isinstance(section, dict):
+        return {}
+    values = section.get("values")
+    return values if isinstance(values, dict) else {}
+
 
 class ConfigurationService:
     """Versioned configuration snapshots stored per project+site in the database.
 
-    Secret material stays file-based under the secrets root; configuration
-    payloads only ever hold secret:// references.
+    Secret material stays file-based (encrypted) under the secrets root;
+    configuration payloads only ever hold secret:// references. Password-kind
+    values are stored unmasked in the DB payload but masked on every snapshot
+    returned to the API routes; internal consumers (e.g. the MQTT connection
+    builder via the configuration values provider) load with
+    mask_secrets=False to see the real values.
     """
 
     def __init__(self, engine: Engine | None = None) -> None:
@@ -120,13 +220,15 @@ class ConfigurationService:
         self,
         project_id: str = DEFAULT_PROJECT_ID,
         site_id: str = DEFAULT_SITE_ID,
+        *,
+        mask_secrets: bool = True,
     ) -> ConfigurationSnapshot:
         payload = self._repository.get_current(project_id, site_id)
         if payload is None:
-            self.save(DEFAULT_CONFIGURATION, project_id=project_id, site_id=site_id)
-            return DEFAULT_CONFIGURATION
-        loaded = ConfigurationSnapshot.model_validate(payload)
-        return self._merge_with_defaults(loaded)
+            snapshot = self._persist(DEFAULT_CONFIGURATION, project_id, site_id)
+        else:
+            snapshot = self._merge_with_defaults(ConfigurationSnapshot.model_validate(payload))
+        return self._mask_for_api(snapshot) if mask_secrets else snapshot
 
     def save(
         self,
@@ -135,9 +237,54 @@ class ConfigurationService:
         project_id: str = DEFAULT_PROJECT_ID,
         site_id: str = DEFAULT_SITE_ID,
     ) -> ConfigurationSnapshot:
-        configuration = self._merge_with_defaults(configuration)
+        """Persist a new version and return the API-safe (masked) snapshot."""
+        return self._mask_for_api(self._persist(configuration, project_id, site_id))
+
+    def read_secret(self, secret_ref: str) -> str:
+        """Resolve a secret:// reference to its decrypted contents."""
+        return read_secret_material(secret_ref)
+
+    def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
+        configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
+        self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
         self._repository.save(project_id, site_id, configuration.model_dump(mode="json"))
         return configuration
+
+    def _mask_for_api(self, configuration: ConfigurationSnapshot) -> ConfigurationSnapshot:
+        """Mask password-kind values on snapshots that cross the API boundary.
+
+        The stored DB payload and internal consumers keep the real values;
+        only the serialized GET/PUT responses carry the sentinel. secret://
+        references are already opaque and stay as-is.
+        """
+        masked = configuration.model_copy(deep=True)
+        for section_name, field_names in PASSWORD_KIND_FIELDS.items():
+            values = getattr(masked, section_name).values
+            for field_name in field_names:
+                if values.get(field_name, ""):
+                    values[field_name] = SECRET_SENTINEL
+        return masked
+
+    def _resolve_secret_sentinels(
+        self,
+        configuration: ConfigurationSnapshot,
+        previous_payload: dict[str, object] | None,
+    ) -> None:
+        """Write-only update semantics for password-kind fields.
+
+        The frontend echoes the all-asterisk sentinel for untouched password
+        fields, so an incoming sentinel keeps the previously stored value;
+        a sentinel with no real prior value stores empty — asterisks are
+        never persisted as the secret itself.
+        """
+        for section_name, field_names in PASSWORD_KIND_FIELDS.items():
+            values = getattr(configuration, section_name).values
+            previous_values = _previous_section_values(previous_payload, section_name)
+            for field_name in field_names:
+                if not _is_secret_sentinel(values.get(field_name, "")):
+                    continue
+                previous = str(previous_values.get(field_name) or "")
+                values[field_name] = "" if _is_secret_sentinel(previous) else previous
 
     def validate(self, configuration: ConfigurationSnapshot) -> ConfigurationValidationResult:
         errors: list[str] = []
@@ -208,10 +355,9 @@ class ConfigurationService:
 
         digest = sha256(content.encode("utf-8")).hexdigest()
         secret_ref = f"secret://{field.lower().replace(' ', '-')}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{token_hex(4)}"
-        secret_path = SECRETS_ROOT / f"{secret_ref.removeprefix('secret://')}.pem"
-        secret_path.write_text(content, encoding="utf-8")
+        write_secret_material(secret_ref, content)
 
-        configuration = self.load(project_id, site_id)
+        configuration = self.load(project_id, site_id, mask_secrets=False)
         configuration.certificates.values[field] = secret_ref
         self.save(configuration, project_id=project_id, site_id=site_id)
 

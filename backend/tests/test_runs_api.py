@@ -3,25 +3,53 @@
 Runs the FastAPI app against a temporary SQLite database: DATABASE_URL is set
 before app.main is imported, and the TestClient is entered as a context
 manager so the startup lifespan applies the Alembic migrations.
+
+The app runs in api_key auth mode here, exercising the authenticated path on
+every request (auth-specific behavior is covered in test_auth.py).
+
+The database is shared per process (see _shared_test_database_url): route
+modules instantiate their services -- and therefore the SQLAlchemy engine --
+at the first app.main import, so every test class in the test run must point
+at the same database file.
 """
 
+import atexit
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+_API_KEY = "test-runs-api-key"
+
 _ENV_OVERRIDES = {
     "JOB_EXECUTION_MODE": "inline",
+    "AUTH_MODE": "api_key",
+    "API_KEY": _API_KEY,
 }
+
+
+def _shared_test_database_url() -> str:
+    """Process-wide temporary SQLite database shared by all API test modules.
+
+    The directory is removed at interpreter exit (best effort: lingering
+    SQLite handles can block deletion on Windows, hence ignore_errors).
+    """
+    existing = os.environ.get("SCT_TEST_DATABASE_URL")
+    if existing:
+        return existing
+    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
+    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
+    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
+    os.environ["SCT_TEST_DATABASE_URL"] = url
+    return url
 
 
 class RunsApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls._temp_dir = tempfile.TemporaryDirectory()
-        database_path = (Path(cls._temp_dir.name) / "smart_commissioning.db").as_posix()
         cls._previous_env = {}
-        for key, value in {"DATABASE_URL": f"sqlite:///{database_path}", **_ENV_OVERRIDES}.items():
+        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
             cls._previous_env[key] = os.environ.get(key)
             os.environ[key] = value
 
@@ -35,7 +63,7 @@ class RunsApiTests(unittest.TestCase):
         from app.main import app
         from fastapi.testclient import TestClient
 
-        cls._client_context = TestClient(app)
+        cls._client_context = TestClient(app, headers={"X-API-Key": _API_KEY})
         cls.client = cls._client_context.__enter__()
 
     @classmethod
@@ -52,7 +80,6 @@ class RunsApiTests(unittest.TestCase):
                 os.environ[key] = value
         config_module.get_settings.cache_clear()
         db_module.get_engine.cache_clear()
-        cls._temp_dir.cleanup()
 
     def _create_udmi_run(self) -> dict:
         response = self.client.post(
