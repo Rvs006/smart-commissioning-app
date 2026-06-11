@@ -3,11 +3,11 @@ import io
 import ipaddress
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
-from typing import Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
@@ -496,7 +496,7 @@ class ImportService:
         file_type = self._detect_file_type(file_name)
         rows = self._parse_rows(file_type=file_type, file_bytes=file_bytes)
 
-        import_id = f"imp_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{token_hex(4)}"
+        import_id = f"imp_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}_{token_hex(4)}"
         stored_file_name = f"{import_id}_{Path(file_name).name}"
         stored_path = IMPORT_FILES_ROOT / stored_file_name
         stored_path.write_bytes(file_bytes)
@@ -553,7 +553,7 @@ class ImportService:
             status=status,
             missing_columns=missing_columns,
             stored_file_name=stored_file_name,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         error_report = ImportErrorReport(import_id=import_id, errors=errors)
 

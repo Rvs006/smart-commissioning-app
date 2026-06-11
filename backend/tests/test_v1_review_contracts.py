@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.schemas.configuration import SecretMaterialRequest
 from app.schemas.jobs import JobCreateRequest, ReportRequest
-from app.services.configuration_service import ConfigurationService, DEFAULT_CONFIGURATION
+from app.services.configuration_service import DEFAULT_CONFIGURATION, ConfigurationService
 from app.services.discovery_observations import build_observation, parse_port_specification
 from app.services.import_service import ImportService
 from app.services.run_service import RunService

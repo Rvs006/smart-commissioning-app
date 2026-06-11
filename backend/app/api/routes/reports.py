@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from io import BytesIO
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -83,15 +83,15 @@ def _build_report_artifact(run: object, output_format: str) -> tuple[bytes, str]
 
 
 def _report_rows(run: object) -> list[tuple[str, str]]:
-    parameters = getattr(run, "parameters")
+    parameters = run.parameters
     return [
         ("Report type", str(parameters.get("report_type", "evidence_pack"))),
         ("Output format", str(parameters.get("output_format", "zip")).upper()),
-        ("Project", str(getattr(run, "project_id"))),
-        ("Site", str(getattr(run, "site_id"))),
-        ("Status", str(getattr(run, "status"))),
+        ("Project", str(run.project_id)),
+        ("Site", str(run.site_id)),
+        ("Status", str(run.status)),
         ("Source runs", ", ".join(str(item) for item in parameters.get("source_run_ids", [])) or "All completed runs"),
-        ("Generated", datetime.now(timezone.utc).isoformat()),
+        ("Generated", datetime.now(UTC).isoformat()),
     ]
 
 

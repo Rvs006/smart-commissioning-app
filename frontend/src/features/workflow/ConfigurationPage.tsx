@@ -8,6 +8,7 @@ import {
   updateConfiguration,
   validateConfiguration,
 } from "../../api/client";
+import { isSecretSentinel, maskSecretValue } from "./secretField";
 
 type FieldKind = "text" | "password" | "select" | "textarea" | "secret" | "readonly";
 
@@ -494,18 +495,4 @@ function normalizeConfigurationForLocks(configuration: ConfigurationSnapshot): C
 
 function isBbmdEnabled(configuration: ConfigurationSnapshot): boolean {
   return configuration.bacnet.values.BBMD === "Enabled";
-}
-
-function isSecretSentinel(value: string): boolean {
-  return value.length > 0 && /^\*+$/.test(value);
-}
-
-function maskSecretValue(value: string): string {
-  if (!value) {
-    return "";
-  }
-  if (value.startsWith("secret://")) {
-    return `${value.slice(0, 24)}...`;
-  }
-  return value.replace(/./g, "*");
 }

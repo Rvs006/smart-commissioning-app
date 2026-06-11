@@ -1,0 +1,31 @@
+# Ruff configuration for Smart Commissioning App python packages
+# (backend/, worker/, core/). target-version matches requires-python
+# (">=3.12") in backend/pyproject.toml.
+# line-length is 120 (not 100) because the existing code routinely exceeds
+# 100 characters (~129 lines > 100 across backend/worker/core at adoption time).
+
+target-version = "py312"
+line-length = 120
+
+exclude = [
+    "deliverables",
+    "build",
+    "device_udmi_payload_validation",
+    "node_modules",
+    ".venv",
+    "frontend",
+]
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+
+[lint.flake8-bugbear]
+# FastAPI declares request parameters via function calls in argument defaults
+# (e.g. `file: UploadFile = File(...)`). This is the idiomatic FastAPI pattern,
+# not the bug B008 guards against, so treat these callables as immutable.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Query",
+]

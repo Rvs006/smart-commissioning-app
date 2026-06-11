@@ -1,10 +1,10 @@
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
+from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
+from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 from app.config import get_settings
 from app.services.run_store import FileRunStore
-from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
-from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 settings = get_settings()
 broker = RedisBroker(url=settings.redis_url)

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response
 
@@ -15,7 +15,7 @@ def get_health() -> dict[str, object]:
         "status": "ok",
         "service": "smart-commissioning-api",
         "environment": get_settings().environment,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 
@@ -27,7 +27,7 @@ def get_readiness(response: Response) -> dict[str, object]:
         response.status_code = 503
     return {
         "status": status,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "checks": {
             "run_store": {
                 "status": "ok" if run_store_ready else "error",

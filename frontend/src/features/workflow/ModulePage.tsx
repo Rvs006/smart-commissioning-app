@@ -959,6 +959,7 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
       return parsed as Record<string, unknown>;
     }
   } catch (error) {
+    // eslint-disable-next-line preserve-caught-error -- caught message is embedded in the thrown error text; `{ cause }` needs the ES2022 Error lib, beyond this tsconfig's ES2020 target.
     throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : "parse failed"}`);
   }
   throw new Error(`${label} must be a JSON object.`);

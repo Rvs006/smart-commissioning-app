@@ -9,7 +9,6 @@ from smart_commissioning_core.mqtt_settings import build_mqtt_connection_setting
 from smart_commissioning_core.mqtt_transport import MqttMessage, MqttTransportError, subscribe_and_capture
 from smart_commissioning_core.records import ValidationIssueRecord
 
-
 # When the core package is installed editable from the repository checkout,
 # parents[2] is the repository root (udmi_validation.py -> smart_commissioning_core -> core -> root).
 _REPO_ROOT = Path(__file__).resolve().parents[2]

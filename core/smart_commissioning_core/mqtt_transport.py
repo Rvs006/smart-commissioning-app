@@ -97,8 +97,6 @@ class MqttClient:
                 packet_type, payload = self._read_packet()
             except TimeoutError:
                 return None
-            except socket.timeout:
-                return None
             if packet_type & 0xF0 != 0x30 or len(payload) < 2:
                 continue
             topic_length = int.from_bytes(payload[:2], "big")

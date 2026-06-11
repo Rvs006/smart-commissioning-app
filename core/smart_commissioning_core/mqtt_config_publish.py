@@ -1,7 +1,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from smart_commissioning_core.mqtt_settings import (
     build_mqtt_connection_settings,
@@ -42,7 +42,7 @@ def validate_and_publish_config(
     wait_seconds = parse_float(parameters.get("wait_seconds"), default=5.0)
 
     issues: list[ValidationIssueRecord] = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     broker_attempted = False
     broker_status_detail = "live_broker_not_requested"
 

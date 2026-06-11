@@ -1,6 +1,6 @@
 import json
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
 
@@ -15,7 +15,6 @@ from app.schemas.jobs import (
     RunRecord,
     ValidationIssueRecord,
 )
-
 
 DISCOVERY_JOB_TYPES: set[JobType] = {"ip_discovery", "bacnet_discovery", "mqtt_discovery"}
 VALIDATION_JOB_TYPES: set[JobType] = {
@@ -93,7 +92,7 @@ class RunService:
         try:
             ensure_runtime_directories()
             probe_path = self.root / f".readiness_{token_hex(4)}"
-            probe_path.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+            probe_path.write_text(datetime.now(UTC).isoformat(), encoding="utf-8")
             probe_path.unlink(missing_ok=True)
         except OSError as error:
             return False, str(error)
@@ -161,7 +160,7 @@ class RunService:
         job_type: JobType,
         parameters: dict[str, object],
     ) -> RunRecord:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         run = RunRecord(
             run_id=f"run_{now.strftime('%Y%m%d%H%M%S')}_{token_hex(4)}",
             project_id=project_id,
@@ -189,7 +188,7 @@ class RunService:
     def _update_run(self, run_id: str, mutate: Callable[[RunRecord], None]) -> RunRecord:
         run = self._load(run_id)
         mutate(run)
-        run.updated_at = datetime.now(timezone.utc)
+        run.updated_at = datetime.now(UTC)
         self._save(run)
         return run
 

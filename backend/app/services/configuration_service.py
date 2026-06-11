@@ -1,6 +1,6 @@
 import ipaddress
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex
@@ -10,11 +10,10 @@ from app.core.runtime import CONFIGURATION_PATH, SECRETS_ROOT, ensure_runtime_di
 from app.schemas.configuration import (
     ConfigurationSection,
     ConfigurationSnapshot,
+    ConfigurationValidationResult,
     SecretMaterialRequest,
     SecretMaterialResponse,
-    ConfigurationValidationResult,
 )
-
 
 DEFAULT_CONFIGURATION = ConfigurationSnapshot(
     device=ConfigurationSection(
@@ -183,7 +182,7 @@ class ConfigurationService:
             raise ValueError(f"{field} must use a supported file type: {supported}.")
 
         digest = sha256(content.encode("utf-8")).hexdigest()
-        secret_ref = f"secret://{field.lower().replace(' ', '-')}-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{token_hex(4)}"
+        secret_ref = f"secret://{field.lower().replace(' ', '-')}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{token_hex(4)}"
         secret_path = SECRETS_ROOT / f"{secret_ref.removeprefix('secret://')}.pem"
         secret_path.write_text(content, encoding="utf-8")
 

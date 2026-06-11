@@ -1,7 +1,7 @@
 import json
 import os
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from smart_commissioning_core.records import ValidationIssueRecord
@@ -77,7 +77,7 @@ class FileRunStore:
         if not isinstance(run, dict):
             raise ValueError(f"Run file {path} must contain a JSON object.")
         mutate(run)
-        run["updated_at"] = datetime.now(timezone.utc).isoformat()
+        run["updated_at"] = datetime.now(UTC).isoformat()
 
         temp_path = path.with_suffix(".json.tmp")
         temp_path.write_text(json.dumps(run, indent=2), encoding="utf-8")

@@ -5,8 +5,8 @@ from app.schemas.jobs import (
     JobAcceptedResponse,
     JobCreateRequest,
     JobType,
-    RunRecord,
     RunListResponse,
+    RunRecord,
 )
 from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
 
