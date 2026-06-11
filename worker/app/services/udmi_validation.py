@@ -11,6 +11,10 @@ DEFAULT_FULL_REPORT_PATH = (
     / "full_report.json"
 )
 PACKAGED_FULL_REPORT_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "udmi_full_report.json"
+ALLOWED_FIXTURE_DIRS = (
+    PACKAGED_FULL_REPORT_PATH.parent,
+    Path(__file__).resolve().parents[3] / "device_udmi_payload_validation",
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,11 @@ def _resolve_report_path(parameters: dict[str, object]) -> Path:
     report_path = Path(raw_path).expanduser()
     if not report_path.is_absolute():
         report_path = Path(__file__).resolve().parents[3] / report_path
+    report_path = report_path.resolve()
+    if not any(report_path.is_relative_to(allowed_dir) for allowed_dir in ALLOWED_FIXTURE_DIRS):
+        raise FileNotFoundError(
+            f"UDMI fixture path outside allowed fixture directories: {raw_path}"
+        )
     return report_path
 
 

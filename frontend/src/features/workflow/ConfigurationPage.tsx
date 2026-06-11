@@ -203,20 +203,20 @@ export function ConfigurationPage() {
     secretMutation.mutate({ content, field, fileName: secretFiles[field] });
   };
 
-  if (configurationQuery.isLoading || !draft) {
-    return (
-      <div className="state-panel">
-        <strong>Loading configuration</strong>
-        <span>Reading the persisted API-backed configuration snapshot.</span>
-      </div>
-    );
-  }
-
   if (configurationQuery.isError) {
     return (
       <div className="state-panel error">
         <strong>Configuration API unavailable</strong>
         <span>{configurationQuery.error.message}</span>
+      </div>
+    );
+  }
+
+  if (configurationQuery.isLoading || !draft) {
+    return (
+      <div className="state-panel">
+        <strong>Loading configuration</strong>
+        <span>Reading the persisted API-backed configuration snapshot.</span>
       </div>
     );
   }
@@ -391,6 +391,8 @@ function FieldControl({
   secretPending,
   value,
 }: FieldControlProps) {
+  const [maskedSentinel, setMaskedSentinel] = useState<string | null>(null);
+
   if (kind === "secret" || secretFields.has(field)) {
     return (
       <label className="secret-field">
@@ -453,10 +455,21 @@ function FieldControl({
     <label>
       {field}
       <input
+        onBlur={() => {
+          if (kind === "password" && maskedSentinel && !value) {
+            onValueChange(maskedSentinel);
+          }
+        }}
         onChange={(event) => onValueChange(event.target.value)}
+        onFocus={() => {
+          if (kind === "password" && isSecretSentinel(value)) {
+            setMaskedSentinel(value);
+            onValueChange("");
+          }
+        }}
         readOnly={disabled || kind === "readonly"}
         type={kind === "password" ? "password" : "text"}
-        value={kind === "password" ? maskSecretValue(value) : value}
+        value={value}
       />
       {hint && <small>{hint}</small>}
     </label>
@@ -481,6 +494,10 @@ function normalizeConfigurationForLocks(configuration: ConfigurationSnapshot): C
 
 function isBbmdEnabled(configuration: ConfigurationSnapshot): boolean {
   return configuration.bacnet.values.BBMD === "Enabled";
+}
+
+function isSecretSentinel(value: string): boolean {
+  return value.length > 0 && /^\*+$/.test(value);
 }
 
 function maskSecretValue(value: string): string {
