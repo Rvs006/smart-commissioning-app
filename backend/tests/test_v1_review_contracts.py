@@ -7,10 +7,10 @@ from app.schemas.jobs import JobCreateRequest, ReportRequest
 from app.services.configuration_service import ConfigurationService, DEFAULT_CONFIGURATION
 from app.services.discovery_observations import build_observation, parse_port_specification
 from app.services.import_service import ImportService
-from app.services.mqtt_config_publish import validate_and_publish_config
 from app.services.run_service import RunService
-from app.services.mqtt_transport import MqttMessage
-from app.services.udmi_validation import validate_udmi_full_report
+from smart_commissioning_core.mqtt_config_publish import validate_and_publish_config
+from smart_commissioning_core.mqtt_transport import MqttMessage
+from smart_commissioning_core.udmi_validation import validate_udmi_full_report
 
 
 class ConfigurationReviewTests(unittest.TestCase):

@@ -11,9 +11,9 @@ from app.schemas.jobs import (
     ValidationIssuesResponse,
 )
 from app.services.job_queue import JobQueueService, JobQueueUnavailable
-from app.services.mqtt_config_publish_processor import process_mqtt_config_publish_run
 from app.services.run_service import RunService, VALIDATION_JOB_TYPES
-from app.services.udmi_run_processor import process_udmi_validation_run
+from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
+from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 router = APIRouter()
 service = RunService()
@@ -50,7 +50,7 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
         processed_run = process_udmi_validation_run(
             run.run_id,
             dict(run.parameters),
-            run_service=service,
+            run_store=service,
             execution_mode="inline_local_fallback",
             fallback_reason="JOB_EXECUTION_MODE is set to inline for local development.",
         )
@@ -93,7 +93,7 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
         processed_run = process_udmi_validation_run(
             run.run_id,
             dict(run.parameters),
-            run_service=service,
+            run_store=service,
             execution_mode="inline_local_fallback",
             fallback_reason=str(error),
         )
@@ -118,7 +118,7 @@ def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResp
     processed_run = process_mqtt_config_publish_run(
         run.run_id,
         dict(run.parameters),
-        run_service=service,
+        run_store=service,
         execution_mode="inline_local_fallback",
     )
     return JobAcceptedResponse(

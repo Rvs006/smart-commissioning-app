@@ -3,6 +3,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+# ValidationIssueRecord moved to the shared core package; imported here so existing
+# `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
+from smart_commissioning_core.records import ValidationIssueRecord  # noqa: F401
+
 JobType = Literal[
     "ip_discovery",
     "bacnet_discovery",
@@ -40,24 +44,6 @@ class JobSummary(BaseModel):
     progress_percent: int
     created_at: datetime
     updated_at: datetime
-
-
-class ValidationIssueRecord(BaseModel):
-    issue_id: str
-    asset_id: str | None = None
-    issue_type: str
-    severity: Literal["low", "medium", "high", "critical"]
-    description: str
-    status: str | None = None
-    point_name: str | None = None
-    topic: str | None = None
-    expected_value: str | None = None
-    observed_value: str | None = None
-    match_basis: str | None = None
-    suggested_action: str | None = None
-    raw_evidence_uri: str | None = None
-    status_detail: str | None = None
-    last_seen_at: datetime | None = None
 
 
 class ObservedPort(BaseModel):

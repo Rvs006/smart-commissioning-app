@@ -5,21 +5,24 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from app.schemas.jobs import ValidationIssueRecord
-from app.services.mqtt_settings import build_mqtt_connection_settings, parse_bool, parse_float, parse_int
-from app.services.mqtt_transport import MqttMessage, MqttTransportError, subscribe_and_capture
+from smart_commissioning_core.mqtt_settings import build_mqtt_connection_settings, parse_bool, parse_float, parse_int
+from smart_commissioning_core.mqtt_transport import MqttMessage, MqttTransportError, subscribe_and_capture
+from smart_commissioning_core.records import ValidationIssueRecord
 
 
+# When the core package is installed editable from the repository checkout,
+# parents[2] is the repository root (udmi_validation.py -> smart_commissioning_core -> core -> root).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_FULL_REPORT_PATH = (
-    Path(__file__).resolve().parents[3]
+    _REPO_ROOT
     / "device_udmi_payload_validation"
     / "device_udmi_payload_validation"
     / "full_report.json"
 )
-PACKAGED_FULL_REPORT_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "udmi_full_report.json"
+PACKAGED_FULL_REPORT_PATH = Path(__file__).resolve().parent / "fixtures" / "udmi_full_report.json"
 ALLOWED_FIXTURE_DIRS = (
     PACKAGED_FULL_REPORT_PATH.parent,
-    Path(__file__).resolve().parents[3] / "device_udmi_payload_validation",
+    _REPO_ROOT / "device_udmi_payload_validation",
 )
 
 NUMERIC_UDMI_UNITS = {
@@ -50,7 +53,7 @@ LiveCapture = Callable[..., list[MqttMessage]]
 def validate_udmi_full_report(
     parameters: dict[str, object] | None = None,
     *,
-    live_capture: LiveCapture = subscribe_and_capture,
+    live_capture: LiveCapture | None = subscribe_and_capture,
 ) -> UdmiValidationResult:
     parameters = dict(parameters or {})
     capture_issues: list[ValidationIssueRecord] = []
@@ -107,7 +110,7 @@ def _resolve_report_path(parameters: dict[str, object]) -> Path:
 
     report_path = Path(raw_path).expanduser()
     if not report_path.is_absolute():
-        report_path = Path(__file__).resolve().parents[3] / report_path
+        report_path = _REPO_ROOT / report_path
     report_path = report_path.resolve()
     if not any(report_path.is_relative_to(allowed_dir) for allowed_dir in ALLOWED_FIXTURE_DIRS):
         raise FileNotFoundError(
@@ -331,7 +334,7 @@ def _review_payload_issues(
 def _capture_live_payloads(
     parameters: dict[str, object],
     *,
-    live_capture: LiveCapture,
+    live_capture: LiveCapture | None,
 ) -> dict[str, object]:
     if not parse_bool(parameters.get("use_live_broker")):
         return {
@@ -339,6 +342,21 @@ def _capture_live_payloads(
             "status_detail": "live_broker_not_requested",
             "captured_topics": [],
             "issue": None,
+        }
+
+    if live_capture is None:
+        return {
+            "attempted": True,
+            "status_detail": "live_capture_unavailable",
+            "captured_topics": [],
+            "issue": _issue(
+                [],
+                asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
+                issue_type="payload_error",
+                severity="high",
+                description="Live MQTT capture is not available in this execution context.",
+                suggested_action="Run live UDMI validation from a service with broker access, or supply captured payloads directly.",
+            ),
         }
 
     topics = _capture_topics(parameters)

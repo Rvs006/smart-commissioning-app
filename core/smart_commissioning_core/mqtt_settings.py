@@ -1,11 +1,31 @@
-from app.services.configuration_service import ConfigurationService
-from app.services.mqtt_transport import MqttConnectionSettings
+from collections.abc import Callable
+
+from smart_commissioning_core.mqtt_transport import MqttConnectionSettings
+
+ConfigurationValuesProvider = Callable[[], tuple[dict[str, object], dict[str, object]]]
+
+_configuration_values_provider: ConfigurationValuesProvider | None = None
+
+
+def set_configuration_values_provider(provider: ConfigurationValuesProvider | None) -> None:
+    """Register a callable returning (mqtt_values, certificate_values) used as connection defaults.
+
+    Services that own persisted configuration (for example the API's ConfigurationService)
+    register a provider at start-up. Services without configuration access leave it unset,
+    in which case only explicit job parameters are used.
+    """
+    global _configuration_values_provider
+    _configuration_values_provider = provider
+
+
+def _configuration_values() -> tuple[dict[str, object], dict[str, object]]:
+    if _configuration_values_provider is None:
+        return {}, {}
+    return _configuration_values_provider()
 
 
 def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnectionSettings:
-    configuration = ConfigurationService().load()
-    mqtt_values = configuration.mqtt.values
-    certificate_values = configuration.certificates.values
+    mqtt_values, certificate_values = _configuration_values()
     host = _string(parameters.get("broker_host")) or _string(mqtt_values.get("MQTT Broker FQDN or IP Address"))
     if not host:
         raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")

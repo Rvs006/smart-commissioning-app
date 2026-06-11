@@ -4,6 +4,8 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
+from smart_commissioning_core.records import ValidationIssueRecord
+
 
 def get_runs_root() -> Path:
     configured = os.getenv("SMART_COMMISSIONING_RUNS_ROOT")
@@ -13,11 +15,13 @@ def get_runs_root() -> Path:
 
 
 class FileRunStore:
+    """File-backed run store satisfying smart_commissioning_core.run_store.RunStore."""
+
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or get_runs_root()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def update_status(
+    def update_run_status(
         self,
         run_id: str,
         *,
@@ -36,25 +40,34 @@ class FileRunStore:
 
         return self._update(run_id, mutate)
 
-    def replace_result(
+    def update_result_summary(
         self,
         run_id: str,
-        *,
         result_summary: dict[str, object],
-        issues: list[dict[str, object]],
+        *,
+        merge: bool = True,
     ) -> dict[str, object]:
         def mutate(run: dict[str, object]) -> None:
-            run["result_summary"] = result_summary
-            run["issues"] = issues
+            if merge:
+                current = run.get("result_summary")
+                if not isinstance(current, dict):
+                    current = {}
+                run["result_summary"] = {**current, **result_summary}
+            else:
+                run["result_summary"] = dict(result_summary)
 
         return self._update(run_id, mutate)
 
-    def update_summary(self, run_id: str, result_summary: dict[str, object]) -> dict[str, object]:
+    def replace_issues(
+        self,
+        run_id: str,
+        issues: list[ValidationIssueRecord | dict[str, object]],
+    ) -> dict[str, object]:
         def mutate(run: dict[str, object]) -> None:
-            current = run.get("result_summary")
-            if not isinstance(current, dict):
-                current = {}
-            run["result_summary"] = {**current, **result_summary}
+            run["issues"] = [
+                ValidationIssueRecord.model_validate(issue).model_dump(mode="json")
+                for issue in issues
+            ]
 
         return self._update(run_id, mutate)
 

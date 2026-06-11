@@ -29,6 +29,7 @@ def _bundle_dependency_imports() -> None:
     import pydantic_core  # noqa: F401
     import pydantic_settings  # noqa: F401
     import redis  # noqa: F401
+    import smart_commissioning_core  # noqa: F401
     import sqlalchemy  # noqa: F401
     import starlette  # noqa: F401
     import uvicorn  # noqa: F401
@@ -53,6 +54,7 @@ def reserve_port(start: int = DEFAULT_PORT, attempts: int = 50) -> int:
 
 def configure_environment(root: Path) -> None:
     backend_root = root / "backend"
+    core_root = root / "core"
     frontend_dist = root / "frontend" / "dist"
     runtime_root = root / "runtime"
 
@@ -62,6 +64,10 @@ def configure_environment(root: Path) -> None:
         raise FileNotFoundError(f"Built frontend missing: {frontend_dist / 'index.html'}")
 
     sys.path.insert(0, str(backend_root))
+    if core_root.exists():
+        # Resolve smart_commissioning_core from the bundled source tree when it
+        # is not already importable (for example in the unfrozen dev layout).
+        sys.path.insert(0, str(core_root))
     os.environ["SCT_FRONTEND_DIST"] = str(frontend_dist)
     os.environ["SMART_COMMISSIONING_RUNS_ROOT"] = str(runtime_root / "runs")
     os.environ["SMART_COMMISSIONING_SECRETS_ROOT"] = str(runtime_root / "secrets")

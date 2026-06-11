@@ -3,17 +3,17 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.schemas.jobs import ValidationIssueRecord
-from app.services.mqtt_settings import (
+from smart_commissioning_core.mqtt_settings import (
     build_mqtt_connection_settings,
     parse_bool,
     parse_float,
 )
-from app.services.mqtt_transport import (
+from smart_commissioning_core.mqtt_transport import (
     MqttMessage,
     MqttTransportError,
     publish_config_and_wait_for_pointset,
 )
+from smart_commissioning_core.records import ValidationIssueRecord
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ BrokerPublisher = Callable[..., MqttMessage | None]
 def validate_and_publish_config(
     parameters: dict[str, object],
     *,
-    broker_publisher: BrokerPublisher = publish_config_and_wait_for_pointset,
+    broker_publisher: BrokerPublisher | None = publish_config_and_wait_for_pointset,
 ) -> MqttConfigPublishResult:
     topic = _string(parameters.get("topic"))
     payload_text = _string(parameters.get("payload"))
@@ -97,56 +97,71 @@ def validate_and_publish_config(
 
     if use_live_broker and not issues:
         broker_attempted = True
-        broker_status_detail = "connecting_to_live_broker"
-        try:
-            settings = build_mqtt_connection_settings(parameters)
-            message = broker_publisher(
-                settings,
-                config_topic=topic,
-                config_payload=payload_text,
-                pointset_topic=pointset_topic,
-                timeout_seconds=wait_seconds,
-            )
-            if message is None:
-                broker_status_detail = "live_pointset_timeout"
-                issues.append(
-                    _issue(
-                        issues,
-                        issue_type="live_pointset_timeout",
-                        severity="high",
-                        description=f"No pointset payload was received on {pointset_topic} after publishing the config payload.",
-                        topic=pointset_topic,
-                        suggested_action="Confirm the device publishes an events/pointset message after config commands.",
-                        status_detail=broker_status_detail,
-                        last_seen_at=now,
-                    )
+        if broker_publisher is None:
+            broker_status_detail = "live_publish_unavailable"
+            issues.append(
+                _issue(
+                    issues,
+                    issue_type="live_publish_unavailable",
+                    severity="high",
+                    description="Live MQTT publish is not available in this execution context.",
+                    topic=topic or None,
+                    suggested_action="Run the config publish from a service with broker access.",
+                    status_detail=broker_status_detail,
+                    last_seen_at=now,
                 )
-            else:
-                broker_status_detail = "live_pointset_received"
-                next_pointset_payload = message.json_payload()
-                if next_pointset_payload is None:
+            )
+        else:
+            broker_status_detail = "connecting_to_live_broker"
+            try:
+                settings = build_mqtt_connection_settings(parameters)
+                message = broker_publisher(
+                    settings,
+                    config_topic=topic,
+                    config_payload=payload_text,
+                    pointset_topic=pointset_topic,
+                    timeout_seconds=wait_seconds,
+                )
+                if message is None:
+                    broker_status_detail = "live_pointset_timeout"
                     issues.append(
                         _issue(
                             issues,
-                            issue_type="invalid_live_pointset_payload",
-                            severity="critical",
-                            description="The live pointset message was received but was not valid JSON.",
-                            topic=message.topic,
-                            suggested_action="Fix the publisher payload so the pointset message is valid JSON.",
-                            status_detail="invalid_live_json",
+                            issue_type="live_pointset_timeout",
+                            severity="high",
+                            description=f"No pointset payload was received on {pointset_topic} after publishing the config payload.",
+                            topic=pointset_topic,
+                            suggested_action="Confirm the device publishes an events/pointset message after config commands.",
+                            status_detail=broker_status_detail,
                             last_seen_at=now,
                         )
                     )
-        except (MqttTransportError, OSError, ValueError) as error:
-            broker_status_detail = _broker_error_status(error)
-            issues.append(
-                _connection_issue(
-                    issues,
-                    topic,
-                    broker_status_detail,
-                    f"Live MQTT publish/subscribe failed: {error}",
+                else:
+                    broker_status_detail = "live_pointset_received"
+                    next_pointset_payload = message.json_payload()
+                    if next_pointset_payload is None:
+                        issues.append(
+                            _issue(
+                                issues,
+                                issue_type="invalid_live_pointset_payload",
+                                severity="critical",
+                                description="The live pointset message was received but was not valid JSON.",
+                                topic=message.topic,
+                                suggested_action="Fix the publisher payload so the pointset message is valid JSON.",
+                                status_detail="invalid_live_json",
+                                last_seen_at=now,
+                            )
+                        )
+            except (MqttTransportError, OSError, ValueError) as error:
+                broker_status_detail = _broker_error_status(error)
+                issues.append(
+                    _connection_issue(
+                        issues,
+                        topic,
+                        broker_status_detail,
+                        f"Live MQTT publish/subscribe failed: {error}",
+                    )
                 )
-            )
 
     observed_value = _extract_present_value(next_pointset_payload, expected_point)
     if expected_point and expected_value is not None and observed_value != expected_value:
