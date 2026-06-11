@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ZIP Inspector</title>
+  <style>
+    :root{
+      --bg:#f2f5f9;
+      --card:#ffffff;
+      --ink:#162033;
+      --muted:#64748b;
+      --line:#d7e0ea;
+      --soft:#eef3f8;
+      --blue:#2158d5;
+      --blue-2:#eaf1ff;
+      --green:#0f8a5f;
+      --green-2:#ebfbf4;
+      --amber:#b96b00;
+      --amber-2:#fff6e8;
+      --red:#b42318;
+      --red-2:#fff0ed;
+      --shadow:0 14px 36px rgba(22,32,51,.08);
+      --radius:18px;
+      --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;
+      --sans:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    *{box-sizing:border-box}
+    html,body{margin:0;background:radial-gradient(circle at top right,#e7eefb 0,#f2f5f9 32%,#f2f5f9 100%);color:var(--ink);font-family:var(--sans)}
+    button,input{font:inherit}
+    button{cursor:pointer}
+    .shell{max-width:1520px;margin:0 auto;padding:28px 22px 40px}
+    .hero{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(340px,.85fr);gap:18px;margin-bottom:18px}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .hero-main{padding:24px 24px 22px}
+    .eyebrow{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:8px 12px;background:var(--blue-2);color:var(--blue);font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+    h1{margin:16px 0 12px;font-size:40px;line-height:1.02;letter-spacing:-.045em}
+    .lede{margin:0 0 18px;font-size:16px;line-height:1.6;color:#43536a;max-width:70ch}
+    .grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .signal{padding:14px;border-radius:14px;background:var(--soft);border:1px solid #e6edf5}
+    .signal strong{display:block;font-size:13px;margin-bottom:6px}
+    .signal span{display:block;color:var(--muted);font-size:13px;line-height:1.45}
+    .hero-side{padding:22px}
+    .hero-side h2,.section-title{margin:0 0 14px;font-size:17px;letter-spacing:-.02em}
+    .path-form{display:flex;gap:10px;flex-wrap:wrap}
+    .input{flex:1;min-width:260px;height:46px;padding:0 14px;border-radius:12px;border:1px solid var(--line);background:white;color:var(--ink)}
+    .btn{height:46px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:white;color:var(--ink);font-weight:700}
+    .btn.primary{background:var(--blue);border-color:var(--blue);color:white}
+    .btn.ghost{background:#f8fbff}
+    .dropzone{margin-top:12px;border:1.5px dashed #adc0dc;border-radius:16px;padding:18px;background:linear-gradient(180deg,#f9fbff 0,#f4f8ff 100%);color:#51647f}
+    .dropzone.drag{border-color:var(--blue);background:#edf3ff}
+    .workspace-note{margin-top:12px;padding:12px 14px;border-radius:14px;background:var(--amber-2);border:1px solid #f6d59b;color:#7a4b00;font-size:13px;line-height:1.5}
+    .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}
+    .stat{padding:16px 18px}
+    .stat-label{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+    .stat-value{margin-top:8px;font-size:28px;font-weight:820;letter-spacing:-.04em}
+    .stat-sub{margin-top:4px;font-size:13px;color:var(--muted)}
+    .main{display:grid;grid-template-columns:minmax(300px,.72fr) minmax(0,1.28fr);gap:18px}
+    .panel-head{padding:18px 20px;border-bottom:1px solid #edf2f6;display:flex;align-items:center;justify-content:space-between;gap:12px}
+    .panel-body{padding:18px 20px}
+    .stack{display:flex;flex-direction:column;gap:12px}
+    .tag{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:8px 11px;font-size:12px;font-weight:800}
+    .tag.blue{background:var(--blue-2);color:var(--blue)}
+    .tag.green{background:var(--green-2);color:var(--green)}
+    .tag.amber{background:var(--amber-2);color:var(--amber)}
+    .tag.red{background:var(--red-2);color:var(--red)}
+    .tag.grey{background:#f2f4f7;color:#475467}
+    .list{display:flex;flex-direction:column;gap:10px}
+    .list-item{padding:14px;border:1px solid var(--line);border-radius:14px;background:#fcfdff}
+    .list-item h3,.list-item h4{margin:0 0 6px;font-size:14px}
+    .list-item p{margin:0;color:var(--muted);font-size:13px;line-height:1.5}
+    .entries{max-height:720px;overflow:auto;padding-right:4px}
+    .entry{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:12px 14px;border:1px solid transparent;border-radius:14px;background:white;text-align:left}
+    .entry:hover{background:#f5f8fd;border-color:#d8e2f0}
+    .entry.active{background:#edf3ff;border-color:#bfd0ef}
+    .entry-main{min-width:0}
+    .entry-path{font-size:13px;font-weight:700;color:#22324a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .entry-meta{margin-top:5px;font-size:12px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
+    .preview{min-height:460px;background:linear-gradient(180deg,#fbfcfe 0,#f6f8fb 100%);border:1px solid #e7edf4;border-radius:16px;padding:18px}
+    .preview pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.6 var(--mono);color:#d4f4e5;background:#08111f;border-radius:14px;padding:16px;max-height:560px;overflow:auto}
+    .preview img{max-width:100%;max-height:520px;border-radius:14px;border:1px solid var(--line);background:white}
+    .empty{display:grid;place-items:center;min-height:260px;color:var(--muted);text-align:center}
+    .pill-row{display:flex;gap:8px;flex-wrap:wrap}
+    .kv{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #edf2f6;font-size:14px}
+    .kv:first-child{border-top:0;padding-top:0}
+    .kv span:first-child{color:var(--muted)}
+    .flash{margin-bottom:16px;padding:13px 15px;border-radius:14px;border:1px solid #b9cef1;background:#edf3ff;color:#26457e;font-size:14px;line-height:1.55}
+    .flash.error{border-color:#f3b3ad;background:var(--red-2);color:#8f1e16}
+    .subgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+    .small{font-size:13px;color:var(--muted);line-height:1.55}
+    @media (max-width:1180px){
+      .hero,.main,.stats,.subgrid{grid-template-columns:1fr}
+      h1{font-size:34px}
+      .entries{max-height:none}
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="card hero-main">
+        <div class="eyebrow">Smart Commissioning Support</div>
+        <h1>ZIP Inspector</h1>
+        <p class="lede">
+          This viewer inspects an archive, explains what kind of package it is, previews its files, and highlights what is worth borrowing for the Smart Commissioning Tool versus what should stay behind.
+        </p>
+        <div class="grid-2">
+          <div class="signal">
+            <strong>What it helps with</strong>
+            <span>Understand whether a zip is a prototype, document pack, data bundle, or codebase.</span>
+          </div>
+          <div class="signal">
+            <strong>What it avoids</strong>
+            <span>Copying compiled junk, one-off branding, or accidental implementation debt into the new app.</span>
+          </div>
+        </div>
+      </div>
+      <div class="card hero-side">
+        <h2>Analyze a ZIP</h2>
+        <div class="path-form">
+          <input id="pathInput" class="input" type="text" placeholder="Paste a full path, e.g. R:\Some Folder\example.zip" />
+          <button id="analyzePathBtn" class="btn primary" type="button">Analyze Path</button>
+        </div>
+        <div id="dropzone" class="dropzone">
+          <strong>Drop a zip here</strong>
+          <div class="small" style="margin-top:6px">or use the file picker if the archive is outside the current workspace.</div>
+          <div style="margin-top:12px">
+            <button id="pickFileBtn" class="btn ghost" type="button">Choose ZIP File</button>
+            <input id="fileInput" type="file" accept=".zip" hidden />
+          </div>
+        </div>
+        <div id="workspaceNote" class="workspace-note">
+          Checking the workspace for local zip files...
+        </div>
+      </div>
+    </section>
+
+    <div id="flash" class="flash" hidden></div>
+
+    <section id="stats" class="stats" hidden>
+      <div class="card stat">
+        <div class="stat-label">Archive Shape</div>
+        <div id="shapeValue" class="stat-value">-</div>
+        <div id="shapeSub" class="stat-sub">-</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">Files</div>
+        <div id="filesValue" class="stat-value">-</div>
+        <div id="filesSub" class="stat-sub">-</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">Folders</div>
+        <div id="dirsValue" class="stat-value">-</div>
+        <div id="dirsSub" class="stat-sub">-</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-label">Expanded Size</div>
+        <div id="sizeValue" class="stat-value">-</div>
+        <div id="sizeSub" class="stat-sub">-</div>
+      </div>
+    </section>
+
+    <section class="main">
+      <div class="stack">
+        <div class="card">
+          <div class="panel-head">
+            <div>
+              <div class="section-title">Archive Assessment</div>
+              <div id="archiveName" class="small">No archive analyzed yet.</div>
+            </div>
+            <div id="stackTags" class="pill-row"></div>
+          </div>
+          <div class="panel-body">
+            <div class="subgrid">
+              <div>
+                <div class="section-title">What It Is</div>
+                <div id="shapeReasons" class="list"></div>
+              </div>
+              <div>
+                <div class="section-title">Top-Level Areas</div>
+                <div id="topLevelList" class="list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="panel-head">
+            <div class="section-title">Borrow For Our App</div>
+          </div>
+          <div id="borrowList" class="panel-body list">
+            <div class="small">Analyze an archive to see reuse guidance.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="panel-head">
+            <div class="section-title">Leave Behind</div>
+          </div>
+          <div id="avoidList" class="panel-body list">
+            <div class="small">This will call out what not to copy directly.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="panel-head">
+            <div class="section-title">File Explorer</div>
+            <div id="entryCount" class="small">0 entries</div>
+          </div>
+          <div id="entries" class="panel-body entries">
+            <div class="empty">Pick a zip first.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="card">
+          <div class="panel-head">
+            <div>
+              <div class="section-title">Preview</div>
+              <div id="previewPath" class="small">Nothing selected.</div>
+            </div>
+            <div id="previewMeta" class="pill-row"></div>
+          </div>
+          <div id="preview" class="panel-body">
+            <div class="preview empty">Choose a previewable file from the explorer.</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="panel-head">
+            <div class="section-title">File Type Signals</div>
+          </div>
+          <div id="countsPanel" class="panel-body stack">
+            <div class="small">Counts will appear after analysis.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const state = {
+      sessionId: null,
+      archive: null,
+      selectedEntry: null
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    const flash = $("flash");
+    const pathInput = $("pathInput");
+    const analyzePathBtn = $("analyzePathBtn");
+    const pickFileBtn = $("pickFileBtn");
+    const fileInput = $("fileInput");
+    const dropzone = $("dropzone");
+
+    function showFlash(message, type = "info") {
+      flash.hidden = false;
+      flash.textContent = message;
+      flash.className = type === "error" ? "flash error" : "flash";
+    }
+
+    function hideFlash() {
+      flash.hidden = true;
+      flash.textContent = "";
+    }
+
+    function badge(label, tone = "grey") {
+      return `<span class="tag ${tone}">${escapeHtml(label)}</span>`;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    async function loadWorkspaceStatus() {
+      try {
+        const response = await fetch("/api/workspace");
+        const payload = await response.json();
+        if (!payload.workspaceZipFiles || payload.workspaceZipFiles.length === 0) {
+          $("workspaceNote").innerHTML = "<strong>No zip exists under the current app folder.</strong><br>This is why I could not inspect a local archive automatically. Paste a path or upload a zip and I will analyze it.";
+          return;
+        }
+        $("workspaceNote").innerHTML = `<strong>Workspace zip files found:</strong><br>${payload.workspaceZipFiles.map(escapeHtml).join("<br>")}`;
+      } catch (error) {
+        $("workspaceNote").textContent = "Could not read workspace zip status.";
+      }
+    }
+
+    function setBusy(button, busy, label) {
+      if (!button) return;
+      button.disabled = busy;
+      button.textContent = busy ? label : button.dataset.idle;
+    }
+
+    async function analyzePath() {
+      const path = pathInput.value.trim();
+      if (!path) {
+        showFlash("Enter a .zip path first.", "error");
+        return;
+      }
+      hideFlash();
+      setBusy(analyzePathBtn, true, "Analyzing...");
+      try {
+        const response = await fetch("/api/analyze-path", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Path analysis failed.");
+        renderArchive(payload);
+        showFlash(`Analyzed ${payload.archiveName}.`);
+      } catch (error) {
+        showFlash(error.message, "error");
+      } finally {
+        setBusy(analyzePathBtn, false);
+      }
+    }
+
+    async function analyzeUpload(file) {
+      if (!file) return;
+      if (!file.name.toLowerCase().endsWith(".zip")) {
+        showFlash("Only .zip files are supported.", "error");
+        return;
+      }
+      hideFlash();
+      setBusy(pickFileBtn, true, "Uploading...");
+      try {
+        const response = await fetch("/api/analyze-upload", {
+          method: "POST",
+          headers: { "X-Filename": file.name },
+          body: await file.arrayBuffer()
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Upload analysis failed.");
+        renderArchive(payload);
+        showFlash(`Analyzed uploaded archive ${payload.archiveName}.`);
+      } catch (error) {
+        showFlash(error.message, "error");
+      } finally {
+        setBusy(pickFileBtn, false);
+      }
+    }
+
+    function renderArchive(payload) {
+      state.sessionId = payload.sessionId;
+      state.archive = payload;
+      state.selectedEntry = null;
+
+      $("stats").hidden = false;
+      $("shapeValue").textContent = payload.classification.shape;
+      $("shapeSub").textContent = payload.classification.reasons[0] || "Archive classified from file signals.";
+      $("filesValue").textContent = payload.summary.files;
+      $("filesSub").textContent = `${payload.summary.entries} total entries`;
+      $("dirsValue").textContent = payload.summary.directories;
+      $("dirsSub").textContent = `${payload.summary.ignoredEntries} ignored noise entries`;
+      $("sizeValue").textContent = payload.summary.uncompressedSizeLabel;
+      $("sizeSub").textContent = `compressed ${payload.summary.compressedSizeLabel}`;
+      $("archiveName").textContent = `${payload.archiveName} • ${payload.archivePath}`;
+
+      $("stackTags").innerHTML = (payload.classification.stacks.length
+        ? payload.classification.stacks.map((stack) => badge(stack, "blue"))
+        : [badge("No strong stack signal", "grey")]).join("");
+
+      $("shapeReasons").innerHTML = payload.classification.reasons.map((reason) => `
+        <div class="list-item">
+          <h3>${escapeHtml(reason)}</h3>
+          <p>This is one of the signals used to classify the archive.</p>
+        </div>
+      `).join("");
+
+      $("topLevelList").innerHTML = payload.counts.topLevel.slice(0, 8).map((item) => `
+        <div class="kv">
+          <span>${escapeHtml(item.label)}</span>
+          <span>${item.count} entries • ${escapeHtml(item.sizeLabel)}</span>
+        </div>
+      `).join("") || '<div class="small">No top-level folders detected.</div>';
+
+      $("borrowList").innerHTML = payload.borrow.map((item) => `
+        <div class="list-item">
+          <h4>${escapeHtml(item.title)}</h4>
+          <p><strong>Why:</strong> ${escapeHtml(item.why)}</p>
+          <p style="margin-top:6px"><strong>Use it for:</strong> ${escapeHtml(item.useFor)}</p>
+        </div>
+      `).join("");
+
+      $("avoidList").innerHTML = payload.avoid.map((item) => `
+        <div class="list-item">
+          <h4>${escapeHtml(item.title)}</h4>
+          <p>${escapeHtml(item.why)}</p>
+        </div>
+      `).join("");
+
+      $("entryCount").textContent = `${payload.sessionEntriesAvailable} visible entries`;
+      renderEntries(payload.entries);
+      renderCounts(payload.counts);
+      renderPreviewPlaceholder();
+    }
+
+    function renderEntries(entries) {
+      const container = $("entries");
+      if (!entries || entries.length === 0) {
+        container.innerHTML = '<div class="empty">This archive has no visible entries after filtering.</div>';
+        return;
+      }
+      container.innerHTML = entries.map((entry, index) => `
+        <button class="entry" data-entry="${escapeHtml(entry.path)}" ${entry.previewable ? "" : 'data-previewable="false"'}>
+          <div class="entry-main">
+            <div class="entry-path">${escapeHtml(entry.path)}</div>
+            <div class="entry-meta">
+              <span>${escapeHtml(entry.kind)}</span>
+              <span>${escapeHtml(entry.sizeLabel)}</span>
+              <span>${escapeHtml(entry.topLevel)}</span>
+            </div>
+          </div>
+          <div>${badge(entry.previewable ? "Preview" : "Meta only", entry.previewable ? "green" : "grey")}</div>
+        </button>
+      `).join("");
+    }
+
+    function renderCounts(counts) {
+      const blocks = [];
+      if (counts.byKind?.length) {
+        blocks.push(`
+          <div class="list-item">
+            <h4>By Content Kind</h4>
+            ${counts.byKind.map((item) => `<div class="kv"><span>${escapeHtml(item.label)}</span><span>${item.count}</span></div>`).join("")}
+          </div>
+        `);
+      }
+      if (counts.byExtension?.length) {
+        blocks.push(`
+          <div class="list-item">
+            <h4>By Extension</h4>
+            ${counts.byExtension.map((item) => `<div class="kv"><span>${escapeHtml(item.label)}</span><span>${item.count}</span></div>`).join("")}
+          </div>
+        `);
+      }
+      $("countsPanel").innerHTML = blocks.join("") || '<div class="small">No count data available.</div>';
+    }
+
+    function renderPreviewPlaceholder() {
+      $("previewPath").textContent = "Nothing selected.";
+      $("previewMeta").innerHTML = "";
+      $("preview").innerHTML = '<div class="preview empty">Choose a previewable file from the explorer.</div>';
+    }
+
+    async function loadPreview(entryPath) {
+      if (!state.sessionId) return;
+      $("previewPath").textContent = entryPath;
+      $("previewMeta").innerHTML = badge("Loading", "amber");
+      $("preview").innerHTML = '<div class="preview empty">Loading preview...</div>';
+      try {
+        const response = await fetch("/api/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: state.sessionId, entryPath })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Preview failed.");
+        if (payload.mode === "image") {
+          $("preview").innerHTML = `<div class="preview"><img src="${payload.dataUrl}" alt="${escapeHtml(payload.path)}" /></div>`;
+          $("previewMeta").innerHTML = `${badge(payload.mimeType, "blue")}${badge(payload.sizeLabel, "grey")}`;
+          return;
+        }
+        if (payload.mode === "text") {
+          $("preview").innerHTML = `<div class="preview"><pre>${escapeHtml(payload.content)}</pre></div>`;
+          $("previewMeta").innerHTML = `${badge(payload.language, "blue")}${badge(payload.sizeLabel, "grey")}${payload.truncated ? badge("Truncated", "amber") : ""}`;
+          return;
+        }
+        $("preview").innerHTML = `
+          <div class="preview">
+            <div class="list-item">
+              <h4>Binary file</h4>
+              <p>No inline preview for this file type.</p>
+              <p style="margin-top:6px"><strong>MIME:</strong> ${escapeHtml(payload.mimeType || "unknown")}</p>
+              <p><strong>Size:</strong> ${escapeHtml(payload.sizeLabel || "-")}</p>
+            </div>
+          </div>
+        `;
+        $("previewMeta").innerHTML = `${badge("Binary", "grey")}${badge(payload.sizeLabel, "grey")}`;
+      } catch (error) {
+        $("preview").innerHTML = `<div class="preview empty">${escapeHtml(error.message)}</div>`;
+        $("previewMeta").innerHTML = badge("Error", "red");
+      }
+    }
+
+    analyzePathBtn.dataset.idle = analyzePathBtn.textContent;
+    pickFileBtn.dataset.idle = pickFileBtn.textContent;
+
+    analyzePathBtn.addEventListener("click", analyzePath);
+    pickFileBtn.addEventListener("click", () => fileInput.click());
+    fileInput.addEventListener("change", () => analyzeUpload(fileInput.files[0]));
+
+    dropzone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropzone.classList.add("drag");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag"));
+    dropzone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropzone.classList.remove("drag");
+      const file = event.dataTransfer.files[0];
+      analyzeUpload(file);
+    });
+
+    $("entries").addEventListener("click", (event) => {
+      const button = event.target.closest(".entry");
+      if (!button) return;
+      const entryPath = button.dataset.entry;
+      document.querySelectorAll(".entry.active").forEach((node) => node.classList.remove("active"));
+      button.classList.add("active");
+      state.selectedEntry = entryPath;
+      loadPreview(entryPath);
+    });
+
+    loadWorkspaceStatus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,2859 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Smart Commissioning Tool - Viewer</title>
+  <style>
+    :root{
+      --bg:#f5f6f9; --card:#fff; --line:#e2e8f0; --muted:#64748b; --text:#1e293b;
+      --blue:#2563eb; --blue2:#eff6ff; --green:#059669; --green2:#ecfdf5; --amber:#d97706; --amber2:#fffbeb; --red:#e11d48; --red2:#fff1f2; --purple:#7c3aed; --purple2:#f5f3ff;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text)}
+    button,input,select{font-family:inherit}
+    .top{position:sticky;top:0;z-index:10;height:72px;background:rgba(255,255,255,.96);backdrop-filter:blur(8px);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;gap:16px}
+    .brand{display:flex;align-items:center;gap:16px;min-width:0}.logo{display:flex;align-items:flex-end;gap:6px;font-weight:700;font-size:26px;letter-spacing:-.03em;color:#475569}.bars{display:flex;width:110px;height:8px;border-radius:2px;overflow:hidden;margin-bottom:4px}.bars span{flex:1}.bars span:nth-child(1){background:#0ea5e9}.bars span:nth-child(2){background:#fbbf24}.bars span:nth-child(3){background:#10b981}.bars span:nth-child(4){background:#d946ef}.bars span:nth-child(5){background:#f43f5e}.divider{width:1px;height:34px;background:var(--line)}
+    .title .main{font-weight:700;font-size:18px}.title .sub{font-size:12px;color:#94a3b8}.topActions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}.btn{border:1px solid var(--line);background:white;color:#475569;border-radius:999px;padding:9px 14px;font-size:13px;font-weight:650;cursor:pointer;white-space:nowrap}.btn:hover{border-color:#93c5fd;color:#1d4ed8}.btn.primary{background:var(--blue);border-color:var(--blue);color:white}.btn.ok{background:var(--green2);border-color:#a7f3d0;color:#047857}.avatar{height:38px;width:38px;border-radius:999px;border:1px solid var(--line);background:white;display:grid;place-items:center;font-weight:700;color:#475569}
+    .navwrap{background:rgba(248,250,252,.75);border-bottom:1px solid var(--line);padding:18px 24px}.container{max-width:1480px;margin:0 auto}.crumb{font-size:14px;margin-bottom:12px;color:#64748b}.crumb b{color:var(--blue)}.navgroups{display:flex;align-items:flex-end;gap:34px;flex-wrap:wrap}.groupTitle{font-size:11px;font-weight:800;letter-spacing:.08em;color:#94a3b8;margin-bottom:8px}.navbuttons{display:flex;gap:8px;flex-wrap:wrap}.navbtn{border:1px solid transparent;background:rgba(255,255,255,.7);color:#475569;border-radius:999px;padding:10px 14px;font-weight:700;font-size:14px;cursor:pointer}.navbtn.active{background:var(--blue);border-color:var(--blue);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.15)}
+    main{max-width:1480px;margin:0 auto;padding:24px}.banner{border:1px solid #bfdbfe;background:var(--blue2);border-radius:14px;padding:14px 16px;margin-bottom:20px;font-size:14px;line-height:1.45}.grid{display:grid;gap:16px}.grid3{grid-template-columns:repeat(3,minmax(0,1fr))}.grid4{grid-template-columns:repeat(4,minmax(0,1fr))}.grid5{grid-template-columns:repeat(5,minmax(0,1fr))}.split{grid-template-columns:1.1fr .9fr}.splitWide{grid-template-columns:.95fr 1.45fr}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:0 1px 2px rgba(15,23,42,.04);overflow:hidden}.cardPad{padding:18px}.cardTitle{display:flex;align-items:center;justify-content:space-between;gap:12px;font-weight:800;margin-bottom:14px}.icon{color:var(--blue);font-weight:900}.field{margin:10px 0}.field label,.smallLabel{display:flex;align-items:center;gap:5px;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#94a3b8;font-weight:800;margin-bottom:6px}.selectLike{border:1px solid var(--line);background:#f8fafc;border-radius:10px;padding:10px 12px;color:#475569;font-size:14px;display:flex;justify-content:space-between}.pill{display:inline-flex;align-items:center;gap:4px;border-radius:7px;border:1px solid #cbd5e1;background:#f8fafc;color:#475569;padding:5px 8px;font-size:12px;font-weight:750;white-space:nowrap}.green{background:var(--green2);border-color:#bbf7d0;color:var(--green)}.red{background:var(--red2);border-color:#fecdd3;color:var(--red)}.amber{background:var(--amber2);border-color:#fde68a;color:var(--amber)}.blue{background:var(--blue2);border-color:#bfdbfe;color:var(--blue)}.purple{background:var(--purple2);border-color:#ddd6fe;color:var(--purple)}.stat{background:white;border:1px solid var(--line);border-radius:16px;padding:18px;box-shadow:0 1px 2px rgba(15,23,42,.04)}.stat h4{margin:0 0 7px 0;font-size:13px;color:#334155;display:flex;align-items:center}.stat .num{font-size:31px;font-weight:850;letter-spacing:-.03em}.stat .sub{font-size:12px;color:#94a3b8;margin-top:3px}
+    .help{display:inline-grid;place-items:center;height:18px;width:18px;border:1px solid #cbd5e1;background:white;color:#94a3b8;border-radius:999px;font-size:12px;cursor:pointer;position:relative;font-weight:900}.help:hover::after{content:attr(data-tip);position:absolute;left:22px;top:-8px;width:280px;background:white;color:#475569;border:1px solid var(--line);box-shadow:0 12px 30px rgba(15,23,42,.16);padding:12px;border-radius:12px;text-transform:none;letter-spacing:0;font-weight:500;line-height:1.45;z-index:100}.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}.search{flex:1;min-width:280px;border:1px solid var(--line);border-radius:14px;background:white;padding:11px 14px;font-size:14px;outline:none}.rectBtn{border:1px solid var(--line);background:white;border-radius:12px;padding:10px 13px;font-size:13px;font-weight:750;color:#475569;cursor:pointer}.rectBtn.primary{background:var(--blue);border-color:var(--blue);color:white}.rectBtn:hover{border-color:#93c5fd;color:#1d4ed8}.rectBtn.primary:hover{color:white}.tableWrap{overflow:auto}.tableHeader{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f1f5f9;padding:14px 16px;font-weight:800}table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}th{background:#f8fafc;color:#64748b;text-transform:uppercase;font-size:11px;letter-spacing:.04em;padding:12px}td{padding:12px;border-top:1px solid #f1f5f9;vertical-align:middle}tbody tr{cursor:pointer}tbody tr:hover{background:#eff6ff}.selected{background:#eff6ff!important}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}.linkish{color:#2563eb;font-weight:800}.inspectorHead{display:flex;align-items:flex-start;justify-content:space-between;border-bottom:1px solid #f1f5f9;padding:18px}.inspectorHead h2{margin:0 0 10px 0;font-size:22px}.tabs{display:flex;gap:24px;border-bottom:1px solid #f1f5f9;padding:0 18px}.tab{border:0;background:transparent;padding:14px 0;font-size:14px;font-weight:800;color:#64748b;cursor:pointer;border-bottom:2px solid transparent}.tab.active{color:var(--blue);border-color:var(--blue)}.infoBox{background:#f8fafc;border:1px solid #f1f5f9;border-radius:14px;padding:13px;margin-top:12px}.infoBox h4{margin:0 0 10px 0}.kv{display:flex;justify-content:space-between;gap:16px;font-size:13px;border-top:1px solid rgba(148,163,184,.12);padding:7px 0}.kv:first-of-type{border-top:0}.kv span:first-child{color:#64748b}.kv span:last-child{font-weight:750;text-align:right}.actions{display:flex;gap:8px;justify-content:flex-end;border-top:1px solid #f1f5f9;padding:14px 16px}.code{background:#020617;color:#a7f3d0;border-radius:14px;border:1px solid var(--line);padding:14px;white-space:pre;overflow:auto;max-height:410px;font-size:12px;line-height:1.55}.meter{height:8px;background:#f1f5f9;border-radius:999px;overflow:hidden;display:flex;margin:10px 0}.meter div:nth-child(1){background:#10b981}.meter div:nth-child(2){background:#f59e0b}.meter div:nth-child(3){background:#e11d48}.modeBtns{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}.sectionHidden{display:none}.pdfViewer{height:calc(100vh - 215px);min-height:650px;width:100%;border:1px solid var(--line);border-radius:16px;background:white}.note{font-size:13px;color:#64748b;line-height:1.5}.footerLinks{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}.pageSwitcher{margin-left:auto;display:flex;gap:8px}.summaryText{font-size:15px;line-height:1.6}.summaryText h3{margin-top:0}.summaryText strong{color:#0f172a}@media(max-width:1050px){.grid3,.grid4,.grid5,.split,.splitWide{grid-template-columns:1fr}.top{height:auto;padding:14px;align-items:flex-start}.brand{flex-wrap:wrap}.topActions{justify-content:flex-start}.pdfViewer{height:700px}.grid3 .infoBox{min-width:0}}@media(max-width:720px){main{padding:14px}.logo{font-size:20px}.bars{display:none}.navgroups{gap:16px}.help:hover::after{left:auto;right:0;top:22px;width:240px}.tabs{overflow:auto}}
+
+    .specTextCard{margin-top:16px}.specText{white-space:pre-wrap;overflow:auto;max-height:calc(100vh - 300px);min-height:560px;background:#0f172a;color:#e2e8f0;border-radius:14px;border:1px solid var(--line);padding:16px;font-size:13px;line-height:1.55}.highlight{background:#fef08a;color:#0f172a;border-radius:3px;padding:0 2px}
+  </style>
+</head>
+<body>
+  <div class="top">
+    <div class="brand">
+      <div class="logo">ELECTRACOM <div class="bars"><span></span><span></span><span></span><span></span><span></span></div></div>
+      <div class="divider"></div>
+      <div class="title"><div class="main">Smart Commissioning Tool</div><div class="sub">v1.0.0 - discovery, commissioning and validation</div></div>
+    </div>
+    <div class="topActions">
+      <button class="btn primary">Back</button><button class="btn">Home</button><button class="btn">Export</button><button class="btn">File ▾</button><button class="btn ok">DBO 1532 - today</button><button class="btn">Brief</button><button class="btn primary">Guided Tour</button><div class="avatar">MD</div>
+    </div>
+  </div>
+
+  <div class="navwrap">
+    <div class="container">
+      <div class="crumb"><b>Home</b> › <span id="crumbName">Configuration</span></div>
+      <div class="navgroups">
+        <div><div class="groupTitle">SETUP</div><div class="navbuttons"><button class="navbtn active" data-page="configuration">⚙ Configuration</button></div></div>
+        <div><div class="groupTitle">DISCOVERY</div><div class="navbuttons"><button class="navbtn" data-page="ip">⌘ IP Scanner</button><button class="navbtn" data-page="bacnet">▣ BACnet Discovery</button><button class="navbtn" data-page="mqtt">☁ MQTT Discovery</button></div></div>
+        <div><div class="groupTitle">VALIDATION</div><div class="navbuttons"><button class="navbtn" data-page="validation">✓ Data Validation</button></div></div>
+        <div><div class="groupTitle">WORKFLOW</div><div class="navbuttons"><button class="navbtn" data-page="reports">▤ Reports</button></div></div>
+        <div class="pageSwitcher"><button class="navbtn" data-page="spec">📄 Specification PDF</button><button class="navbtn" data-page="about">? What is this?</button></div>
+      </div>
+    </div>
+  </div>
+
+  <main>
+    <section id="configuration" class="page">
+      <div class="banner"><b>Configuration:</b> configure network, protocol, security, time, backup and diagnostic settings used by discovery and validation workflows. <span class="help" data-tip="These settings define how the tool connects to networks, BACnet devices, MQTT brokers, time services and backup locations.">i</span></div>
+      <div class="grid grid3" id="configCards"></div>
+      <div class="actions"><button class="rectBtn">Import Configuration</button><button class="rectBtn primary">Save Configuration</button></div>
+    </section>
+
+    <section id="ip" class="page sectionHidden">
+      <div class="banner"><b>IP Scanner:</b> discovers devices on the network, checks reachability, identifies open services and compares results against the imported IP Device Register.</div>
+      <div class="grid grid5"><div class="stat"><h4>Target IP Range <span class="help" data-tip="The IP range or CIDR subnet to scan. The tool compares visible devices against the imported register.">i</span></h4><b>10.0.10.1 - 10.0.12.254</b></div><div class="stat"><h4>Scan Mode</h4><b>Ping + Port + Service</b></div><div class="stat"><h4>Ports / Services</h4><b>BACnet 47808, HTTP 80, HTTPS 443</b></div><div class="stat"><h4>Timeout</h4><b>1000 ms</b></div><div class="stat"><h4>Import Register</h4><b>IP Device Register loaded</b></div></div>
+      <br><div class="grid grid4" id="ipStats"></div><br>
+      <div class="grid split">
+        <div><div class="toolbar"><input class="search" placeholder="Search by IP, hostname, service..."><button class="rectBtn">Filters</button><button class="rectBtn">Import Register</button><button class="rectBtn primary">Start Scan</button></div><div class="card"><div class="tableHeader">Discovery Results (163)<button class="rectBtn">Columns</button></div><div class="tableWrap"><table id="ipTable"></table></div><div class="actions"><button class="rectBtn">Export Results</button><button class="rectBtn">Compare to Register</button><button class="rectBtn">Open Device History</button></div></div></div>
+        <div class="card" id="ipInspector"></div>
+      </div>
+    </section>
+
+    <section id="bacnet" class="page sectionHidden">
+      <div class="banner"><b>BACnet Discovery:</b> uses Who-Is / I-Am to discover BACnet devices and object lists, then compares them against the BACnet Device Register.</div>
+      <div class="grid grid5"><div class="stat"><h4>BACnet Network</h4><b>1512</b></div><div class="stat"><h4>UDP Port</h4><b>47808</b></div><div class="stat"><h4>Device Instance Range</h4><b>1 - 4194303</b></div><div class="stat"><h4>BBMD</h4><b>10.10.24.30 - enabled</b></div><div class="stat"><h4>Foreign Device</h4><b>Disabled - TTL 300</b></div></div>
+      <br><div class="grid grid4" id="bacnetStats"></div><br>
+      <div class="grid splitWide"><div class="card"><div class="tableHeader">Discovery Results (128)<button class="rectBtn">Filters</button></div><div class="tableWrap"><table id="bacnetTable"></table></div></div><div class="card" id="bacnetInspector"></div></div>
+    </section>
+
+    <section id="mqtt" class="page sectionHidden">
+      <div class="banner"><b>MQTT Discovery:</b> subscribes to broker topics, discovers assets and inspects UDMI-style payloads for point extraction and validation.</div>
+      <div class="grid grid5"><div class="stat"><h4>Broker Status</h4><b>Connected - electracom-broker:8883</b></div><div class="stat"><h4>Root Topic Filter</h4><b>udmi/#</b></div><div class="stat"><h4>QoS</h4><b>1 - At least once</b></div><div class="stat"><h4>Subscription Mode</h4><b>Subscribe (Live)</b></div><div class="stat"><h4>Import Register</h4><b>MQTT Register loaded</b></div></div>
+      <br><div class="grid grid4" id="mqttStats"></div><br>
+      <div class="grid splitWide"><div class="card"><div class="tableHeader">Discovered Topics & Assets <span class="pill green">Live</span><button class="rectBtn primary">Subscribe</button></div><div class="tableWrap"><table id="mqttTable"></table></div></div><div class="card" id="mqttInspector"></div></div>
+    </section>
+
+    <section id="validation" class="page sectionHidden">
+      <div class="banner"><b>Data Validation:</b> verifies BACnet point quality, MQTT payload structure, expected data completeness and BACnet-to-MQTT translation accuracy.</div>
+      <div class="modeBtns"><button class="navbtn active">Validation Overview</button><button class="navbtn">MQTT Payload Validation</button><button class="navbtn">BACnet Point Validation</button><button class="navbtn">BACnet ↔ MQTT Comparison</button></div>
+      <div class="grid grid4" id="validationStats"></div><br>
+      <div class="toolbar"><input class="search" placeholder="Search assets, points, topics or object IDs..."><button class="rectBtn">Filters</button><button class="rectBtn">Import Validation Files</button><button class="rectBtn primary">Run Validation</button></div>
+      <div class="grid splitWide"><div class="card"><div class="tableHeader">Validation Results (482)</div><div class="tableWrap"><table id="validationTable"></table></div></div><div class="card" id="validationInspector"></div></div>
+    </section>
+
+    <section id="reports" class="page sectionHidden">
+      <div class="banner"><b>Reports:</b> generate commissioning evidence packs, issue registers and device/point validation exports.</div>
+      <div class="grid grid3">
+        <div class="card cardPad"><div class="cardTitle"><span>Validation Summary</span><span class="icon">▤</span></div><p class="note">PDF report by project/system, including pass, warning and fail status.</p><button class="rectBtn primary">Generate PDF</button></div>
+        <div class="card cardPad"><div class="cardTitle"><span>Point-Level Export</span><span class="icon">▦</span></div><p class="note">CSV/XLSX issue register for point validation and BACnet-to-MQTT mapping checks.</p><button class="rectBtn">Export XLSX</button></div>
+        <div class="card cardPad"><div class="cardTitle"><span>Commissioning Evidence</span><span class="icon">✓</span></div><p class="note">Signed test output pack for handover and project records.</p><button class="rectBtn">Build Evidence Pack</button></div>
+      </div>
+    </section>
+
+    <section id="spec" class="page sectionHidden">
+      <div class="banner"><b>Specification:</b> fixed local preview. The previous network access error came from the embedded PDF iframe. This version removes the iframe and shows the specification as local text inside the same HTML file.</div>
+      <div class="grid grid3">
+        <div class="card cardPad"><div class="cardTitle"><span>No network fetch</span><span class="pill green">Fixed</span></div><p class="note">No iframe, no CDN, no external script, and no separate PDF request are used in this tab.</p></div>
+        <div class="card cardPad"><div class="cardTitle"><span>Spec included</span><span class="pill blue">42 pages</span></div><p class="note">The functional and technical specification text is embedded below for review.</p></div>
+        <div class="card cardPad"><div class="cardTitle"><span>Build basis</span><span class="pill amber">MVP scope</span></div><p class="note">Use this with the UI tabs to understand what needs to be built for the toolset.</p></div>
+      </div>
+      <div class="card cardPad specTextCard">
+        <div class="cardTitle"><span>Smart Commissioning Tool - Functional &amp; Technical Specification</span><span class="pill blue">Local text view</span></div>
+        <input id="specSearch" class="search" placeholder="Search the specification text..." style="width:100%;margin:0 0 12px 0" />
+        <pre id="specText" class="specText">Smart Commissioning Tool — Functional &amp;
+Technical Specification
+1. Purpose of this Specification
+This specification defines the required functionality, behaviour, user interface expectations, data
+handling logic, and acceptance criteria for the Smart Commissioning Tool.
+
+
+The document is intended for use by a software engineer, development team, or AI software agent to
+design and build the application based on the accompanying React UI mockup.
+
+
+The tool is intended to support smart building commissioning activities, specifically around:
+
+
+     • Network device discovery
+     • BACnet device and point discovery
+     • MQTT topic, asset and payload discovery
+     • Data validation against expected project registers
+     • BACnet-to-MQTT translation validation
+     • Commissioning evidence reporting
+
+The tool should be developed as a practical commissioning and validation platform for Master Systems
+Integrator activities, allowing engineers to confirm that systems and data are visible, structured,
+complete, accurate, and suitable for integration into a Smart Building environment.
+
+
+
+
+2. Product Name
+The product shall be named:
+
+
+Smart Commissioning Tool
+
+
+The name shall be used consistently across:
+
+
+     • Application header
+     • Browser/page title where applicable
+     • Reports
+     • Export files
+     • Generated evidence packs
+     • Login/sign-in screens if developed later
+     • Help and guided tour content
+
+
+
+
+3. High-Level Requirement
+The Smart Commissioning Tool shall provide a web-based interface that allows a commissioning
+engineer to configure system connectivity, discover devices and data sources, inspect live data,
+
+
+
+
+                                                     1
+
+
+--- Page break ---
+
+compare discovered data against expected registers, validate BACnet and MQTT data quality, and
+generate evidence reports.
+
+
+The core pages to be built are:
+
+
+    1. Configuration
+    2. IP Scanner
+    3. BACnet Discovery
+    4. MQTT Discovery
+    5. Data Validation
+    6. Reports
+
+The application shall follow the visual layout, navigation structure, and interaction model shown in the
+accompanying React UI mockup.
+
+
+
+
+4. Why the Tool is Needed
+Smart building commissioning typically requires confirmation that devices are correctly installed, visible
+on the network, configured with the correct communication parameters, exposing the correct protocol
+data, and transmitting usable data to the Smart environment.
+
+
+Manual validation using separate tools such as IP scanners, BACnet explorers, MQTT clients,
+spreadsheets and ad hoc reports is time-consuming, inconsistent, and difficult to evidence.
+
+
+The Smart Commissioning Tool is required to provide a structured workflow that allows commissioning
+teams to:
+
+
+     • Confirm expected devices are visible on the network.
+     • Identify unexpected or rogue devices.
+     • Confirm BACnet devices are discoverable and exposing the required objects.
+     • Confirm MQTT topics are subscribable and payloads are correctly structured.
+     • Validate that expected assets and points are present.
+     • Validate live values, units, timestamps, status flags and quality indicators.
+     • Compare BACnet source data against MQTT translated data.
+     • Produce issue registers and commissioning reports.
+     • Provide clear evidence of system readiness for MSI and Smart Building integration.
+
+
+
+
+5. Where the Tool Applies
+The tool applies to projects where IP-connected, BACnet-connected, MQTT-connected or translated
+Smart Building data must be commissioned and validated.
+
+
+Typical systems include, but are not limited to:
+
+
+     • Building Management Systems
+     • Energy Metering Systems
+     • Lighting Control Systems
+     • Access Control Systems
+
+
+
+                                                    2
+
+
+--- Page break ---
+
+      • CCTV and Security Systems
+      • Fire monitoring interfaces where applicable
+      • Lift and vertical transportation interfaces
+      • IAQ sensors and IoT gateways
+      • Occupancy and people-counting systems
+      • Smart lockers and other tenant/amenity systems
+      • MQTT brokers and Smart Building data platforms
+
+The tool should be suitable for use during:
+
+
+      • Factory acceptance testing
+      • Site acceptance testing
+      • Network readiness testing
+      • System integration testing
+      • Smart Building data validation
+      • Commissioning evidence production
+      • Defects and issue resolution
+      • Handover validation
+
+
+
+
+6. User Roles
+
+6.1 MSI / Smart Commissioning Engineer
+
+Primary user of the application.
+
+
+Expected activities:
+
+
+      • Configure scan and protocol settings.
+      • Import project registers.
+      • Run discovery workflows.
+      • Review discovered devices and points.
+      • Inspect live data.
+      • Run validation checks.
+      • Raise or export issue registers.
+      • Produce commissioning evidence.
+
+6.2 Software / Platform Engineer
+
+Uses the output of the tool to troubleshoot protocol, payload or integration issues.
+
+
+Expected activities:
+
+
+      • Review MQTT payloads.
+      • Review BACnet-to-MQTT mapping results.
+      • Investigate schema issues.
+      • Review missing, stale or out-of-tolerance data.
+
+6.3 Project Manager / Delivery Lead
+
+Uses reports and summary views to understand commissioning progress.
+
+
+
+
+                                                     3
+
+
+--- Page break ---
+
+Expected activities:
+
+
+      • Review high-level device and data readiness metrics.
+      • Track issue counts.
+      • Confirm evidence production status.
+
+6.4 Backend / System Administrator
+
+Configures deployment, access, services, certificates and storage.
+
+
+Expected activities:
+
+
+      • Maintain broker credentials.
+      • Maintain certificates and keys.
+      • Configure backup and logging.
+      • Support network and protocol connectivity.
+
+
+
+
+7. Overall Application Behaviour
+The application shall behave as a guided commissioning workflow.
+
+
+The general workflow shall be:
+
+
+    1. Configure network, BACnet, MQTT, certificate, time and backup settings.
+    2. Import expected registers.
+    3. Perform IP discovery.
+    4. Review visible, missing and rogue IP devices.
+    5. Perform BACnet discovery.
+    6. Review BACnet devices and live object data.
+    7. Perform MQTT discovery.
+    8. Review MQTT topics, payloads and extracted points.
+    9. Import validation mapping files.
+   10. Validate BACnet data.
+   11. Validate MQTT payload data.
+   12. Compare BACnet source data to MQTT translated data.
+   13. Review device and point-level issues.
+   14. Export reports and issue registers.
+
+The tool should not only show pass/fail results. It should allow the user to click into the underlying
+device, point, topic, object or mapping record to understand the reason for the result.
+
+
+
+
+8. User Interface Requirements
+
+8.1 General UI Style
+
+The application shall follow the style shown in the React UI mockup:
+
+
+      • Light grey application background.
+
+
+
+
+                                                     4
+
+
+--- Page break ---
+
+      • White content cards.
+      • Rounded corners.
+      • Subtle shadows.
+      • Blue primary accent colour.
+      • Green status indicators for healthy/pass/online states.
+      • Amber status indicators for partial/warning states.
+      • Red status indicators for fail/error/unexpected states.
+      • Pill-style buttons and status tags.
+      • Compact but readable data tables.
+      • Grouped top navigation.
+      • Clickable rows in tables.
+      • Right-hand inspector/detail panels.
+      • Contextual information icons.
+
+8.2 Header
+
+The top header shall include:
+
+
+      • ELECTRACOM logo area.
+      • Product title: Smart Commissioning Tool.
+      • Version indicator.
+      • Back button.
+      • Home button.
+      • Export button.
+      • File menu.
+      • Secure/status pill.
+      • Brief button.
+      • Guided Tour button.
+      • Sign-in/user control area.
+      • User initials/avatar.
+
+8.3 Secondary Navigation
+
+The application shall use grouped navigation:
+
+
+      • SETUP
+      • Configuration
+      • DISCOVERY
+      • IP Scanner
+      • BACnet Discovery
+      • MQTT Discovery
+      • VALIDATION
+      • Data Validation
+      • WORKFLOW
+      • Reports
+
+The active page shall be clearly highlighted with a blue pill/button state.
+
+
+8.4 Breadcrumbs
+
+Each page shall include a breadcrumb in the format:
+
+
+
+
+                                                     5
+
+
+--- Page break ---
+
+Home &gt; Page Name
+
+
+Example:
+
+
+Home &gt; BACnet Discovery
+
+
+8.5 Information Icons
+
+Information icons shall be provided beside key labels, headings and metrics.
+
+
+When clicked, the information icon shall display a popover explaining:
+
+
+     • What the element means.
+     • Why it is relevant.
+     • How the value is used.
+     • What the user should do if the value indicates a problem.
+
+Information icons shall be clickable, not purely decorative.
+
+
+They shall be provided for, at minimum:
+
+
+     • Configuration page banner.
+     • IP target range.
+     • Scan mode.
+     • Ports/services.
+     • Import register.
+     • Expected devices.
+     • Reachable devices.
+     • Rogue hosts.
+     • BACnet network number.
+     • BBMD settings.
+     • Object count.
+     • BACnet present value.
+     • BACnet reliability.
+     • MQTT broker status.
+     • MQTT root topic filter.
+     • MQTT QoS.
+     • Payload status.
+     • Extracted points.
+     • Mapping comparison.
+     • Point issues.
+
+
+
+
+9. Configuration Page Specification
+
+9.1 What Needs to be Built
+
+Build a Configuration page that allows the commissioning engineer to configure all application-level
+and protocol-level settings required by the tool.
+
+
+
+
+                                                     6
+
+
+--- Page break ---
+
+The page shall include configuration sections for:
+
+
+     • Device IP settings
+     • BACnet discovery settings
+     • MQTT broker and subscription settings
+     • Certificates and keys
+     • Time and NTP
+     • Backups and restore
+     • Logging and diagnostics
+
+9.2 Why it is Needed
+
+Discovery and validation workflows depend on correct network settings, protocol settings, broker
+connectivity, certificates, accurate time and reliable logs.
+
+
+Without correct configuration, the tool may fail to discover devices, fail to subscribe to MQTT topics,
+incorrectly timestamp validation results, or be unable to generate reliable evidence.
+
+
+9.3 Where it Applies
+
+This page applies globally to the application instance or gateway service running the Smart
+Commissioning Tool.
+
+
+The settings may apply to:
+
+
+     • Local gateway configuration.
+     • Discovery service configuration.
+     • MQTT client configuration.
+     • BACnet discovery engine configuration.
+     • Logging and diagnostics service.
+     • Backup service.
+
+9.4 Required Fields
+
+Device IP Settings
+
+Required fields:
+
+
+     • Hostname
+     • IP assignment mode: DHCP or static IP
+     • IP address
+     • Subnet mask
+     • Gateway
+     • DNS servers
+     • VLAN ID, optional
+     • Network status
+
+
+
+
+                                                     7
+
+
+--- Page break ---
+
+BACnet Settings for Discovery
+
+Required fields:
+
+
+     • BACnet network number
+     • UDP port, default 47808
+     • Device instance range
+     • BBMD enabled/disabled
+     • BBMD address
+     • BBMD UDP port
+     • Foreign device enabled/disabled
+     • TTL value
+     • BACnet listener status
+
+MQTT Broker &amp; Subscription Settings
+
+Required fields:
+
+
+     • MQTT broker FQDN or IP address
+     • Port, typically 8883 for MQTT over TLS
+     • Client ID
+     • Root topic
+     • QoS setting
+     • Keep alive interval
+     • Broker connection status
+
+Certificates &amp; Keys
+
+Required fields:
+
+
+     • CA certificate
+     • Client certificate
+     • Private key
+     • Optional private key password
+     • Certificate validity status
+     • Certificate expiry date where available
+
+Time &amp; NTP
+
+Required fields:
+
+
+     • Timezone
+     • Primary NTP server
+     • Secondary NTP server, optional
+     • NTP update interval
+     • Last sync time
+     • NTP status
+
+
+
+
+                                                 8
+
+
+--- Page break ---
+
+Backups &amp; Restore
+
+Required fields:
+
+
+     • Backup schedule
+     • Backup retention
+     • Encrypted backup enabled/disabled
+     • Backup location
+     • Last backup status
+     • Restore action
+
+Logging &amp; Diagnostics
+
+Required fields:
+
+
+     • Log level
+     • Log retention
+     • Remote syslog target, optional
+     • Syslog port
+     • Diagnostics mode
+     • Disk usage
+     • Logging status
+
+9.5 How it Should Behave
+
+The page shall allow the user to:
+
+
+     • View existing configuration.
+     • Edit configuration fields.
+     • Save configuration.
+     • Import configuration.
+     • Validate field formats.
+     • View status of network, BACnet listener, MQTT broker, certificates, NTP, backups and logging.
+     • Open information popovers for each major setting.
+
+The page shall prevent invalid configuration from being saved where possible.
+
+
+Examples of validation:
+
+
+     • IP address must be a valid IPv4 or IPv6 address.
+     • BACnet UDP port must be numeric.
+     • BACnet network number must be within valid range.
+     • MQTT port must be numeric.
+     • Root topic must not be empty.
+     • Certificate files must use supported file formats.
+     • NTP interval must be within permitted range.
+
+9.6 Finished Result
+
+The finished page shall look like the Configuration page in the React mockup:
+
+
+     • Multiple white configuration cards.
+
+
+
+
+                                                   9
+
+
+--- Page break ---
+
+      • Each card has a title, icon and information icon.
+      • Fields are clearly grouped.
+      • Status chips show current health.
+      • Import and Save buttons are available at the bottom.
+
+9.7 Success Checks
+
+Success shall be checked by confirming that:
+
+
+      • All required sections are present.
+      • All required fields can be displayed.
+      • Editable fields can be changed and saved.
+      • Invalid values are rejected or clearly flagged.
+      • MQTT broker connection status can be shown.
+      • BACnet listener status can be shown.
+      • Certificate validity can be shown.
+      • NTP sync status can be shown.
+      • Information icons open meaningful help popovers.
+
+
+
+
+10. IP Scanner Page Specification
+
+10.1 What Needs to be Built
+
+Build an IP Scanner page that allows users to scan a defined IP range, identify visible devices, detect
+open ports/services, compare results against an imported IP Device Register, and inspect discovered
+devices.
+
+
+The page shall include:
+
+
+      • Scan control panel.
+      • Register import function.
+      • Summary metric cards.
+      • Discovery results table.
+      • Clickable table rows.
+      • Right-hand device inspector.
+      • Live data and diagnostics tabs.
+
+10.2 Why it is Needed
+
+The IP Scanner is required to confirm that expected network-connected devices are visible on the CNS
+or project network.
+
+
+It is also required to identify:
+
+
+      • Missing expected devices.
+      • Unexpected or rogue hosts.
+      • Incorrect IP addressing.
+      • Unexpected open services.
+      • Devices exposing unencrypted or unapproved services.
+      • Differences between the expected IP Device Register and the observed network state.
+
+
+
+                                                    10
+
+
+--- Page break ---
+
+10.3 Where it Applies
+
+The IP Scanner applies to all IP-connected systems and devices included within the commissioning
+scope.
+
+
+Typical device types include:
+
+
+     • BMS controllers
+     • Metering gateways
+     • Lighting gateways
+     • Access control panels
+     • CCTV devices
+     • IoT gateways
+     • MQTT brokers
+     • Virtual machines
+     • Head-end servers
+     • Network-connected plant controllers
+
+10.4 Required Inputs
+
+The page shall support the following inputs:
+
+
+     • Target IP range or CIDR subnet.
+     • Scan mode.
+     • Ports/services to scan.
+     • Timeout setting.
+     • Optional advanced scan settings.
+     • Imported IP Device Register.
+
+10.5 IP Device Register Import
+
+The application shall allow an IP Device Register to be imported.
+
+
+Minimum expected columns:
+
+
+     • Project/site
+     • System
+     • Device name
+     • Asset ID, if available
+     • Expected hostname
+     • Expected IP address
+     • Subnet/VLAN
+     • Device type
+     • Manufacturer/vendor
+     • Expected services/ports
+     • Location
+     • Notes
+
+The tool shall compare discovered devices against the imported register.
+
+
+
+
+                                                   11
+
+
+--- Page break ---
+
+10.6 Required Outputs
+
+The page shall show:
+
+
+     • Expected devices count.
+     • Reachable devices count.
+     • Register matches count.
+     • Unexpected/rogue hosts count.
+     • Discovery results table.
+     • Device-level inspector panel.
+     • Exportable results.
+
+10.7 Discovery Results Table
+
+The table shall include, at minimum:
+
+
+     • IP address
+     • Hostname
+     • Status
+     • Latency
+     • Open ports
+     • Detected service
+     • Register status
+     • Project/site
+
+Rows shall be clickable.
+
+
+Clicking a row shall open or update the device inspector panel.
+
+
+10.8 Device Inspector
+
+The right-hand inspector shall show details for the selected device.
+
+
+Required sections:
+
+
+     • Device overview
+     • Live health
+     • Network details
+     • Observed services
+     • Register comparison
+     • Notes
+
+Required tabs:
+
+
+     • Overview
+     • Live Data
+     • Diagnostics
+
+
+
+
+                                                   12
+
+
+--- Page break ---
+
+Overview Tab
+
+The Overview tab shall show:
+
+
+     • Hostname
+     • Device type
+     • Vendor
+     • Model
+     • Description
+     • IP address
+     • Subnet mask
+     • Gateway
+     • DNS server
+     • VLAN ID
+     • Project/site
+     • Location
+     • Observed services
+     • Register comparison summary
+
+Live Data Tab
+
+The Live Data tab shall show live or latest observed values such as:
+
+
+     • Response time
+     • Packet loss
+     • Link status
+     • MAC address
+     • Last seen timestamp
+     • Active sessions where available
+     • Service uptime where available
+     • Protocol response health where available
+
+Diagnostics Tab
+
+The Diagnostics tab shall show:
+
+
+     • Detected warnings.
+     • Unexpected open ports.
+     • Missing expected services.
+     • Register comparison issues.
+     • Suggested actions.
+
+10.9 Status Logic
+
+Suggested status values:
+
+
+     • Reachable
+     • Unreachable
+     • Rogue Host
+     • Match
+     • Partial
+     • Not in Register
+
+
+
+                                                    13
+
+
+--- Page break ---
+
+     • No Data
+
+Register matching logic should consider:
+
+
+     • IP address match.
+     • Hostname match.
+     • Expected port/service match.
+     • Device type match where available.
+     • Project/site match.
+
+10.10 How it Should Behave
+
+The user shall be able to:
+
+
+     • Enter an IP range.
+     • Select scan mode.
+     • Select ports/services.
+     • Import an IP Device Register.
+     • Start a scan.
+     • View progress where scans are active.
+     • View summary metrics.
+     • Sort and filter results.
+     • Click a discovered device.
+     • View live device details.
+     • Add notes.
+     • Export results.
+     • Compare results to register.
+     • Open device history.
+
+10.11 Finished Result
+
+The finished page shall look like the IP Scanner page in the React mockup:
+
+
+     • Top control cards.
+     • Four summary metric cards.
+     • Large results table on the left.
+     • Device inspector panel on the right.
+     • Clickable information icons.
+     • Clickable discovery rows.
+
+10.12 Success Checks
+
+Success shall be checked by confirming that:
+
+
+     • A user can run a scan against a defined IP range.
+     • Discovered devices are listed in the table.
+     • Imported register records are compared against discovered results.
+     • Expected, reachable, matched and rogue metrics are calculated.
+     • Clicking a row updates the device inspector.
+     • The device inspector shows relevant live data.
+     • Results can be exported.
+     • Information icons are clickable and explain the relevant UI elements.
+
+
+
+
+                                                  14
+
+
+--- Page break ---
+
+11. BACnet Discovery Page Specification
+
+11.1 What Needs to be Built
+
+Build a BACnet Discovery page that allows users to discover BACnet devices, inspect BACnet properties
+and objects, compare results against a BACnet Device Register, and view live BACnet point values.
+
+
+The page shall include:
+
+
+      • BACnet discovery controls.
+      • BACnet register import.
+      • Summary metric cards.
+      • BACnet device results table.
+      • Clickable BACnet device rows.
+      • Device inspector panel.
+      • Live BACnet points table.
+      • Object tree view.
+
+11.2 Why it is Needed
+
+BACnet discovery is required to confirm that BACnet devices are visible, correctly configured and
+exposing the required objects for integration and validation.
+
+
+It is also required to confirm:
+
+
+      • BACnet/IP routing is working.
+      • BBMD or foreign device configuration is correct where used.
+      • Expected BACnet devices are online.
+      • Device instances are correct.
+      • Object lists can be read.
+      • Present values are available.
+      • Status flags and reliability can be checked.
+      • Required points are present before translation or Smart integration.
+
+11.3 Where it Applies
+
+This page applies to all BACnet devices within the commissioning scope.
+
+
+Typical devices include:
+
+
+      • BMS controllers
+      • Plant controllers
+      • AHU controllers
+      • VAV controllers
+      • FCU controllers
+      • Metering gateways exposing BACnet
+      • Lighting BACnet gateways
+      • Fire or lift monitoring gateways where applicable
+
+
+
+
+                                                   15
+
+
+--- Page break ---
+
+11.4 Required Inputs
+
+The page shall support:
+
+
+     • BACnet network number.
+     • UDP port.
+     • Device instance range.
+     • BBMD settings.
+     • Foreign device settings.
+     • TTL setting.
+     • BACnet Device Register import.
+
+11.5 BACnet Device Register Import
+
+Minimum expected columns:
+
+
+     • Project/site
+     • System
+     • Device name
+     • BACnet device instance
+     • BACnet network number
+     • IP address
+     • UDP port
+     • Vendor/manufacturer
+     • Device type
+     • Expected object count, if available
+     • Location
+     • Notes
+
+Optional columns:
+
+
+     • Expected object IDs
+     • Expected object names
+     • Expected units
+     • Expected COV settings
+     • Expected polling intervals
+
+11.6 Required Outputs
+
+The page shall show:
+
+
+     • Expected devices.
+     • Discovered devices.
+     • Objects discovered.
+     • Unmatched/unexpected devices.
+     • BACnet device table.
+     • BACnet object data.
+     • Object tree.
+     • Register comparison results.
+
+
+
+
+                                             16
+
+
+--- Page break ---
+
+11.7 Discovery Results Table
+
+The table shall include:
+
+
+      • Device instance
+      • Device name
+      • IP address
+      • BACnet network
+      • UDP port
+      • Object count
+      • Register status
+      • Online status
+
+Rows shall be clickable.
+
+
+Clicking a row shall update the BACnet device inspector.
+
+
+11.8 BACnet Device Inspector
+
+The BACnet inspector shall include:
+
+
+      • Device title
+      • Online/matched badges
+      • Overview tab
+      • Live Points tab
+      • Object Tree tab
+      • Action buttons
+
+Required action buttons:
+
+
+      • Read Properties
+      • Export Objects
+      • Compare to Register
+
+11.9 Overview Tab
+
+The Overview tab shall show:
+
+
+      • Device name
+      • Device instance
+      • Vendor
+      • Model
+      • Firmware
+      • Location
+      • BACnet network number
+      • IP address
+      • UDP port
+      • Max APDU length
+      • Segmentation support
+      • Vendor ID
+      • Register status
+      • Register record ID
+
+
+
+                                                   17
+
+
+--- Page break ---
+
+     • Last matched time
+
+11.10 Live Points Tab
+
+The Live Points tab shall show a table of live BACnet objects.
+
+
+Required columns:
+
+
+     • Object type
+     • Object name
+     • Object instance
+     • Present value
+     • Units
+     • Status flags
+     • Reliability
+
+The tool shall support common BACnet object types including:
+
+
+     • Analog Input
+     • Analog Output
+     • Analog Value
+     • Binary Input
+     • Binary Output
+     • Binary Value
+     • Multi-state Input
+     • Multi-state Output
+     • Multi-state Value
+     • Schedule
+     • Trend Log
+     • Device
+
+11.11 Object Tree Tab
+
+The Object Tree tab shall present objects grouped by object type.
+
+
+Example groupings:
+
+
+     • Analog Inputs
+     • Analog Outputs
+     • Binary Inputs
+     • Binary Outputs
+     • Multi-state Inputs
+     • Multi-state Outputs
+     • Schedules
+     • Trend Logs
+
+The user should be able to expand and collapse object groups.
+
+
+
+
+                                                    18
+
+
+--- Page break ---
+
+11.12 BACnet Object Reading Behaviour
+
+For each BACnet object, the tool should attempt to read:
+
+
+     • objectIdentifier
+     • objectName
+     • objectType
+     • presentValue
+     • units where applicable
+     • statusFlags
+     • reliability
+     • description where available
+     • outOfService
+     • priorityArray where applicable
+     • relinquishDefault where applicable
+
+11.13 How it Should Behave
+
+The user shall be able to:
+
+
+     • Configure BACnet discovery settings.
+     • Start BACnet discovery.
+     • Import a BACnet Device Register.
+     • View discovered devices.
+     • Click a device.
+     • View live BACnet objects.
+     • Read or refresh object properties.
+     • Compare devices and objects against the register.
+     • Export object lists.
+     • View BACnet issues.
+
+11.14 Finished Result
+
+The finished page shall look like the BACnet Discovery page in the React mockup:
+
+
+     • Discovery controls at top.
+     • Summary metrics.
+     • BACnet device table on the left.
+     • Device inspector on the right.
+     • Live point data table.
+     • Object tree view.
+     • Information icons.
+
+11.15 Success Checks
+
+Success shall be checked by confirming that:
+
+
+     • BACnet devices can be discovered using Who-Is/I-Am.
+     • Discovered devices populate the table.
+     • Imported BACnet register records can be compared.
+     • Clicking a BACnet device opens live point information.
+     • BACnet object values and status data are visible.
+
+
+
+                                                  19
+
+
+--- Page break ---
+
+      • Object lists can be exported.
+      • Missing, unmatched and unexpected BACnet devices are flagged.
+
+
+
+
+12. MQTT Discovery Page Specification
+
+12.1 What Needs to be Built
+
+Build an MQTT Discovery page that allows users to connect to an MQTT broker, subscribe to topics,
+inspect live payloads, extract assets and points, compare topics against an MQTT Device Register, and
+validate payload structure.
+
+
+The page shall include:
+
+
+      • Broker status/control area.
+      • Topic subscription controls.
+      • MQTT register import.
+      • Summary metric cards.
+      • Discovered topic/assets table.
+      • Clickable topic rows.
+      • Topic/asset inspector.
+      • Live JSON payload viewer.
+      • Extracted live points table.
+      • Register comparison panel.
+
+12.2 Why it is Needed
+
+MQTT discovery is required to confirm that the Smart integration broker is receiving data from expected
+assets, that topics are subscribable, and that payloads are correctly structured for downstream Smart
+Building use.
+
+
+It is also required to confirm:
+
+
+      • Broker connectivity.
+      • TLS/certificate authentication.
+      • Expected topics are present.
+      • Payloads are valid JSON.
+      • Payloads follow expected schema or UDMI-style structure.
+      • Required points are present.
+      • Values, units and timestamps are available.
+      • Unexpected topics or assets are identified.
+
+12.3 Where it Applies
+
+This page applies to MQTT-based Smart Building integrations, including:
+
+
+      • Gateway-published BMS data.
+      • IoT sensor data.
+      • Smart Building platform ingestion feeds.
+      • UDMI-aligned telemetry.
+      • Broker-to-platform data streams.
+
+
+
+                                                   20
+
+
+--- Page break ---
+
+      • Translated BACnet-to-MQTT point data.
+
+12.4 Required Inputs
+
+The page shall support:
+
+
+      • MQTT broker endpoint.
+      • Broker port.
+      • TLS/certificate settings from Configuration page.
+      • Root topic filter.
+      • QoS.
+      • Subscription mode.
+      • MQTT Device Register import.
+
+12.5 MQTT Device Register Import
+
+Minimum expected columns:
+
+
+      • Project/site
+      • System
+      • Asset ID
+      • Asset name
+      • Expected topic
+      • Payload type
+      • Expected schema version
+      • Expected points
+      • Expected units
+      • Expected reporting interval
+      • Source protocol, if translated
+      • Notes
+
+12.6 Required Outputs
+
+The page shall show:
+
+
+      • Expected assets.
+      • Subscribed assets.
+      • Topics discovered.
+      • Schema/payload issues.
+      • Discovered topic table.
+      • Live payload viewer.
+      • Extracted point list.
+      • Register comparison.
+
+12.7 Discovered Topics &amp; Assets Table
+
+The table shall include:
+
+
+      • Topic
+      • Asset
+      • Payload type
+      • Message rate
+
+
+
+
+                                                   21
+
+
+--- Page break ---
+
+     • Payload status
+     • Register status
+     • Last seen timestamp
+
+Rows shall be clickable.
+
+
+Clicking a row shall update the topic/asset inspector.
+
+
+12.8 Topic / Asset Inspector
+
+The inspector shall show:
+
+
+     • Asset name
+     • Subscription status
+     • Register match status
+     • Live message rate
+     • Message count
+     • Overview tab
+     • Live Payload tab
+     • Points tab
+     • Metadata tab
+
+Required actions:
+
+
+     • Pause stream
+     • Export payload
+     • Compare to register
+
+12.9 Live Payload Tab
+
+The Live Payload tab shall show:
+
+
+     • Topic overview.
+     • Payload metadata.
+     • Code-style JSON viewer.
+     • Live extracted points.
+     • Register comparison summary.
+
+The JSON viewer should support:
+
+
+     • Monospace formatting.
+     • Syntax-like visual formatting.
+     • Scrolling.
+     • Copy action, if developed.
+     • Latest message display.
+
+12.10 Extracted Points
+
+The extracted points table shall include:
+
+
+     • Point name
+     • Value
+
+
+
+
+                                                    22
+
+
+--- Page break ---
+
+     • Units
+     • Timestamp
+
+The extraction logic should parse live JSON payloads and identify point-level data.
+
+
+For UDMI-style payloads, the tool should support fields such as:
+
+
+     • version
+     • timestamp
+     • sequence number
+     • system/state payload
+     • pointset payload
+     • metadata payload
+     • config payload where applicable
+     • point names
+     • point values
+     • units
+     • status or quality fields where available
+
+12.11 Payload Status Logic
+
+Suggested status values:
+
+
+     • Valid
+     • Warning
+     • Invalid
+     • Missing expected field
+     • Invalid JSON
+     • Schema mismatch
+     • Stale payload
+     • Unmatched
+     • Partial
+
+12.12 How it Should Behave
+
+The user shall be able to:
+
+
+     • Confirm broker connection.
+     • Enter or confirm a root topic filter.
+     • Select QoS.
+     • Start subscription.
+     • View discovered topics.
+     • Click a topic or asset.
+     • View live payloads.
+     • Pause and resume live stream.
+     • View extracted points.
+     • Compare against MQTT register.
+     • Export payloads.
+
+
+
+
+                                                   23
+
+
+--- Page break ---
+
+12.13 Finished Result
+
+The finished page shall look like the MQTT Discovery page in the React mockup:
+
+
+     • Broker status and subscription controls.
+     • Summary metrics.
+     • Topic table on the left.
+     • Detailed live payload inspector on the right.
+     • JSON viewer.
+     • Extracted live points table.
+     • Register comparison panel.
+     • Clickable information icons.
+
+12.14 Success Checks
+
+Success shall be checked by confirming that:
+
+
+     • Broker connection status is shown.
+     • The tool can subscribe to a configured topic filter.
+     • Topics appear in the table.
+     • Payloads can be viewed live.
+     • Valid JSON is recognised.
+     • Invalid payloads are flagged.
+     • Extracted points are displayed.
+     • Register comparison results are calculated.
+     • Clicking a row updates the inspector.
+
+
+
+
+13. Data Validation Page Specification
+
+13.1 What Needs to be Built
+
+Build a Data Validation page that validates expected BACnet and MQTT data against imported validation
+files and confirms the accuracy of BACnet-to-MQTT mappings.
+
+
+The page shall include:
+
+
+     • Validation mode selector.
+     • Validation file import.
+     • Run validation action.
+     • Summary metric cards.
+     • Asset validation results table.
+     • Clickable asset rows.
+     • Asset validation inspector.
+     • BACnet point validation results.
+     • MQTT payload validation results.
+     • BACnet-to-MQTT comparison table.
+     • Point detail drilldown.
+     • Issue summary.
+     • Report and export actions.
+
+
+
+
+                                                       24
+
+
+--- Page break ---
+
+13.2 Why it is Needed
+
+Discovery confirms that devices and topics are visible. Validation confirms that the data is complete,
+correct, usable and aligned with expected Smart Building integration requirements.
+
+
+The validation page is needed to prove:
+
+
+     • Expected assets are online.
+     • Expected BACnet points are present.
+     • Expected MQTT payloads are present.
+     • Payloads are correctly structured.
+     • Expected point names exist.
+     • Live values are present.
+     • Units are correct.
+     • Data is not stale.
+     • BACnet values are correctly translated to MQTT values.
+     • Mismatches are visible and reportable.
+
+13.3 Where it Applies
+
+This page applies to:
+
+
+     • BACnet point validation.
+     • MQTT payload validation.
+     • MQTT point extraction validation.
+     • BACnet-to-MQTT mapping validation.
+     • Smart Building data readiness checks.
+     • Commissioning evidence packs.
+
+13.4 Required Validation Modes
+
+The page shall include the following modes:
+
+
+    1. Validation Overview
+    2. MQTT Payload Validation
+    3. BACnet Point Validation
+    4. BACnet ↔ MQTT Comparison
+
+13.5 Required Inputs
+
+The page shall support importing validation files.
+
+
+The imported files may include:
+
+
+     • Asset validation register.
+     • BACnet point register.
+     • MQTT point/payload register.
+     • BACnet-to-MQTT mapping file.
+     • Expected units file.
+     • Tolerance file.
+     • Project/system filter file where applicable.
+
+
+
+
+                                                      25
+
+
+--- Page break ---
+
+13.6 Minimum Validation File Fields
+
+Asset-Level Fields
+
+     • Project/site
+     • System
+     • Asset ID
+     • Asset name
+     • Source protocol
+     • Expected online status
+     • Expected topic or device reference
+     • Location
+
+BACnet Point Fields
+
+     • Asset ID
+     • Device instance
+     • BACnet network
+     • Object type
+     • Object instance
+     • Object name
+     • Expected point name
+     • Expected units
+     • Expected value type
+     • Required/optional flag
+
+MQTT Point Fields
+
+     • Asset ID
+     • Topic
+     • Payload type
+     • JSON path or field name
+     • Expected point name
+     • Expected units
+     • Expected value type
+     • Required/optional flag
+     • Expected reporting interval
+
+Mapping Fields
+
+     • Asset ID
+     • BACnet device instance
+     • BACnet object type
+     • BACnet object instance
+     • BACnet object name
+     • BACnet units
+     • MQTT topic
+     • MQTT field/path
+     • MQTT units
+     • Tolerance
+     • Mapping required flag
+
+
+
+
+                                            26
+
+
+--- Page break ---
+
+13.7 Required Outputs
+
+The page shall show:
+
+
+      • Expected assets.
+      • Online and valid assets.
+      • Point issues.
+      • Translation mismatches.
+      • Validation results table.
+      • Selected asset detail panel.
+      • Issue summary.
+      • Point detail drilldown.
+      • Exportable issue register.
+      • Exportable validation report.
+
+13.8 Validation Results Table
+
+The table shall include:
+
+
+      • Asset
+      • Validation source
+      • Points valid
+      • Result
+      • Issues
+      • Last run
+      • Project
+
+Rows shall be clickable.
+
+
+Clicking a row shall update the asset validation inspector.
+
+
+13.9 Asset Validation Inspector
+
+The inspector shall show:
+
+
+      • Selected asset name.
+      • Asset type badge.
+      • Online status.
+      • Source protocol badge.
+      • Generate report action.
+      • Export issues action.
+      • Open point detail action.
+
+Required tabs:
+
+
+      • Overview
+      • Point Issues
+      • BACnet ↔ MQTT Compare
+
+13.10 BACnet ↔ MQTT Compare Tab
+
+The compare tab shall include a mapping comparison table.
+
+
+
+
+                                                    27
+
+
+--- Page break ---
+
+Required columns:
+
+
+     • BACnet object name
+     • BACnet live value
+     • MQTT field
+     • MQTT live value
+     • Unit
+     • Alignment result
+     • Tolerance
+
+Suggested alignment statuses:
+
+
+     • Pass
+     • Warning
+     • Fail
+
+Comparison logic shall consider:
+
+
+     • Whether BACnet source point exists.
+     • Whether MQTT mapped field exists.
+     • Whether both values are present.
+     • Whether values are numerically aligned within tolerance.
+     • Whether boolean/binary values match.
+     • Whether enumerated values match expected mapping.
+     • Whether units match.
+     • Whether timestamps are current enough.
+     • Whether values are stale.
+
+13.11 Point Detail Drilldown
+
+When a mapping or point row is selected, the user shall be able to view point detail.
+
+
+Required point detail sections:
+
+
+     • BACnet details
+     • MQTT details
+     • Comparison details
+     • Available actions
+
+BACnet Details
+
+Required fields:
+
+
+     • Object type
+     • Object instance
+     • Object name
+     • Present value
+     • Units
+     • Status flags
+     • Reliability
+     • Timestamp
+
+
+
+
+                                                   28
+
+
+--- Page break ---
+
+MQTT Details
+
+Required fields:
+
+
+     • Topic
+     • Field/path
+     • Value
+     • Units
+     • Schema type
+     • Quality
+     • Timestamp
+
+Comparison Details
+
+Required fields:
+
+
+     • Difference
+     • Tolerance
+     • Result
+     • Reason
+
+13.12 Issue Summary
+
+The issue summary panel shall show grouped issue types.
+
+
+Minimum issue categories:
+
+
+     • Missing points
+     • Null or stale values
+     • Schema/type errors
+     • Unit mismatches
+     • Out-of-tolerance values
+     • Unexpected points
+     • Register mismatch
+
+13.13 How it Should Behave
+
+The user shall be able to:
+
+
+     • Import validation files.
+     • Select validation mode.
+     • Run validation.
+     • Filter by environment and project.
+     • View high-level metrics.
+     • Click an asset.
+     • View point-level results.
+     • View BACnet-to-MQTT mapping results.
+     • Drill into a failing point.
+     • Understand the reason for a failure.
+     • Export issues.
+     • Generate a report.
+
+
+
+
+                                                29
+
+
+--- Page break ---
+
+13.14 Finished Result
+
+The finished page shall look like the Data Validation page in the React mockup:
+
+
+     • Mode selector at the top.
+     • Summary metric cards.
+     • Validation results table on the left.
+     • Detailed inspector on the right.
+     • Mapping comparison table.
+     • Issue summary.
+     • Point detail drilldown.
+     • Information icons.
+
+13.15 Success Checks
+
+Success shall be checked by confirming that:
+
+
+     • Validation files can be imported.
+     • Validation can be run.
+     • Assets are listed with pass/warning/fail results.
+     • Clicking an asset updates the inspector.
+     • BACnet point validation results are visible.
+     • MQTT payload validation results are visible.
+     • BACnet-to-MQTT mapped values can be compared.
+     • Tolerance failures are correctly flagged.
+     • Missing and stale values are identified.
+     • Reports and issue exports can be generated.
+
+
+
+
+14. Reports Page Specification
+
+14.1 What Needs to be Built
+
+Build a Reports page that allows users to generate and export commissioning evidence from discovery
+and validation workflows.
+
+
+14.2 Why it is Needed
+
+The commissioning process requires clear evidence that devices, points, topics and translated data have
+been tested and validated.
+
+
+The Reports page provides the final output required for project records, client review, issue
+management and handover.
+
+
+14.3 Required Report Types
+
+The application shall support the following report outputs:
+
+
+     • IP discovery report.
+     • BACnet discovery report.
+
+
+
+
+                                                    30
+
+
+--- Page break ---
+
+     • MQTT discovery report.
+     • Data validation summary report.
+     • BACnet point issue register.
+     • MQTT payload issue register.
+     • BACnet-to-MQTT mapping comparison report.
+     • Full commissioning evidence pack.
+
+14.4 Required Export Formats
+
+The tool should support:
+
+
+     • PDF for formal reports.
+     • CSV for raw data export.
+     • XLSX for issue registers and validation outputs.
+     • JSON where useful for raw payload or API-based export.
+
+14.5 Report Content
+
+Reports should include:
+
+
+     • Project name.
+     • Site name.
+     • Date/time generated.
+     • Tool version.
+     • User who generated the report.
+     • Configuration summary.
+     • Imported register reference.
+     • Discovery summary.
+     • Validation summary.
+     • Pass/warning/fail metrics.
+     • Detailed issue list.
+     • Evidence tables.
+     • Notes added by commissioning engineer.
+
+14.6 Success Checks
+
+Success shall be checked by confirming that:
+
+
+     • Reports can be generated from completed discovery/validation results.
+     • Reports include summary and detailed evidence.
+     • Reports can be downloaded.
+     • Exported files match the filtered view where filters are applied.
+
+
+
+
+15. Data Model Requirements
+
+15.1 Core Entities
+
+The backend should support the following core entities:
+
+
+     • Project
+
+
+
+
+                                                  31
+
+
+--- Page break ---
+
+     • Site
+     • System
+     • Device
+     • Asset
+     • IP Scan Result
+     • BACnet Device
+     • BACnet Object
+     • MQTT Topic
+     • MQTT Payload
+     • Extracted MQTT Point
+     • Validation Run
+     • Validation Result
+     • Mapping Result
+     • Issue
+     • Report
+     • User Note
+
+15.2 Device Entity
+
+Recommended fields:
+
+
+     • device_id
+     • project_id
+     • site_id
+     • system_id
+     • device_name
+     • asset_id
+     • hostname
+     • ip_address
+     • subnet
+     • vlan_id
+     • mac_address
+     • device_type
+     • manufacturer
+     • model
+     • location
+     • expected_ports
+     • observed_ports
+     • register_status
+     • online_status
+     • last_seen
+     • notes
+
+15.3 BACnet Device Entity
+
+Recommended fields:
+
+
+     • bacnet_device_id
+     • project_id
+     • device_name
+     • device_instance
+     • bacnet_network
+
+
+
+                              32
+
+
+--- Page break ---
+
+     • ip_address
+     • udp_port
+     • vendor_id
+     • vendor_name
+     • model_name
+     • firmware_revision
+     • max_apdu_length
+     • segmentation_supported
+     • object_count
+     • online_status
+     • register_status
+     • last_discovered
+
+15.4 BACnet Object Entity
+
+Recommended fields:
+
+
+     • bacnet_object_id
+     • bacnet_device_id
+     • object_type
+     • object_instance
+     • object_name
+     • description
+     • present_value
+     • units
+     • status_flags
+     • reliability
+     • out_of_service
+     • priority_array
+     • relinquish_default
+     • last_read
+
+15.5 MQTT Topic Entity
+
+Recommended fields:
+
+
+     • mqtt_topic_id
+     • project_id
+     • asset_id
+     • topic
+     • payload_type
+     • schema_version
+     • qos
+     • retained
+     • message_rate
+     • message_count
+     • last_seen
+     • payload_status
+     • register_status
+
+
+
+
+                                33
+
+
+--- Page break ---
+
+15.6 MQTT Extracted Point Entity
+
+Recommended fields:
+
+
+     • mqtt_point_id
+     • mqtt_topic_id
+     • asset_id
+     • point_name
+     • json_path
+     • value
+     • units
+     • quality
+     • timestamp
+     • schema_type
+     • last_seen
+
+15.7 Mapping Result Entity
+
+Recommended fields:
+
+
+     • mapping_result_id
+     • validation_run_id
+     • asset_id
+     • bacnet_device_instance
+     • bacnet_object_type
+     • bacnet_object_instance
+     • bacnet_object_name
+     • bacnet_live_value
+     • bacnet_units
+     • mqtt_topic
+     • mqtt_field
+     • mqtt_live_value
+     • mqtt_units
+     • tolerance
+     • result
+     • difference
+     • reason
+     • timestamp
+
+15.8 Issue Entity
+
+Recommended fields:
+
+
+     • issue_id
+     • validation_run_id
+     • project_id
+     • asset_id
+     • device_id
+     • point_name
+     • issue_type
+     • severity
+
+
+
+
+                                   34
+
+
+--- Page break ---
+
+      • description
+      • source
+      • suggested_action
+      • status
+      • created_at
+      • resolved_at
+      • notes
+
+
+
+
+16. Import File Behaviour
+
+16.1 General Import Requirements
+
+The application shall support importing register and validation files.
+
+
+For each import, the tool shall:
+
+
+      • Validate file type.
+      • Validate required columns.
+      • Show import success/failure.
+      • Show row count.
+      • Show rejected rows.
+      • Allow the user to download an import error report.
+      • Store import metadata.
+
+16.2 Supported File Types
+
+Preferred formats:
+
+
+      • XLSX
+      • CSV
+
+Optional future formats:
+
+
+      • JSON
+      • XML
+
+16.3 Import Error Handling
+
+The tool shall identify:
+
+
+      • Missing required columns.
+      • Invalid IP addresses.
+      • Invalid BACnet instance numbers.
+      • Duplicate device records.
+      • Duplicate point mappings.
+      • Invalid MQTT topics.
+      • Invalid units.
+      • Empty required fields.
+
+
+
+
+                                                    35
+
+
+--- Page break ---
+
+17. Validation Logic Requirements
+
+17.1 Asset-Level Validation
+
+For each expected asset, the tool shall determine:
+
+
+     • Is the asset expected?
+     • Was the asset discovered?
+     • Is the asset online?
+     • Does the asset match the imported register?
+     • Are all required data points present?
+     • Are values being received?
+     • Are values current?
+     • Are values in the expected format?
+
+17.2 BACnet Point Validation
+
+For each expected BACnet point, validate:
+
+
+     • Device exists.
+     • Object exists.
+     • Object type matches.
+     • Object instance matches.
+     • Object name matches, where required.
+     • Present value is readable.
+     • Value is not null.
+     • Units match expected units.
+     • Status flags indicate normal operation or are clearly flagged.
+     • Reliability does not indicate fault, unless expected.
+
+17.3 MQTT Payload Validation
+
+For each expected MQTT topic/payload, validate:
+
+
+     • Topic exists.
+     • Payload received within expected time interval.
+     • Payload is valid JSON.
+     • Payload follows expected structure.
+     • Required fields are present.
+     • Required points are present.
+     • Values are present.
+     • Units are present where required.
+     • Timestamps are present and current.
+     • Schema version matches expected version where required.
+
+17.4 BACnet-to-MQTT Mapping Validation
+
+For each mapping, validate:
+
+
+     • BACnet source point exists.
+     • BACnet source value is readable.
+
+
+
+
+                                                     36
+
+
+--- Page break ---
+
+      • MQTT mapped field exists.
+      • MQTT mapped value is present.
+      • Units match or are correctly converted.
+      • Value is aligned within tolerance.
+      • Boolean values match.
+      • Enumerated values are correctly mapped.
+      • Timestamp difference is within acceptable range.
+
+17.5 Result Statuses
+
+Use the following result statuses:
+
+
+      • Pass
+      • Warning
+      • Fail
+      • Not Tested
+      • Not Applicable
+
+17.6 Severity Levels
+
+Use the following issue severity levels:
+
+
+      • Critical
+      • High
+      • Medium
+      • Low
+      • Informational
+
+
+
+
+18. Live Data Requirements
+
+18.1 IP Live Data
+
+The tool should be able to show latest available network observations such as:
+
+
+      • Ping response time.
+      • Packet loss.
+      • Last seen timestamp.
+      • Link status where available.
+      • MAC address where available.
+      • Open services.
+
+18.2 BACnet Live Data
+
+The tool should be able to show:
+
+
+      • Live present values.
+      • Units.
+      • Status flags.
+      • Reliability.
+      • Last read timestamp.
+
+
+
+
+                                                  37
+
+
+--- Page break ---
+
+     • Object properties.
+
+18.3 MQTT Live Data
+
+The tool should be able to show:
+
+
+     • Latest payload.
+     • Message rate.
+     • Last message timestamp.
+     • Message count.
+     • Extracted point values.
+     • Payload validation status.
+
+
+
+
+19. Security Requirements
+The tool shall be designed with appropriate security controls.
+
+
+Minimum requirements:
+
+
+     • Support MQTT over TLS.
+     • Support certificate-based MQTT authentication.
+     • Store private keys securely.
+     • Do not expose certificate private keys in the UI.
+     • Mask sensitive fields such as passwords.
+     • Support role-based access where user management is introduced.
+     • Log user actions relevant to configuration and reporting.
+     • Avoid storing unnecessary credentials.
+     • Protect imported data and reports.
+
+
+
+
+20. Audit and Logging Requirements
+The application should log:
+
+
+     • Configuration changes.
+     • Register imports.
+     • Discovery runs.
+     • Validation runs.
+     • Report generation.
+     • Export actions.
+     • Errors and failed protocol connections.
+     • User notes and issue status changes.
+
+Logs should include:
+
+
+     • Timestamp.
+     • User, where available.
+     • Action type.
+     • Project/site context.
+
+
+
+
+                                                   38
+
+
+--- Page break ---
+
+      • Result.
+      • Error message where applicable.
+
+
+
+
+21. Performance Requirements
+The tool should be able to handle realistic project datasets.
+
+
+Suggested minimum targets:
+
+
+      • IP scan results: at least 5,000 devices.
+      • BACnet devices: at least 1,000 devices.
+      • BACnet objects: at least 250,000 objects.
+      • MQTT topics: at least 100,000 topics.
+      • Validation mappings: at least 250,000 point mappings.
+
+The UI should remain responsive when large datasets are loaded.
+
+
+Recommended UI features:
+
+
+      • Pagination.
+      • Search.
+      • Filtering.
+      • Lazy loading.
+      • Virtualised tables for large datasets.
+      • Background job processing for long scans.
+
+
+
+
+22. Error Handling Requirements
+The tool shall clearly show errors to the user.
+
+
+Examples:
+
+
+      • Broker connection failed.
+      • BACnet discovery timeout.
+      • IP scan failed.
+      • Register import failed.
+      • Required columns missing.
+      • Payload is invalid JSON.
+      • BACnet object read failed.
+      • Certificate expired.
+      • NTP not synchronised.
+
+Error messages should be specific, actionable and linked to the affected device, topic, point or
+configuration field.
+
+
+
+
+                                                    39
+
+
+--- Page break ---
+
+23. Accessibility and Usability Requirements
+The application should:
+
+
+     • Use readable font sizes.
+     • Use sufficient colour contrast.
+     • Not rely on colour alone for status.
+     • Include text labels with icons.
+     • Provide clear focus states.
+     • Support keyboard navigation where possible.
+     • Provide meaningful tooltips/popovers.
+     • Keep tables sortable and searchable.
+
+
+
+
+24. Acceptance Criteria Summary
+The finished application shall be considered successful when the following criteria are met:
+
+
+Configuration
+
+     • All required configuration sections are present.
+     • Settings can be viewed and edited.
+     • Invalid settings are flagged.
+     • Status indicators work.
+     • Information icons are clickable.
+
+IP Scanner
+
+     • IP scans can be configured and run.
+     • Results are displayed in a table.
+     • Results compare against an imported register.
+     • Rogue and missing devices are flagged.
+     • Clicking a device opens a detail inspector.
+     • Results can be exported.
+
+BACnet Discovery
+
+     • BACnet devices can be discovered.
+     • BACnet devices compare against an imported register.
+     • Clicking a device shows live object data.
+     • BACnet objects show present value, units, status flags and reliability.
+     • Object lists can be exported.
+
+MQTT Discovery
+
+     • Broker connection status is displayed.
+     • Topics can be subscribed to.
+     • Payloads can be viewed live.
+     • Points can be extracted from payloads.
+     • Payloads are validated.
+     • Topics/assets compare against an imported register.
+
+
+
+
+                                                    40
+
+
+--- Page break ---
+
+Data Validation
+
+     • Validation files can be imported.
+     • Validation can be run.
+     • Assets show pass/warning/fail status.
+     • Device and point issues are visible.
+     • BACnet-to-MQTT mappings can be compared.
+     • Out-of-tolerance values are flagged.
+     • Point-level detail is available.
+
+Reports
+
+     • Reports can be generated.
+     • Issue registers can be exported.
+     • Evidence packs include summary and detailed results.
+
+
+
+
+25. Definition of Done
+The development work shall be considered complete when:
+
+
+     • The React UI reflects the approved mockup.
+     • All pages are navigable.
+     • Information icons open explanatory popovers.
+     • Clickable device/topic/asset rows update inspector panels.
+     • Import workflows support required register types.
+     • Discovery workflows produce structured result data.
+     • Validation workflows calculate pass/warning/fail results.
+     • BACnet-to-MQTT comparison logic is implemented.
+     • Reports and exports can be generated.
+     • Errors are clearly shown.
+     • Core workflows have been tested with representative project data.
+     • The tool can be demonstrated end-to-end using sample IP, BACnet, MQTT and validation
+       datasets.
+
+
+
+
+26. Suggested Development Approach
+A suitable delivery approach would be:
+
+
+    1. Build the application shell and navigation.
+    2. Build Configuration page and persistent settings model.
+    3. Build import framework for registers.
+    4. Build IP Scanner UI and mocked scan result workflow.
+    5. Connect IP Scanner to backend scan service.
+    6. Build BACnet Discovery UI and mocked BACnet result workflow.
+    7. Connect BACnet Discovery to BACnet service/library.
+    8. Build MQTT Discovery UI and mocked broker/topic workflow.
+    9. Connect MQTT Discovery to broker subscription service.
+   10. Build Data Validation UI and validation result model.
+
+
+
+
+                                                 41
+
+
+--- Page break ---
+
+   11. Implement validation logic.
+   12. Implement BACnet-to-MQTT mapping comparison.
+   13. Build Reports page and export engine.
+   14. Add audit logging and error handling.
+   15. Test with sample project datasets.
+   16. Refine performance for large datasets.
+
+
+
+
+27. Key Developer Notes
+     • The UI should not be treated as a static dashboard. Table rows, tabs, information icons and
+       inspector panels must be interactive.
+     • Discovery and validation operations may need to run as asynchronous background jobs.
+     • The frontend should be designed to poll job status or receive updates via WebSocket/server-sent
+       events where live updates are required.
+     • The data model should preserve raw discovered data as well as interpreted/validated data.
+     • The system should distinguish between expected, discovered, matched, partial, unmatched and
+       unexpected records.
+     • All validation failures should be traceable back to source data.
+     • Reports should be reproducible from stored validation run records.
+     • The application should be structured so additional protocols can be added later, such as Modbus
+       TCP, SNMP, OPC UA or REST API validation.
+
+
+
+
+28. Future Expansion Considerations
+The following features are not required for the first build but should be considered in the architecture:
+
+
+     • Modbus TCP discovery and validation.
+     • SNMP discovery and validation.
+     • OPC UA discovery and validation.
+     • REST API endpoint validation.
+     • User authentication and role-based access.
+     • Multi-project dashboard.
+     • Issue assignment and workflow status.
+     • Integration with Jira, Azure DevOps or other issue trackers.
+     • Automated scheduled validation runs.
+     • Notification rules.
+     • Comparison between historical validation runs.
+     • Commissioning sign-off workflow.
+     • QR code linkage to asset records.
+     • Direct export to Smart Building platform asset/point libraries.
+
+
+
+
+                                                    42
+
+
+--- Page break ---
+
+</pre>
+      </div>
+    </section>
+
+    <section id="about" class="page sectionHidden">
+      <div class="card cardPad summaryText">
+        <h3>What is this app exactly?</h3>
+        <p><strong>Smart Commissioning Tool</strong> is a proposed web-based commissioning and validation platform for Master Systems Integrator / Smart Building delivery. It brings together separate commissioning checks that engineers often perform manually using IP scanners, BACnet explorers, MQTT clients, spreadsheets and ad hoc reports.</p>
+        <p>The core idea is: import the expected project registers, discover what is actually visible on the network, inspect BACnet and MQTT data, compare actual data against expected data, flag issues, and export commissioning evidence.</p>
+        <p><strong>Main workflow:</strong> configure connectivity → import registers → scan IP devices → discover BACnet devices and points → subscribe to MQTT topics → validate live values, units, timestamps and payload schema → compare BACnet source values against MQTT translated values → export reports and issue registers.</p>
+        <p><strong>Best product interpretation:</strong> it is not just a dashboard. It is intended to become a commissioning evidence tool for smart building data readiness, especially where BMS/BACnet data is translated into MQTT/UDMI-style smart building feeds.</p>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const tips={expectedDevices:'Total number of expected devices/assets from the imported register.',reachableDevices:'Devices that responded to scan or protocol discovery.',rogueHosts:'Hosts visible on the network but not found in the expected register.',mappingCompare:'Compares mapped BACnet source values against MQTT translated values, including unit and tolerance checks.'};
+    const stats={
+      ip:[['Expected Devices','186','From IP Device Register','blue'],['Reachable Devices','163','87.6% visible','green'],['Register Matches','142','76.3% matched','green'],['Unexpected / Rogue Hosts','21','11.3% not in register','red']],
+      bacnet:[['Expected Devices','142','From BACnet Register','blue'],['Discovered Devices','128','Online devices found','green'],['Objects Discovered','24,538','Total BACnet objects','purple'],['Unmatched / Unexpected','14','Needs review','red']],
+      mqtt:[['Expected Assets','147','From MQTT Register','blue'],['Subscribed Assets','128','Matched assets','green'],['Topics Discovered','1,842','Unique topics','amber'],['Schema / Payload Issues','27','Needs attention','red']],
+      validation:[['Expected Assets','482','100% expected','blue'],['Online & Valid Assets','412','85.5% valid','green'],['Point Issues','128','Across 69 assets','amber'],['Translation Mismatches','57','Across 31 assets','red']]
+    };
+    const config=[['Device IP Settings','Hostname|sct-gateway-01;IP Assignment|Static IP - 10.10.25.50;Subnet Mask|255.255.255.0;Gateway|10.10.25.1;DNS Servers|10.10.25.10, 8.8.8.8;VLAN ID|25'],['BACnet Settings for Discovery','BACnet Network Number|1532;UDP Port|47808;BBMD Address|10.10.25.20;BBMD UDP Port|47808;Foreign Device|Enabled;TTL|300 seconds'],['MQTT Broker & Subscription Settings','MQTT Broker FQDN|mqtt.electracom.local;Port|8883;Client ID|sct-gateway-01;Root Topic|electracom/sct/1532;QoS|1 - At least once;Keep Alive|60 seconds'],['Certificates & Keys','CA Certificate|ca-bundle.pem - Valid;Client Certificate|client-cert.pem - Valid;Private Key|client-key.pem - Valid;Key Password|************'],['Time & NTP','Timezone|London, Dublin;NTP Server 1|0.pool.ntp.org;NTP Server 2|1.pool.ntp.org;NTP Update Interval|64 minutes'],['Backups & Restore','Backup Schedule|Daily - 02:00;Retention|30 days;Encrypted Backups|Enabled;Backup Location|Local Storage (/data/backups)'],['Logging & Diagnostics','Log Level|Info;Log Retention|30 days;Remote Syslog|10.10.25.60;Syslog Port|514 / UDP;Diagnostics Mode|Disabled']];
+    const ipRows=[['10.0.10.15','BMS-AHU-L04-01','Reachable','2.4','47808, 80, 443','BACnet, HTTP, HTTPS','Match','Oxford Street','AHU Controller'],['10.0.10.16','BMS-VSD-L04-01','Reachable','3.1','47808, 80','BACnet, HTTP','Match','Oxford Street','Variable Speed Drive'],['10.0.10.17','BMS-EM-L04-01','Reachable','2.8','47808','BACnet','Partial','Oxford Street','Energy Meter'],['10.0.10.18','AHU-L04-02','Reachable','4.6','47808, 80, 443','BACnet, HTTP, HTTPS','Match','Oxford Street','AHU Controller'],['10.0.10.21','CAM-L04-03','Unreachable','-','-','-','No Data','Oxford Street','Camera'],['10.0.10.25','ROGUE-DEVICE-7F2A','Rogue Host','1.9','80','HTTP','Not in Register','Oxford Street','Unknown']];
+    const bacnetRows=[['12001','AHU-L01-01','10.10.10.21','1512','47808','312','Matched','Online'],['12004','AHU-L04-01','10.10.10.24','1512','47808','428','Matched','Online'],['12007','VAV-04-07','10.10.11.27','1512','47808','96','Matched','Online'],['40002','PUMP-02','10.10.15.22','1512','47808','176','Unmatched','Online'],['50001','AHU-OLD-01','10.10.16.15','1512','47808','0','Unmatched','Offline'],['60003','UNKNOWN-03','10.10.17.99','1512','47808','27','Unexpected','Online']];
+    const mqttRows=[['udmi/site/oxf/ahu/l04/01','AHU-L04-01','udmi-v2','4.2 msg/s','Valid','Matched','10:32:56'],['udmi/site/oxf/ahu/l04/02','AHU-L04-02','udmi-v2','3.9 msg/s','Valid','Matched','10:32:56'],['udmi/site/oxf/vav/l04/01','VAV-L04-01','udmi-v2','2.1 msg/s','Valid','Matched','10:32:55'],['udmi/site/oxf/fcu/l04/05','FCU-L04-05','udmi-v2','1.8 msg/s','Valid','Unmatched','10:32:55'],['udmi/site/oxf/vsd/pump-01','PMP-01','udmi-v2','0.7 msg/s','Warning','Partial','10:32:54'],['udmi/site/oxf/ctrl/panel-01','CTRL-PNL-01','udmi-v2','0.3 msg/s','Invalid','Unmatched','10:32:52']];
+    const validationRows=[['AHU-L04-01','BACnet + MQTT','186 / 190 (97.9%)','Pass','2','May 20, 2024 08:42','Oxford Street Tower'],['AHU-L04-02','BACnet + MQTT','174 / 190 (91.6%)','Warning','16','May 20, 2024 08:41','Oxford Street Tower'],['VAV-L04-01','BACnet + MQTT','32 / 34 (94.1%)','Warning','2','May 20, 2024 08:40','Oxford Street Tower'],['FCU-L04-03','BACnet + MQTT','28 / 28 (100%)','Pass','0','May 20, 2024 08:39','Oxford Street Tower'],['Pump-P01','BACnet','18 / 22 (81.8%)','Fail','4','May 20, 2024 08:38','Oxford Street Tower'],['Lighting-L04-Z1','BACnet + MQTT','96 / 110 (87.3%)','Warning','14','May 20, 2024 08:33','Oxford Street Tower']];
+    function cls(v){if(['Match','Matched','Online','Reachable','Valid','Pass','Subscribed','normal','No Fault Detected'].includes(v))return'green';if(['Warning','Partial','Unmatched','Unexpected','in-alarm'].includes(v))return'amber';if(['Fail','Invalid','Not in Register','Rogue Host','Unreachable','Offline'].includes(v))return'red';return''}
+    function badge(v){return `<span class="pill ${cls(v)}">${v}</span>`}
+    function makeStats(id,arr){document.getElementById(id).innerHTML=arr.map(s=>`<div class="stat"><h4>${s[0]} <span class="help" data-tip="${tips.expectedDevices}">i</span></h4><div class="num ${s[3]}">${s[1]}</div><div class="sub">${s[2]}</div></div>`).join('')}
+    function table(id,heads,rows,onClick){const el=document.getElementById(id);el.innerHTML=`<thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map((r,i)=>`<tr data-i="${i}" class="${i===0?'selected':''}">${r.slice(0,heads.length).map((c,ci)=>`<td class="${ci===0?'mono linkish':''}">${['Status','Register','Result','Payload Status'].includes(heads[ci])?badge(c):c}</td>`).join('')}</tr>`).join('')}</tbody>`;el.querySelectorAll('tbody tr').forEach(tr=>tr.onclick=()=>{el.querySelectorAll('tr').forEach(x=>x.classList.remove('selected'));tr.classList.add('selected');onClick(rows[+tr.dataset.i]);});}
+    function info(title,rows){return `<div class="infoBox"><h4>${title}</h4>${rows.map(r=>`<div class="kv"><span>${r[0]}</span><span>${r[1]}</span></div>`).join('')}</div>`}
+    function ipInspector(r){document.getElementById('ipInspector').innerHTML=`<div class="inspectorHead"><div><h2>${r[1]}</h2>${badge(r[2])} ${badge(r[6])}</div><div>↗ ×</div></div><div class="tabs"><button class="tab active">Overview</button><button class="tab">Live Data</button><button class="tab">Diagnostics</button></div><div class="cardPad"><div class="grid grid2">${info('Device Overview',[['Hostname',r[1]],['Type',r[8]],['Vendor','Schneider Electric'],['Model','Altivar Process ATV600'],['Description','AHU Supply Fan VSD - Level 04']])}${info('Live Health',[['Ping','2.1 ms'],['Link Status','Up'],['MAC Address','00:50:56:9A:1B:2C'],['Last Seen','20 May 2024 02:23:41 PM']])}</div>${info('Network Details',[['IP Address',r[0]],['Subnet Mask','255.255.255.0'],['Gateway','10.0.10.1'],['DNS Server','10.0.10.10'],['VLAN ID','25'],['Location','Level 04 - Plant Room']])}<p><b>Observed Services</b></p>${r[4].split(', ').map(x=>x&&`<span class="pill">${x==='47808'?'BACnet (47808)':x}</span> `).join('')}</div>`}
+    function bacInspector(r){document.getElementById('bacnetInspector').innerHTML=`<div class="inspectorHead"><div><h2>${r[1]}</h2>${badge(r[7])} ${badge(r[6])}</div><div><button class="rectBtn">Read Properties</button> <button class="rectBtn">Export Objects</button> <button class="rectBtn">Compare to Register</button></div></div><div class="tabs"><button class="tab">Overview</button><button class="tab active">Live Points</button><button class="tab">Object Tree</button></div><div class="grid split" style="padding:16px"><div>${info('Device Overview',[['Device Instance',r[0]],['IP Address',r[2]],['Vendor','ELECTRACOM'],['Firmware','v2.14.3'],['Objects',r[5]]])}${info('Object Tree',[['Analog Inputs','42'],['Analog Outputs','8'],['Binary Inputs','56'],['Binary Outputs','28'],['Trend Logs','2']])}</div><div class="card"><div class="tableWrap"><table><thead><tr>${['Object Type','Object Name','Instance','Present Value','Units','Status Flags','Reliability'].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${[['Analog Input','Supply Air Temp','1','18.6','°C','in-alarm','No Fault Detected'],['Analog Input','Return Air Temp','2','22.1','°C','normal','No Fault Detected'],['Analog Output','Heating Valve Cmd','1','45.2','%','normal','No Fault Detected'],['Binary Input','Fan Status','1','On','-','normal','No Fault Detected']].map(x=>`<tr>${x.map((c,i)=>`<td>${i>=5?badge(c):c}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div></div>`}
+    function mqttInspector(r){const code=`{\n  "version": "2.0.0",\n  "timestamp": "2024-05-20T10:32:56.123Z",\n  "seq": 12418,\n  "data": {\n    "site": "oxf",\n    "ahu": {\n      "l04": {\n        "01": {\n          "status": "ok",\n          "mode": "cool",\n          "supply_air_temp": { "value": 14.2, "units": "degC" },\n          "return_air_temp": { "value": 23.6, "units": "degC" },\n          "supply_fan_speed": { "value": 68.3, "units": "percent" }\n        }\n      }\n    }\n  }\n}`;document.getElementById('mqttInspector').innerHTML=`<div class="inspectorHead"><div><h2>${r[1]}</h2>${badge('Subscribed')} ${badge(r[5])}</div><div class="note">● Live &nbsp; ${r[3]} &nbsp; 12,418 msgs</div></div><div class="tabs"><button class="tab">Overview</button><button class="tab active">Live Payload</button><button class="tab">Points</button><button class="tab">Metadata</button></div><div class="grid split" style="padding:16px"><div><h4>Live Payload</h4><pre class="code">${code}</pre></div><div>${info('Extracted Points (Live)', [['supply_air_temp','14.2 °C'],['return_air_temp','23.6 °C'],['mixed_air_temp','18.7 °C'],['supply_fan_speed','68.3 %']])}<div class="infoBox"><h4>Register Comparison</h4><div class="meter"><div style="width:88%"></div><div style="width:8%"></div><div style="width:4%"></div></div><p class="note">Matched 22 (88%)<br>Missing 2 (8%)<br>Extra 1 (4%)</p></div></div></div>`}
+    function valInspector(r){const rows=[['ahu_l04_01_supply_temp','12.45','ahu.l04_01.supply_temp','12.46','°C','Pass','±0.50 °C'],['ahu_l04_01_supply_fan_status','1 (On)','ahu.l04_01.supply_fan.status','1 (On)','-','Pass','Exact'],['ahu_l04_01_supply_fan_speed','63.2','ahu.l04_01.supply_fan.speed','62.5','%','Warning','±2.00 %'],['ahu_l04_01_damper_position','48.0','ahu.l04_01.damper.position','41.0','%','Fail','±5.00 %'],['ahu_l04_01_oa_temp','18.10','ahu.l04_01.oa_temp','18.11','°C','Pass','±0.30 °C']];document.getElementById('validationInspector').innerHTML=`<div class="inspectorHead"><div><h2>${r[0]}</h2>${badge('AHU')} ${badge('Online')} ${badge('BACnet + MQTT')}</div><div><button class="rectBtn">Generate Report</button> <button class="rectBtn">Export Issues</button> <button class="rectBtn">Open Point Detail</button></div></div><div class="cardPad"><h4>BACnet ↔ MQTT Mapping Comparison</h4><table><thead><tr>${['BACnet Object','BACnet Live','MQTT Field','MQTT Live','Unit','Alignment','Tolerance'].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(x=>`<tr>${x.map((c,i)=>`<td>${i===5?badge(c):c}</td>`).join('')}</tr>`).join('')}</tbody></table><div class="grid split" style="margin-top:14px"><div>${info('Point Detail: ahu_l04_01_damper_position',[['BACnet Present Value','48.0 %'],['MQTT Value','41.0 %'],['Difference','-7.0 %'],['Tolerance','±5.0 %'],['Result','Fail - Outside tolerance']])}</div><div>${info('Issue Summary',[['Missing Points','1'],['Schema / Type Errors','1'],['Total Issues','2']])}</div></div></div>`}
+    document.getElementById('configCards').innerHTML=config.map(c=>`<div class="card cardPad"><div class="cardTitle"><span><span class="icon">▣</span> ${c[0]} <span class="help" data-tip="Configuration group used by discovery and validation workflows.">i</span></span><span class="pill green">Configured</span></div>${c[1].split(';').map(pair=>{const [k,v]=pair.split('|');return `<div class="field"><label>${k}</label><div class="selectLike"><span>${v}</span><span>⌄</span></div></div>`}).join('')}</div>`).join('');
+    makeStats('ipStats',stats.ip);makeStats('bacnetStats',stats.bacnet);makeStats('mqttStats',stats.mqtt);makeStats('validationStats',stats.validation);
+    table('ipTable',['IP Address','Hostname','Status','Latency','Open Ports','Service','Register','Project'],ipRows,ipInspector);ipInspector(ipRows[0]);
+    table('bacnetTable',['Instance','Device','IP','Net','Port','Objects','Register','Status'],bacnetRows,bacInspector);bacInspector(bacnetRows[0]);
+    table('mqttTable',['Topic','Asset','Payload','Rate','Payload Status','Register','Last Seen'],mqttRows,mqttInspector);mqttInspector(mqttRows[0]);
+    table('validationTable',['Asset','Source','Points Valid','Result','Issues','Last Run','Project'],validationRows,valInspector);valInspector(validationRows[0]);
+    const labels={configuration:'Configuration',ip:'IP Scanner',bacnet:'BACnet Discovery',mqtt:'MQTT Discovery',validation:'Data Validation',reports:'Reports',spec:'Specification PDF',about:'What is this?'};
+    document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>{const p=b.dataset.page;document.querySelectorAll('.page').forEach(x=>x.classList.add('sectionHidden'));document.getElementById(p).classList.remove('sectionHidden');document.querySelectorAll('.navbtn').forEach(x=>x.classList.remove('active'));document.querySelectorAll(`[data-page="${p}"]`).forEach(x=>x.classList.add('active'));document.getElementById('crumbName').textContent=labels[p];window.scrollTo({top:0,behavior:'smooth'});});
+  </script>
+
+  <script>
+    (function(){
+      function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+      const input = document.getElementById('specSearch');
+      const pre = document.getElementById('specText');
+      if(!input || !pre) return;
+      const raw = pre.textContent;
+      input.addEventListener('input', function(){
+        const q = input.value.trim();
+        if(!q){ pre.textContent = raw; return; }
+        const rx = new RegExp(escapeRegExp(q), 'gi');
+        pre.innerHTML = raw.replace(rx, m => '<span class="highlight">' + m + '</span>');
+      });
+    })();
+  </script>
+</body>
+</html>

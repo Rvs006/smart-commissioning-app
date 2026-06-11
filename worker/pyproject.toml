@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-commissioning-worker"
+version = "0.1.0"
+description = "Background worker scaffold for Smart Commissioning discovery and validation jobs."
+requires-python = ">=3.12"
+dependencies = [
+  "dramatiq[redis]>=1.17.1,<2.0",
+  "pydantic-settings>=2.6.1,<3.0"
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]

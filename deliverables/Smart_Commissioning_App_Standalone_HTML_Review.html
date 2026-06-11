@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Commissioning App - Standalone HTML Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f6f8;
+      --surface: #ffffff;
+      --surface-2: #eef1f5;
+      --border: #d9dee7;
+      --ink: #16202a;
+      --text: #4a5563;
+      --muted: #7b8794;
+      --blue: #0b67c2;
+      --green: #16794c;
+      --amber: #a35f00;
+      --red: #bd1e2d;
+      --purple: #6b42a0;
+      --green-bg: #e8f6ee;
+      --amber-bg: #fff4df;
+      --red-bg: #fdecef;
+      --blue-bg: #eaf3ff;
+      --purple-bg: #f0ecfb;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; }
+    button, input, select, textarea { font: inherit; }
+    button { border: 0; cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: .62; }
+    input, select, textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--ink);
+      padding: 9px 10px;
+      outline: none;
+    }
+    textarea { min-height: 112px; resize: vertical; font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+    label { display: grid; gap: 6px; color: var(--text); font-size: 12px; font-weight: 700; }
+    .app-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: rgba(255,255,255,.94);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(14px);
+    }
+    .topbar {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 12px 18px 8px;
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+    }
+    .brand { display: grid; gap: 2px; min-width: 0; }
+    .brand strong { font-size: 18px; }
+    .brand span, .eyebrow {
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      font: 700 11px Consolas, "Courier New", monospace;
+    }
+    .badge-row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 12px;
+    }
+    .badge.blue { background: var(--blue-bg); border-color: transparent; color: var(--blue); }
+    .badge.amber { background: var(--amber-bg); border-color: transparent; color: var(--amber); }
+    .nav {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 0 18px 10px;
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+    }
+    .nav button {
+      min-width: max-content;
+      border-radius: 999px;
+      padding: 8px 11px;
+      background: transparent;
+      color: var(--text);
+      font-weight: 750;
+    }
+    .nav button.active { background: var(--blue-bg); color: var(--blue); }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 22px 18px 80px; }
+    .titlebar { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 18px; }
+    h1, h2, h3 { margin: 0; }
+    h1 { font-size: clamp(26px, 4vw, 42px); line-height: 1.02; }
+    h2 { font-size: 22px; }
+    h3 { font-size: 16px; }
+    p { color: var(--text); line-height: 1.5; margin: 8px 0 0; }
+    .surface {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 1px 2px rgba(0,0,0,.04);
+    }
+    .grid { display: grid; gap: 14px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .metric { display: grid; gap: 4px; }
+    .metric strong { font-size: 28px; }
+    .metric span { color: var(--muted); font-weight: 700; }
+    .actions { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+    .btn {
+      border-radius: 8px;
+      min-height: 38px;
+      padding: 9px 12px;
+      font-weight: 800;
+      background: var(--surface-2);
+      color: var(--ink);
+    }
+    .btn.primary { background: var(--blue); color: #fff; }
+    .btn.danger { background: var(--red-bg); color: var(--red); }
+    .btn.small { min-height: 31px; padding: 6px 9px; font-size: 12px; }
+    .stack { display: grid; gap: 14px; }
+    .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .form-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .section-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    .state {
+      border-radius: 8px;
+      padding: 12px;
+      display: grid;
+      gap: 4px;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .state strong { color: var(--ink); }
+    .state.success { background: var(--green-bg); border-color: #bbe5cb; }
+    .state.warning { background: var(--amber-bg); border-color: #f3d29a; }
+    .state.error { background: var(--red-bg); border-color: #f3b8c0; }
+    .state.info { background: var(--blue-bg); border-color: #bed8f7; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+    table { width: 100%; min-width: 760px; border-collapse: collapse; background: #fff; }
+    th, td { border-bottom: 1px solid var(--border); padding: 10px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: #fafbfc; }
+    td code { white-space: nowrap; font-size: 12px; }
+    .status {
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 800;
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    .status.ready, .status.succeeded { background: var(--green-bg); color: var(--green); }
+    .status.warning, .status.queued { background: var(--amber-bg); color: var(--amber); }
+    .status.failed, .status.blocked { background: var(--red-bg); color: var(--red); }
+    .status.running { background: var(--blue-bg); color: var(--blue); }
+    .issue-list { display: grid; gap: 9px; }
+    .issue {
+      display: grid;
+      gap: 5px;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--amber);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+    .issue.critical { border-left-color: var(--red); }
+    .issue.minor { border-left-color: var(--purple); }
+    .issue small { color: var(--muted); }
+    .port-row { display: grid; grid-template-columns: 1fr 150px auto; gap: 10px; align-items: end; }
+    .json-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .feedback-toggle {
+      display: none;
+    }
+    .drawer {
+      position: fixed;
+      top: 0;
+      right: 0;
+      z-index: 40;
+      width: min(440px, 100vw);
+      height: 100vh;
+      background: #fff;
+      border-left: 1px solid var(--border);
+      padding: 18px;
+      overflow: auto;
+      box-shadow: -20px 0 45px rgba(0,0,0,.18);
+      display: none;
+    }
+    .drawer.open { display: block; }
+    .overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 35;
+      background: rgba(17,24,39,.28);
+    }
+    .overlay.open { display: block; }
+    .comment-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: grid; gap: 5px; }
+    .comment-card small { color: var(--muted); }
+    .hidden { display: none !important; }
+    @media (max-width: 780px) {
+      .topbar, .titlebar, .section-head { flex-direction: column; align-items: stretch; }
+      .grid.two, .grid.three, .grid.four, .form-grid, .form-grid.three, .json-grid { grid-template-columns: 1fr; }
+      .port-row { grid-template-columns: 1fr; }
+      .brand strong { font-size: 16px; }
+      .shell { padding-inline: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div class="topbar">
+      <div class="brand">
+        <strong>Smart Commissioning Tool</strong>
+        <span>Standalone HTML review build</span>
+      </div>
+      <div class="badge-row">
+        <span class="badge blue">No install</span>
+        <span class="badge amber">Simulated backend</span>
+        <span class="badge">Block B Plantroom</span>
+      </div>
+    </div>
+    <nav class="nav" id="nav"></nav>
+  </header>
+
+  <main class="shell" id="app"></main>
+  <div class="overlay" id="overlay"></div>
+  <aside class="drawer" id="drawer" aria-label="Engineer review comments"></aside>
+  <button class="btn primary feedback-toggle" id="feedbackButton" type="button">Review Comments</button>
+
+  <script>
+    const pages = [
+      ["home", "Homepage"],
+      ["configuration", "Configuration"],
+      ["ip", "IP Discovery"],
+      ["bacnet", "BACnet"],
+      ["mqtt", "MQTT Discovery"],
+      ["udmi", "UDMI"],
+      ["validation", "Validation"],
+      ["reports", "Reports"]
+    ];
+
+    const data = {
+      project: { site: "Block B Plantroom", readiness: 68, assets: 126, online: 111, issues: 14, packs: 3 },
+      config: {
+        "Network Basics": {
+          status: "Healthy",
+          fields: {
+            "Hostname": "sct-gateway-01",
+            "IP Assignment": "Static IP",
+            "IP Address": "10.10.25.50",
+            "Subnet Mask": "255.255.255.0",
+            "Gateway": "10.10.25.1",
+            "DNS Servers": "10.10.25.10, 8.8.8.8",
+            "VLAN ID": "25"
+          }
+        },
+        "BACnet Discovery": {
+          status: "Listening",
+          fields: {
+            "BACnet Network Number": "1532",
+            "UDP Port": "47808",
+            "BBMD": "Enabled",
+            "BBMD Address": "10.10.25.20",
+            "BBMD UDP Port": "47808",
+            "Foreign Device": "Enabled",
+            "TTL": "300"
+          }
+        },
+        "MQTT Settings": {
+          status: "Connected",
+          fields: {
+            "MQTT Broker FQDN or IP Address": "mqtt.electracom.local",
+            "Port": "8883",
+            "Client ID": "sct-gateway-01",
+            "Root Topic": "electracom/sct/1532",
+            "QoS": "1 - At least once",
+            "Keep Alive Interval": "60",
+            "MQTT Username": "",
+            "MQTT Password": "********"
+          }
+        },
+        "Certificates & Keys": {
+          status: "Valid",
+          fields: {
+            "CA Certificate": "secret://bootstrap-ca-certificate",
+            "Client Certificate": "secret://bootstrap-client-certificate",
+            "Private Key": "secret://bootstrap-private-key",
+            "Key Password": "********",
+            "Certificate Expiry": "2027-05-20"
+          }
+        },
+        "Time & NTP": {
+          status: "Synchronised",
+          fields: {
+            "Timezone": "Europe/London",
+            "Primary NTP Server": "0.pool.ntp.org",
+            "Secondary NTP Server": "1.pool.ntp.org",
+            "NTP Update Interval": "64"
+          }
+        },
+        "Backup & Restore": {
+          status: "Success",
+          fields: {
+            "Backup Schedule": "Daily 02:00",
+            "Backup Retention": "30 days",
+            "Encrypted Backups": "Enabled",
+            "Backup Location": "/data/backups",
+            "Last Backup Status": "Success",
+            "Restore Action": "Available"
+          }
+        },
+        "Logging & Diagnostics": {
+          status: "Healthy",
+          fields: {
+            "Log Level": "Info",
+            "Log Retention": "30 days",
+            "Remote Syslog Target": "10.10.25.60",
+            "Syslog Port": "514",
+            "Diagnostics Mode": "Disabled"
+          }
+        }
+      },
+      rows: {
+        ip: {
+          title: "Network Scan Results",
+          columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
+          rows: [
+            ["Boiler 1 Controller", "10.10.25.101", "Online", "90:2C:D0:B0:03:36", "47808/udp, 443/tcp", "MAC", "48 sec ago", "Responded to UDP BACnet and HTTPS checks", "Matched"],
+            ["AHU Level 3", "10.10.25.117", "Online", "5C:A1:1D:8D:6F:FF", "47808/udp", "IP", "7 min ago", "BACnet reachable, HTTP missing", "Service mismatch"],
+            ["Unknown host", "-", "10.10.25.214", "C0:A6:F3:F2:F3:2F", "80/tcp, 443/tcp", "None", "Now", "Matched no imported MAC address", "Rogue"]
+          ]
+        },
+        bacnet: {
+          title: "BACnet Devices",
+          columns: ["Device", "Instance", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
+          rows: [
+            ["Boiler 1 Controller", "1532001", "118", "48 sec ago", "I-Am received and object list captured", "Ready"],
+            ["Level 3 AHU", "1532117", "204", "7 min ago", "BACnet reliability flagged stale on four points", "Four required points missing"],
+            ["CHW Pump Panel", "1532041", "96", "2 min ago", "Operational with no fault or stale flags", "Ready"]
+          ]
+        },
+        mqtt: {
+          title: "MQTT Topic Observations",
+          columns: ["Topic", "Asset", "Payload Last Seen", "Message Count", "Detailed Connection Status", "Raw Payload", "Result"],
+          rows: [
+            ["electracom/sct/1532/boiler/1/pointset", "MDB5-00-043-BLR-1", "2 min ago", "47", "Connected; payload type mismatch", "{\"points\":{\"fault_status\":{\"present_value\":1}}}", "Type mismatch"],
+            ["electracom/sct/1532/meter/009/pointset", "MTR-ENERGY-009", "15 sec ago", "126", "Connected; TLS session healthy", "{\"points\":{\"energy_sensor\":{\"present_value\":1294.4}}}", "Ready"],
+            ["electracom/sct/1532/ahu/l03/state", "AHU-L03-017", "7 min ago", "8", "Connected; reporting slower than expected", "{\"system\":{\"operation\":{\"operational\":true}}}", "Slow interval"]
+          ]
+        },
+        udmi: {
+          title: "UDMI Payload Checks",
+          columns: ["Asset", "State", "Pointset", "Payload Last Seen", "Message Count", "Raw Payload", "Result"],
+          rows: [
+            ["MDB5-00-043-BLR-1", "Present", "Present", "2 min ago", "47", "{\"pointset\":{\"points\":{\"fault_status\":{\"present_value\":1}}}}", "Type mismatch"],
+            ["MDB5-00-044-BLR-2", "Present", "Present", "48 sec ago", "52", "{\"pointset\":{\"points\":{\"supply_air_temperature_setpoint\":{\"present_value\":22}}}}", "Ready"],
+            ["AHU-L03-017", "Present", "Late", "7 min ago", "8", "{\"system\":{\"hardware\":{\"make\":\"Schneider\",\"model\":\"PM5111\"}}}", "Warning"]
+          ]
+        },
+        validation: {
+          title: "Point Comparison Results",
+          columns: ["Asset", "Point", "BACnet", "MQTT", "Tolerance", "Result"],
+          rows: [
+            ["Boiler 1", "supply_temp", "71.2 C", "71.1 C", "+/- 0.5 C", "Ready"],
+            ["Boiler 1", "fault_status", "normal", "0", "type match", "Type mismatch"],
+            ["AHU L03", "fan_enable", "active", "active", "exact", "Ready"]
+          ]
+        },
+        reports: {
+          title: "Report Queue",
+          columns: ["Report", "Source", "Status", "File"],
+          rows: [
+            ["IP discovery evidence", "run_ip_demo_001", "Ready", "ip_discovery.zip"],
+            ["UDMI issue report", "run_udmi_demo_001", "Queued", "udmi_issue_report.xlsx"],
+            ["BACnet point issue report", "run_bacnet_demo_001", "Ready", "bacnet_point_issue_report.xlsx"],
+            ["Handover pack", "All runs", "Blocked", "Awaiting validation"]
+          ]
+        }
+      },
+      issues: [
+        ["ISS-1042", "MDB5-00-043-BLR-1", "critical", "UDMI pointset", "fault_status expected STRING but received NUMBER.", "BMS contractor"],
+        ["ISS-1037", "AHU-L03-017", "major", "BACnet discovery", "Four required points are absent from the live object list.", "Controls engineer"],
+        ["ISS-1028", "MDB5-00-043-BLR-1", "major", "MQTT discovery", "Telemetry interval exceeds configured tolerance by 70 seconds.", "Integration engineer"],
+        ["ISS-1019", "MTR-ENERGY-009", "minor", "Report metadata", "Asset location is missing floor reference in imported register.", "Commissioning lead"]
+      ]
+    };
+
+    const sampleJson = {
+      schedule: JSON.stringify({ asset_id: "AHU-1000001", manufacturer: "Schneider", model: "PM5111", guid: "ifc://expected-ahu-1000001", units: { supply_air_temperature_setpoint: "degrees_celsius" } }, null, 2),
+      state: JSON.stringify({ timestamp: "2026-04-01T10:47:38.697+01:00", system: { hardware: { make: "Schneider", model: "PM5111" }, operation: { operational: true } } }, null, 2),
+      metadata: JSON.stringify({ timestamp: "2026-04-01T10:48:00.000+01:00", system: { physical_tag: { asset: { guid: "ifc://expected-ahu-1000001" } } }, pointset: { points: { supply_air_temperature_setpoint: { units: "degrees_celsius" } } } }, null, 2),
+      pointset: JSON.stringify({ timestamp: "2026-04-01T10:48:56.312+01:00", pointset: { points: { supply_air_temperature_setpoint: { present_value: 22 } } } }, null, 2)
+    };
+
+    const state = {
+      page: location.hash.replace("#", "") || "home",
+      config: JSON.parse(localStorage.getItem("sctStandaloneConfig") || "null") || data.config,
+      runs: JSON.parse(localStorage.getItem("sctStandaloneRuns") || "[]"),
+      comments: JSON.parse(localStorage.getItem("sctStandaloneComments") || "[]"),
+      scanPorts: JSON.parse(localStorage.getItem("sctStandalonePorts") || "null") || [{ port: "47808", protocol: "udp" }, { port: "80", protocol: "tcp" }, { port: "443", protocol: "tcp" }],
+      feedbackOpen: false,
+      lastMessage: null
+    };
+
+    function save() {
+      localStorage.setItem("sctStandaloneConfig", JSON.stringify(state.config));
+      localStorage.setItem("sctStandaloneRuns", JSON.stringify(state.runs));
+      localStorage.setItem("sctStandaloneComments", JSON.stringify(state.comments));
+      localStorage.setItem("sctStandalonePorts", JSON.stringify(state.scanPorts));
+    }
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
+    }
+
+    function jsArg(value) {
+      return JSON.stringify(String(value ?? "")).replace(/</g, "\\u003c");
+    }
+
+    function setPage(page) {
+      state.page = page;
+      state.lastMessage = null;
+      location.hash = page;
+      render();
+      requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+    }
+
+    function renderNav() {
+      document.getElementById("nav").innerHTML = pages.map(([key, label]) =>
+        `<button type="button" class="${state.page === key ? "active" : ""}" onclick="setPage('${key}')">${label}</button>`
+      ).join("");
+    }
+
+    function pageTitle() {
+      const found = pages.find(([key]) => key === state.page);
+      return found ? found[1] : "Homepage";
+    }
+
+    function render() {
+      renderNav();
+      const app = document.getElementById("app");
+      const subtitle = state.page === "home"
+        ? "Review the commissioning workflow without installing or running a local backend."
+        : "Standalone HTML mode uses local browser simulation for review and comments.";
+      app.innerHTML = `
+        <div class="titlebar">
+          <div>
+            <span class="eyebrow">Smart Commissioning</span>
+            <h1>${esc(pageTitle())}</h1>
+            <p>${esc(subtitle)}</p>
+          </div>
+          <div class="actions">
+            <button class="btn" type="button" onclick="downloadState()">Export review state</button>
+            <button class="btn primary" type="button" onclick="toggleFeedback(true)">Review Comments</button>
+            <button class="btn danger" type="button" onclick="resetDemo()">Reset demo data</button>
+          </div>
+        </div>
+        ${state.lastMessage ? `<div class="state ${state.lastMessage.kind}"><strong>${esc(state.lastMessage.title)}</strong><span>${esc(state.lastMessage.body)}</span></div>` : ""}
+        ${renderPage()}
+      `;
+      renderDrawer();
+    }
+
+    function renderPage() {
+      if (state.page === "home") return renderHome();
+      if (state.page === "configuration") return renderConfiguration();
+      if (state.page === "udmi") return renderUdmi();
+      if (state.page === "reports") return renderReports();
+      if (state.page === "ip") return renderModule("ip", "Find reachable, missing, and rogue hosts. Port/protocol settings are editable below.");
+      if (state.page === "bacnet") return renderModule("bacnet", "Review discovered BACnet devices, object counts, last discovered timestamps, and fault detail.");
+      if (state.page === "mqtt") return renderModule("mqtt", "Review MQTT topics, raw payloads, message counts, copy actions, and detailed broker status.");
+      if (state.page === "validation") return renderModule("validation", "Compare BACnet values to MQTT telemetry using expected value type and tolerance rules.");
+      return renderHome();
+    }
+
+    function renderHome() {
+      return `
+        <section class="grid three">
+          ${metric("Readiness", data.project.readiness + "%")}
+          ${metric("Online assets", data.project.online + " / " + data.project.assets)}
+          ${metric("Open issues", data.project.issues)}
+        </section>
+        <section class="surface stack" style="margin-top:14px">
+          <div class="section-head">
+            <div>
+              <span class="eyebrow">How this app is meant to be used</span>
+              <h2>Commissioning evidence workspace for site teams</h2>
+              <p>Configure the job, import registers, discover what is live, validate protocols and payloads, then export handover evidence that can survive review.</p>
+            </div>
+          </div>
+          <div class="grid four">
+            ${step("1", "Configure", "Gateway identity, BACnet, MQTT, certificates, time, backups, and logging.", "configuration")}
+            ${step("2", "Discover", "IP devices, BACnet objects, MQTT topics, and last-seen evidence.", "ip")}
+            ${step("3", "Validate", "UDMI state/metadata/pointset and BACnet-to-MQTT mappings.", "udmi")}
+            ${step("4", "Report", "Issue reports and evidence packs for dry-run review.", "reports")}
+          </div>
+        </section>
+        <section class="grid two" style="margin-top:14px">
+          <div class="surface">
+            <h3>Tester build scope</h3>
+            <p>This HTML file is for UI/UX review where ThreatLocker blocks the executable. It simulates API responses in the browser and stores comments in localStorage.</p>
+          </div>
+          <div class="surface">
+            <h3>Not live integration</h3>
+            <p>It does not connect to a live MQTT broker, scan the network, call FastAPI, or generate real XLSX/PDF report artifacts. Use the executable or server build for those tests after IT approval.</p>
+          </div>
+        </section>
+        ${renderIssues(data.issues.slice(0, 2))}
+      `;
+    }
+
+    function metric(label, value) {
+      return `<article class="surface metric"><span>${esc(label)}</span><strong>${esc(value)}</strong></article>`;
+    }
+
+    function step(number, label, body, page) {
+      return `<article class="surface"><span class="eyebrow">${number}</span><h3>${esc(label)}</h3><p>${esc(body)}</p><p><button class="btn small" type="button" onclick="setPage('${page}')">Open</button></p></article>`;
+    }
+
+    function renderConfiguration() {
+      const sections = Object.entries(state.config).map(([section, sectionData]) => `
+        <section class="surface">
+          <div class="section-head">
+            <div><span class="eyebrow">${esc(section)}</span><h2>${esc(sectionData.status)}</h2></div>
+            <label>Section status<input value="${esc(sectionData.status)}" onchange='updateStatus(${jsArg(section)}, this.value)'></label>
+          </div>
+          <div class="form-grid">
+            ${Object.entries(sectionData.fields).map(([field, value]) => renderField(section, field, value)).join("")}
+          </div>
+        </section>
+      `).join("");
+      return `
+        <div class="actions" style="margin-bottom:14px">
+          <button class="btn primary" type="button" onclick="validateConfig()">Validate Snapshot</button>
+          <button class="btn" type="button" onclick="saveConfig()">Save locally</button>
+        </div>
+        <div class="stack">${sections}</div>
+      `;
+    }
+
+    function renderField(section, field, value) {
+      const secret = ["CA Certificate", "Client Certificate", "Private Key"].includes(field);
+      const selectOptions = {
+        "IP Assignment": ["Static IP", "DHCP"],
+        "BBMD": ["Enabled", "Disabled"],
+        "Foreign Device": ["Enabled", "Disabled"],
+        "Encrypted Backups": ["Enabled", "Disabled"],
+        "Diagnostics Mode": ["Enabled", "Disabled"]
+      };
+      if (secret) {
+        const id = idFor(section, field);
+        return `<label>${esc(field)}
+          <input readonly value="${esc(value)}">
+          <textarea id="${id}" placeholder="Paste ${esc(field.toLowerCase())} content"></textarea>
+          <input type="file" accept=".pem,.crt,.cer,.key,.p12,.pfx" onchange="readSecretFile('${id}', this)">
+          <button class="btn small" type="button" onclick='storeSecret(${jsArg(section)}, ${jsArg(field)}, ${jsArg(id)})'>Store masked reference</button>
+        </label>`;
+      }
+      if (selectOptions[field]) {
+        return `<label>${esc(field)}<select onchange='updateConfig(${jsArg(section)}, ${jsArg(field)}, this.value)'>${selectOptions[field].map(option => `<option ${option === value ? "selected" : ""}>${esc(option)}</option>`).join("")}</select></label>`;
+      }
+      return `<label>${esc(field)}<input value="${esc(value)}" onchange='updateConfig(${jsArg(section)}, ${jsArg(field)}, this.value)'></label>`;
+    }
+
+    function renderModule(kind, summary) {
+      return `
+        <section class="grid two">
+          <div class="surface">
+            <span class="eyebrow">Inputs</span>
+            <h2>Register Import</h2>
+            <p>${esc(summary)}</p>
+            <div class="form-grid" style="margin-top:12px">
+              <label>Import profile<select><option>${kind === "ip" ? "ip_register" : kind === "bacnet" ? "bacnet_register" : kind === "mqtt" ? "mqtt_register" : "mapping"}</option><option>asset_validation</option><option>tolerances</option></select></label>
+              <label>CSV or XLSX file<input type="file" accept=".csv,.xlsx" onchange="fakeImport(this)"></label>
+            </div>
+          </div>
+          <div class="surface">
+            <span class="eyebrow">Execution</span>
+            <h2>Run Controls</h2>
+            <p>Queues a simulated local run record for review. No network call is made in this HTML build.</p>
+            <p><button class="btn primary" type="button" onclick="queueRun('${kind}')">Queue ${esc(pageTitle())}</button></p>
+          </div>
+        </section>
+        ${kind === "ip" ? renderPortEditor() : ""}
+        <section class="surface" style="margin-top:14px">
+          <div class="section-head"><div><span class="eyebrow">Results</span><h2>${esc(data.rows[kind].title)}</h2></div></div>
+          ${renderTable(data.rows[kind])}
+        </section>
+        ${renderIssues(data.issues.filter(issue => kind === "validation" || issue[3].toLowerCase().includes(kind === "ip" ? "mqtt" : kind)))}
+      `;
+    }
+
+    function renderPortEditor() {
+      return `<section class="surface" style="margin-top:14px">
+        <div class="section-head"><div><span class="eyebrow">Scan settings</span><h2>Port and Protocol Selection</h2><p>Leave the list empty to use the common fallback: 47808/udp, 80/tcp, and 443/tcp.</p></div><button class="btn small" onclick="addPort()" type="button">Add port</button></div>
+        <div class="stack">${state.scanPorts.map((entry, index) => `
+          <div class="port-row">
+            <label>Port<input inputmode="numeric" value="${esc(entry.port)}" onchange="changePort(${index}, 'port', this.value)"></label>
+            <label>Protocol<select onchange="changePort(${index}, 'protocol', this.value)"><option value="udp" ${entry.protocol === "udp" ? "selected" : ""}>UDP</option><option value="tcp" ${entry.protocol === "tcp" ? "selected" : ""}>TCP</option></select></label>
+            <button class="btn small" onclick="removePort(${index})" type="button">Remove</button>
+          </div>`).join("")}</div>
+        <p><strong>Current API-style value:</strong> ${esc(scanPortSpec() || "common ports")}</p>
+      </section>`;
+    }
+
+    function renderUdmi() {
+      return `
+        <section class="surface stack">
+          <div class="section-head"><div><span class="eyebrow">Validation inputs</span><h2>Schedule and Payload Evidence</h2><p>Edit the sample JSON and run a local validation simulation.</p></div></div>
+          <div class="json-grid">
+            <label>Expected schedule JSON<textarea id="scheduleJson">${esc(sampleJson.schedule)}</textarea></label>
+            <label>State payload JSON<textarea id="stateJson">${esc(sampleJson.state)}</textarea></label>
+            <label>Metadata payload JSON<textarea id="metadataJson">${esc(sampleJson.metadata)}</textarea></label>
+            <label>Pointset payload JSON<textarea id="pointsetJson">${esc(sampleJson.pointset)}</textarea></label>
+          </div>
+          <label style="display:flex;gap:8px;align-items:center;font-weight:700"><input style="width:auto" type="checkbox" id="liveBroker"> Use live broker topics in real app mode</label>
+          <div class="actions"><button class="btn primary" type="button" onclick="runUdmi()">Run UDMI validation simulation</button></div>
+        </section>
+        <section class="surface stack" style="margin-top:14px">
+          <div class="section-head"><div><span class="eyebrow">Config payloads</span><h2>Publish and Verify Next Pointset</h2><p>Simulates the V1 config payload workflow without connecting to a broker.</p></div></div>
+          <div class="form-grid">
+            <label>Config topic<input id="publishTopic" value="334os/b1/ahu-1000001/config"></label>
+            <label>Expected point<input id="publishPoint" value="supply_air_temperature_setpoint"></label>
+            <label>Expected value<input id="publishValue" value="22"></label>
+            <label>Next pointset topic<input id="pointsetTopic" value="334os/b1/ahu-1000001/events/pointset"></label>
+          </div>
+          <label>Config payload<textarea id="publishPayload">{"pointset":{"points":{"supply_air_temperature_setpoint":{"set_value":22}}}}</textarea></label>
+          <label style="display:flex;gap:8px;align-items:center;font-weight:700"><input style="width:auto" type="checkbox" id="confirmPublish"> I confirm this payload is ready to publish</label>
+          <div class="actions"><button class="btn primary" type="button" onclick="publishConfig()">Publish and verify next pointset</button></div>
+        </section>
+        <section class="surface" style="margin-top:14px">${renderTable(data.rows.udmi)}</section>
+        ${renderIssues(data.issues.filter(issue => issue[3].includes("UDMI")))}
+      `;
+    }
+
+    function renderReports() {
+      return `
+        <section class="grid two">
+          <div class="surface"><h2>Issue report</h2><p>Uses issue_report naming for consistency with the V1 notes.</p><p><button class="btn primary" onclick="queueRun('issue_report')" type="button">Queue issue report</button></p></div>
+          <div class="surface"><h2>Evidence pack</h2><p>Creates a simulated evidence pack record for review.</p><p><button class="btn primary" onclick="queueRun('evidence_pack')" type="button">Queue evidence pack</button></p></div>
+        </section>
+        <section class="surface" style="margin-top:14px">${renderTable(data.rows.reports)}</section>
+        ${state.runs.length ? `<section class="surface" style="margin-top:14px"><h2>Local run history</h2>${renderTable({ columns: ["Run ID", "Type", "Status", "Created"], rows: state.runs.map(run => [run.id, run.type, run.status, run.created]) })}</section>` : ""}
+      `;
+    }
+
+    function renderTable(tableData) {
+      const rawIndex = tableData.columns.findIndex(column => column === "Raw Payload");
+      return `<div class="table-wrap"><table><thead><tr>${tableData.columns.map(column => `<th>${esc(column)}</th>`).join("")}${rawIndex >= 0 ? "<th>Action</th>" : ""}</tr></thead><tbody>
+        ${tableData.rows.map((row, rowIndex) => `<tr>${row.map((cell, cellIndex) => `<td>${cellIndex === rawIndex ? `<code>${esc(cell)}</code>` : esc(cell)}</td>`).join("")}${rawIndex >= 0 ? `<td><button class="btn small" onclick='copyPayload(${jsArg(row[rawIndex])}, ${jsArg("Row " + (rowIndex + 1))})' type="button">Copy payload</button></td>` : ""}</tr>`).join("")}
+      </tbody></table></div>`;
+    }
+
+    function renderIssues(issues) {
+      if (!issues.length) return "";
+      return `<section class="surface" style="margin-top:14px"><div class="section-head"><div><span class="eyebrow">Issues</span><h2>Issue Report Preview</h2></div></div><div class="issue-list">
+        ${issues.map(issue => `<div class="issue ${esc(issue[2])}"><strong>${esc(issue[0])} - ${esc(issue[4])}</strong><small>${esc(issue[1])} | ${esc(issue[3])} | Owner: ${esc(issue[5])}</small></div>`).join("")}
+      </div></section>`;
+    }
+
+    function updateStatus(section, value) { state.config[section].status = value; save(); }
+    function updateConfig(section, field, value) { state.config[section].fields[field] = value; save(); }
+    function idFor(section, field) { return (section + field).replace(/[^a-z0-9]/gi, ""); }
+
+    function readSecretFile(id, input) {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => document.getElementById(id).value = String(reader.result || "");
+      reader.readAsText(file);
+    }
+
+    function storeSecret(section, field, id) {
+      const value = document.getElementById(id).value.trim();
+      if (!value) return message("warning", "Secret content empty", "Paste content or select a local file first.");
+      state.config[section].fields[field] = "secret://html-review-" + field.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      save();
+      message("success", "Secret material stored locally", field + " is masked as a local review reference.");
+    }
+
+    function validateConfig() {
+      const values = Object.assign({}, ...Object.values(state.config).map(section => section.fields));
+      const errors = [];
+      if (!/^\d+\.\d+\.\d+\.\d+$/.test(values["Subnet Mask"])) errors.push("Subnet Mask must be IPv4 style.");
+      if (!values["DNS Servers"]) errors.push("DNS Servers must not be empty.");
+      if (Number(values["BBMD UDP Port"]) <= 0) errors.push("BBMD UDP Port must be greater than zero.");
+      if (Number(values["Keep Alive Interval"]) <= 0) errors.push("MQTT Keep Alive Interval must be greater than zero.");
+      if (errors.length) message("warning", errors.length + " validation issue(s)", errors.join(" "));
+      else message("success", "Configuration is valid", "Standalone validation accepted the current snapshot.");
+    }
+
+    function saveConfig() { save(); message("success", "Saved locally", "Configuration was saved in this browser only."); }
+
+    function scanPortSpec() {
+      return state.scanPorts.filter(row => row.port.trim()).map(row => row.port.trim() + "/" + row.protocol).join(", ");
+    }
+    function addPort() { state.scanPorts.push({ port: "", protocol: "tcp" }); save(); render(); }
+    function removePort(index) { state.scanPorts.splice(index, 1); save(); render(); }
+    function changePort(index, field, value) { state.scanPorts[index][field] = value; save(); }
+
+    function queueRun(type) {
+      const run = { id: "run_html_" + Date.now(), type, status: type.includes("report") || type.includes("pack") ? "queued" : "succeeded", created: new Date().toLocaleString() };
+      state.runs.unshift(run);
+      save();
+      message("success", "Run simulated", run.id + " created locally with status " + run.status + ".");
+    }
+
+    function fakeImport(input) {
+      const file = input.files && input.files[0];
+      if (file) message("success", "Import simulated", file.name + " accepted for review. No file leaves this browser.");
+    }
+
+    function runUdmi() {
+      try {
+        const schedule = JSON.parse(document.getElementById("scheduleJson").value);
+        const statePayload = JSON.parse(document.getElementById("stateJson").value);
+        const metadata = JSON.parse(document.getElementById("metadataJson").value);
+        const pointset = JSON.parse(document.getElementById("pointsetJson").value);
+        const issues = [];
+        if (schedule.manufacturer && statePayload.system && statePayload.system.hardware && statePayload.system.hardware.make !== schedule.manufacturer) issues.push("state payload - manufacturer does not match asset register");
+        if (schedule.guid && metadata.system && metadata.system.physical_tag && metadata.system.physical_tag.asset.guid !== schedule.guid) issues.push("metadata GUID does not match asset register");
+        const points = (pointset.pointset && pointset.pointset.points) || pointset.points || {};
+        Object.entries(points).forEach(([name, detail]) => {
+          if (typeof detail.present_value === "string") issues.push("pointset payload - " + name + " present_value is string where numeric was expected");
+        });
+        if (issues.length) message("warning", issues.length + " UDMI issue(s)", issues.join("; "));
+        else message("success", "UDMI validation succeeded", "State, metadata, pointset, units, and message count checks passed in HTML simulation.");
+      } catch (error) {
+        message("error", "Invalid JSON", error.message);
+      }
+    }
+
+    function publishConfig() {
+      const confirmed = document.getElementById("confirmPublish").checked;
+      if (!confirmed) return message("warning", "Publish blocked", "Select the confirmation checkbox before publishing.");
+      try {
+        const payload = JSON.parse(document.getElementById("publishPayload").value);
+        const point = document.getElementById("publishPoint").value.trim();
+        const expected = document.getElementById("publishValue").value.trim();
+        const setValue = payload.pointset && payload.pointset.points && payload.pointset.points[point] && payload.pointset.points[point].set_value;
+        if (String(setValue) !== expected) return message("warning", "Pointset verification failed", "Payload set_value does not match the expected value.");
+        message("success", "Publish and verify succeeded", "Next pointset simulation observed " + point + " present_value = " + expected + ".");
+      } catch (error) {
+        message("error", "Invalid config payload", error.message);
+      }
+    }
+
+    async function copyPayload(payload, label) {
+      try {
+        await navigator.clipboard.writeText(payload);
+        message("success", "Payload copied", label + " raw payload copied to clipboard.");
+      } catch (error) {
+        downloadBlob(label.replace(/\s+/g, "_").toLowerCase() + "_payload.json", payload);
+        message("warning", "Clipboard blocked", "Payload was exported as a JSON file instead.");
+      }
+    }
+
+    function message(kind, title, body) {
+      state.lastMessage = { kind, title, body };
+      render();
+    }
+
+    function downloadBlob(fileName, content, type = "application/json") {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadState() {
+      downloadBlob("smart_commissioning_html_review_state.json", JSON.stringify({ config: state.config, runs: state.runs, comments: state.comments, scanPorts: state.scanPorts }, null, 2));
+    }
+
+    function resetDemo() {
+      if (!confirm("Reset local demo data and comments in this browser?")) return;
+      localStorage.removeItem("sctStandaloneConfig");
+      localStorage.removeItem("sctStandaloneRuns");
+      localStorage.removeItem("sctStandaloneComments");
+      localStorage.removeItem("sctStandalonePorts");
+      location.reload();
+    }
+
+    function renderDrawer() {
+      const drawer = document.getElementById("drawer");
+      const overlay = document.getElementById("overlay");
+      drawer.classList.toggle("open", state.feedbackOpen);
+      overlay.classList.toggle("open", state.feedbackOpen);
+      drawer.innerHTML = `
+        <div class="section-head"><div><span class="eyebrow">Engineer feedback</span><h2>Review Comments</h2><p>Comments stay in this browser until exported.</p></div><button class="btn small" onclick="toggleFeedback(false)">Close</button></div>
+        <div class="stack">
+          <label>Area<select id="commentArea">${pages.map(([, label]) => `<option ${label === pageTitle() ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+          <label>Severity<select id="commentSeverity"><option>Comment</option><option>Issue</option><option>Blocker</option></select></label>
+          <label>Comment<textarea id="commentText" placeholder="What should be changed, clarified, or verified?"></textarea></label>
+          <button class="btn primary" onclick="addComment()" type="button">Add comment</button>
+          <div class="actions"><button class="btn small" onclick="exportComments('json')" type="button">Export JSON</button><button class="btn small" onclick="exportComments('csv')" type="button">Export CSV</button></div>
+          <div class="stack">${state.comments.map((comment, index) => `<div class="comment-card"><strong>${esc(comment.area)} - ${esc(comment.severity)}</strong><span>${esc(comment.text)}</span><small>${esc(comment.created)} | ${esc(comment.viewport)}</small><button class="btn small" onclick="deleteComment(${index})" type="button">Delete</button></div>`).join("") || `<div class="state info"><strong>No comments yet</strong><span>Add comments here, then export them for the project team.</span></div>`}</div>
+        </div>
+      `;
+    }
+
+    function toggleFeedback(open) {
+      state.feedbackOpen = open;
+      renderDrawer();
+    }
+
+    function addComment() {
+      const text = document.getElementById("commentText").value.trim();
+      if (!text) return;
+      state.comments.unshift({
+        area: document.getElementById("commentArea").value,
+        severity: document.getElementById("commentSeverity").value,
+        text,
+        created: new Date().toISOString(),
+        viewport: window.innerWidth + "x" + window.innerHeight
+      });
+      save();
+      renderDrawer();
+    }
+
+    function deleteComment(index) {
+      state.comments.splice(index, 1);
+      save();
+      renderDrawer();
+    }
+
+    function exportComments(format) {
+      if (format === "csv") {
+        const rows = [["area", "severity", "text", "created", "viewport"]].concat(state.comments.map(c => [c.area, c.severity, c.text, c.created, c.viewport]));
+        const csv = rows.map(row => row.map(cell => '"' + String(cell).replace(/"/g, '""') + '"').join(",")).join("\n");
+        downloadBlob("smart_commissioning_review_comments.csv", csv, "text/csv");
+      } else {
+        downloadBlob("smart_commissioning_review_comments.json", JSON.stringify({ exportedAt: new Date().toISOString(), comments: state.comments }, null, 2));
+      }
+    }
+
+    window.addEventListener("hashchange", () => {
+      const nextPage = location.hash.replace("#", "") || "home";
+      if (nextPage !== state.page) {
+        state.lastMessage = null;
+      }
+      state.page = nextPage;
+      render();
+      requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
+    });
+    document.getElementById("feedbackButton").addEventListener("click", () => toggleFeedback(true));
+    document.getElementById("overlay").addEventListener("click", () => toggleFeedback(false));
+    render();
+  </script>
+</body>
+</html>

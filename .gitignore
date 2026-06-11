@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# Build & packaged artifacts
+build/
+*.zip
+*.exe
+deliverables/Smart_Commissioning_App_Windows_Portable/
+
+# Vendored external tool (own git repo + bundled venv)
+device_udmi_payload_validation/
+
+# Runtime state, logs, local databases
+backend/runtime/
+*.log
+*.sqlite3
+*.db
+ruvector.db
+agentdb.rvf*
+
+# Local agent/tooling state
+.swarm/
+.ruflo/
+.claude/
+.code-review-graph/
+
+# Environment
+.env
+.env.local
+
+# Local screenshots (prototype/review captures, not docs assets)
+/*.png
+frontend/*.png
