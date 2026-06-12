@@ -237,6 +237,34 @@ class DbRunStore:
 
     # -- internals ------------------------------------------------------------
 
+    # -- cooperative cancellation --------------------------------------------
+
+    def request_cancel(self, run_id: str) -> dict[str, object]:
+        """Mark the run as cancellation-requested (cooperative).
+
+        Sets the ``cancel_requested`` flag; running engines poll
+        :meth:`is_cancel_requested` and stop early. Does NOT change ``status``
+        on its own — the engine/run wrapper flips the terminal status to
+        ``cancelled`` when it observes the request. Raises FileNotFoundError if
+        the run does not exist.
+        """
+        with self._session_factory.begin() as session:
+            run = self._load(session, run_id, for_update=True)
+            run.cancel_requested = True
+            run.updated_at = _utcnow()
+            session.flush()
+            return _run_to_dict(run)
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        """Return True if cancellation has been requested for the run.
+
+        Returns False for a missing run (a vanished run cannot be cancelled),
+        so engine cancellation polling never raises.
+        """
+        with self._session_factory() as session:
+            run = session.scalars(select(Run).where(Run.id == run_id)).one_or_none()
+            return bool(run is not None and run.cancel_requested)
+
     def _load(self, session: Session, run_id: str, *, for_update: bool = False) -> Run:
         statement = select(Run).where(Run.id == run_id)
         if for_update:

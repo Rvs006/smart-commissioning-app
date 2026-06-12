@@ -382,16 +382,20 @@ def _capture_live_payloads(
             max_messages=parse_int(parameters.get("max_messages"), default=len(topics)),
         )
     except (MqttTransportError, OSError, ValueError) as error:
+        # Use the coarse status label only; the raw exception text may carry
+        # credentials (connection URL / auth detail) and this description is
+        # returned to the frontend.
+        broker_status_detail = _broker_error_status(error)
         return {
             "attempted": True,
-            "status_detail": _broker_error_status(error),
+            "status_detail": broker_status_detail,
             "captured_topics": [],
             "issue": _issue(
                 [],
                 asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
                 issue_type="payload_error",
                 severity="critical",
-                description=f"Live MQTT capture failed: {error}",
+                description=f"Live MQTT capture failed ({broker_status_detail}).",
                 suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
             ),
         }

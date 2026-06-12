@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from smart_commissioning_core.engines.safety import require_scan_authorization
 from smart_commissioning_core.mqtt_settings import (
     build_mqtt_connection_settings,
     parse_bool,
@@ -40,6 +41,15 @@ def validate_and_publish_config(
     use_live_broker = parse_bool(parameters.get("use_live_broker")) or bool(_string(parameters.get("broker_host")))
     pointset_topic = _string(parameters.get("pointset_topic")) or (_pointset_topic_from_config(topic) or "")
     wait_seconds = parse_float(parameters.get("wait_seconds"), default=5.0)
+
+    # A live config publish actively writes to a real broker / device, so it is
+    # an authorized active operation. Gate it in the engine core (not only the
+    # API route) so worker / direct callers cannot bypass authorization. A
+    # ScanNotAuthorized raised here propagates to the processor, which marks the
+    # run failed; the API route maps it to 403. Validate-only (no live broker)
+    # stays unauthenticated and side-effect-free.
+    if use_live_broker:
+        require_scan_authorization(parameters)
 
     issues: list[ValidationIssueRecord] = []
     now = datetime.now(UTC)
@@ -154,14 +164,19 @@ def validate_and_publish_config(
                         )
             except (MqttTransportError, OSError, ValueError) as error:
                 broker_status_detail = _broker_error_status(error)
+                # Use the coarse status label only; the raw exception text may
+                # carry credentials (e.g. a connection URL or auth detail) and
+                # this description is returned to the frontend.
                 issues.append(
                     _connection_issue(
                         issues,
                         topic,
                         broker_status_detail,
-                        f"Live MQTT publish/subscribe failed: {error}",
+                        f"Live MQTT publish/subscribe failed ({broker_status_detail}).",
                     )
                 )
+
+    previous_config = _capture_previous_config(parameters, topic)
 
     observed_value = _extract_present_value(next_pointset_payload, expected_point)
     if expected_point and expected_value is not None and observed_value != expected_value:
@@ -202,8 +217,98 @@ def validate_and_publish_config(
         "broker_status_detail": broker_status_detail,
         "last_seen_at": now.isoformat(),
         "raw_evidence_uri": "runtime://mqtt-config-publish/latest",
+        # Rollback support: the prior value on the config topic, captured before
+        # the publish. See _capture_previous_config for the honest limitations.
+        "previous_config": previous_config,
     }
     return MqttConfigPublishResult(result_summary=summary, issues=issues)
+
+
+def _capture_previous_config(parameters: dict[str, object], topic: str) -> dict[str, object]:
+    """Capture the prior retained config value on ``topic`` for rollback.
+
+    HONESTY: reading a broker's RETAINED message requires a reachable broker,
+    which does not exist in this environment. So this captures whatever prior
+    value the caller can provide via ``parameters['previous_config_payload']``
+    (e.g. a value the operator snapshotted earlier); when none is supplied we
+    record ``captured: False`` and leave ``payload`` null. The live capture of
+    the retained value off a real broker is on-site-validation surface and is
+    listed in the task's ``live_untested`` output.
+
+    Shape: ``{"topic", "payload" (str|None), "captured" (bool), "source"}``.
+    """
+    supplied = parameters.get("previous_config_payload")
+    if supplied is None:
+        supplied = parameters.get("previous_config")
+    if isinstance(supplied, (dict, list)):
+        payload_text: str | None = json.dumps(supplied)
+        source = "request_supplied"
+        captured = True
+    elif isinstance(supplied, str) and supplied.strip():
+        payload_text = supplied
+        source = "request_supplied"
+        captured = True
+    else:
+        payload_text = None
+        source = "not_captured_no_broker_read"
+        captured = False
+    return {
+        "topic": topic,
+        "payload": payload_text,
+        "captured": captured,
+        "source": source,
+    }
+
+
+def rollback_config(
+    parameters: dict[str, object],
+    previous_config: dict[str, object],
+    *,
+    broker_publisher: BrokerPublisher | None = publish_config_and_wait_for_pointset,
+) -> MqttConfigPublishResult:
+    """Republish a previously-captured config payload to roll back a publish.
+
+    Reuses the forward publish path so the SAME publish-confirmation gate and
+    live-broker handling apply: the operator must re-confirm
+    (``parameters['confirmed']``), and a live broker is contacted only when
+    ``use_live_broker`` / ``broker_host`` is set. The payload published is the
+    captured previous value, NOT the request's ``payload``.
+
+    HONESTY: the live republish to a real broker is the same untested
+    raw-socket path as the forward publish. Without a broker this validates the
+    rollback plumbing (gate, topic, captured payload) only.
+    """
+    # A live rollback republishes to a real broker, so gate it on authorization
+    # in the core (not only the API route) — same as the forward publish — so
+    # worker / direct callers cannot bypass it. ScanNotAuthorized propagates to
+    # the processor (failed run -> 403 at the API). Validate-only stays open.
+    use_live_broker = parse_bool(parameters.get("use_live_broker")) or bool(_string(parameters.get("broker_host")))
+    if use_live_broker:
+        require_scan_authorization(parameters)
+
+    payload_text = previous_config.get("payload")
+    if not isinstance(payload_text, str) or not payload_text.strip():
+        raise ValueError("rollback requires a captured previous config payload (a JSON string).")
+
+    rollback_parameters = dict(parameters)
+    # Publish the captured prior value to the original config topic; keep the
+    # broker/auth/confirmation parameters from the original run.
+    rollback_parameters["payload"] = payload_text
+    if previous_config.get("topic"):
+        rollback_parameters["topic"] = previous_config["topic"]
+    # A rollback does not assert a new expected override value; drop any
+    # forward-publish expectation so the rollback is judged on publish success.
+    rollback_parameters.pop("expected_point", None)
+    rollback_parameters.pop("expected_value", None)
+    # Do not re-capture a "previous of the previous"; mark this as a rollback.
+    rollback_parameters.pop("previous_config_payload", None)
+    rollback_parameters.pop("previous_config", None)
+
+    result = validate_and_publish_config(rollback_parameters, broker_publisher=broker_publisher)
+    summary = dict(result.result_summary)
+    summary["rollback"] = True
+    summary["rolled_back_payload_bytes"] = len(payload_text.encode("utf-8"))
+    return MqttConfigPublishResult(result_summary=summary, issues=result.issues)
 
 
 def _string(value: object) -> str:

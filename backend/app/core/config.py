@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     max_xlsx_decompressed_bytes: int = 200 * 1024 * 1024
     job_execution_mode: Literal["auto", "queue", "inline"] = "auto"
     allow_inline_worker_fallback: bool = True
+    # Conservative active-scan throttle defaults applied to discovery engines
+    # (IP/BACnet/MQTT). Gentle by design so a scan pointed at a real building
+    # network cannot overwhelm controllers or a broker. Per-run parameters may
+    # narrow these further but not exceed the operator's environment policy
+    # unless they explicitly override via request parameters.
+    scan_max_concurrency: int = 16
+    scan_rate_limit_per_sec: float = 10.0
+    scan_connect_timeout_s: float = 5.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

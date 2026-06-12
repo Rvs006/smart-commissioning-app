@@ -13,6 +13,13 @@ dependencies = [
   "alembic>=1.13",
 ]
 
+[project.optional-dependencies]
+# Real BACnet/IP discovery transport (Bacpypes3Backend). NOT a hard dependency:
+# the BACnet engine defaults to a simulated, offline backend and only needs
+# bacpypes3 when the real backend is selected. The real path REQUIRES on-site
+# validation against actual BACnet devices and has never been integration-tested.
+bacnet = ["bacpypes3>=0.0.98"]
+
 [tool.setuptools.packages.find]
 include = ["smart_commissioning_core*"]
 

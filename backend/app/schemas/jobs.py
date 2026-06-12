@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ValidationIssueRecord moved to the shared core package; imported here so existing
 # `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
@@ -58,9 +58,16 @@ class DiscoveryAssetObservation(BaseModel):
     mac_address: str | None = None
     hostname: str | None = None
     observed_ports: list[ObservedPort] = Field(default_factory=list)
-    match_basis: Literal["mac", "ip", "hostname", "none"] = "none"
+    # Engine-defined provenance for the observation. IP discovery uses
+    # "mac"/"ip"/"hostname"/"none"; BACnet uses "bacnet_who_is"; MQTT may use
+    # other labels. Kept as a free string so new engines are not blocked by a
+    # rigid enum, while existing IP consumers keep their values unchanged.
+    match_basis: str = "none"
     last_seen_at: datetime | None = None
     status_detail: str | None = None
+    # Engines carry extra per-asset fields (BACnet device_instance/vendor,
+    # point_count, ...) that consumers may use; allow them through unmodelled.
+    model_config = ConfigDict(extra="allow")
 
 
 class RunRecord(JobSummary):
@@ -81,7 +88,27 @@ class DiscoveryResultsResponse(BaseModel):
     job_type: JobType
     status: JobStatus
     result_summary: dict[str, object] = Field(default_factory=dict)
+    # Back-compat view derived from result_summary["discovered_assets"].
     discovered_assets: list[DiscoveryAssetObservation] = Field(default_factory=list)
+    # Structured rows persisted via DiscoveryRepository (devices/points/topics).
+    # Kept as plain dicts so per-engine attributes survive without a rigid model.
+    devices: list[dict[str, object]] = Field(default_factory=list)
+    points: list[dict[str, object]] = Field(default_factory=list)
+    topics: list[dict[str, object]] = Field(default_factory=list)
+
+
+class DiscoveryPointsResponse(BaseModel):
+    run_id: str
+    job_type: JobType
+    status: JobStatus
+    points: list[dict[str, object]] = Field(default_factory=list)
+
+
+class DiscoveryTopicsResponse(BaseModel):
+    run_id: str
+    job_type: JobType
+    status: JobStatus
+    topics: list[dict[str, object]] = Field(default_factory=list)
 
 
 class ValidationIssuesResponse(BaseModel):

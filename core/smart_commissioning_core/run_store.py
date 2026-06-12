@@ -35,3 +35,17 @@ class RunStore(Protocol):
         run_id: str,
         issues: list[ValidationIssueRecord | dict[str, object]],
     ) -> Any: ...
+
+
+class CancellableRunStore(RunStore, Protocol):
+    """A RunStore that also supports cooperative cancellation.
+
+    The engine framework (smart_commissioning_core.engines) uses
+    ``is_cancel_requested`` to build an EngineContext cancellation checker, and
+    the API exposes ``request_cancel`` to flip the flag. Implementations back
+    these with the Run.cancel_requested column (see DbRunStore).
+    """
+
+    def request_cancel(self, run_id: str) -> Any: ...
+
+    def is_cancel_requested(self, run_id: str) -> bool: ...

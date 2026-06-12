@@ -152,6 +152,35 @@ class RunService:
     ) -> RunRecord:
         return RunRecord.model_validate(self._store.append_issue(run_id, issue))
 
+    # -- cooperative cancellation (CancellableRunStore protocol) --------------
+
+    def request_cancel(self, run_id: str) -> RunRecord:
+        """Flag the run as cancellation-requested; returns the updated run.
+
+        Cooperative: running engines poll :meth:`is_cancel_requested` and stop
+        early, flipping the terminal status to ``cancelled``. Raises
+        FileNotFoundError for a missing run (the route maps that to 404).
+        """
+        return RunRecord.model_validate(self._store.request_cancel(run_id))
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        """Return True if cancellation has been requested for the run.
+
+        Exposed so the engine framework (and inline dispatch) can build a
+        cancellation checker from this RunService directly. Never raises for a
+        missing run (a vanished run cannot be cancelled).
+        """
+        return self._store.is_cancel_requested(run_id)
+
+    @property
+    def engine(self) -> Engine:
+        """The shared SQLAlchemy engine backing this service.
+
+        Exposed so route dispatch can build a DiscoveryRepository / loaders on
+        the SAME engine/database the run store uses.
+        """
+        return self._engine
+
     def _create_run(
         self,
         *,

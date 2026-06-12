@@ -331,6 +331,9 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
                 "expected_value": 22,
                 "pointset_topic": "334os/b1/ahu-1000001/events/pointset",
                 "use_live_broker": True,
+                # A live publish is now an authorized active operation gated in
+                # the engine core; supply authorization to exercise the live path.
+                "authorized": True,
             },
             broker_publisher=fake_publisher,
         )

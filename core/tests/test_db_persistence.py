@@ -3,12 +3,18 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from smart_commissioning_core.db.base import Base
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.engine import create_engine_from_url, default_sqlite_url
 from smart_commissioning_core.db.migrate import upgrade_to_head
 from smart_commissioning_core.db.models import Project, Site
-from smart_commissioning_core.db.repositories import ConfigurationRepository, ImportRepository
+from smart_commissioning_core.db.repositories import (
+    ConfigurationRepository,
+    DiscoveryRepository,
+    ImportRepository,
+)
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 from sqlalchemy import inspect, select
@@ -245,6 +251,139 @@ class RunLifecycleTests(SqliteTestCase):
         self.assertGreater(len(record["issues"]), 0)
         self.assertEqual(self.store.get_run(run_id), record)
 
+    def test_request_cancel_and_is_cancel_requested_roundtrip(self) -> None:
+        run_id = self.store.create_run(
+            project_id="demo-project", site_id="demo-site", job_type="ip_discovery"
+        )["run_id"]
+
+        self.assertFalse(self.store.is_cancel_requested(run_id), "new run is not cancel-requested")
+
+        self.store.request_cancel(run_id)
+        self.assertTrue(self.store.is_cancel_requested(run_id))
+
+        # The public run dict shape is unchanged (no cancel_requested key leaks
+        # into the API contract); cancellation is observed via is_cancel_requested.
+        self.assertEqual(list(self.store.get_run(run_id)), FILE_RECORD_KEYS)
+
+    def test_is_cancel_requested_false_for_missing_run(self) -> None:
+        self.assertFalse(self.store.is_cancel_requested("run_00000000000000_deadbeef"))
+
+    def test_request_cancel_missing_run_raises(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.store.request_cancel("run_00000000000000_deadbeef")
+
+
+class DiscoveryRepositoryTests(SqliteTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = DbRunStore(self.engine)
+        self.repository = DiscoveryRepository(self.engine)
+        self.run_id = self.store.create_run(
+            project_id="demo-project", site_id="demo-site", job_type="ip_discovery"
+        )["run_id"]
+
+    def test_replace_list_count_devices_roundtrip(self) -> None:
+        devices = [
+            {
+                "address": "10.10.25.117",
+                "device_type": "ahu",
+                "name": "AHU-L03-017",
+                "vendor": "ExpectedCo",
+                "model": "Model-A",
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "attributes": {"mac": "aa:bb:cc:dd:ee:ff", "observed_ports": [47808]},
+            },
+            {"address": "10.10.25.118", "device_type": "vav", "attributes": {}},
+        ]
+
+        written = self.repository.replace_devices(self.run_id, devices)
+        self.assertEqual(written, 2)
+        self.assertEqual(self.repository.count_devices(self.run_id), 2)
+
+        listed = self.repository.list_devices(self.run_id)
+        self.assertEqual([row["address"] for row in listed], ["10.10.25.117", "10.10.25.118"])
+        self.assertEqual(listed[0]["attributes"], {"mac": "aa:bb:cc:dd:ee:ff", "observed_ports": [47808]})
+        self.assertEqual(listed[0]["vendor"], "ExpectedCo")
+        self.assertEqual([row["position"] for row in listed], [0, 1])
+
+        # replace is idempotent: re-writing fewer rows replaces, not appends.
+        self.repository.replace_devices(self.run_id, [{"address": "10.10.25.200"}])
+        self.assertEqual(self.repository.count_devices(self.run_id), 1)
+        self.assertEqual([r["address"] for r in self.repository.list_devices(self.run_id)], ["10.10.25.200"])
+
+    def test_replace_list_count_points_roundtrip(self) -> None:
+        points = [
+            {
+                "device_ref": "10.10.25.117",
+                "point_id": "ai-1",
+                "point_name": "supply_air_temperature_sensor",
+                "observed_value": {"present_value": 21.5},
+                "units": "degrees-celsius",
+                "attributes": {"object_type": "analog-input"},
+            },
+            {"point_name": "co2_concentration_sensor", "observed_value": {"present_value": 500}},
+        ]
+
+        self.assertEqual(self.repository.replace_points(self.run_id, points), 2)
+        self.assertEqual(self.repository.count_points(self.run_id), 2)
+
+        listed = self.repository.list_points(self.run_id)
+        self.assertEqual(listed[0]["point_name"], "supply_air_temperature_sensor")
+        self.assertEqual(listed[0]["observed_value"], {"present_value": 21.5})
+        self.assertEqual(listed[0]["units"], "degrees-celsius")
+        self.assertEqual(listed[0]["attributes"], {"object_type": "analog-input"})
+        self.assertIsNone(listed[1]["device_ref"])
+
+    def test_replace_list_count_topics_roundtrip(self) -> None:
+        topics = [
+            {
+                "topic": "electracom/sct/1532/ahu/l03/events/pointset",
+                "last_payload": {"points": {"co2": {"present_value": 500}}},
+                "message_count": 7,
+                "attributes": {"qos": 1},
+            },
+            {"topic": "electracom/sct/1532/ahu/l03/state"},
+        ]
+
+        self.assertEqual(self.repository.replace_topics(self.run_id, topics), 2)
+        self.assertEqual(self.repository.count_topics(self.run_id), 2)
+
+        listed = self.repository.list_topics(self.run_id)
+        self.assertEqual(listed[0]["topic"], "electracom/sct/1532/ahu/l03/events/pointset")
+        self.assertEqual(listed[0]["message_count"], 7)
+        self.assertEqual(listed[0]["last_payload"], {"points": {"co2": {"present_value": 500}}})
+        self.assertEqual(listed[1]["message_count"], 0, "message_count defaults to 0")
+        self.assertEqual(listed[1]["last_payload"], {})
+
+    def test_rows_are_scoped_per_run(self) -> None:
+        other_run = self.store.create_run(
+            project_id="demo-project", site_id="demo-site", job_type="bacnet_discovery"
+        )["run_id"]
+        self.repository.replace_devices(self.run_id, [{"address": "a"}])
+        self.repository.replace_devices(other_run, [{"address": "b"}, {"address": "c"}])
+
+        self.assertEqual(self.repository.count_devices(self.run_id), 1)
+        self.assertEqual(self.repository.count_devices(other_run), 2)
+        self.assertEqual([r["address"] for r in self.repository.list_devices(self.run_id)], ["a"])
+
+    def test_cascade_delete_on_run_delete(self) -> None:
+        self.repository.replace_devices(self.run_id, [{"address": "a"}])
+        self.repository.replace_points(self.run_id, [{"point_name": "p"}])
+        self.repository.replace_topics(self.run_id, [{"topic": "t"}])
+        self.assertEqual(self.repository.count_devices(self.run_id), 1)
+
+        from smart_commissioning_core.db.engine import session_factory
+        from smart_commissioning_core.db.models import Run
+
+        with session_factory(self.engine).begin() as session:
+            session.delete(session.get(Run, self.run_id))
+
+        # FK ondelete=CASCADE (PRAGMA foreign_keys=ON on SQLite) removes the rows.
+        self.assertEqual(self.repository.count_devices(self.run_id), 0)
+        self.assertEqual(self.repository.count_points(self.run_id), 0)
+        self.assertEqual(self.repository.count_topics(self.run_id), 0)
+
 
 class ConfigurationRepositoryTests(SqliteTestCase):
     def setUp(self) -> None:
@@ -335,6 +474,10 @@ class MigrationTests(unittest.TestCase):
         "run_issues",
         "configuration_snapshots",
         "import_records",
+        # Added by the engine-framework migration c4a7ced176a9.
+        "discovered_devices",
+        "discovered_points",
+        "discovered_topics",
     }
 
     def test_upgrade_to_head_creates_schema_and_is_idempotent(self) -> None:
@@ -367,6 +510,8 @@ class MigrationTests(unittest.TestCase):
                         "error_message",
                         "created_at",
                         "updated_at",
+                        # Added by the engine-framework migration.
+                        "cancel_requested",
                     }.issubset(run_columns),
                     run_columns,
                 )
@@ -374,12 +519,37 @@ class MigrationTests(unittest.TestCase):
                 issue_columns = {column["name"] for column in inspector.get_columns("run_issues")}
                 self.assertTrue(set(ISSUE_KEYS).issubset(issue_columns), issue_columns)
 
+                device_columns = {c["name"] for c in inspector.get_columns("discovered_devices")}
+                self.assertTrue(
+                    {"id", "run_id", "position", "address", "device_type", "attributes", "created_at"}
+                    .issubset(device_columns),
+                    device_columns,
+                )
+
                 # The migrated schema is usable by the store directly.
                 store = DbRunStore(engine)
                 record = store.create_run(
                     project_id="demo-project", site_id="demo-site", job_type="ip_discovery"
                 )
                 self.assertEqual(list(record), FILE_RECORD_KEYS)
+                # cancel flag defaults to False on a freshly migrated DB.
+                self.assertFalse(store.is_cancel_requested(record["run_id"]))
+            finally:
+                engine.dispose()
+
+    def test_upgrade_to_head_has_zero_metadata_drift(self) -> None:
+        # After upgrading to head, alembic's compare_metadata against the ORM
+        # models must report no differences (the migration matches the models).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = default_sqlite_url(Path(temp_dir))
+            upgrade_to_head(url)
+
+            engine = create_engine_from_url(url)
+            try:
+                with engine.connect() as connection:
+                    context = MigrationContext.configure(connection)
+                    diffs = compare_metadata(context, Base.metadata)
+                self.assertEqual(diffs, [], f"schema drift detected after upgrade: {diffs}")
             finally:
                 engine.dispose()
 

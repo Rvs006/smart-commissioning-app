@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
-from app.schemas.jobs import JobType, RunListResponse
+from app.schemas.jobs import JobType, RunListResponse, RunRecord
 from app.services.run_service import RunService
 
 router = APIRouter()
@@ -25,3 +25,19 @@ def list_runs(
             offset=offset,
         )
     )
+
+
+@router.post("/{run_id}/cancel", response_model=RunRecord)
+def cancel_run(run_id: str) -> RunRecord:
+    """Request cooperative cancellation of a run.
+
+    Sets the run's ``cancel_requested`` flag (does NOT itself flip status).
+    Engines poll this flag via the framework and stop early, flipping the
+    terminal status to ``cancelled`` when they observe it. A run that has
+    already finished is unaffected (the flag is recorded but no engine is
+    running to act on it). Returns the updated run; 404 for a missing run.
+    """
+    try:
+        return service.request_cancel(run_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' was not found.") from error
