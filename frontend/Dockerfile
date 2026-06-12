@@ -3,7 +3,9 @@
 #   docker build -f frontend/Dockerfile .
 
 # --- Stage 1: build the static bundle ---------------------------------------
-FROM node:20-alpine AS build
+# Node 22 ships npm 11, matching the npm that generated package-lock.json;
+# node:20 (npm 10) rejects the lockfile's optional-dependency tree under npm ci.
+FROM node:22-alpine AS build
 
 WORKDIR /build
 
