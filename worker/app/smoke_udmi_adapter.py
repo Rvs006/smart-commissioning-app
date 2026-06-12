@@ -1,4 +1,4 @@
-from app.services.udmi_validation import validate_udmi_full_report
+from smart_commissioning_core.udmi_validation import validate_udmi_full_report
 
 
 def main() -> None:
@@ -7,7 +7,8 @@ def main() -> None:
     assert result.result_summary["not_publishing"] == 31, result.result_summary
     assert result.result_summary["issue_count"] == len(result.issues)
     assert result.issues, "Expected normalized issues from the UDMI fixture."
-    assert {"issue_id", "asset_id", "issue_type", "severity", "description"} <= set(result.issues[0])
+    first_issue = result.issues[0].model_dump()
+    assert {"issue_id", "asset_id", "issue_type", "severity", "description"} <= set(first_issue)
     print(
         "UDMI adapter smoke passed: "
         f"{result.result_summary['issue_count']} normalized issues from {result.source_fixture}."

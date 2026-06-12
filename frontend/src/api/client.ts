@@ -169,17 +169,193 @@ export type ReportSummary = {
   file_name: string;
 };
 
+export type ReportListResponse = {
+  reports: ReportSummary[];
+};
+
+// Mirrors backend app.schemas.jobs.JobSummary. Run lists return summaries only;
+// the full RunRecord (parameters/result_summary/issues) comes from a per-run GET.
+export type JobSummary = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  stage: string;
+  progress_percent: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RunListResponse = {
+  runs: JobSummary[];
+};
+
+export type ObservedPort = {
+  port: number;
+  protocol: "tcp" | "udp";
+  service?: string | null;
+};
+
+// Mirrors backend DiscoveryAssetObservation (extra="allow"): engines attach
+// per-protocol fields (device_instance, vendor, point_count, ...) beyond the
+// modelled keys, so the index signature keeps those reachable.
+export type DiscoveryAssetObservation = {
+  asset_id?: string | null;
+  ip_address?: string | null;
+  mac_address?: string | null;
+  hostname?: string | null;
+  observed_ports?: ObservedPort[];
+  match_basis?: string;
+  last_seen_at?: string | null;
+  status_detail?: string | null;
+  [key: string]: unknown;
+};
+
+// Devices/points/topics come back as plain dicts so per-engine attributes
+// survive without a rigid model; consumers read known keys defensively.
+export type DiscoveryRowRecord = Record<string, unknown>;
+
+export type DiscoveryResultsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  result_summary: Record<string, unknown>;
+  discovered_assets: DiscoveryAssetObservation[];
+  devices: DiscoveryRowRecord[];
+  points: DiscoveryRowRecord[];
+  topics: DiscoveryRowRecord[];
+};
+
+export type DiscoveryPointsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  points: DiscoveryRowRecord[];
+};
+
+export type DiscoveryTopicsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  topics: DiscoveryRowRecord[];
+};
+
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const apiBaseUrl = rawApiBaseUrl.replace(/\/$/, "");
 
+const API_KEY_STORAGE_KEY = "sc.apiKey";
+
+export const AUTH_REQUIRED_MESSAGE = "Authentication required — set an API key";
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+function readStoredApiKey(): string | null {
+  try {
+    return window.localStorage.getItem(API_KEY_STORAGE_KEY);
+  } catch {
+    // localStorage can be unavailable (e.g. restrictive embedded contexts).
+    return null;
+  }
+}
+
+export function getApiKey(): string | null {
+  const stored = readStoredApiKey();
+  if (stored) {
+    return stored;
+  }
+  const envKey: unknown = import.meta.env.VITE_API_KEY;
+  return typeof envKey === "string" && envKey.length > 0 ? envKey : null;
+}
+
+export function setApiKey(key: string): void {
+  window.localStorage.setItem(API_KEY_STORAGE_KEY, key);
+}
+
+export function clearApiKey(): void {
+  window.localStorage.removeItem(API_KEY_STORAGE_KEY);
+}
+
+function withApiKey(init?: RequestInit): RequestInit | undefined {
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    return init;
+  }
+  const headers = new Headers(init?.headers);
+  headers.set("X-API-Key", apiKey);
+  return { ...init, headers };
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, init);
+  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
+
+  if (response.status === 401) {
+    throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+  }
 
   if (!response.ok) {
-    throw new Error(await parseApiError(response));
+    throw new ApiError(await parseApiError(response), response.status);
   }
 
   return (await response.json()) as T;
+}
+
+export type DownloadedFile = {
+  blob: Blob;
+  filename: string | null;
+};
+
+/**
+ * Fetches a binary endpoint with the same auth handling as request().
+ * Direct-navigation anchors cannot attach the X-API-Key header, so all
+ * file downloads must go through this helper in hosted deployments.
+ */
+export async function downloadFile(path: string): Promise<DownloadedFile> {
+  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey());
+
+  if (response.status === 401) {
+    throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+  }
+
+  if (!response.ok) {
+    throw new ApiError(await parseApiError(response), response.status);
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: parseContentDispositionFilename(response.headers.get("Content-Disposition")),
+  };
+}
+
+function parseContentDispositionFilename(header: string | null): string | null {
+  if (!header) {
+    return null;
+  }
+  // RFC 5987 extended parameter (filename*=UTF-8''...) takes priority.
+  const encodedMatch = /filename\*\s*=\s*utf-8''([^;]+)/i.exec(header);
+  if (encodedMatch) {
+    try {
+      const decoded = decodeURIComponent(encodedMatch[1].trim());
+      if (decoded) {
+        return decoded;
+      }
+    } catch {
+      // Malformed percent-encoding: fall back to the plain filename parameter.
+    }
+  }
+  const quotedMatch = /filename\s*=\s*"([^"]*)"/i.exec(header);
+  if (quotedMatch) {
+    return quotedMatch[1] || null;
+  }
+  const bareMatch = /filename\s*=\s*([^;]+)/i.exec(header);
+  const bareFilename = bareMatch?.[1].trim();
+  return bareFilename ? bareFilename : null;
 }
 
 async function parseApiError(response: Response): Promise<string> {
@@ -291,12 +467,22 @@ export function getImportErrors(importId: string): Promise<ImportErrorReport> {
   return request<ImportErrorReport>(`/imports/${importId}/errors`);
 }
 
+export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
+  return `/imports/templates/${encodeURIComponent(importType)}.${format}`;
+}
+
+// URL helpers are display-only. Downloads must use downloadFile() so the
+// X-API-Key header is attached; bare anchors 401 in hosted deployments.
 export function getImportTemplateUrl(importType: ImportType, format: ImportTemplateFormat): string {
-  return `${apiBaseUrl}/imports/templates/${encodeURIComponent(importType)}.${format}`;
+  return `${apiBaseUrl}${getImportTemplatePath(importType, format)}`;
+}
+
+export function getReportDownloadPath(reportId: string): string {
+  return `/reports/${encodeURIComponent(reportId)}/download`;
 }
 
 export function getReportDownloadUrl(reportId: string): string {
-  return `${apiBaseUrl}/reports/${encodeURIComponent(reportId)}/download`;
+  return `${apiBaseUrl}${getReportDownloadPath(reportId)}`;
 }
 
 export function startDiscoveryRun(input: {
@@ -392,4 +578,249 @@ export function createReport(input: { reportType: ReportType; format?: ReportFor
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
+}
+
+export function listReports(): Promise<ReportListResponse> {
+  return request<ReportListResponse>("/reports");
+}
+
+export function getReport(reportId: string): Promise<ReportSummary> {
+  return request<ReportSummary>(`/reports/${encodeURIComponent(reportId)}`);
+}
+
+export type ListRunsParams = {
+  projectId?: string;
+  siteId?: string;
+  jobType?: JobType;
+  limit?: number;
+  offset?: number;
+};
+
+function buildRunsQuery(params?: ListRunsParams): string {
+  const search = new URLSearchParams();
+  if (params?.projectId) {
+    search.set("project_id", params.projectId);
+  }
+  if (params?.siteId) {
+    search.set("site_id", params.siteId);
+  }
+  if (params?.jobType) {
+    search.set("job_type", params.jobType);
+  }
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  if (typeof params?.offset === "number") {
+    search.set("offset", String(params.offset));
+  }
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
+export function listRuns(params?: ListRunsParams): Promise<RunListResponse> {
+  return request<RunListResponse>(`/runs${buildRunsQuery(params)}`);
+}
+
+export function cancelRun(runId: string): Promise<RunRecord> {
+  return request<RunRecord>(`/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function listDiscoveryRuns(): Promise<RunListResponse> {
+  return request<RunListResponse>("/discovery/runs");
+}
+
+export function getDiscoveryRun(runId: string): Promise<RunRecord> {
+  return request<RunRecord>(`/discovery/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getDiscoveryResults(runId: string): Promise<DiscoveryResultsResponse> {
+  return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`);
+}
+
+export function getDiscoveryPoints(runId: string): Promise<DiscoveryPointsResponse> {
+  return request<DiscoveryPointsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/points`);
+}
+
+export function getDiscoveryTopics(runId: string): Promise<DiscoveryTopicsResponse> {
+  return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`);
+}
+
+export function listValidationRuns(): Promise<RunListResponse> {
+  return request<RunListResponse>("/validation/runs");
+}
+
+export function rollbackMqttConfigPublish(runId: string): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    `/validation/mqtt-config/runs/${encodeURIComponent(runId)}/rollback`,
+    { method: "POST" },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Server-Sent Events (SSE) run-progress streaming.
+//
+// The backend exposes GET /runs/{run_id}/events as a text/event-stream that
+// emits status/stage/progress and closes when the run is terminal. The browser
+// EventSource API CANNOT attach custom headers, so it cannot carry X-API-Key in
+// api_key mode. We therefore consume the stream with fetch()+ReadableStream
+// through the SAME withApiKey() path the rest of the client uses, and parse the
+// SSE frames manually. In local/loopback mode no key is needed; this one code
+// path covers both modes. On any error/unsupported environment the caller falls
+// back to the existing 1.5s polling (see ModulePage / DashboardPage).
+// ---------------------------------------------------------------------------
+
+// The status/stage/progress slice emitted per progress frame. Mirrors the
+// backend events._progress_payload shape.
+export type RunEvent = {
+  run_id: string;
+  job_type?: JobType;
+  status: JobStatus;
+  stage?: string;
+  progress_percent?: number;
+  updated_at?: string | null;
+  error_message?: string | null;
+};
+
+export type RunEventName = "message" | "terminal" | "timeout" | "gone";
+
+export type RunEventCallbacks = {
+  // Fired for every progress frame (the default "message" event) and for the
+  // explicit "terminal" frame, so consumers always see the final state.
+  onEvent: (event: RunEvent, name: RunEventName) => void;
+  // Fired once when the stream ends (terminal/timeout/closed) or errors. The
+  // boolean reports whether the run reached a terminal status over the stream.
+  onClose?: (reachedTerminal: boolean) => void;
+  onError?: (error: unknown) => void;
+};
+
+const TERMINAL_EVENT_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>([
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Parses accumulated SSE text into complete frames, returning the parsed
+ * events and the unconsumed trailing buffer (a partial frame).
+ */
+export function parseSseBuffer(buffer: string): { events: { name: RunEventName; data: RunEvent | null }[]; rest: string } {
+  const events: { name: RunEventName; data: RunEvent | null }[] = [];
+  // SSE frames are separated by a blank line. Normalise CRLF first.
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const parts = normalized.split("\n\n");
+  // The last element is an incomplete frame (no trailing blank line yet).
+  const rest = parts.pop() ?? "";
+  for (const block of parts) {
+    const trimmed = block.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let name: RunEventName = "message";
+    const dataLines: string[] = [];
+    for (const line of trimmed.split("\n")) {
+      if (line.startsWith("event:")) {
+        name = line.slice("event:".length).trim() as RunEventName;
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trim());
+      }
+    }
+    let data: RunEvent | null = null;
+    if (dataLines.length > 0) {
+      try {
+        data = JSON.parse(dataLines.join("")) as RunEvent;
+      } catch {
+        // A malformed data frame is skipped rather than aborting the stream.
+        data = null;
+      }
+    }
+    events.push({ data, name });
+  }
+  return { events, rest };
+}
+
+/**
+ * Opens the SSE run-progress stream and dispatches parsed events to callbacks.
+ * Returns a disposer that aborts the underlying fetch (cancel-safe): calling it
+ * stops the stream and is a no-op after the stream has already closed.
+ *
+ * Auth: routed through withApiKey() so X-API-Key (or the loopback path) applies
+ * exactly like every other request. A 401 surfaces via onError as an ApiError,
+ * letting the caller fall back to polling.
+ */
+export function streamRunEvents(runId: string, callbacks: RunEventCallbacks): () => void {
+  const controller = new AbortController();
+  let reachedTerminal = false;
+  let closed = false;
+
+  const finish = (error?: unknown) => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    if (error !== undefined) {
+      callbacks.onError?.(error);
+    }
+    callbacks.onClose?.(reachedTerminal);
+  };
+
+  void (async () => {
+    try {
+      const init = withApiKey({
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+      const response = await fetch(
+        `${apiBaseUrl}/runs/${encodeURIComponent(runId)}/events`,
+        init,
+      );
+
+      if (response.status === 401) {
+        throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+      }
+      if (!response.ok) {
+        throw new ApiError(await parseApiError(response), response.status);
+      }
+      if (!response.body) {
+        // No streaming body (e.g. a non-streaming fetch polyfill): the caller
+        // must fall back to polling.
+        throw new Error("Streaming response body is not available.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const { events, rest } = parseSseBuffer(buffer);
+        buffer = rest;
+        for (const { name, data } of events) {
+          if (data) {
+            if (name === "terminal" || TERMINAL_EVENT_STATUSES.has(data.status)) {
+              reachedTerminal = true;
+            }
+            callbacks.onEvent(data, name);
+          }
+        }
+      }
+      finish();
+    } catch (error) {
+      // An aborted stream (caller disposed) is a clean close, not an error.
+      if (controller.signal.aborted) {
+        finish();
+        return;
+      }
+      finish(error);
+    }
+  })();
+
+  return () => {
+    controller.abort();
+  };
 }

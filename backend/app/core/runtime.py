@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 
-
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOT = BACKEND_ROOT / "runtime"
 CONFIGURATION_PATH = RUNTIME_ROOT / "configuration.json"

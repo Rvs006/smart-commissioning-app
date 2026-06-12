@@ -1,0 +1,77 @@
+Smart Commissioning App
+Copyright (c) the Smart Commissioning App authors.
+
+This product bundles, at install time, the following third-party Python
+packages as runtime dependencies. Each is the property of its respective
+authors and is used under the license noted. Full license texts are
+distributed with each package (see each package's site-packages metadata,
+its source distribution, or the upstream project). This NOTICE summarizes
+attributions; it is not itself a license grant.
+
+A machine-readable, version-pinned inventory is produced by
+scripts/generate_sbom.py (CycloneDX JSON). See docs/SBOM.md for the
+human-readable inventory, the license-risk assessment, and the alternative
+pip-licenses / cyclonedx-py invocations.
+
+--------------------------------------------------------------------------------
+Runtime dependencies (declared in core/, backend/, worker/ pyproject.toml)
+--------------------------------------------------------------------------------
+
+FastAPI            - MIT License                        - https://github.com/fastapi/fastapi
+Starlette          - BSD 3-Clause License               - https://github.com/encode/starlette
+Uvicorn            - BSD 3-Clause License               - https://github.com/encode/uvicorn
+Pydantic           - MIT License                        - https://github.com/pydantic/pydantic
+pydantic-core      - MIT License                        - https://github.com/pydantic/pydantic-core
+pydantic-settings  - MIT License                        - https://github.com/pydantic/pydantic-settings
+SQLAlchemy         - MIT License                        - https://github.com/sqlalchemy/sqlalchemy
+Alembic            - MIT License                        - https://github.com/sqlalchemy/alembic
+Dramatiq           - GNU LGPL v3 or later (LGPL-3.0+)   - https://github.com/Bogdanp/dramatiq
+redis-py           - MIT License                        - https://github.com/redis/redis-py
+psycopg (3)        - GNU LGPL v3 only (LGPL-3.0-only)   - https://github.com/psycopg/psycopg
+psycopg-binary     - GNU LGPL v3 only (LGPL-3.0-only)   - https://github.com/psycopg/psycopg
+cryptography       - Apache-2.0 OR BSD-3-Clause         - https://github.com/pyca/cryptography
+openpyxl           - MIT License                        - https://foss.heptapod.net/openpyxl/openpyxl
+prometheus-client  - Apache-2.0 AND BSD-2-Clause        - https://github.com/prometheus/client_python
+HTTPX              - BSD 3-Clause License               - https://github.com/encode/httpx
+python-multipart   - Apache-2.0 License                 - https://github.com/Kludex/python-multipart
+
+Optional extra (smart-commissioning-core[bacnet], NOT installed by default):
+
+bacpypes3          - MIT License                        - https://github.com/JoelBender/BACpypes3
+
+--------------------------------------------------------------------------------
+Notable transitive dependencies
+--------------------------------------------------------------------------------
+
+anyio              - MIT License                        - https://github.com/agronholm/anyio
+sniffio            - MIT OR Apache-2.0                  - https://github.com/python-trio/sniffio
+idna               - BSD 3-Clause License               - https://github.com/kjd/idna
+certifi            - Mozilla Public License 2.0 (MPL)   - https://github.com/certifi/python-certifi
+h11                - MIT License                        - https://github.com/python-hyper/h11
+httpcore           - BSD 3-Clause License               - https://github.com/encode/httpcore
+click              - BSD 3-Clause License               - https://github.com/pallets/click
+colorama           - BSD 3-Clause License               - https://github.com/tartley/colorama
+MarkupSafe         - BSD 3-Clause License               - https://github.com/pallets/markupsafe
+Mako               - MIT License                        - https://github.com/sqlalchemy/mako
+greenlet           - MIT AND PSF-2.0                    - https://github.com/python-greenlet/greenlet
+cffi               - MIT License                        - https://github.com/python-cffi/cffi
+pycparser          - BSD 3-Clause License               - https://github.com/eliben/pycparser
+typing-extensions  - Python Software Foundation License - https://github.com/python/typing_extensions
+annotated-types    - MIT License                        - https://github.com/annotated-types/annotated-types
+typing-inspection  - MIT License                        - https://github.com/pydantic/typing-inspection
+python-dotenv      - BSD 3-Clause License               - https://github.com/theskumar/python-dotenv
+PyJWT              - MIT License                        - https://github.com/jpadilla/pyjwt
+et-xmlfile         - MIT License                        - https://foss.heptapod.net/openpyxl/et_xmlfile
+zipp               - MIT License                        - https://github.com/jaraco/zipp
+importlib-metadata - Apache-2.0 License                 - https://github.com/python/importlib_metadata
+tzdata             - Apache-2.0 License                 - https://github.com/python/tzdata
+
+--------------------------------------------------------------------------------
+
+Weak-copyleft components (Dramatiq, psycopg, certifi) are used as unmodified,
+separately-installed libraries. If you modify and redistribute any of them, you
+must make the corresponding source available under its license. See the License
+risk assessment in docs/SBOM.md.
+
+The frontend's npm dependencies are attributed separately via the npm
+toolchain (npm sbom / npm ls --all) and are not listed here.

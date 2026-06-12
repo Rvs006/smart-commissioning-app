@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packages and tooling
+        run: pip install -e ./core -e ./backend -e ./worker ruff mypy
+
+      - name: Ruff lint
+        run: ruff check backend worker core
+
+      - name: Core unit tests
+        run: python -m unittest discover -s core/tests
+
+      - name: Backend unit tests
+        working-directory: backend
+        run: python -m unittest discover -s tests
+
+      # Mypy is informational only — backend/ and worker/ both ship a
+      # top-level package named "app", so it runs once per package.
+      - name: Mypy (informational) - backend
+        run: mypy backend/app
+        continue-on-error: true
+
+      - name: Mypy (informational) - worker
+        run: mypy worker/app
+        continue-on-error: true
+
+      - name: Mypy (informational) - core
+        run: mypy core/smart_commissioning_core
+        continue-on-error: true
+
+  # Additive SBOM + license inventory job. Generates a CycloneDX SBOM across the
+  # three Python distributions and runs an allowlist-based license gate.
+  # NON-BLOCKING (continue-on-error) because the generated inventory depends on
+  # the exact transitive versions resolved at install time, which are not pinned
+  # here — so a transient license-metadata change should surface as a warning,
+  # not a red build. Flip continue-on-error to false (and pin versions) to make
+  # the gate enforcing.
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Install the same runtime tree the SBOM inventories (no extra SBOM tool;
+      # scripts/generate_sbom.py uses only the standard library).
+      - name: Install packages
+        run: pip install -e ./core -e ./backend -e ./worker
+
+      - name: Generate SBOM (CycloneDX JSON) and run the license gate
+        continue-on-error: true
+        run: python scripts/generate_sbom.py --json sbom.json --markdown docs/SBOM.generated.md --check
+
+      - name: Upload SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom.json
+            docs/SBOM.generated.md
+          if-no-files-found: warn
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Node/npm that generated frontend/package-lock.json
+          # (npm 11). Node 20 ships npm 10, which reads the optional-dependency
+          # tree differently and rejects the lockfile under `npm ci`.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test -- --run
+
+      - name: Build
+        run: npm run build

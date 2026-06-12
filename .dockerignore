@@ -1,0 +1,14 @@
+.git
+**/node_modules
+frontend/dist
+**/build
+deliverables
+device_udmi_payload_validation
+backend/runtime
+**/__pycache__
+**/*.egg-info
+*.log
+*.db
+.swarm
+.ruflo
+.claude

@@ -1,14 +1,21 @@
-export type HealthState = "ready" | "warning" | "failed" | "running" | "queued";
+// Sample / preview data for UI areas that have no backing endpoint yet.
+//
+// What is REAL elsewhere (not here): recent runs (GET /runs), discovery
+// devices/points/topics (GET /discovery/runs/{id}/results), validation issues
+// (GET /validation/runs/{id}/issues), and the report queue (GET /reports).
+//
+// What stays sample (kept here, labelled in the UI as "Sample preview"):
+//  - workflowStages: no workflow-status aggregate endpoint exists.
+//  - moduleWorkspaces.*.rows / metrics for validation modules + the "Result"
+//    interpretation columns: register-comparison verdicts are produced by a
+//    validation run, not returned by discovery results.
+//  - issueRows: illustrative issue copy used only as a labelled fallback when no
+//    live validation run has been executed yet.
+//
+// Removed as dead (no consumer, no endpoint): projectSummary, runRows,
+// assetRows — replaced by the live queries listed above.
 
-export type AssetRow = {
-  assetId: string;
-  name: string;
-  protocol: "BACnet" | "MQTT" | "BACnet + MQTT";
-  network: string;
-  state: HealthState;
-  lastSeen: string;
-  points: string;
-};
+export type HealthState = "ready" | "warning" | "failed" | "running" | "queued";
 
 export type IssueRow = {
   id: string;
@@ -17,15 +24,6 @@ export type IssueRow = {
   area: string;
   message: string;
   owner: string;
-};
-
-export type RunRow = {
-  id: string;
-  type: string;
-  status: HealthState;
-  progress: number;
-  stage: string;
-  updated: string;
 };
 
 export type WorkflowStage = {
@@ -48,16 +46,6 @@ export type ModuleWorkspace = {
   columns: string[];
   issues: IssueRow[];
   evidence: string[];
-};
-
-export const projectSummary = {
-  project: "ElectraCom Smart Building",
-  site: "Block B Plantroom",
-  readiness: 68,
-  assets: 126,
-  onlineAssets: 111,
-  openIssues: 14,
-  evidencePacks: 3,
 };
 
 export const workflowStages: WorkflowStage[] = [
@@ -93,45 +81,8 @@ export const workflowStages: WorkflowStage[] = [
   },
 ];
 
-export const assetRows: AssetRow[] = [
-  {
-    assetId: "MDB5-00-043-BLR-1",
-    name: "Boiler 1 Controller",
-    protocol: "BACnet + MQTT",
-    network: "10.10.25.101 / device 1532001",
-    state: "failed",
-    lastSeen: "2 min ago",
-    points: "42 / 45",
-  },
-  {
-    assetId: "MDB5-00-044-BLR-2",
-    name: "Boiler 2 Controller",
-    protocol: "BACnet + MQTT",
-    network: "10.10.25.102 / device 1532002",
-    state: "ready",
-    lastSeen: "48 sec ago",
-    points: "45 / 45",
-  },
-  {
-    assetId: "AHU-L03-017",
-    name: "Level 3 AHU",
-    protocol: "BACnet",
-    network: "10.10.25.117 / device 1532117",
-    state: "warning",
-    lastSeen: "7 min ago",
-    points: "87 / 91",
-  },
-  {
-    assetId: "MTR-ENERGY-009",
-    name: "Energy Meter 9",
-    protocol: "MQTT",
-    network: "electracom/sct/1532/meter/009",
-    state: "ready",
-    lastSeen: "15 sec ago",
-    points: "18 / 18",
-  },
-];
-
+// Labelled sample issues. Used only as a fallback in the module inspector when
+// no live validation run has been executed; live runs replace these.
 export const issueRows: IssueRow[] = [
   {
     id: "ISS-1042",
@@ -164,33 +115,6 @@ export const issueRows: IssueRow[] = [
     area: "Report metadata",
     message: "Asset location is missing floor reference in imported register.",
     owner: "Commissioning lead",
-  },
-];
-
-export const runRows: RunRow[] = [
-  {
-    id: "run_udmi_demo_001",
-    type: "UDMI validation",
-    status: "failed",
-    progress: 100,
-    stage: "Issue classification",
-    updated: "3 min ago",
-  },
-  {
-    id: "run_mqtt_demo_001",
-    type: "MQTT discovery",
-    status: "running",
-    progress: 64,
-    stage: "Subscribing to telemetry topics",
-    updated: "Now",
-  },
-  {
-    id: "run_ip_demo_001",
-    type: "IP scanner",
-    status: "ready",
-    progress: 100,
-    stage: "Register comparison complete",
-    updated: "18 min ago",
   },
 ];
 

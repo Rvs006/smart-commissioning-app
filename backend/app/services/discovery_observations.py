@@ -1,8 +1,7 @@
-from datetime import datetime, timezone
 import re
+from datetime import UTC, datetime
 
 from app.schemas.jobs import DiscoveryAssetObservation, ObservedPort
-
 
 COMMON_PORTS = [
     ObservedPort(port=47808, protocol="udp", service="BACnet"),
@@ -57,7 +56,7 @@ def build_observation(
         hostname=observed.get("hostname") or None,
         observed_ports=parse_port_specification(port_specification),
         match_basis=match_basis,
-        last_seen_at=datetime.now(timezone.utc),
+        last_seen_at=datetime.now(UTC),
         status_detail=status_detail,
     )
 

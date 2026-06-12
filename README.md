@@ -3,9 +3,10 @@
 This repository currently contains:
 
 - the functional specification in `Smart Commissioning Tool Specification.pdf`
-- the original UI prototypes in `smart_commissiong_tool_ui.jsx`, `preview.html`, and `smart_commissioning_tool_FIXED_fast.html`
 - the standalone UDMI payload validator in `device_udmi_payload_validation/`
 - the first production scaffold in `frontend/`, `backend/`, `worker/`, `infra/`, and `docs/`
+
+The original UI prototypes (`smart_commissiong_tool_ui.jsx`, `preview.html`, `smart_commissioning_tool_FIXED_fast.html`, and the zip-inspector dev tools) were removed after the baseline commit and remain available in git history (baseline commit `3471050`).
 
 ## Production Direction
 
@@ -17,7 +18,7 @@ The real application should be built as a multi-service system:
 - `infra/`: local Docker Compose stack for API, worker, Postgres, Redis, and object storage
 - `docs/`: product and architecture decisions
 
-The existing HTML and JSX files remain reference material for the product workflow and visual design. They are not the production runtime.
+The original HTML and JSX prototypes served as reference material for the product workflow and visual design; they were never the production runtime and can be retrieved from git history (baseline commit `3471050`).
 
 ## Repository Layout
 
@@ -27,9 +28,9 @@ frontend/
 backend/
 worker/
 infra/
+packaging/
+deliverables/
 device_udmi_payload_validation/
-preview.html
-smart_commissiong_tool_ui.jsx
 Smart Commissioning Tool Specification.pdf
 ```
 

@@ -8,7 +8,18 @@ version = "0.1.0"
 description = "FastAPI service scaffold for the Smart Commissioning Tool."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "Framework :: FastAPI",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+  "Topic :: System :: Monitoring",
+  "Development Status :: 3 - Alpha",
+  "Private :: Do Not Upload",
+]
 dependencies = [
+  "cryptography>=43.0,<47.0",
   "dramatiq[redis]>=1.17.1,<2.0",
   "fastapi>=0.115.5,<1.0",
   "httpx>=0.27.2,<1.0",
@@ -18,8 +29,15 @@ dependencies = [
   "psycopg[binary]>=3.2.3,<4.0",
   "redis>=5.2.0,<6.0",
   "python-multipart>=0.0.20,<1.0",
-  "openpyxl>=3.1.5,<4.0"
+  "openpyxl>=3.1.5,<4.0",
+  "prometheus-client>=0.21.0,<1.0"
 ]
+
+[project.optional-dependencies]
+# Optional tooling for generating an SBOM / license inventory with the
+# off-the-shelf tools. The in-repo scripts/generate_sbom.py uses only the
+# stdlib and needs none of these; see docs/SBOM.md.
+sbom = ["pip-licenses>=5.0", "cyclonedx-bom>=4.0"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

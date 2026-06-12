@@ -1,27 +1,35 @@
-import { ChangeEvent, useEffect, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
+  cancelRun,
   createImport,
   createReport,
+  downloadFile,
+  getDiscoveryResults,
+  getDiscoveryRun,
   getValidationIssues,
   getValidationRun,
   getImportErrors,
-  getImportTemplateUrl,
-  getReportDownloadUrl,
+  getImportTemplatePath,
+  getReportDownloadPath,
   ImportBatchSummary,
   ImportErrorReport,
   ImportProfileSummary,
   ImportType,
   JobStatus,
   listImportProfiles,
+  rollbackMqttConfigPublish,
   startMqttConfigPublishRun,
   startDiscoveryRun,
   startValidationRun,
   ReportSummary,
   ValidationIssueRecord,
 } from "../../api/client";
-import { getModuleByRoute } from "./moduleData";
+import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { moduleWorkspaces, type IssueRow } from "./operatorData";
+import { discoveryMetrics, discoveryViewFor } from "./discoveryRows";
+import { isTerminalStatus } from "./runFormat";
+import { useRunEvents } from "./useRunEvents";
 
 type ModulePageProps = {
   moduleRoute: string;
@@ -47,6 +55,14 @@ type ScanPort = {
   protocol: "tcp" | "udp";
 };
 
+// Which kind of run is being monitored, so we poll the right status endpoint.
+type ActiveRun = {
+  runId: string;
+  kind: "discovery" | "validation";
+};
+
+const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discovery"]);
+
 const validationModeCards = [
   {
     description:
@@ -71,7 +87,6 @@ const validationModeCards = [
   },
 ];
 
-const terminalStatuses: JobStatus[] = ["succeeded", "failed", "cancelled"];
 const defaultScanPorts: ScanPort[] = [
   { port: "47808", protocol: "udp" },
   { port: "80", protocol: "tcp" },
@@ -145,12 +160,13 @@ const defaultPointsetPayload = JSON.stringify(
 export function ModulePage({ moduleRoute }: ModulePageProps) {
   const module = getModuleByRoute(moduleRoute);
   const workspace = moduleWorkspaces[moduleRoute];
+  const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const [selectedImportType, setSelectedImportType] = useState<ImportType | "">("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importOutcome, setImportOutcome] = useState<ImportOutcome | null>(null);
   const [runOutcome, setRunOutcome] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
-  const [activeUdmiRunId, setActiveUdmiRunId] = useState<string | null>(null);
+  const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback | null>(null);
   const [publishTopic, setPublishTopic] = useState("334os/b1/ahu-1000001/config");
   const [publishPayload, setPublishPayload] = useState(
@@ -163,6 +179,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [publishPointsetTopic, setPublishPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
   const [publishWaitSeconds, setPublishWaitSeconds] = useState("5");
   const [scanPorts, setScanPorts] = useState<ScanPort[]>(defaultScanPorts);
+  const [scanAuthorized, setScanAuthorized] = useState(false);
+  const [scanDryRun, setScanDryRun] = useState(false);
   const [udmiExpectedSchedule, setUdmiExpectedSchedule] = useState(defaultExpectedSchedule);
   const [udmiStatePayload, setUdmiStatePayload] = useState(defaultStatePayload);
   const [udmiMetadataPayload, setUdmiMetadataPayload] = useState(defaultMetadataPayload);
@@ -173,30 +191,101 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("5");
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
+  const templateDownload = useFileDownload();
+  const reportDownload = useFileDownload();
+  const exportDownload = useFileDownload();
 
   const profilesQuery = useQuery({
     queryFn: listImportProfiles,
     queryKey: ["import-profiles"],
   });
 
+  // SSE-first run progress for the active run. status/stage/progress update
+  // live from the stream; on stream error/unsupported, sseActive flips false
+  // and the queries below resume the proven 1.5s polling (no regression).
+  const runEvents = useRunEvents(activeRun?.runId, Boolean(activeRun));
+  const sseEvent = runEvents.event;
+  const sseDriving = runEvents.sseActive && sseEvent !== null;
+
+  // Validation run monitor — polls until terminal (the proven 1.5s pattern,
+  // generalized to any validation run, not only UDMI). While SSE is the live
+  // source we pause the interval; if SSE drops we fall back to polling.
   const validationRunQuery = useQuery({
-    enabled: Boolean(activeUdmiRunId),
-    queryFn: () => getValidationRun(activeUdmiRunId ?? ""),
-    queryKey: ["validation-run", activeUdmiRunId],
+    enabled: Boolean(activeRun) && activeRun?.kind === "validation",
+    queryFn: () => getValidationRun(activeRun?.runId ?? ""),
+    queryKey: ["validation-run", activeRun?.runId],
     refetchInterval: (query) => {
-      const status = query.state.data?.status;
-      return status && terminalStatuses.includes(status) ? false : 1500;
+      if (isTerminalStatus(query.state.data?.status) || runEvents.reachedTerminal) {
+        return false;
+      }
+      return runEvents.sseActive ? false : 1500;
     },
   });
 
+  // Discovery run monitor — same polling contract, against the discovery
+  // status endpoint, so queued/running discovery runs update live.
+  const discoveryRunQuery = useQuery({
+    enabled: Boolean(activeRun) && activeRun?.kind === "discovery",
+    queryFn: () => getDiscoveryRun(activeRun?.runId ?? ""),
+    queryKey: ["discovery-run", activeRun?.runId],
+    refetchInterval: (query) => {
+      if (isTerminalStatus(query.state.data?.status) || runEvents.reachedTerminal) {
+        return false;
+      }
+      return runEvents.sseActive ? false : 1500;
+    },
+  });
+
+  const activeRunRecord =
+    activeRun?.kind === "discovery" ? discoveryRunQuery.data : validationRunQuery.data;
+  // Prefer the live SSE frame for status/stage/progress; fall back to the
+  // polled record for those fields and for everything else (result_summary).
+  const activeRunStatus = (sseDriving ? sseEvent?.status : undefined) ?? activeRunRecord?.status;
+  const activeRunStage = (sseDriving ? sseEvent?.stage : undefined) ?? activeRunRecord?.stage;
+  const activeRunProgress =
+    (sseDriving ? sseEvent?.progress_percent : undefined) ?? activeRunRecord?.progress_percent ?? 0;
+  const activeRunError = (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
+  const activeRunTerminal = isTerminalStatus(activeRunStatus);
+
+  // Validation issues — fetched only once the validation run is terminal.
   const validationIssuesQuery = useQuery({
     enabled:
-      Boolean(activeUdmiRunId) &&
-      Boolean(validationRunQuery.data?.status) &&
-      terminalStatuses.includes(validationRunQuery.data?.status as JobStatus),
-    queryFn: () => getValidationIssues(activeUdmiRunId ?? ""),
-    queryKey: ["validation-issues", activeUdmiRunId],
+      Boolean(activeRun) &&
+      activeRun?.kind === "validation" &&
+      isTerminalStatus(validationRunQuery.data?.status),
+    queryFn: () => getValidationIssues(activeRun?.runId ?? ""),
+    queryKey: ["validation-issues", activeRun?.runId],
   });
+
+  // Discovery results — fetched only once the discovery run is terminal.
+  const discoveryResultsQuery = useQuery({
+    enabled:
+      Boolean(activeRun) &&
+      activeRun?.kind === "discovery" &&
+      isTerminalStatus(discoveryRunQuery.data?.status),
+    queryFn: () => getDiscoveryResults(activeRun?.runId ?? ""),
+    queryKey: ["discovery-results", activeRun?.runId],
+  });
+
+  // When SSE reports the run terminal but polling is paused, the polled record
+  // (and its result_summary) may still be mid-run. Trigger a single refetch so
+  // the terminal-gated issues/results queries fire against fresh data.
+  const refetchValidationRun = validationRunQuery.refetch;
+  const refetchDiscoveryRun = discoveryRunQuery.refetch;
+  useEffect(() => {
+    if (!runEvents.reachedTerminal || !activeRun) {
+      return;
+    }
+    if (activeRun.kind === "discovery") {
+      void refetchDiscoveryRun();
+    } else {
+      void refetchValidationRun();
+    }
+  }, [runEvents.reachedTerminal, activeRun, refetchDiscoveryRun, refetchValidationRun]);
+
+  const resetTemplateDownload = templateDownload.reset;
+  const resetReportDownload = reportDownload.reset;
+  const resetExportDownload = exportDownload.reset;
 
   useEffect(() => {
     setSelectedImportType(module.importTypes[0] ?? "");
@@ -204,10 +293,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setImportOutcome(null);
     setRunOutcome(null);
     setLastReport(null);
-    setActiveUdmiRunId(null);
+    setActiveRun(null);
     setCopyFeedback(null);
     setSelectedResultIndex(0);
-  }, [module.route, module.importTypes]);
+    setScanAuthorized(false);
+    setScanDryRun(false);
+    resetTemplateDownload();
+    resetReportDownload();
+    resetExportDownload();
+  }, [module.route, module.importTypes, resetTemplateDownload, resetReportDownload, resetExportDownload]);
 
   const importMutation = useMutation({
     mutationFn: async (input: { importType: ImportType; file: File }) => {
@@ -235,12 +329,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }
 
       if (action.kind === "discovery") {
+        // Real (non-dry-run) scans must carry the authorization contract or the
+        // backend returns 403. The operator confirms via the checkbox; a dry-run
+        // previews the plan with no I/O and needs no authorization.
         return startDiscoveryRun({
           jobType: action.jobType,
-          parameters:
-            action.runKind === "ip"
-              ? { port_specification: scanPortSpecification(scanPorts) }
-              : undefined,
+          parameters: buildDiscoveryParameters(action, {
+            authorized: scanAuthorized,
+            dryRun: scanDryRun,
+            scanPorts,
+          }),
           runKind: action.runKind,
         });
       }
@@ -273,8 +371,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       if ("run_id" in result) {
         setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
         setLastReport(null);
-        if (action?.kind === "validation" && action.runKind === "udmi") {
-          setActiveUdmiRunId(result.run_id);
+        if (action?.kind === "discovery") {
+          setActiveRun({ kind: "discovery", runId: result.run_id });
+        } else if (action?.kind === "validation") {
+          setActiveRun({ kind: "validation", runId: result.run_id });
         }
       } else {
         setLastReport(result);
@@ -297,7 +397,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     onSuccess: (result) => {
       setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
-      setActiveUdmiRunId(result.run_id);
+      setActiveRun({ kind: "validation", runId: result.run_id });
+    },
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: (runId: string) => cancelRun(runId),
+    onSuccess: () => {
+      if (activeRun?.kind === "discovery") {
+        void discoveryRunQuery.refetch();
+      } else {
+        void validationRunQuery.refetch();
+      }
+    },
+  });
+
+  const rollbackMutation = useMutation({
+    mutationFn: (runId: string) => rollbackMqttConfigPublish(runId),
+    onSuccess: (result) => {
+      setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
     },
   });
 
@@ -307,16 +425,56 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const selectedProfile = availableProfiles.find(
     (profile) => profile.import_type === selectedImportType,
   );
+
+  // Live issues for ANY terminal validation run (UDMI, BACnet, mapping), not
+  // only UDMI. Falls back to the labelled sample workspace.issues otherwise.
   const liveIssues =
-    module.route === "udmi-validation" && activeUdmiRunId && validationIssuesQuery.data
+    activeRun?.kind === "validation" && validationIssuesQuery.data
       ? validationIssuesQuery.data.issues.map(toIssueRow)
       : null;
   const visibleIssues = liveIssues ?? workspace?.issues ?? [];
-  const validationRun = validationRunQuery.data;
-  const validationStatusClass = validationRun ? toStatusClass(validationRun.status) : "queued";
-  const resultRows = workspace?.rows ?? [];
+
+  // Live discovery results view (ip/bacnet/mqtt). Built only after a terminal
+  // run; until then the table falls back to labelled sample rows.
+  const discoveryView = useMemo(() => {
+    if (!isDiscoveryModule || !discoveryResultsQuery.data) {
+      return null;
+    }
+    return discoveryViewFor(module.route, discoveryResultsQuery.data);
+  }, [isDiscoveryModule, discoveryResultsQuery.data, module.route]);
+
+  const liveMetrics = useMemo(() => {
+    if (!isDiscoveryModule || !discoveryResultsQuery.data) {
+      return null;
+    }
+    return discoveryMetrics(module.route, discoveryResultsQuery.data);
+  }, [isDiscoveryModule, discoveryResultsQuery.data, module.route]);
+
+  const usingLiveResults = Boolean(discoveryView);
+  const tableColumns = discoveryView?.columns ?? workspace?.columns ?? [];
+  const resultRows = discoveryView?.rows ?? workspace?.rows ?? [];
   const selectedResult = resultRows[selectedResultIndex] ?? resultRows[0] ?? null;
-  const resultDetails = selectedResult ? buildResultDetailItems(module.route, selectedResult) : [];
+  const resultDetails = selectedResult
+    ? buildResultDetailItems(module.route, selectedResult, usingLiveResults)
+    : [];
+
+  const primaryMetric = liveMetrics?.primary ?? workspace?.primaryMetric ?? "Ready";
+  const primaryMetricLabel = liveMetrics?.primaryLabel ?? workspace?.primaryMetricLabel ?? module.integrationStatus;
+  const secondaryMetric = liveMetrics?.secondary ?? workspace?.secondaryMetric ?? String(module.importTypes.length);
+  const secondaryMetricLabel =
+    liveMetrics?.secondaryLabel ?? workspace?.secondaryMetricLabel ?? "accepted inputs";
+
+  const activeStatusClass = activeRunStatus ? toStatusClass(activeRunStatus) : "queued";
+  const canCancel = Boolean(activeRun) && Boolean(activeRunStatus) && !activeRunTerminal;
+
+  // Export wiring: a report download fits the reports module (uses the last
+  // queued report). Elsewhere there is no per-run results download endpoint, so
+  // the button is disabled with an explanatory tooltip rather than faked.
+  const exportReport = module.route === "reports" ? lastReport : null;
+  const exportEnabled = Boolean(exportReport);
+  const exportTooltip = exportEnabled
+    ? `Download ${exportReport?.file_name ?? "report"}`
+    : "Queue a report first to enable a real download. Discovery/validation results have no per-run file export endpoint yet.";
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
@@ -353,6 +511,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setScanPorts((current) => current.filter((_entry, entryIndex) => entryIndex !== index));
   };
 
+  const handleExport = () => {
+    if (!exportReport) {
+      return;
+    }
+    void exportDownload.download(
+      "export",
+      getReportDownloadPath(exportReport.report_id),
+      exportReport.file_name || `${exportReport.report_id}.${exportReport.output_format}`,
+    );
+  };
+
   const handleCopyPayload = async (payload: string, label: string) => {
     try {
       await navigator.clipboard.writeText(payload);
@@ -365,6 +534,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   };
 
+  // For real (non-dry-run) discovery the operator must confirm authorization.
+  const discoveryBlocked = isDiscoveryModule && !scanDryRun && !scanAuthorized;
+
   return (
     <div className="app-page">
       <section className="module-hero">
@@ -375,12 +547,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </div>
         <div className="module-metrics">
           <article>
-            <strong>{workspace?.primaryMetric ?? "Ready"}</strong>
-            <span>{workspace?.primaryMetricLabel ?? module.integrationStatus}</span>
+            <strong>{primaryMetric}</strong>
+            <span>{primaryMetricLabel}</span>
           </article>
           <article>
-            <strong>{workspace?.secondaryMetric ?? module.importTypes.length}</strong>
-            <span>{workspace?.secondaryMetricLabel ?? "accepted inputs"}</span>
+            <strong>{secondaryMetric}</strong>
+            <span>{secondaryMetricLabel}</span>
           </article>
         </div>
       </section>
@@ -435,21 +607,46 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </p>
                   </div>
                   <div className="inline-actions">
-                    <a
+                    <button
                       className="secondary-button compact"
-                      download
-                      href={getImportTemplateUrl(selectedImportType, "xlsx")}
+                      disabled={templateDownload.pendingKey !== null}
+                      onClick={() =>
+                        void templateDownload.download(
+                          "template-xlsx",
+                          getImportTemplatePath(selectedImportType, "xlsx"),
+                          `${selectedImportType}_template.xlsx`,
+                        )
+                      }
+                      type="button"
                     >
-                      Download XLSX
-                    </a>
-                    <a
+                      {templateDownload.pendingKey === "template-xlsx"
+                        ? "Downloading..."
+                        : "Download XLSX"}
+                    </button>
+                    <button
                       className="secondary-button compact"
-                      download
-                      href={getImportTemplateUrl(selectedImportType, "csv")}
+                      disabled={templateDownload.pendingKey !== null}
+                      onClick={() =>
+                        void templateDownload.download(
+                          "template-csv",
+                          getImportTemplatePath(selectedImportType, "csv"),
+                          `${selectedImportType}_template.csv`,
+                        )
+                      }
+                      type="button"
                     >
-                      Download CSV
-                    </a>
+                      {templateDownload.pendingKey === "template-csv"
+                        ? "Downloading..."
+                        : "Download CSV"}
+                    </button>
                   </div>
+                </div>
+              )}
+
+              {templateDownload.error && (
+                <div className="state-panel error">
+                  <strong>Template download failed</strong>
+                  <span>{templateDownload.error}</span>
                 </div>
               )}
 
@@ -496,24 +693,56 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <h3>Run Controls</h3>
             </div>
           </div>
+
+          {isDiscoveryModule && (
+            <div className="form-stack scan-authorization">
+              <label className="confirm-row">
+                <input
+                  checked={scanDryRun}
+                  onChange={(event) => setScanDryRun(event.target.checked)}
+                  type="checkbox"
+                />
+                Dry run — preview the scan plan with no network I/O (no authorization needed).
+              </label>
+              {!scanDryRun && (
+                <label className="confirm-row">
+                  <input
+                    checked={scanAuthorized}
+                    onChange={(event) => setScanAuthorized(event.target.checked)}
+                    type="checkbox"
+                  />
+                  I am authorized to scan this network. Real scans without this are rejected (403).
+                </label>
+              )}
+            </div>
+          )}
+
           <div className="run-list">
             {module.runActions.length > 0 ? (
-              module.runActions.map((action, index) => (
-                <div className="run-card" key={action.label}>
-                  <div>
-                    <strong>{action.label}</strong>
-                    <span>{action.helper}</span>
+              module.runActions.map((action, index) => {
+                const blocked = action.kind === "discovery" && discoveryBlocked;
+                return (
+                  <div className="run-card" key={action.label}>
+                    <div>
+                      <strong>{action.label}</strong>
+                      <span>{action.helper}</span>
+                    </div>
+                    <button
+                      className="secondary-button compact"
+                      disabled={runMutation.isPending || blocked}
+                      onClick={() => runMutation.mutate(index)}
+                      title={
+                        blocked
+                          ? "Confirm scan authorization (or enable dry run) before queueing a real scan."
+                          : undefined
+                      }
+                      type="button"
+                    >
+                      {runMutation.isPending ? "Queueing..." : scanDryRun && action.kind === "discovery" ? "Preview" : "Queue"}
+                    </button>
                   </div>
-                  <button
-                    className="secondary-button compact"
-                    disabled={runMutation.isPending}
-                    onClick={() => runMutation.mutate(index)}
-                    type="button"
-                  >
-                    {runMutation.isPending ? "Queueing..." : "Queue"}
-                  </button>
-                </div>
-              ))
+                );
+              })
             ) : (
               <div className="empty-workspace">
                 <strong>Saved synchronously</strong>
@@ -534,10 +763,31 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <strong>Accepted by API</strong>
               <span>{runOutcome}</span>
               {lastReport && (
-                <a className="secondary-button compact inline-link-button" download href={getReportDownloadUrl(lastReport.report_id)}>
-                  Download {lastReport.output_format.toUpperCase()}
-                </a>
+                <button
+                  className="secondary-button compact inline-link-button"
+                  disabled={reportDownload.pendingKey !== null}
+                  onClick={() =>
+                    void reportDownload.download(
+                      "report",
+                      getReportDownloadPath(lastReport.report_id),
+                      lastReport.file_name ||
+                        `${lastReport.report_id}.${lastReport.output_format}`,
+                    )
+                  }
+                  type="button"
+                >
+                  {reportDownload.pendingKey === "report"
+                    ? "Downloading..."
+                    : `Download ${lastReport.output_format.toUpperCase()}`}
+                </button>
               )}
+            </div>
+          )}
+
+          {reportDownload.error && (
+            <div className="state-panel error">
+              <strong>Report download failed</strong>
+              <span>{reportDownload.error}</span>
             </div>
           )}
 
@@ -548,43 +798,83 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </div>
           )}
 
-          {activeUdmiRunId && (
+          {activeRun && (
             <div className="state-panel run-monitor">
               <div className="run-monitor-heading">
                 <div>
-                  <strong>UDMI run monitor</strong>
-                  <span>{activeUdmiRunId}</span>
+                  <strong>{activeRun.kind === "discovery" ? "Discovery" : "Validation"} run monitor</strong>
+                  <span>{activeRun.runId}</span>
                 </div>
-                <span className={`status-token ${validationStatusClass}`}>
-                  {validationRun?.status ?? "queued"}
+                <span className={`status-token ${activeStatusClass}`}>
+                  {activeRunStatus ?? "queued"}
                 </span>
               </div>
 
               <div className="progress-track">
-                <div style={{ width: `${validationRun?.progress_percent ?? 0}%` }} />
+                <div style={{ width: `${activeRunProgress}%` }} />
               </div>
 
               <dl className="summary-grid">
                 <div>
                   <dt>Stage</dt>
-                  <dd>{validationRun?.stage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
+                  <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
                 </div>
                 <div>
                   <dt>Expected</dt>
-                  <dd>{formatSummaryValue(validationRun?.result_summary.expected_devices)}</dd>
+                  <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.expected_devices)}</dd>
                 </div>
                 <div>
                   <dt>Publishing</dt>
-                  <dd>{formatSummaryValue(validationRun?.result_summary.publishing_seen)}</dd>
+                  <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.publishing_seen)}</dd>
                 </div>
                 <div>
                   <dt>Issues</dt>
-                  <dd>{formatSummaryValue(validationRun?.result_summary.issue_count)}</dd>
+                  <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}</dd>
                 </div>
               </dl>
 
-              {validationRun?.error_message && (
-                <span className="error-text">{validationRun.error_message}</span>
+              <div className="inline-actions">
+                {canCancel && (
+                  <button
+                    className="secondary-button compact"
+                    disabled={cancelMutation.isPending}
+                    onClick={() => cancelMutation.mutate(activeRun.runId)}
+                    type="button"
+                  >
+                    {cancelMutation.isPending ? "Cancelling..." : "Cancel run"}
+                  </button>
+                )}
+                {activeRun.kind === "validation" &&
+                  validationRunQuery.data?.job_type === "mqtt_config_publish" &&
+                  activeRunTerminal && (
+                    <button
+                      className="secondary-button compact"
+                      disabled={rollbackMutation.isPending}
+                      onClick={() => rollbackMutation.mutate(activeRun.runId)}
+                      type="button"
+                    >
+                      {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
+                    </button>
+                  )}
+              </div>
+
+              {cancelMutation.isError && (
+                <span className="error-text">{cancelMutation.error.message}</span>
+              )}
+              {rollbackMutation.isError && (
+                <span className="error-text">{rollbackMutation.error.message}</span>
+              )}
+
+              {activeRunError && (
+                <span className="error-text">{activeRunError}</span>
+              )}
+
+              {activeRun.kind === "discovery" && discoveryResultsQuery.isError && (
+                <span className="error-text">
+                  Could not load discovery results: {discoveryResultsQuery.error instanceof Error
+                    ? discoveryResultsQuery.error.message
+                    : "request failed"}
+                </span>
               )}
             </div>
           )}
@@ -827,39 +1117,75 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <span className="eyebrow">Results</span>
               <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
             </div>
-            <button className="secondary-button compact" type="button">
-              Export
+            <button
+              className="secondary-button compact"
+              disabled={!exportEnabled || exportDownload.pendingKey !== null}
+              onClick={handleExport}
+              title={exportTooltip}
+              type="button"
+            >
+              {exportDownload.pendingKey === "export" ? "Exporting..." : "Export"}
             </button>
           </div>
+
+          {!usingLiveResults && resultRows.length > 0 && (
+            <div className="sample-banner" role="note">
+              {isDiscoveryModule
+                ? "Sample preview — queue a discovery run to replace this with live results."
+                : "Sample preview — per-asset result rows are illustrative. The live issues panel and run monitor reflect real run data."}
+            </div>
+          )}
+          {usingLiveResults && (
+            <div className="sample-banner" role="note">
+              Live discovery observations. Register-comparison verdicts (matched / rogue / missing)
+              are produced by validation, not discovery, so no "Result" column is shown here.
+            </div>
+          )}
+
           <div className="data-table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  {(workspace?.columns ?? []).map((column) => (
-                    <th key={column}>{column}</th>
-                  ))}
-                  {resultRows.length > 0 && <th>Details</th>}
-                </tr>
-              </thead>
-              <tbody>
-                {resultRows.map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    {(workspace?.columns ?? []).map((column) => (
-                      <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
+            {resultRows.length > 0 ? (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    {tableColumns.map((column) => (
+                      <th key={column}>{column}</th>
                     ))}
-                    <td>
-                      <button
-                        className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
-                        onClick={() => setSelectedResultIndex(rowIndex)}
-                        type="button"
-                      >
-                        View
-                      </button>
-                    </td>
+                    <th>Details</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {resultRows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {tableColumns.map((column) => (
+                        <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
+                      ))}
+                      <td>
+                        <button
+                          className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
+                          onClick={() => setSelectedResultIndex(rowIndex)}
+                          type="button"
+                        >
+                          View
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="empty-workspace">
+                <strong>
+                  {isDiscoveryModule && activeRun && !activeRunTerminal
+                    ? "Run in progress..."
+                    : "No results yet"}
+                </strong>
+                <span>
+                  {isDiscoveryModule
+                    ? "Queue a discovery run; observed devices, points, or topics appear here once it completes."
+                    : "Queue a run to populate results."}
+                </span>
+              </div>
+            )}
           </div>
         </article>
 
@@ -898,16 +1224,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 ) : (
                   <div className="empty-workspace">
                     <strong>No active findings</strong>
-                    <span>This module has no blocking issue in the current demo data.</span>
+                    <span>
+                      {liveIssues
+                        ? "This validation run reported no issues."
+                        : "Run a validation to surface live findings here."}
+                    </span>
                   </div>
                 )}
               </div>
 
               <div className="evidence-list">
                 <h4>Evidence outputs</h4>
-                {activeUdmiRunId && Boolean(validationRun?.result_summary.source_fixture) && (
-                  <span>UDMI fixture summary</span>
-                )}
+                {activeRun?.kind === "validation" &&
+                  Boolean(validationRunQuery.data?.result_summary.source_fixture) && (
+                    <span>Validation fixture summary</span>
+                  )}
                 {(workspace?.evidence ?? []).map((item) => (
                   <span key={item}>{item}</span>
                 ))}
@@ -926,6 +1257,29 @@ function scanPortSpecification(ports: ScanPort[]): string {
     .filter((entry) => entry.port)
     .map((entry) => `${entry.port}/${entry.protocol}`)
     .join(", ");
+}
+
+// Builds discovery run parameters, attaching the authorization contract for
+// real scans and the dry_run flag for previews. IP scans also carry the port
+// specification. Mirrors the backend safety contract (parameters.authorized).
+function buildDiscoveryParameters(
+  action: Extract<ModuleRunAction, { kind: "discovery" }>,
+  options: { authorized: boolean; dryRun: boolean; scanPorts: ScanPort[] },
+): Record<string, unknown> {
+  const parameters: Record<string, unknown> = {};
+  if (options.dryRun) {
+    parameters.dry_run = true;
+  } else {
+    parameters.authorized = options.authorized;
+    parameters.scan_authorization = {
+      authorized: options.authorized,
+      authorized_by: "frontend-operator",
+    };
+  }
+  if (action.runKind === "ip") {
+    parameters.port_specification = scanPortSpecification(options.scanPorts);
+  }
+  return parameters;
 }
 
 function buildUdmiValidationParameters(input: {
@@ -959,6 +1313,7 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
       return parsed as Record<string, unknown>;
     }
   } catch (error) {
+    // eslint-disable-next-line preserve-caught-error -- caught message is embedded in the thrown error text; `{ cause }` needs the ES2022 Error lib, beyond this tsconfig's ES2020 target.
     throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : "parse failed"}`);
   }
   throw new Error(`${label} must be a JSON object.`);
@@ -1019,7 +1374,7 @@ function renderCell(
 ) {
   if (column === "Raw Payload" && row[column]) {
     return (
-      <button className="secondary-button compact" onClick={() => onCopyPayload(row[column], row.Asset ?? "Selected")} type="button">
+      <button className="secondary-button compact" onClick={() => onCopyPayload(row[column], row.Asset ?? row.Topic ?? "Selected")} type="button">
         Copy payload
       </button>
     );
@@ -1046,6 +1401,8 @@ function DefaultTemplateInspector({
   selectedImportType: ImportType;
   selectedProfile?: ImportProfileSummary;
 }) {
+  const { download, error, pendingKey } = useFileDownload();
+
   return (
     <div className="template-inspector">
       <p className="section-copy">
@@ -1053,13 +1410,41 @@ function DefaultTemplateInspector({
         evidence. Upload this template after filling in the expected devices for the project.
       </p>
       <div className="inline-actions">
-        <a className="primary-button compact" download href={getImportTemplateUrl(selectedImportType, "xlsx")}>
-          Download default XLSX
-        </a>
-        <a className="secondary-button compact" download href={getImportTemplateUrl(selectedImportType, "csv")}>
-          Download CSV copy
-        </a>
+        <button
+          className="primary-button compact"
+          disabled={pendingKey !== null}
+          onClick={() =>
+            void download(
+              "inspector-xlsx",
+              getImportTemplatePath(selectedImportType, "xlsx"),
+              `${selectedImportType}_template.xlsx`,
+            )
+          }
+          type="button"
+        >
+          {pendingKey === "inspector-xlsx" ? "Downloading..." : "Download default XLSX"}
+        </button>
+        <button
+          className="secondary-button compact"
+          disabled={pendingKey !== null}
+          onClick={() =>
+            void download(
+              "inspector-csv",
+              getImportTemplatePath(selectedImportType, "csv"),
+              `${selectedImportType}_template.csv`,
+            )
+          }
+          type="button"
+        >
+          {pendingKey === "inspector-csv" ? "Downloading..." : "Download CSV copy"}
+        </button>
       </div>
+      {error && (
+        <div className="state-panel error">
+          <strong>Template download failed</strong>
+          <span>{error}</span>
+        </div>
+      )}
       <div className="evidence-list template-fields">
         <h4>Template columns</h4>
         {(selectedProfile?.required_columns ?? []).map((column) => (
@@ -1070,28 +1455,86 @@ function DefaultTemplateInspector({
   );
 }
 
-function buildResultDetailItems(route: string, row: Record<string, string>): DetailItem[] {
+/**
+ * Drives an authenticated file download. Plain `<a download href>` anchors
+ * navigate outside fetch(), so they cannot carry the X-API-Key header and
+ * 401 in hosted deployments; this routes downloads through downloadFile().
+ */
+function useFileDownload() {
+  const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const download = useCallback(async (key: string, path: string, fallbackFilename: string) => {
+    setPendingKey(key);
+    setError(null);
+    try {
+      const { blob, filename } = await downloadFile(path);
+      triggerBlobDownload(blob, filename ?? fallbackFilename);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Download failed.");
+    } finally {
+      setPendingKey(null);
+    }
+  }, []);
+
+  const reset = useCallback(() => {
+    setPendingKey(null);
+    setError(null);
+  }, []);
+
+  return { download, error, pendingKey, reset };
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+function buildResultDetailItems(
+  route: string,
+  row: Record<string, string>,
+  live: boolean,
+): DetailItem[] {
   if (route === "bacnet-discovery") {
     return [
       { label: "Device", value: row.Device ?? "Selected BACnet device" },
       { label: "Instance", value: row.Instance ?? "Unknown" },
+      { label: "Address", value: row.Address ?? "—" },
+      { label: "Vendor", value: row.Vendor ?? "—" },
       { label: "Objects indexed", value: row.Objects ?? "Pending" },
-      { label: "Discovery status", value: row.Result ?? "Pending" },
-      { label: "Last discovered", value: row["Device Last Discovered"] ?? "Not recorded" },
+      { label: "Last discovered", value: row.Discovered ?? row["Device Last Discovered"] ?? "Not recorded" },
       {
-        label: "Object drilldown",
-        value:
-          "Show object type, instance, object name, present value, units, reliability, status flags, priority array, and timestamp.",
-      },
-      {
-        label: "Readable grouping",
-        value:
-          "Group by equipment, then point family; highlight missing, stale, unreliable, and unit-mismatch points first.",
+        label: live ? "Note" : "Object drilldown",
+        value: live
+          ? "Object-level present values are in the per-run points endpoint; comparison verdicts come from a validation run."
+          : "Show object type, instance, object name, present value, units, reliability, status flags, priority array, and timestamp.",
       },
     ];
   }
 
-  if (route === "mqtt-discovery" || route === "udmi-validation") {
+  if (route === "mqtt-discovery") {
+    return [
+      { label: "Topic", value: row.Topic ?? "State, metadata, or pointset topic" },
+      { label: "Asset", value: row.Asset ?? "—" },
+      { label: "Messages", value: row["Message Count"] ?? "Pending" },
+      { label: "Last payload seen", value: row["Last Payload Seen"] ?? "Not recorded" },
+      { label: "Connection status", value: row["Detailed Status"] ?? "Pending" },
+      {
+        label: "Note",
+        value: live
+          ? "Raw payloads are captured as observed. Type/interval verdicts come from a validation run, not discovery."
+          : "Show decoded JSON, extracted point names, present values, units, timestamp freshness, and schema warnings together.",
+      },
+    ];
+  }
+
+  if (route === "udmi-validation") {
     return [
       { label: "Asset", value: row.Asset ?? "Selected MQTT asset" },
       { label: "Topic", value: row.Topic ?? "State, metadata, or pointset topic" },
@@ -1101,12 +1544,7 @@ function buildResultDetailItems(route: string, row: Record<string, string>): Det
       {
         label: "Live data view",
         value:
-          "Show decoded JSON, extracted point names, present values, units, timestamp freshness, and schema warnings together.",
-      },
-      {
-        label: "Operator summary",
-        value:
-          "Start with plain English status, then allow expanding raw payload evidence only when someone needs to audit it.",
+          "Run-level results and live issues come from the validation run; the per-asset rows below are a labelled sample.",
       },
     ];
   }
@@ -1120,12 +1558,7 @@ function buildResultDetailItems(route: string, row: Record<string, string>): Det
       {
         label: "Comparison logic",
         value:
-          "Show mapped source fields, unit conversion, tolerance, pass/warn/fail state, and the latest timestamps from both protocols.",
-      },
-      {
-        label: "Human display",
-        value:
-          "Use one row per point with expandable evidence so engineers can scan mismatches before reading raw values.",
+          "Comparison verdicts live in the validation run result_summary and issues. The rows below are a labelled sample.",
       },
     ];
   }

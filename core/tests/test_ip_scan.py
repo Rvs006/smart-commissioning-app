@@ -1,0 +1,324 @@
+"""Unit tests for the IP discovery engine.
+
+HONESTY: there is NO real building network here. Everything runs against
+``127.0.0.1`` plus an ephemeral loopback ``socket`` listener that the test
+itself opens/closes, OR against an injected fake connect-probe. The real
+remote-network sweep path (default ``asyncio.open_connection`` against site
+hosts, reverse DNS against a real resolver) is NOT exercised — it is listed in
+the task's ``live_untested`` output and requires on-site validation.
+"""
+
+import socket
+import unittest
+from typing import Any
+
+from smart_commissioning_core.engines import ip_scan
+from smart_commissioning_core.engines.base import ThrottleConfig
+
+
+class FakeRunStore:
+    """In-memory RunStore capturing run wrapper calls, with cancellation support."""
+
+    def __init__(self, *, cancel_after: int | None = None) -> None:
+        self.status_calls: list[dict[str, Any]] = []
+        self.summary_calls: list[dict[str, Any]] = []
+        self.issues_calls: list[list[Any]] = []
+        self.record_summary: dict[str, Any] = {}
+        self.last_status: str | None = None
+        self._cancel = False
+        self._cancel_checks = 0
+        self._cancel_after = cancel_after
+
+    def update_run_status(self, run_id: str, *, status: str, stage: str | None = None,
+                          progress_percent: int | None = None, error_message: str | None = None) -> dict[str, Any]:
+        self.status_calls.append({"status": status, "stage": stage,
+                                  "progress_percent": progress_percent, "error_message": error_message})
+        self.last_status = status
+        return {"run_id": run_id, "status": status, "stage": stage,
+                "progress_percent": progress_percent, "error_message": error_message,
+                "result_summary": dict(self.record_summary)}
+
+    def update_result_summary(self, run_id: str, result_summary: dict[str, Any], *, merge: bool = True) -> dict[str, Any]:
+        self.summary_calls.append(dict(result_summary))
+        if merge:
+            self.record_summary.update(result_summary)
+        else:
+            self.record_summary = dict(result_summary)
+        return {"run_id": run_id, "result_summary": dict(self.record_summary)}
+
+    def replace_issues(self, run_id: str, issues: list[Any]) -> dict[str, Any]:
+        self.issues_calls.append(list(issues))
+        return {"run_id": run_id}
+
+    def request_cancel(self, run_id: str) -> dict[str, Any]:
+        self._cancel = True
+        return {"run_id": run_id}
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        self._cancel_checks += 1
+        if self._cancel_after is not None and self._cancel_checks >= self._cancel_after:
+            self._cancel = True
+        return self._cancel
+
+
+_AUTH = {"authorized": True}
+
+
+class TargetExpansionTests(unittest.TestCase):
+    def test_cidr_expands_to_hosts(self) -> None:
+        hosts = ip_scan._expand_hosts({"cidr": "10.0.0.0/30"})
+        # /30 -> .1 and .2 (network/broadcast dropped)
+        self.assertEqual(hosts, ["10.0.0.1", "10.0.0.2"])
+
+    def test_slash_32_keeps_single_host(self) -> None:
+        self.assertEqual(ip_scan._expand_hosts({"cidr": "192.168.1.5/32"}), ["192.168.1.5"])
+
+    def test_range_inclusive(self) -> None:
+        hosts = ip_scan._expand_hosts({"start": "10.0.0.1", "end": "10.0.0.3"})
+        self.assertEqual(hosts, ["10.0.0.1", "10.0.0.2", "10.0.0.3"])
+
+    def test_missing_spec_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            ip_scan._expand_hosts({})
+
+    def test_reversed_range_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            ip_scan._expand_hosts({"start": "10.0.0.5", "end": "10.0.0.1"})
+
+    def test_oversized_cidr_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            ip_scan._expand_hosts({"cidr": "10.0.0.0/8"})
+
+    def test_ports_default_and_validation(self) -> None:
+        self.assertEqual(ip_scan._resolve_ports({}), list(ip_scan.DEFAULT_PORTS))
+        self.assertEqual(ip_scan._resolve_ports({"ports": [22, 22, 80]}), [22, 80])
+        with self.assertRaises(ValueError):
+            ip_scan._resolve_ports({"ports": [99999]})
+        with self.assertRaises(ValueError):
+            ip_scan._resolve_ports({"ports": []})
+
+
+class DryRunTests(unittest.TestCase):
+    def test_dry_run_opens_no_socket_and_returns_plan(self) -> None:
+        store = FakeRunStore()
+        contacted: list[tuple[str, int]] = []
+
+        async def spy_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.append((host, port))  # pragma: no cover - must never run
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_dry",
+            {"cidr": "10.0.0.0/30", "ports": [80, 443], "reverse_dns": True},
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            dry_run=True,
+            connect=spy_connect,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(contacted, [], "dry run must not open any socket")
+        summary = store.summary_calls[-1]
+        self.assertTrue(summary["dry_run"])
+        plan = summary["dry_run_plan"]
+        self.assertEqual(plan["engine"], "ip_discovery")
+        self.assertTrue(plan["dry_run"])
+        # 2 hosts x 2 ports = 4 (ip, port) targets
+        self.assertEqual(plan["target_count"], 4)
+        self.assertIn({"ip": "10.0.0.1", "port": 80}, plan["targets"])
+        self.assertIn("reverse-dns", plan["actions"])
+        self.assertEqual(summary["hosts_responsive"], 0)
+
+    def test_dry_run_does_not_require_authorization(self) -> None:
+        # A dry run is side-effect free, so previewing the plan without auth is OK.
+        store = FakeRunStore()
+        result = ip_scan.process_ip_discovery_run(
+            "run_dry2", {"cidr": "10.0.0.0/31"},
+            run_store=store, execution_mode="x", dry_run=True,
+        )
+        self.assertEqual(result["status"], "succeeded")
+
+
+class AuthorizationTests(unittest.TestCase):
+    def test_real_scan_without_authorization_fails(self) -> None:
+        store = FakeRunStore()
+        contacted: list[tuple[str, int]] = []
+
+        async def spy_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.append((host, port))  # pragma: no cover
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_noauth", {"cidr": "10.0.0.0/31", "ports": [80]},
+            run_store=store, execution_mode="x", connect=spy_connect,
+        )
+        # run_engine swallows the ScanNotAuthorized and marks failed with a
+        # sanitized message — and crucially NO socket was contacted.
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [], "unauthorized scan must not contact any target")
+        self.assertNotIn("10.0.0", result["error_message"] or "")
+
+
+class FakeConnectScanTests(unittest.TestCase):
+    """Real scan logic against an injected deterministic connect probe."""
+
+    def test_responsive_host_reported_with_open_ports(self) -> None:
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            # 10.0.0.1 has 80 open; 10.0.0.2 has nothing open.
+            return host == "10.0.0.1" and port == 80
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_fc", {**_AUTH, "cidr": "10.0.0.0/30", "ports": [80, 443]},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        assets = summary["discovered_assets"]
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]["ip_address"], "10.0.0.1")
+        self.assertEqual(assets[0]["match_basis"], "ip")
+        self.assertEqual([p["port"] for p in assets[0]["observed_ports"]], [80])
+        self.assertEqual(assets[0]["observed_ports"][0]["service"], "http")
+        self.assertEqual(summary["hosts_scanned"], 2)
+        self.assertEqual(summary["hosts_responsive"], 1)
+
+    def test_closed_port_host_absent(self) -> None:
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return False  # nothing open anywhere
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_closed", {**_AUTH, "cidr": "10.0.0.0/30", "ports": [80, 443]},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(store.summary_calls[-1]["discovered_assets"], [])
+        self.assertEqual(store.summary_calls[-1]["hosts_responsive"], 0)
+
+    def test_structured_records_built_for_persistence(self) -> None:
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return port == 47808  # BACnet open on every host
+
+        ip_scan.process_ip_discovery_run(
+            "run_rec", {**_AUTH, "cidr": "10.0.0.0/30", "ports": [80, 47808],
+                        "project_id": "P1", "site_id": "S1"},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(len(persisted), 1)
+        run_id, records = persisted[0]
+        self.assertEqual(run_id, "run_rec")
+        self.assertEqual(len(records), 2)  # both hosts have 47808 open
+        rec = records[0]
+        self.assertEqual(rec["device_type"], "ip_host")
+        self.assertEqual(rec["project_id"], "P1")
+        self.assertEqual(rec["attributes"]["open_ports"], [47808])
+
+    def test_throttle_concurrency_bound_respected(self) -> None:
+        store = FakeRunStore()
+        state = {"in_flight": 0, "peak": 0}
+
+        import asyncio
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            await asyncio.sleep(0.005)
+            state["in_flight"] -= 1
+            return False
+
+        ip_scan.process_ip_discovery_run(
+            # 4 hosts x 5 ports = 20 probe units; bound concurrency to 3.
+            "run_thr", {**_AUTH, "cidr": "10.0.0.0/29", "ports": [80, 443, 47808, 1883, 502]},
+            run_store=store, execution_mode="x",
+            throttle=ThrottleConfig(max_concurrency=3, rate_limit_per_sec=None),
+            connect=fake_connect,
+        )
+        self.assertLessEqual(state["peak"], 3, "concurrency bound exceeded")
+        self.assertGreater(state["peak"], 1, "test did not exercise overlap")
+
+    def test_cancellation_stops_sweep_early(self) -> None:
+        # Cancel checker flips True after a couple of checks, so later hosts
+        # are skipped and we get partial results / cancelled status.
+        store = FakeRunStore(cancel_after=2)
+        scanned_hosts: set[str] = set()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            scanned_hosts.add(host)
+            return False
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_cancel", {**_AUTH, "cidr": "10.0.0.0/28", "ports": [80]},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "cancelled")
+        # 10.0.0.0/28 has 14 hosts; we must NOT have scanned all of them.
+        self.assertLess(len(scanned_hosts), 14, "cancellation must stop the sweep early")
+
+
+class LoopbackSocketTests(unittest.TestCase):
+    """Real asyncio.open_connection against a REAL ephemeral loopback listener.
+
+    This exercises the production default connect probe (no injection) end to
+    end on 127.0.0.1 — the honest, environment-safe slice of the real path.
+    """
+
+    def test_open_localhost_port_detected_and_closed_port_not(self) -> None:
+        # Open a listener on an ephemeral port.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        open_port = listener.getsockname()[1]
+
+        # Find a (very likely) closed port: bind+close to reserve, then reuse #.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+        probe.close()  # now nothing is listening on closed_port
+
+        store = FakeRunStore()
+        try:
+            result = ip_scan.process_ip_discovery_run(
+                "run_loop",
+                {**_AUTH, "cidr": "127.0.0.1/32", "ports": [open_port, closed_port]},
+                run_store=store,
+                execution_mode="x",
+                throttle=ThrottleConfig(max_concurrency=4, rate_limit_per_sec=None, connect_timeout_s=2.0),
+                # NO connect injection: uses the real asyncio.open_connection probe.
+            )
+        finally:
+            listener.close()
+
+        self.assertEqual(result["status"], "succeeded")
+        assets = store.summary_calls[-1]["discovered_assets"]
+        self.assertEqual(len(assets), 1, "127.0.0.1 should be responsive on the open port")
+        observed = [p["port"] for p in assets[0]["observed_ports"]]
+        self.assertIn(open_port, observed, "the open loopback port must be detected")
+        self.assertNotIn(closed_port, observed, "the closed port must not be reported open")
+
+    def test_reverse_dns_injected(self) -> None:
+        # Use an injected connect + injected reverse lookup so this is hermetic.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_rdns", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80], "reverse_dns": True},
+            run_store=store, execution_mode="x",
+            connect=fake_connect,
+            reverse_lookup=lambda ip: "localhost.test",
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(store.summary_calls[-1]["discovered_assets"][0]["hostname"], "localhost.test")
+
+
+if __name__ == "__main__":
+    unittest.main()

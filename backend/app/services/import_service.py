@@ -1,18 +1,20 @@
 import csv
 import io
 import ipaddress
-import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
-from typing import Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
+from smart_commissioning_core.db.repositories import ImportRepository
+from sqlalchemy.engine import Engine
 
-from app.core.runtime import IMPORT_FILES_ROOT, IMPORTS_ROOT, ensure_runtime_directories
+from app.core.db import get_engine
+from app.core.runtime import IMPORT_FILES_ROOT, ensure_runtime_directories
 from app.schemas.imports import (
     ImportBatchSummary,
     ImportErrorRecord,
@@ -468,8 +470,15 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
 
 
 class ImportService:
-    def __init__(self) -> None:
+    """Import batches with database-backed metadata.
+
+    Summary/accepted_rows/errors live in the database (ImportRepository); the
+    uploaded original file is still written to disk under the imports root.
+    """
+
+    def __init__(self, engine: Engine | None = None) -> None:
         ensure_runtime_directories()
+        self._repository = ImportRepository(engine if engine is not None else get_engine())
 
     def list_profiles(self) -> list[ImportProfileSummary]:
         return [profile.as_summary() for profile in PROFILES.values()]
@@ -496,7 +505,7 @@ class ImportService:
         file_type = self._detect_file_type(file_name)
         rows = self._parse_rows(file_type=file_type, file_bytes=file_bytes)
 
-        import_id = f"imp_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{token_hex(4)}"
+        import_id = f"imp_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}_{token_hex(4)}"
         stored_file_name = f"{import_id}_{Path(file_name).name}"
         stored_path = IMPORT_FILES_ROOT / stored_file_name
         stored_path.write_bytes(file_bytes)
@@ -553,28 +562,30 @@ class ImportService:
             status=status,
             missing_columns=missing_columns,
             stored_file_name=stored_file_name,
-            created_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
         )
         error_report = ImportErrorReport(import_id=import_id, errors=errors)
 
-        (IMPORTS_ROOT / f"{import_id}.summary.json").write_text(summary.model_dump_json(indent=2), encoding="utf-8")
-        (IMPORTS_ROOT / f"{import_id}.errors.json").write_text(error_report.model_dump_json(indent=2), encoding="utf-8")
-        (IMPORTS_ROOT / f"{import_id}.accepted_rows.json").write_text(
-            json.dumps(accepted_rows, indent=2),
-            encoding="utf-8",
+        self._repository.create(
+            import_id=import_id,
+            import_type=import_type,
+            project_id=project_id,
+            site_id=site_id,
+            original_filename=Path(file_name).name,
+            stored_file_path=str(stored_path),
+            summary=summary.model_dump(mode="json"),
+            accepted_rows=accepted_rows,
+            errors=[error.model_dump(mode="json") for error in errors],
+            created_at=summary.created_at,
         )
 
         return summary, error_report
 
     def get_import(self, import_id: str) -> ImportBatchSummary:
-        summary_path = IMPORTS_ROOT / f"{import_id}.summary.json"
-        payload = json.loads(summary_path.read_text(encoding="utf-8"))
-        return ImportBatchSummary.model_validate(payload)
+        return ImportBatchSummary.model_validate(self._repository.get_summary(import_id))
 
     def get_import_errors(self, import_id: str) -> ImportErrorReport:
-        error_path = IMPORTS_ROOT / f"{import_id}.errors.json"
-        payload = json.loads(error_path.read_text(encoding="utf-8"))
-        return ImportErrorReport.model_validate(payload)
+        return ImportErrorReport.model_validate(self._repository.get_errors(import_id))
 
     def _detect_file_type(self, file_name: str) -> str:
         suffix = Path(file_name).suffix.lower()
