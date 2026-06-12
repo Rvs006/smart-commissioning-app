@@ -1,8 +1,10 @@
 from smart_commissioning_core.db.db_run_store import DbRunStore
-from sqlalchemy import text
+from smart_commissioning_core.db.models import Run
+from sqlalchemy import text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core.config import edge_identity
 from app.core.db import get_engine
 from app.core.runtime import ensure_runtime_directories
 from app.schemas.jobs import (
@@ -195,7 +197,30 @@ class RunService:
             job_type=job_type,
             parameters=parameters,
         )
+        # Run attribution: stamp the local edge_id so a run's origin is recorded
+        # before it ever syncs. edge_id is kept OUT of the public _run_to_dict
+        # record (like cancel_requested), so the API response shape is unchanged;
+        # the hub reads it via SyncRepository when a bundle is built/ingested.
+        self._stamp_local_edge_id(str(record["run_id"]))
         return RunRecord.model_validate(record)
+
+    def _stamp_local_edge_id(self, run_id: str) -> None:
+        """Record the originating (local) edge id on a freshly created run.
+
+        Best-effort and non-fatal: edge_id is provenance metadata, not part of
+        the run contract. If identity resolution fails (e.g. crypto unavailable
+        still yields an id, but an I/O error could occur), run creation must not
+        break — the run simply stays unattributed (edge_id NULL) and can still
+        be processed locally.
+        """
+        try:
+            local_edge_id = edge_identity().edge_id
+        except Exception:  # pragma: no cover - identity I/O is best effort
+            return
+        with self._engine.begin() as connection:
+            connection.execute(
+                update(Run).where(Run.id == run_id).values(edge_id=local_edge_id)
+            )
 
     def _report_file_name(self, report_type: str, run_id: str, output_format: str) -> str:
         extension = REPORT_FORMAT_EXTENSIONS.get(output_format, "zip")

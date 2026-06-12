@@ -265,6 +265,26 @@ class DbRunStore:
             run = session.scalars(select(Run).where(Run.id == run_id)).one_or_none()
             return bool(run is not None and run.cancel_requested)
 
+    # -- edge->hub sync accessors --------------------------------------------
+    # edge_id / synced_at are kept out of the public _run_to_dict contract (like
+    # cancel_requested) and read here so the 13-key record shape never changes.
+
+    def get_edge_id(self, run_id: str) -> str | None:
+        """Return the originating edge id for the run (None for a local run).
+
+        Raises FileNotFoundError if the run does not exist.
+        """
+        with self._session_factory() as session:
+            return self._load(session, run_id).edge_id
+
+    def get_synced_at(self, run_id: str) -> datetime | None:
+        """Return the edge watermark (when last pushed from here), or None.
+
+        Raises FileNotFoundError if the run does not exist.
+        """
+        with self._session_factory() as session:
+            return self._load(session, run_id).synced_at
+
     def _load(self, session: Session, run_id: str, *, for_update: bool = False) -> Run:
         statement = select(Run).where(Run.id == run_id)
         if for_update:

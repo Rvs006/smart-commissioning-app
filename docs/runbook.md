@@ -284,3 +284,59 @@ A first-15-minutes checklist:
   inline jobs, SQLite. For multi-user throughput, use the hosted profile.
 - **Front door:** put the TLS-terminating reverse proxy / load balancer in front
   of the frontend port; the app binds loopback only.
+
+## 11. Edge/Hub sync
+
+On-site **edge** instances push immutable, signed run+evidence bundles to a
+central **hub** that aggregates results across projects/sites. The full model,
+trust/enrollment, immutability rules, and step-by-step transports are in
+`docs/sync-architecture.md`; this section is the operator's quick path. The
+mechanism is in `core/smart_commissioning_core/sync.py` and
+`sync_identity.py`; the round-trip is proven in-process across two SQLite DBs in
+`core/tests/test_sync.py` (a real network push and a Postgres hub are
+`live_untested` — see that doc's §7).
+
+> The edge sync CLI (`python -m app.scripts.sync`), the hub ingest endpoint
+> (`POST /api/v1/hub/runs/ingest`), the offline ingest CLI, and the trusted-edges
+> allowlist config are being added in a parallel phase — referenced generically
+> here. Their behavior is fixed by the core and described in
+> `docs/sync-architecture.md`.
+
+**Enroll an edge (one-time):** export the edge's `edge_id` + public-key
+fingerprint (or PEM); pin it in the hub's **trusted-edges allowlist** out of
+band, confirming the fingerprint. Until the entry exists every bundle from that
+edge is rejected (`rejected_untrusted`) and **nothing is written**. The private
+signing key never leaves the edge.
+
+**Run a sync:**
+
+- **Online** — build the un-synced (watermark) set on the edge, push the bundle
+  bytes to the hub with the edge API key, read the returned ingest summary, then
+  mark the runs synced on the edge **only after a confirmed-accepted push**.
+- **Offline (air-gapped)** — build, export a `.scbundle` file, carry it out,
+  ingest at the hub with the offline ingest CLI, confirm the hub accepted it,
+  then mark the runs synced on the edge.
+
+Only **terminal** runs (`succeeded`/`failed`/`cancelled`) sync; in-flight runs
+are never bundled.
+
+**Verify what landed (hub):** read the runs API filtered by `project_id` /
+`site_id` / `edge_id` (the hub stamps `edge_id` on every ingested run); reconcile
+against the push's `inserted_run_ids`.
+
+**Rejected bundle:** read the ingest summary's `rejected_reason` / counters.
+
+| Counter | Cause | Action |
+| --- | --- | --- |
+| `rejected_untrusted` | Edge not in the allowlist, or its key's fingerprint ≠ the pinned value. | Enroll a genuinely new edge; for an unexpected fingerprint change verify out of band before re-pinning (possible key-compromise — `docs/security-posture.md` §7). |
+| `rejected_bad_signature` | Signature did not verify against the trusted key. | Rebuild + re-push on the edge; if it persists, re-verify enrollment. |
+| `rejected_bad_hash` | A bundle member was altered in transit (whole bundle rejected, nothing written). | Discard; rebuild a fresh bundle and re-transfer (suspect the media for offline carry). |
+| `rejected_immutable` (run-level) | Same `run_id` already on the hub with **different** content. | Immutability guard working, not a bug — the hub never overwrites. A re-run should get a new id. Hub copy is unchanged. |
+
+A whole-bundle rejection writes nothing — fix the cause, rebuild on the edge,
+re-transfer.
+
+**Watermark:** `synced_at IS NULL` means "this edge has not pushed this run yet".
+Mark synced only after a confirmed-accepted push so the run is retried otherwise;
+it is per-instance and idempotent. The hub leaves `synced_at` NULL and preserves
+the edge's `created_at`/`updated_at`.

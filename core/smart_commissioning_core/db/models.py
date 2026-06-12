@@ -67,6 +67,16 @@ class Run(Base):
     cancel_requested: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default=false(), nullable=False
     )
+    # Edge->hub sync columns (Phase: sync core). Both nullable and kept OUT of
+    # the public _run_to_dict record (like cancel_requested) so the 13-key file
+    # record contract is unchanged; exposed via DbRunStore/SyncRepository
+    # accessors instead.
+    #   edge_id    — the originating edge. NULL on a local edge run; stamped from
+    #                the bundle manifest on hub ingest so the hub knows the source.
+    #   synced_at  — when THIS instance last pushed the run (the edge watermark).
+    #                NULL means "never synced from here / un-synced".
+    edge_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 

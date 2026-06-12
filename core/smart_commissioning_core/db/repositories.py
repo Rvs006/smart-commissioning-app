@@ -15,6 +15,9 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from smart_commissioning_core.db.db_run_store import (
+    get_or_create_project_and_site,
+)
 from smart_commissioning_core.db.engine import session_factory
 from smart_commissioning_core.db.models import (
     ConfigurationSnapshot,
@@ -22,7 +25,13 @@ from smart_commissioning_core.db.models import (
     DiscoveredPoint,
     DiscoveredTopic,
     ImportRecord,
+    Run,
+    RunIssue,
 )
+
+# Terminal run statuses eligible for sync. In-flight runs (queued/running/...)
+# are NEVER bundled: only finished, immutable records leave the edge.
+TERMINAL_RUN_STATUSES = ("succeeded", "failed", "cancelled")
 
 
 class ConfigurationRepository:
@@ -402,3 +411,229 @@ class DiscoveryRepository:
             message_count=int(payload.get("message_count") or 0),
             attributes=dict(payload.get("attributes") or {}),
         )
+
+
+class SyncRepository:
+    """Edge<->hub synchronization persistence: watermarks + immutable ingest.
+
+    This repository is the transport-agnostic bridge the sync layer
+    (smart_commissioning_core.sync) builds on. It does two jobs:
+
+    EDGE side (push):
+        * :meth:`list_unsynced_terminal_runs` — run ids of TERMINAL runs not yet
+          pushed from here (``synced_at IS NULL``), oldest-first.
+        * :meth:`mark_synced` — stamp ``synced_at`` on the pushed run ids so the
+          next bundle excludes them (the edge watermark).
+
+    HUB side (ingest):
+        * :meth:`run_exists` / :meth:`get_run_for_export` — read a full run
+          payload (run + issues + discovery rows) for hashing/comparison.
+        * :meth:`insert_run_record` — immutably insert a run and all its child
+          rows in one transaction, stamping the originating ``edge_id``. Used by
+          the hub when a run id is absent; never overwrites an existing run.
+
+    Reuses the existing project/site get-or-create and the established row
+    serializations so hub copies are byte-for-byte comparable with edge copies.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._session_factory = session_factory(engine)
+        self._discovery = DiscoveryRepository(engine)
+
+    # -- edge: watermark / unsynced listing ----------------------------------
+
+    def list_unsynced_terminal_runs(
+        self,
+        *,
+        project_id: str | None = None,
+        site_id: str | None = None,
+        statuses: tuple[str, ...] = TERMINAL_RUN_STATUSES,
+    ) -> list[str]:
+        """Return ids of terminal runs not yet synced from here, oldest-first.
+
+        A run is eligible when its status is terminal AND ``synced_at IS NULL``.
+        Oldest-first (created_at, id) so a bundle preserves production order.
+        """
+        statement = (
+            select(Run.id)
+            .where(Run.status.in_(statuses))
+            .where(Run.synced_at.is_(None))
+            .order_by(Run.created_at.asc(), Run.id.asc())
+        )
+        if project_id is not None:
+            statement = statement.where(Run.project_id == project_id)
+        if site_id is not None:
+            statement = statement.where(Run.site_id == site_id)
+        with self._session_factory() as session:
+            return [row for row in session.scalars(statement).all()]
+
+    def mark_synced(self, run_ids: list[str], *, now: datetime) -> int:
+        """Stamp ``synced_at = now`` on the given run ids; return rows updated.
+
+        The edge calls this after a successful push so those runs drop out of the
+        next :meth:`list_unsynced_terminal_runs`. Idempotent re-stamping is fine
+        (it just advances the watermark). Unknown ids are ignored.
+        """
+        if not run_ids:
+            return 0
+        updated = 0
+        with self._session_factory.begin() as session:
+            runs = session.scalars(select(Run).where(Run.id.in_(run_ids))).all()
+            for run in runs:
+                run.synced_at = now
+                updated += 1
+        return updated
+
+    # -- hub: read for hashing / comparison ----------------------------------
+
+    def run_exists(self, run_id: str) -> bool:
+        """True if a run with this id already exists (hub idempotency check)."""
+        with self._session_factory() as session:
+            return session.get(Run, run_id) is not None
+
+    def get_run_for_export(self, run_id: str) -> dict[str, object] | None:
+        """Return the full exportable payload for a run, or None if absent.
+
+        Shape is the canonical sync content (see sync.build_run_content): the
+        13-key run record plus its edge_id, issues, and discovery rows. Used both
+        to export a run for a bundle and to recompute a stored run's content hash
+        on the hub for idempotency / immutability checks.
+        """
+        from smart_commissioning_core.db.db_run_store import _run_to_dict
+
+        with self._session_factory() as session:
+            run = session.get(Run, run_id)
+            if run is None:
+                return None
+            record = _run_to_dict(run)
+            edge_id = run.edge_id
+        discovery = self._discovery
+        return {
+            "run": record,
+            "edge_id": edge_id,
+            "issues": list(record["issues"]),
+            "devices": discovery.list_devices(run_id),
+            "points": discovery.list_points(run_id),
+            "topics": discovery.list_topics(run_id),
+        }
+
+    # -- hub: immutable insert -----------------------------------------------
+
+    def insert_run_record(
+        self,
+        *,
+        run: dict[str, object],
+        issues: list[dict[str, object]],
+        devices: list[dict[str, object]],
+        points: list[dict[str, object]],
+        topics: list[dict[str, object]],
+        edge_id: str | None,
+    ) -> None:
+        """Insert a complete run + children in ONE transaction (hub ingest).
+
+        Immutability is the caller's contract: the hub only calls this when the
+        run id is ABSENT. ``edge_id`` (from the bundle manifest) is stamped onto
+        the row so the hub knows the source. The run's own created_at/updated_at
+        from the edge are preserved; ``synced_at`` is left NULL on the hub (the
+        hub is a sink, it does not re-push by default).
+
+        Raises if the run id already exists (the unique PK), so a concurrent
+        double-insert can never silently overwrite.
+        """
+        with self._session_factory.begin() as session:
+            get_or_create_project_and_site(
+                session, str(run["project_id"]), str(run["site_id"])
+            )
+            session.add(self._run_row(run, edge_id=edge_id))
+            session.flush()
+            run_id = str(run["run_id"])
+            for position, issue in enumerate(issues):
+                session.add(self._issue_row(run_id, position, issue))
+            for position, device in enumerate(devices):
+                session.add(_insert_discovery_device(run_id, position, device))
+            for position, point in enumerate(points):
+                session.add(_insert_discovery_point(run_id, position, point))
+            for position, topic in enumerate(topics):
+                session.add(_insert_discovery_topic(run_id, position, topic))
+            session.flush()
+
+    # -- row builders --------------------------------------------------------
+
+    def _run_row(self, run: dict[str, object], *, edge_id: str | None) -> Run:
+        return Run(
+            id=str(run["run_id"]),
+            project_id=str(run["project_id"]),
+            site_id=str(run["site_id"]),
+            job_type=str(run["job_type"]),
+            status=str(run["status"]),
+            stage=str(run["stage"]),
+            progress_percent=int(run.get("progress_percent") or 0),
+            parameters=dict(run.get("parameters") or {}),
+            result_summary=dict(run.get("result_summary") or {}),
+            execution_mode=run.get("execution_mode"),
+            error_message=run.get("error_message"),
+            edge_id=edge_id,
+            synced_at=None,
+            created_at=_parse_dt(run.get("created_at")),
+            updated_at=_parse_dt(run.get("updated_at")),
+        )
+
+    def _issue_row(self, run_id: str, position: int, issue: dict[str, object]) -> RunIssue:
+        # Round-trip through the pydantic record so types (e.g. last_seen_at
+        # datetime) match the native create path exactly.
+        from smart_commissioning_core.records import ValidationIssueRecord
+
+        record = ValidationIssueRecord.model_validate(issue)
+        return RunIssue(run_id=run_id, position=position, **record.model_dump())
+
+
+def _insert_discovery_device(
+    run_id: str, position: int, payload: dict[str, object]
+) -> DiscoveredDevice:
+    columns = ("project_id", "site_id", "address", "device_type", "name", "vendor", "model")
+    return DiscoveredDevice(
+        run_id=run_id,
+        position=position,
+        attributes=dict(payload.get("attributes") or {}),
+        **{key: payload.get(key) for key in columns},
+    )
+
+
+def _insert_discovery_point(
+    run_id: str, position: int, payload: dict[str, object]
+) -> DiscoveredPoint:
+    columns = ("device_ref", "point_id", "point_name", "units")
+    return DiscoveredPoint(
+        run_id=run_id,
+        position=position,
+        observed_value=dict(payload.get("observed_value") or {}),
+        attributes=dict(payload.get("attributes") or {}),
+        **{key: payload.get(key) for key in columns},
+    )
+
+
+def _insert_discovery_topic(
+    run_id: str, position: int, payload: dict[str, object]
+) -> DiscoveredTopic:
+    return DiscoveredTopic(
+        run_id=run_id,
+        position=position,
+        topic=str(payload.get("topic") or ""),
+        last_payload=dict(payload.get("last_payload") or {}),
+        message_count=int(payload.get("message_count") or 0),
+        attributes=dict(payload.get("attributes") or {}),
+    )
+
+
+def _parse_dt(value: object) -> datetime:
+    """Parse an ISO timestamp from an exported run record back to a datetime.
+
+    Edge records serialize created_at/updated_at via ``.isoformat()``; on ingest
+    we parse them back so the hub preserves the edge's original timestamps. A
+    missing value falls back to now-UTC (defensive; exports always carry both).
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        return datetime.fromisoformat(value)
+    return datetime.now(UTC)

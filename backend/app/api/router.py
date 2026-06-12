@@ -7,6 +7,7 @@ from app.api.routes import (
     events,
     evidence,
     health,
+    hub,
     imports,
     reports,
     runs,
@@ -36,4 +37,9 @@ protected_router.include_router(reports.router, prefix="/reports", tags=["report
 # Evidence integrity (verify), backup, and retention. Verify stays behind auth
 # too: it can regenerate report artifacts, so it is not treated as public.
 protected_router.include_router(evidence.router, prefix="/evidence", tags=["evidence"])
+# Edge->hub sync: hub ingest endpoint (POST /hub/runs/ingest). The router is
+# always mounted but every route returns 404 unless deployment_role == 'hub'
+# (the role-guard lives in the route so toggling the setting needs no remount).
+# Behind the same auth as every other /api/v1 route.
+protected_router.include_router(hub.router, prefix="/hub", tags=["hub"])
 api_router.include_router(protected_router)

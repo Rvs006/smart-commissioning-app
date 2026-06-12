@@ -27,7 +27,11 @@ routes.
 - **Edge ↔ Hub.** The portable laptop (edge) holds its own SQLite + secrets and
   trusts only loopback; the hosted hub is a shared server reached over the
   network (behind a TLS-terminating reverse proxy). They are distinct trust
-  zones — edge data does not implicitly trust the hub and vice versa.
+  zones — edge data does not implicitly trust the hub and vice versa. Across this
+  boundary the hub trusts an edge only via a pinned-key **trusted-edges
+  allowlist** and accepts only signed, hash-verified, immutable run bundles
+  (untrusted or tampered bundles are rejected and nothing is written); see
+  `docs/sync-architecture.md`.
 - **App ↔ OT / site network.** Discovery/publish engines actively touch a live
   building-management / operational-technology network (BACnet broadcasts, IP
   probes, MQTT). This is the **highest-consequence boundary**: an unauthorized or
