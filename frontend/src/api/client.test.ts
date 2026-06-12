@@ -1,11 +1,17 @@
 import {
   ApiError,
   AUTH_REQUIRED_MESSAGE,
+  cancelRun,
   clearApiKey,
   downloadFile,
   formatApiDetail,
   getApiKey,
+  getDiscoveryResults,
+  getDiscoveryRun,
   getHealth,
+  listReports,
+  listRuns,
+  rollbackMqttConfigPublish,
   setApiKey,
   validateConfiguration,
   type ConfigurationSnapshot,
@@ -257,6 +263,84 @@ describe("downloadFile", () => {
       message: "Report artefact missing.",
       name: "ApiError",
       status: 404,
+    });
+  });
+});
+
+describe("run and discovery API functions", () => {
+  afterEach(() => {
+    clearApiKey();
+    vi.unstubAllGlobals();
+  });
+
+  it("listRuns builds the query string and attaches the API key", async () => {
+    setApiKey("stored-key");
+    const payload = { runs: [{ run_id: "r1", job_type: "ip_discovery", status: "succeeded" }] };
+    const fetchMock = stubFetch(jsonResponse(payload));
+
+    await expect(
+      listRuns({ jobType: "ip_discovery", limit: 25, projectId: "demo-project" }),
+    ).resolves.toEqual(payload);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/runs?project_id=demo-project&job_type=ip_discovery&limit=25");
+    expect(new Headers(init?.headers).get("X-API-Key")).toBe("stored-key");
+  });
+
+  it("listRuns omits the query string when no params are supplied", async () => {
+    const fetchMock = stubFetch(jsonResponse({ runs: [] }));
+
+    await listRuns();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/runs");
+  });
+
+  it("cancelRun POSTs to the cancel endpoint", async () => {
+    const payload = { run_id: "r1", job_type: "ip_discovery", status: "cancelled" };
+    const fetchMock = stubFetch(jsonResponse(payload));
+
+    await expect(cancelRun("r1")).resolves.toEqual(payload);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/runs/r1/cancel");
+    expect(init?.method).toBe("POST");
+  });
+
+  it("getDiscoveryRun and getDiscoveryResults hit the discovery routes", async () => {
+    const runPayload = { run_id: "r1", status: "running" };
+    let fetchMock = stubFetch(jsonResponse(runPayload));
+    await getDiscoveryRun("r1");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/discovery/runs/r1");
+
+    const resultsPayload = { run_id: "r1", status: "succeeded", devices: [], points: [], topics: [], discovered_assets: [] };
+    fetchMock = stubFetch(jsonResponse(resultsPayload));
+    await expect(getDiscoveryResults("r1")).resolves.toEqual(resultsPayload);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/discovery/runs/r1/results");
+  });
+
+  it("listReports hits the reports list endpoint", async () => {
+    const fetchMock = stubFetch(jsonResponse({ reports: [] }));
+    await listReports();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/reports");
+  });
+
+  it("rollbackMqttConfigPublish POSTs to the rollback route", async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({ run_id: "r1", job_type: "mqtt_config_publish", status: "succeeded", message: "ok" }),
+    );
+    await rollbackMqttConfigPublish("r1");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/validation/mqtt-config/runs/r1/rollback");
+    expect(init?.method).toBe("POST");
+  });
+
+  it("turns a 401 on a run call into an auth-specific ApiError", async () => {
+    stubFetch(errorResponse(401, "Unauthorized", { detail: "API key required." }));
+
+    await expect(listRuns()).rejects.toMatchObject({
+      message: AUTH_REQUIRED_MESSAGE,
+      name: "ApiError",
+      status: 401,
     });
   });
 });

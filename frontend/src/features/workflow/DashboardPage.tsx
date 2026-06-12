@@ -1,15 +1,25 @@
+import { useMemo } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { createReport, getHealth, listImportProfiles } from "../../api/client";
-import { issueRows, projectSummary, runRows, workflowStages } from "./operatorData";
-
-const statusLabels = {
-  failed: "Fail",
-  queued: "Queued",
-  ready: "Ready",
-  running: "Running",
-  warning: "Warning",
-};
+import {
+  createReport,
+  getHealth,
+  getValidationIssues,
+  listImportProfiles,
+  listReports,
+  listRuns,
+  listValidationRuns,
+  type JobSummary,
+} from "../../api/client";
+import { workflowStages } from "./operatorData";
+import {
+  formatRelativeTime,
+  humanizeJobType,
+  humanizeStage,
+  isTerminalStatus,
+  statusTokenLabels,
+  toHealthState,
+} from "./runFormat";
 
 const briefSteps = [
   {
@@ -38,6 +48,26 @@ const briefSteps = [
   },
 ];
 
+// Picks the single highest-severity issue across recent terminal validation
+// runs to surface as the dashboard's "Blocking Finding". Severity rank mirrors
+// the backend ValidationIssueRecord ordering.
+const severityRank: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+function severityClass(severity: string): "critical" | "major" | "minor" {
+  if (severity === "critical") {
+    return "critical";
+  }
+  if (severity === "high" || severity === "medium") {
+    return "major";
+  }
+  return "minor";
+}
+
 export function DashboardPage() {
   const healthQuery = useQuery({
     queryFn: getHealth,
@@ -48,29 +78,95 @@ export function DashboardPage() {
     queryFn: listImportProfiles,
     queryKey: ["import-profiles"],
   });
+
+  // Recent runs (real). Poll fast while any run is still in flight, otherwise
+  // settle to the slower 15s cadence so a queued -> succeeded flip shows live.
+  const runsQuery = useQuery({
+    queryFn: () => listRuns({ limit: 50 }),
+    queryKey: ["runs"],
+    refetchInterval: (query) =>
+      query.state.data?.runs?.some((run) => !isTerminalStatus(run.status)) ? 1500 : 15000,
+  });
+
+  // Reports (real) — used for the evidence-pack count KPI.
+  const reportsQuery = useQuery({
+    queryFn: listReports,
+    queryKey: ["reports"],
+    refetchInterval: (query) =>
+      query.state.data?.reports?.some((report) => !isTerminalStatus(report.status)) ? 1500 : 15000,
+  });
+
+  // Latest terminal validation run, used to derive the open-issues KPI and the
+  // single blocking finding. Issues are only fetched once a run is terminal.
+  const validationRunsQuery = useQuery({
+    queryFn: listValidationRuns,
+    queryKey: ["validation-runs"],
+    refetchInterval: (query) =>
+      query.state.data?.runs?.some((run) => !isTerminalStatus(run.status)) ? 1500 : 15000,
+  });
+
+  const latestTerminalValidationRunId = useMemo(() => {
+    const runs = validationRunsQuery.data?.runs ?? [];
+    const terminal = runs.find((run) => isTerminalStatus(run.status));
+    return terminal?.run_id ?? null;
+  }, [validationRunsQuery.data]);
+
+  const issuesQuery = useQuery({
+    enabled: Boolean(latestTerminalValidationRunId),
+    queryFn: () => getValidationIssues(latestTerminalValidationRunId ?? ""),
+    queryKey: ["validation-issues", latestTerminalValidationRunId],
+  });
+
   const reportMutation = useMutation({
     mutationFn: () => createReport({ reportType: "evidence_pack" }),
+    onSuccess: () => {
+      void reportsQuery.refetch();
+    },
   });
+
+  const runs = runsQuery.data?.runs ?? [];
+  const recentRuns = runs.slice(0, 4);
+  const reports = reportsQuery.data?.reports ?? [];
+
+  const issues = useMemo(() => issuesQuery.data?.issues ?? [], [issuesQuery.data]);
+  const sortedIssues = useMemo(
+    () =>
+      [...issues].sort(
+        (a, b) => (severityRank[b.severity] ?? 0) - (severityRank[a.severity] ?? 0),
+      ),
+    [issues],
+  );
+  const topIssue = sortedIssues[0] ?? null;
+
+  // Real KPIs derived from live data:
+  //  - active runs: runs not yet terminal
+  //  - open issues: issues in the latest terminal validation run
+  //  - evidence packs: report runs (any report counts as a generated pack)
+  const activeRuns = runs.filter((run) => !isTerminalStatus(run.status)).length;
+  const openIssues = issues.length;
+  const evidencePacks = reports.length;
+
+  const runsLoading = runsQuery.isLoading;
+  const runsError = runsQuery.isError ? runsQuery.error : null;
 
   return (
     <div className="app-page dashboard-page">
       <section className="home-overview">
         <div className="overview-copy">
-          <span className="eyebrow">{projectSummary.project}</span>
-          <h2>{projectSummary.site}</h2>
+          {/* Project/site display strings have no backend metadata endpoint. */}
+          <span className="eyebrow">Smart Commissioning workspace</span>
+          <h2>Commissioning console</h2>
           <p>Track the current commissioning state and jump into the next validation task.</p>
         </div>
 
-        <div className="readiness-panel" aria-label={`${projectSummary.readiness}% ready`}>
+        <div className="readiness-panel" aria-label="API status">
           <div className="readiness-row">
-            <span>Readiness</span>
-            <strong>{projectSummary.readiness}%</strong>
-          </div>
-          <div className="progress-track">
-            <div style={{ width: `${projectSummary.readiness}%` }} />
+            <span>API status</span>
+            <strong>{healthQuery.data?.status ?? (healthQuery.isLoading ? "..." : "offline")}</strong>
           </div>
           <small>
-            API {healthQuery.data?.status ?? "offline"} · {profilesQuery.data?.length ?? "..."} import profiles
+            {profilesQuery.data?.length ?? "..."} import profiles · {runs.length} recorded run
+            {runs.length === 1 ? "" : "s"}
           </small>
         </div>
       </section>
@@ -128,16 +224,20 @@ export function DashboardPage() {
 
       <section className="kpi-strip compact-kpis">
         <article>
-          <span>Total assets</span>
-          <strong>{projectSummary.assets}</strong>
+          <span>Recorded runs</span>
+          <strong>{runsQuery.isLoading ? "..." : runs.length}</strong>
         </article>
         <article>
-          <span>Online assets</span>
-          <strong>{projectSummary.onlineAssets}</strong>
+          <span>Active runs</span>
+          <strong>{runsQuery.isLoading ? "..." : activeRuns}</strong>
         </article>
-        <article className="danger">
+        <article className={openIssues > 0 ? "danger" : undefined}>
           <span>Open issues</span>
-          <strong>{projectSummary.openIssues}</strong>
+          <strong>{issuesQuery.isLoading ? "..." : openIssues}</strong>
+        </article>
+        <article>
+          <span>Evidence packs</span>
+          <strong>{reportsQuery.isLoading ? "..." : evidencePacks}</strong>
         </article>
       </section>
 
@@ -148,6 +248,9 @@ export function DashboardPage() {
               <span className="eyebrow">Workflow</span>
               <h3>Current Stage</h3>
             </div>
+            <span className="sample-tag" title="No workflow-status endpoint exists yet.">
+              Sample preview
+            </span>
           </div>
           <div className="workflow-board">
             {workflowStages.slice(0, 4).map((stage) => (
@@ -170,21 +273,24 @@ export function DashboardPage() {
             </div>
           </div>
           <div className="run-list">
-            {runRows.slice(0, 2).map((run) => (
-              <div className="run-card" key={run.id}>
-                <div>
-                  <strong>{run.type}</strong>
-                  <span>{run.stage}</span>
-                </div>
-                <div className="progress-block">
-                  <span className={`status-token ${run.status}`}>{statusLabels[run.status]}</span>
-                  <div className="progress-track">
-                    <div style={{ width: `${run.progress}%` }} />
-                  </div>
-                  <small>{run.updated}</small>
-                </div>
+            {runsError ? (
+              <div className="state-panel error">
+                <strong>Could not load runs</strong>
+                <span>{runsError instanceof Error ? runsError.message : "Request failed."}</span>
               </div>
-            ))}
+            ) : runsLoading ? (
+              <div className="empty-workspace">
+                <strong>Loading runs...</strong>
+                <span>Fetching the latest job history.</span>
+              </div>
+            ) : recentRuns.length > 0 ? (
+              recentRuns.map((run) => <RunSummaryCard key={run.run_id} run={run} />)
+            ) : (
+              <div className="empty-workspace">
+                <strong>No runs yet</strong>
+                <span>Queue a discovery or validation run to populate this list.</span>
+              </div>
+            )}
           </div>
         </article>
       </section>
@@ -198,18 +304,37 @@ export function DashboardPage() {
             </div>
           </div>
           <div className="issue-list">
-            {issueRows.slice(0, 1).map((issue) => (
-              <div className={`issue-card ${issue.severity}`} key={issue.id}>
+            {issuesQuery.isError ? (
+              <div className="state-panel error">
+                <strong>Could not load issues</strong>
+                <span>
+                  {issuesQuery.error instanceof Error
+                    ? issuesQuery.error.message
+                    : "Request failed."}
+                </span>
+              </div>
+            ) : topIssue ? (
+              <div className={`issue-card ${severityClass(topIssue.severity)}`}>
                 <div>
-                  <span>{issue.id}</span>
-                  <strong>{issue.message}</strong>
+                  <span>{topIssue.issue_id}</span>
+                  <strong>{topIssue.description}</strong>
                   <small>
-                    {issue.assetId} · {issue.area}
+                    {topIssue.asset_id ?? "Unknown asset"} ·{" "}
+                    {topIssue.issue_type.replace(/_/g, " ")}
                   </small>
                 </div>
-                <em>{issue.owner}</em>
+                <em>Commissioning team</em>
               </div>
-            ))}
+            ) : (
+              <div className="empty-workspace">
+                <strong>No blocking findings</strong>
+                <span>
+                  {latestTerminalValidationRunId
+                    ? "The latest validation run reported no issues."
+                    : "Run a validation to surface blocking findings here."}
+                </span>
+              </div>
+            )}
           </div>
         </article>
 
@@ -221,14 +346,35 @@ export function DashboardPage() {
             </div>
           </div>
           <div className="evidence-summary">
-            <strong>{projectSummary.evidencePacks}</strong>
-            <span>Evidence packs generated from stored runs.</span>
+            <strong>{reportsQuery.isLoading ? "..." : evidencePacks}</strong>
+            <span>
+              {evidencePacks === 1 ? "Report" : "Reports"} generated from stored runs.
+            </span>
             <Link className="secondary-button compact" to="/reports">
               Open reports
             </Link>
           </div>
         </article>
       </section>
+    </div>
+  );
+}
+
+function RunSummaryCard({ run }: { run: JobSummary }) {
+  const state = toHealthState(run.status);
+  return (
+    <div className="run-card">
+      <div>
+        <strong>{humanizeJobType(run.job_type)}</strong>
+        <span>{humanizeStage(run.stage) || "Awaiting first update"}</span>
+      </div>
+      <div className="progress-block">
+        <span className={`status-token ${state}`}>{statusTokenLabels[state]}</span>
+        <div className="progress-track">
+          <div style={{ width: `${run.progress_percent}%` }} />
+        </div>
+        <small>{formatRelativeTime(run.updated_at)}</small>
+      </div>
     </div>
   );
 }

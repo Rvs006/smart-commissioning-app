@@ -169,6 +169,76 @@ export type ReportSummary = {
   file_name: string;
 };
 
+export type ReportListResponse = {
+  reports: ReportSummary[];
+};
+
+// Mirrors backend app.schemas.jobs.JobSummary. Run lists return summaries only;
+// the full RunRecord (parameters/result_summary/issues) comes from a per-run GET.
+export type JobSummary = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  stage: string;
+  progress_percent: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RunListResponse = {
+  runs: JobSummary[];
+};
+
+export type ObservedPort = {
+  port: number;
+  protocol: "tcp" | "udp";
+  service?: string | null;
+};
+
+// Mirrors backend DiscoveryAssetObservation (extra="allow"): engines attach
+// per-protocol fields (device_instance, vendor, point_count, ...) beyond the
+// modelled keys, so the index signature keeps those reachable.
+export type DiscoveryAssetObservation = {
+  asset_id?: string | null;
+  ip_address?: string | null;
+  mac_address?: string | null;
+  hostname?: string | null;
+  observed_ports?: ObservedPort[];
+  match_basis?: string;
+  last_seen_at?: string | null;
+  status_detail?: string | null;
+  [key: string]: unknown;
+};
+
+// Devices/points/topics come back as plain dicts so per-engine attributes
+// survive without a rigid model; consumers read known keys defensively.
+export type DiscoveryRowRecord = Record<string, unknown>;
+
+export type DiscoveryResultsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  result_summary: Record<string, unknown>;
+  discovered_assets: DiscoveryAssetObservation[];
+  devices: DiscoveryRowRecord[];
+  points: DiscoveryRowRecord[];
+  topics: DiscoveryRowRecord[];
+};
+
+export type DiscoveryPointsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  points: DiscoveryRowRecord[];
+};
+
+export type DiscoveryTopicsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  topics: DiscoveryRowRecord[];
+};
+
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const apiBaseUrl = rawApiBaseUrl.replace(/\/$/, "");
 
@@ -508,4 +578,82 @@ export function createReport(input: { reportType: ReportType; format?: ReportFor
     headers: { "Content-Type": "application/json" },
     method: "POST",
   });
+}
+
+export function listReports(): Promise<ReportListResponse> {
+  return request<ReportListResponse>("/reports");
+}
+
+export function getReport(reportId: string): Promise<ReportSummary> {
+  return request<ReportSummary>(`/reports/${encodeURIComponent(reportId)}`);
+}
+
+export type ListRunsParams = {
+  projectId?: string;
+  siteId?: string;
+  jobType?: JobType;
+  limit?: number;
+  offset?: number;
+};
+
+function buildRunsQuery(params?: ListRunsParams): string {
+  const search = new URLSearchParams();
+  if (params?.projectId) {
+    search.set("project_id", params.projectId);
+  }
+  if (params?.siteId) {
+    search.set("site_id", params.siteId);
+  }
+  if (params?.jobType) {
+    search.set("job_type", params.jobType);
+  }
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  if (typeof params?.offset === "number") {
+    search.set("offset", String(params.offset));
+  }
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
+export function listRuns(params?: ListRunsParams): Promise<RunListResponse> {
+  return request<RunListResponse>(`/runs${buildRunsQuery(params)}`);
+}
+
+export function cancelRun(runId: string): Promise<RunRecord> {
+  return request<RunRecord>(`/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function listDiscoveryRuns(): Promise<RunListResponse> {
+  return request<RunListResponse>("/discovery/runs");
+}
+
+export function getDiscoveryRun(runId: string): Promise<RunRecord> {
+  return request<RunRecord>(`/discovery/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getDiscoveryResults(runId: string): Promise<DiscoveryResultsResponse> {
+  return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`);
+}
+
+export function getDiscoveryPoints(runId: string): Promise<DiscoveryPointsResponse> {
+  return request<DiscoveryPointsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/points`);
+}
+
+export function getDiscoveryTopics(runId: string): Promise<DiscoveryTopicsResponse> {
+  return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`);
+}
+
+export function listValidationRuns(): Promise<RunListResponse> {
+  return request<RunListResponse>("/validation/runs");
+}
+
+export function rollbackMqttConfigPublish(runId: string): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    `/validation/mqtt-config/runs/${encodeURIComponent(runId)}/rollback`,
+    { method: "POST" },
+  );
 }

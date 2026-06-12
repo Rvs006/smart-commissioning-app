@@ -750,6 +750,31 @@ label {
   font-size: 16px;
 }
 
+/* Marks UI areas that show preview data with no backing endpoint yet. */
+.sample-tag {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 980px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.sample-banner {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .hero-side h2 {
   margin: 0;
 }
