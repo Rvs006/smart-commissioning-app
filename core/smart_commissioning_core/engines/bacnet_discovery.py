@@ -281,12 +281,16 @@ class Bacpypes3Backend:
 
     There is no BACnet device or building network in the development/CI
     environment, so this class has NOT been exercised against real hardware. The
-    ``bacpypes3`` calls below are written conservatively against the documented
-    high-level async API (``Application.from_args``/``from_json``,
-    ``app.who_is``, ``app.read_property``). Anything uncertain is flagged with a
-    ``# UNVERIFIED:`` comment. Before relying on this path in production it MUST
-    be validated on-site against real controllers; treat the data shapes below
-    as best-effort until then.
+    ``bacpypes3`` calls below have been cross-checked against the current
+    bacpypes3 documentation (context7 ``/joelbender/bacpypes3``) — call
+    signatures, the I-Am result shape (``iAmDeviceIdentifier``/``pduSource``),
+    ``read_property`` shorthand, and ``close()`` semantics are tagged
+    ``# VERIFIED against bacpypes3 ...``. What the docs could NOT settle is left
+    explicit: the I-Am ``vendorID`` attribute name and large object-list APDU
+    chunking are flagged as best-effort / known limitations. NOTHING here has
+    been run against a real controller. Verified-against-docs is NOT the same as
+    verified-against-hardware: the whole Who-Is / ReadProperty path still MUST be
+    validated on-site before it can be trusted.
 
     The ``bacpypes3`` import is performed lazily in :meth:`_ensure_app` (NOT at
     module import), guarded so a missing dependency raises a clear
@@ -328,7 +332,10 @@ class Bacpypes3Backend:
         if self._app is not None:
             return self._app
         try:
-            # UNVERIFIED: import paths follow the documented bacpypes3 layout.
+            # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): the
+            # Application class lives at bacpypes3.app.Application and is the
+            # documented high-level entry point (from_args/from_json/
+            # from_object_list).
             from bacpypes3.app import Application  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover - exercised only without the extra
             raise RuntimeError(
@@ -342,9 +349,16 @@ class Bacpypes3Backend:
                 "Bacpypes3Backend requires a local BACnet/IP address "
                 "(local_address=...), e.g. '192.168.1.10/24'."
             )
-        # UNVERIFIED: Application.from_json builds an app from an object list;
-        # the network-port entry binds the local interface. Real deployments may
-        # prefer Application.from_args / a full config. Validate on-site.
+        # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3):
+        # Application.from_json(object_list) builds an app from a list of
+        # JSON-serialisable object dicts. The documented device entry carries
+        # "object-identifier"/"object-name"/"vendor-identifier"; the network-port
+        # entry carries "ip-address" (e.g. "192.168.1.50/24") to bind the local
+        # interface. Vendor-specific types are resolved from the device entry's
+        # "vendor-identifier". The "device,4194303" instance is the BACnet
+        # unconfigured-device wildcard, a safe transient identity for a scanner.
+        # Real deployments may prefer Application.from_args(SimpleArgumentParser()
+        # .parse_args()) (also documented) for a full CLI/config-driven setup.
         object_list = [
             {
                 "object-identifier": "device,4194303",
@@ -368,16 +382,22 @@ class Bacpypes3Backend:
     ) -> list[dict[str, Any]]:
         """REQUIRES ON-SITE VALIDATION. Broadcast Who-Is and map I-Am responses."""
         app = self._ensure_app()
-        # UNVERIFIED: who_is(low_limit, high_limit, timeout=...) returns a list
-        # of IAmRequest APDUs. The 'address' (directed Who-Is) parameter is not
-        # passed here because the documented signature does not accept it; a
-        # directed Who-Is would require a different bacpypes3 call. Validate
-        # on-site before relying on directed discovery.
+        # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): the
+        # documented high-level signature is
+        #   await app.who_is(low_limit=None, high_limit=None, timeout=None)
+        # and it RETURNS a list of IAmRequest APDUs (awaited, not delivered via
+        # an indication callback). The 'address' (directed Who-Is) parameter is
+        # intentionally not passed: the documented who_is() signature does not
+        # accept an address, so a directed/unicast Who-Is would require the
+        # lower-level whois path (the shell 'whois [address ...]'). Keep the
+        # broadcast form here; directed discovery still needs on-site validation.
         i_ams = await app.who_is(low_limit=low_limit, high_limit=high_limit, timeout=self._timeout_s)
         devices: list[dict[str, Any]] = []
         for i_am in i_ams or []:
-            # UNVERIFIED: iAmDeviceIdentifier is an ObjectIdentifier tuple
-            # ("device", instance); pduSource is the responder address.
+            # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): the
+            # documented Who-Is example reads inst = i_am.iAmDeviceIdentifier[1]
+            # (iAmDeviceIdentifier is the ObjectIdentifier ("device", instance))
+            # and addr = i_am.pduSource (the responder's source address).
             try:
                 instance = int(i_am.iAmDeviceIdentifier[1])
             except (AttributeError, IndexError, TypeError, ValueError):  # pragma: no cover - hardware shapes
@@ -386,7 +406,13 @@ class Bacpypes3Backend:
                 {
                     "device_instance": instance,
                     "address": str(getattr(i_am, "pduSource", "")),
-                    # UNVERIFIED: vendorID attribute name on IAmRequest.
+                    # BEST-EFFORT (still needs on-site validation): the I-Am APDU
+                    # carries a vendor id (BACnet I-Am = deviceIdentifier,
+                    # maxAPDULengthAccepted, segmentationSupported, vendorID), but
+                    # context7's bacpypes3 docs only demonstrate
+                    # iAmDeviceIdentifier/pduSource, not the exact vendor attribute
+                    # name. getattr(..., None) degrades to None rather than raising
+                    # if the casing differs on real hardware.
                     "vendor_id": getattr(i_am, "vendorID", None),
                 }
             )
@@ -398,14 +424,26 @@ class Bacpypes3Backend:
         address = str(device.get("address") or "")
         instance = device.get("device_instance")
         device_object = f"device,{instance}"
-        # UNVERIFIED: reading the whole object-list array in one ReadProperty may
-        # exceed APDU size on large devices; production code typically reads the
-        # array length then each element by index. Validate / chunk on-site.
+        # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): the call
+        # shape is await app.read_property(address, object_id, property_id) with
+        # string shorthand for all three (e.g. "device,1001", "object-list").
+        # Reading the whole "object-list" returns the full array (the docs read
+        # an entire "priority-array" the same way).
+        # KNOWN LIMITATION (on-site validation / live_untested): on large devices
+        # the whole-array read can exceed the APDU size. The documented array
+        # indexing supports a chunked fallback — read the length with
+        #   read_property(address, "device,<n>", "object-list", instance=0)
+        # (the shell form is object-list[0]) then each element by index
+        # (object-list[i], instance=i). Wire that fallback up against real
+        # hardware if the single read aborts.
         raw_objects = await app.read_property(address, device_object, self._object_list_property)
         objects: list[dict[str, Any]] = []
         for raw in raw_objects or []:
-            # UNVERIFIED: each entry is an ObjectIdentifier; str() yields
-            # "objecttype,instance". Skip the device object itself.
+            # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): each
+            # object-list entry is an ObjectIdentifier whose str() yields the
+            # "object-type,instance" shorthand (the same shorthand read_property
+            # accepts as an object_id, e.g. "analog-input,3"). Skip the device
+            # object itself.
             object_identifier = str(raw)
             if object_identifier.startswith("device,"):
                 continue
@@ -426,9 +464,13 @@ class Bacpypes3Backend:
         app = self._ensure_app()
         address = str(device.get("address") or "")
         object_identifier = str(obj.get("object_identifier") or "")
-        # UNVERIFIED: present-value read; some object types (e.g. structured
-        # view) have no present-value and will raise ErrorRejectAbortNack — the
-        # engine catches per-point failures so one bad object does not abort.
+        # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): present-
+        # value is read with await app.read_property(address, "<type>,<inst>",
+        # "present-value") — exactly the documented example. On failure
+        # read_property raises bacpypes3.apdu.ErrorRejectAbortNack (e.g. an
+        # object with no present-value such as structured-view); the engine's
+        # per-point `except Exception` records the read error and keeps scanning,
+        # so one bad object does not abort the device.
         return await app.read_property(address, object_identifier, "present-value")
 
     def close(self) -> None:
@@ -438,7 +480,11 @@ class Bacpypes3Backend:
         if app is not None:
             close = getattr(app, "close", None)
             if callable(close):
-                close()  # UNVERIFIED: Application.close() is documented as sync.
+                # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3):
+                # Application.close() is synchronous — the documented examples
+                # call app.close() (not awaited) in a finally block for clean
+                # shutdown.
+                close()
 
 
 # -- backend selection ------------------------------------------------------
