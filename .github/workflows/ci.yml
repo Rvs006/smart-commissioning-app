@@ -41,6 +41,41 @@ jobs:
         run: mypy core/smart_commissioning_core
         continue-on-error: true
 
+  # Additive SBOM + license inventory job. Generates a CycloneDX SBOM across the
+  # three Python distributions and runs an allowlist-based license gate.
+  # NON-BLOCKING (continue-on-error) because the generated inventory depends on
+  # the exact transitive versions resolved at install time, which are not pinned
+  # here — so a transient license-metadata change should surface as a warning,
+  # not a red build. Flip continue-on-error to false (and pin versions) to make
+  # the gate enforcing.
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Install the same runtime tree the SBOM inventories (no extra SBOM tool;
+      # scripts/generate_sbom.py uses only the standard library).
+      - name: Install packages
+        run: pip install -e ./core -e ./backend -e ./worker
+
+      - name: Generate SBOM (CycloneDX JSON) and run the license gate
+        continue-on-error: true
+        run: python scripts/generate_sbom.py --json sbom.json --markdown docs/SBOM.generated.md --check
+
+      - name: Upload SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom.json
+            docs/SBOM.generated.md
+          if-no-files-found: warn
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

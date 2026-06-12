@@ -1,17 +1,67 @@
 from __future__ import annotations
 
+import datetime as _dt
+import faulthandler
 import importlib
 import os
 import socket
 import sys
 import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 
 
 APP_NAME = "Smart Commissioning App"
 DEFAULT_PORT = 8000
+
+# Keep a reference to the always-open faulthandler log so the OS does not close
+# it; a hard crash (segfault, C-level fault) is dumped here by faulthandler.
+_FAULTHANDLER_FILE = None
+
+
+def install_crash_logging(root: Path) -> Path | None:
+    """Write uncaught exceptions (and low-level faults) to a timestamped file.
+
+    Field failures in the portable .exe are otherwise invisible — the console
+    window closes and nothing is captured. This installs a ``sys.excepthook``
+    that appends a full traceback to ``<root>/runtime/logs/crash-*.log`` and (if
+    available) enables ``faulthandler`` so even interpreter-level crashes leave a
+    dump. Local file only: there is NO network upload. Fully guarded so a logging
+    failure can never prevent the app from starting; returns the log directory
+    on success or ``None`` if crash logging could not be installed.
+    """
+    global _FAULTHANDLER_FILE
+    try:
+        log_dir = root / "runtime" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        crash_path = log_dir / f"crash-{stamp}.log"
+
+        def _excepthook(exc_type, exc_value, exc_tb) -> None:  # noqa: ANN001
+            try:
+                with crash_path.open("a", encoding="utf-8") as handle:
+                    handle.write(f"=== {APP_NAME} crash {_dt.datetime.now().isoformat()} ===\n")
+                    traceback.print_exception(exc_type, exc_value, exc_tb, file=handle)
+                    handle.write("\n")
+            except Exception:  # noqa: BLE001 (crash logging must never raise)
+                pass
+            # Preserve default behaviour: still print to stderr.
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+        sys.excepthook = _excepthook
+
+        try:
+            fault_path = log_dir / f"faulthandler-{stamp}.log"
+            _FAULTHANDLER_FILE = fault_path.open("a", encoding="utf-8")
+            faulthandler.enable(file=_FAULTHANDLER_FILE)
+        except Exception:  # noqa: BLE001 (faulthandler is best-effort)
+            _FAULTHANDLER_FILE = None
+
+        return log_dir
+    except Exception:  # noqa: BLE001 (never block startup on crash-log setup)
+        return None
 
 
 def _bundle_dependency_imports() -> None:
@@ -25,6 +75,7 @@ def _bundle_dependency_imports() -> None:
     import httpx  # noqa: F401
     import multipart  # noqa: F401
     import openpyxl  # noqa: F401
+    import prometheus_client  # noqa: F401
     import psycopg  # noqa: F401
     import pydantic  # noqa: F401
     import pydantic_core  # noqa: F401
@@ -96,6 +147,11 @@ def open_browser_later(url: str) -> None:
 
 def main() -> int:
     root = app_root()
+
+    # Install local crash logging before anything else so even a failure during
+    # environment setup / app import is captured to a file (the portable exe has
+    # no attached console to read otherwise).
+    install_crash_logging(root)
 
     try:
         configure_environment(root)

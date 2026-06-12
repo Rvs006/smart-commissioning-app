@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -20,6 +20,7 @@ import {
   statusTokenLabels,
   toHealthState,
 } from "./runFormat";
+import { useRunEvents } from "./useRunEvents";
 
 const briefSteps = [
   {
@@ -87,6 +88,23 @@ export function DashboardPage() {
     refetchInterval: (query) =>
       query.state.data?.runs?.some((run) => !isTerminalStatus(run.status)) ? 1500 : 15000,
   });
+
+  // SSE-first monitoring of the newest in-flight run: the stream drives a fast
+  // refetch of the runs list when that run goes terminal, so the dashboard
+  // reflects completion without waiting on the 1.5s poll. On SSE error the
+  // existing polling above is untouched, so nothing regresses.
+  const newestActiveRunId = useMemo(() => {
+    const all = runsQuery.data?.runs ?? [];
+    return all.find((run) => !isTerminalStatus(run.status))?.run_id ?? null;
+  }, [runsQuery.data]);
+
+  const runEvents = useRunEvents(newestActiveRunId, Boolean(newestActiveRunId));
+  const refetchRuns = runsQuery.refetch;
+  useEffect(() => {
+    if (runEvents.reachedTerminal) {
+      void refetchRuns();
+    }
+  }, [runEvents.reachedTerminal, refetchRuns]);
 
   // Reports (real) — used for the evidence-pack count KPI.
   const reportsQuery = useQuery({

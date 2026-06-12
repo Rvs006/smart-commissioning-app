@@ -7,12 +7,27 @@ name = "smart-commissioning-worker"
 version = "0.1.0"
 description = "Background worker scaffold for Smart Commissioning discovery and validation jobs."
 requires-python = ">=3.12"
+license = "MIT"
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+  "Topic :: System :: Monitoring",
+  "Development Status :: 3 - Alpha",
+  "Private :: Do Not Upload",
+]
 dependencies = [
   "dramatiq[redis]>=1.17.1,<2.0",
   "pydantic-settings>=2.6.1,<3.0",
   "sqlalchemy>=2.0.36,<3.0",
   "psycopg[binary]>=3.2.3,<4.0"
 ]
+
+[project.optional-dependencies]
+# Optional tooling for generating an SBOM / license inventory with the
+# off-the-shelf tools. The in-repo scripts/generate_sbom.py uses only the
+# stdlib and needs none of these; see docs/SBOM.md.
+sbom = ["pip-licenses>=5.0", "cyclonedx-bom>=4.0"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

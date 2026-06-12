@@ -657,3 +657,170 @@ export function rollbackMqttConfigPublish(runId: string): Promise<JobAcceptedRes
     { method: "POST" },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Server-Sent Events (SSE) run-progress streaming.
+//
+// The backend exposes GET /runs/{run_id}/events as a text/event-stream that
+// emits status/stage/progress and closes when the run is terminal. The browser
+// EventSource API CANNOT attach custom headers, so it cannot carry X-API-Key in
+// api_key mode. We therefore consume the stream with fetch()+ReadableStream
+// through the SAME withApiKey() path the rest of the client uses, and parse the
+// SSE frames manually. In local/loopback mode no key is needed; this one code
+// path covers both modes. On any error/unsupported environment the caller falls
+// back to the existing 1.5s polling (see ModulePage / DashboardPage).
+// ---------------------------------------------------------------------------
+
+// The status/stage/progress slice emitted per progress frame. Mirrors the
+// backend events._progress_payload shape.
+export type RunEvent = {
+  run_id: string;
+  job_type?: JobType;
+  status: JobStatus;
+  stage?: string;
+  progress_percent?: number;
+  updated_at?: string | null;
+  error_message?: string | null;
+};
+
+export type RunEventName = "message" | "terminal" | "timeout" | "gone";
+
+export type RunEventCallbacks = {
+  // Fired for every progress frame (the default "message" event) and for the
+  // explicit "terminal" frame, so consumers always see the final state.
+  onEvent: (event: RunEvent, name: RunEventName) => void;
+  // Fired once when the stream ends (terminal/timeout/closed) or errors. The
+  // boolean reports whether the run reached a terminal status over the stream.
+  onClose?: (reachedTerminal: boolean) => void;
+  onError?: (error: unknown) => void;
+};
+
+const TERMINAL_EVENT_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>([
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * Parses accumulated SSE text into complete frames, returning the parsed
+ * events and the unconsumed trailing buffer (a partial frame).
+ */
+export function parseSseBuffer(buffer: string): { events: { name: RunEventName; data: RunEvent | null }[]; rest: string } {
+  const events: { name: RunEventName; data: RunEvent | null }[] = [];
+  // SSE frames are separated by a blank line. Normalise CRLF first.
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const parts = normalized.split("\n\n");
+  // The last element is an incomplete frame (no trailing blank line yet).
+  const rest = parts.pop() ?? "";
+  for (const block of parts) {
+    const trimmed = block.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let name: RunEventName = "message";
+    const dataLines: string[] = [];
+    for (const line of trimmed.split("\n")) {
+      if (line.startsWith("event:")) {
+        name = line.slice("event:".length).trim() as RunEventName;
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trim());
+      }
+    }
+    let data: RunEvent | null = null;
+    if (dataLines.length > 0) {
+      try {
+        data = JSON.parse(dataLines.join("")) as RunEvent;
+      } catch {
+        // A malformed data frame is skipped rather than aborting the stream.
+        data = null;
+      }
+    }
+    events.push({ data, name });
+  }
+  return { events, rest };
+}
+
+/**
+ * Opens the SSE run-progress stream and dispatches parsed events to callbacks.
+ * Returns a disposer that aborts the underlying fetch (cancel-safe): calling it
+ * stops the stream and is a no-op after the stream has already closed.
+ *
+ * Auth: routed through withApiKey() so X-API-Key (or the loopback path) applies
+ * exactly like every other request. A 401 surfaces via onError as an ApiError,
+ * letting the caller fall back to polling.
+ */
+export function streamRunEvents(runId: string, callbacks: RunEventCallbacks): () => void {
+  const controller = new AbortController();
+  let reachedTerminal = false;
+  let closed = false;
+
+  const finish = (error?: unknown) => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    if (error !== undefined) {
+      callbacks.onError?.(error);
+    }
+    callbacks.onClose?.(reachedTerminal);
+  };
+
+  void (async () => {
+    try {
+      const init = withApiKey({
+        headers: { Accept: "text/event-stream" },
+        signal: controller.signal,
+      });
+      const response = await fetch(
+        `${apiBaseUrl}/runs/${encodeURIComponent(runId)}/events`,
+        init,
+      );
+
+      if (response.status === 401) {
+        throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+      }
+      if (!response.ok) {
+        throw new ApiError(await parseApiError(response), response.status);
+      }
+      if (!response.body) {
+        // No streaming body (e.g. a non-streaming fetch polyfill): the caller
+        // must fall back to polling.
+        throw new Error("Streaming response body is not available.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const { events, rest } = parseSseBuffer(buffer);
+        buffer = rest;
+        for (const { name, data } of events) {
+          if (data) {
+            if (name === "terminal" || TERMINAL_EVENT_STATUSES.has(data.status)) {
+              reachedTerminal = true;
+            }
+            callbacks.onEvent(data, name);
+          }
+        }
+      }
+      finish();
+    } catch (error) {
+      // An aborted stream (caller disposed) is a clean close, not an error.
+      if (controller.signal.aborted) {
+        finish();
+        return;
+      }
+      finish(error);
+    }
+  })();
+
+  return () => {
+    controller.abort();
+  };
+}

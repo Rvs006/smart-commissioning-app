@@ -29,6 +29,7 @@ import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { moduleWorkspaces, type IssueRow } from "./operatorData";
 import { discoveryMetrics, discoveryViewFor } from "./discoveryRows";
 import { isTerminalStatus } from "./runFormat";
+import { useRunEvents } from "./useRunEvents";
 
 type ModulePageProps = {
   moduleRoute: string;
@@ -199,13 +200,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["import-profiles"],
   });
 
+  // SSE-first run progress for the active run. status/stage/progress update
+  // live from the stream; on stream error/unsupported, sseActive flips false
+  // and the queries below resume the proven 1.5s polling (no regression).
+  const runEvents = useRunEvents(activeRun?.runId, Boolean(activeRun));
+  const sseEvent = runEvents.event;
+  const sseDriving = runEvents.sseActive && sseEvent !== null;
+
   // Validation run monitor — polls until terminal (the proven 1.5s pattern,
-  // generalized to any validation run, not only UDMI).
+  // generalized to any validation run, not only UDMI). While SSE is the live
+  // source we pause the interval; if SSE drops we fall back to polling.
   const validationRunQuery = useQuery({
     enabled: Boolean(activeRun) && activeRun?.kind === "validation",
     queryFn: () => getValidationRun(activeRun?.runId ?? ""),
     queryKey: ["validation-run", activeRun?.runId],
-    refetchInterval: (query) => (isTerminalStatus(query.state.data?.status) ? false : 1500),
+    refetchInterval: (query) => {
+      if (isTerminalStatus(query.state.data?.status) || runEvents.reachedTerminal) {
+        return false;
+      }
+      return runEvents.sseActive ? false : 1500;
+    },
   });
 
   // Discovery run monitor — same polling contract, against the discovery
@@ -214,12 +228,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled: Boolean(activeRun) && activeRun?.kind === "discovery",
     queryFn: () => getDiscoveryRun(activeRun?.runId ?? ""),
     queryKey: ["discovery-run", activeRun?.runId],
-    refetchInterval: (query) => (isTerminalStatus(query.state.data?.status) ? false : 1500),
+    refetchInterval: (query) => {
+      if (isTerminalStatus(query.state.data?.status) || runEvents.reachedTerminal) {
+        return false;
+      }
+      return runEvents.sseActive ? false : 1500;
+    },
   });
 
   const activeRunRecord =
     activeRun?.kind === "discovery" ? discoveryRunQuery.data : validationRunQuery.data;
-  const activeRunStatus = activeRunRecord?.status;
+  // Prefer the live SSE frame for status/stage/progress; fall back to the
+  // polled record for those fields and for everything else (result_summary).
+  const activeRunStatus = (sseDriving ? sseEvent?.status : undefined) ?? activeRunRecord?.status;
+  const activeRunStage = (sseDriving ? sseEvent?.stage : undefined) ?? activeRunRecord?.stage;
+  const activeRunProgress =
+    (sseDriving ? sseEvent?.progress_percent : undefined) ?? activeRunRecord?.progress_percent ?? 0;
+  const activeRunError = (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
   const activeRunTerminal = isTerminalStatus(activeRunStatus);
 
   // Validation issues — fetched only once the validation run is terminal.
@@ -241,6 +266,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryFn: () => getDiscoveryResults(activeRun?.runId ?? ""),
     queryKey: ["discovery-results", activeRun?.runId],
   });
+
+  // When SSE reports the run terminal but polling is paused, the polled record
+  // (and its result_summary) may still be mid-run. Trigger a single refetch so
+  // the terminal-gated issues/results queries fire against fresh data.
+  const refetchValidationRun = validationRunQuery.refetch;
+  const refetchDiscoveryRun = discoveryRunQuery.refetch;
+  useEffect(() => {
+    if (!runEvents.reachedTerminal || !activeRun) {
+      return;
+    }
+    if (activeRun.kind === "discovery") {
+      void refetchDiscoveryRun();
+    } else {
+      void refetchValidationRun();
+    }
+  }, [runEvents.reachedTerminal, activeRun, refetchDiscoveryRun, refetchValidationRun]);
 
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
@@ -770,13 +811,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
 
               <div className="progress-track">
-                <div style={{ width: `${activeRunRecord?.progress_percent ?? 0}%` }} />
+                <div style={{ width: `${activeRunProgress}%` }} />
               </div>
 
               <dl className="summary-grid">
                 <div>
                   <dt>Stage</dt>
-                  <dd>{activeRunRecord?.stage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
+                  <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
                 </div>
                 <div>
                   <dt>Expected</dt>
@@ -824,8 +865,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <span className="error-text">{rollbackMutation.error.message}</span>
               )}
 
-              {activeRunRecord?.error_message && (
-                <span className="error-text">{activeRunRecord.error_message}</span>
+              {activeRunError && (
+                <span className="error-text">{activeRunError}</span>
               )}
 
               {activeRun.kind === "discovery" && discoveryResultsQuery.isError && (

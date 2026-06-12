@@ -11,10 +11,14 @@ import {
   getHealth,
   listReports,
   listRuns,
+  parseSseBuffer,
   rollbackMqttConfigPublish,
   setApiKey,
+  streamRunEvents,
   validateConfiguration,
   type ConfigurationSnapshot,
+  type RunEvent,
+  type RunEventName,
 } from "./client";
 
 describe("formatApiDetail", () => {
@@ -342,5 +346,154 @@ describe("run and discovery API functions", () => {
       name: "ApiError",
       status: 401,
     });
+  });
+});
+
+// Build a streaming Response whose body yields the given UTF-8 chunks in order
+// through a ReadableStream reader — exactly what streamRunEvents consumes via
+// fetch(). Mirrors the backend text/event-stream framing.
+function sseStreamResponse(chunks: string[], status = 200): Response {
+  const encoder = new TextEncoder();
+  let index = 0;
+  const reader = {
+    read: async () => {
+      if (index >= chunks.length) {
+        return { done: true, value: undefined };
+      }
+      const value = encoder.encode(chunks[index]);
+      index += 1;
+      return { done: false, value };
+    },
+  };
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? "OK" : "Error",
+    headers: new Headers({ "Content-Type": "text/event-stream" }),
+    body: { getReader: () => reader },
+    json: async () => ({}),
+  } as unknown as Response;
+}
+
+function sseFrame(payload: Record<string, unknown>, event?: string): string {
+  const lines = [];
+  if (event) {
+    lines.push(`event: ${event}`);
+  }
+  lines.push(`data: ${JSON.stringify(payload)}`);
+  return `${lines.join("\n")}\n\n`;
+}
+
+describe("parseSseBuffer", () => {
+  it("parses complete frames and returns the partial trailing buffer", () => {
+    const buffer = `${sseFrame({ run_id: "r1", status: "running", progress_percent: 40 })}data: {"run_id":"r1",`;
+    const { events, rest } = parseSseBuffer(buffer);
+    expect(events).toHaveLength(1);
+    expect(events[0].name).toBe("message");
+    expect(events[0].data).toMatchObject({ run_id: "r1", status: "running", progress_percent: 40 });
+    expect(rest).toBe('data: {"run_id":"r1",');
+  });
+
+  it("reads the event name from an event: line", () => {
+    const { events } = parseSseBuffer(sseFrame({ run_id: "r1", status: "succeeded" }, "terminal"));
+    expect(events[0].name).toBe("terminal");
+    expect(events[0].data).toMatchObject({ status: "succeeded" });
+  });
+
+  it("skips a frame with malformed JSON without throwing", () => {
+    const { events } = parseSseBuffer("data: {not-json}\n\n");
+    expect(events).toHaveLength(1);
+    expect(events[0].data).toBeNull();
+  });
+});
+
+// Collects events from streamRunEvents and resolves once the stream closes.
+function collectRunEvents(runId: string): Promise<{
+  events: { event: RunEvent; name: RunEventName }[];
+  reachedTerminal: boolean;
+  error: unknown;
+}> {
+  return new Promise((resolve) => {
+    const events: { event: RunEvent; name: RunEventName }[] = [];
+    let error: unknown;
+    streamRunEvents(runId, {
+      onClose: (reachedTerminal) => resolve({ error, events, reachedTerminal }),
+      onError: (caught) => {
+        error = caught;
+      },
+      onEvent: (event, name) => {
+        events.push({ event, name });
+      },
+    });
+  });
+}
+
+describe("streamRunEvents", () => {
+  afterEach(() => {
+    clearApiKey();
+    vi.unstubAllGlobals();
+  });
+
+  it("attaches the X-API-Key header (fetch-stream) and parses events from the ReadableStream", async () => {
+    setApiKey("stored-key");
+    const fetchMock = stubFetch(
+      sseStreamResponse([
+        sseFrame({ run_id: "r1", status: "running", stage: "scanning", progress_percent: 30 }),
+        sseFrame({ run_id: "r1", status: "succeeded", progress_percent: 100 }, "terminal"),
+      ]),
+    );
+
+    const { events, reachedTerminal, error } = await collectRunEvents("r1");
+
+    // X-API-Key rides the fetch (EventSource could not have sent it).
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/runs/r1/events");
+    expect(new Headers(init?.headers).get("X-API-Key")).toBe("stored-key");
+
+    expect(error).toBeUndefined();
+    expect(reachedTerminal).toBe(true);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({ name: "message", event: { status: "running", stage: "scanning" } });
+    expect(events[1]).toMatchObject({ name: "terminal", event: { status: "succeeded", progress_percent: 100 } });
+  });
+
+  it("treats a status-derived terminal frame as terminal even without the event name", async () => {
+    stubFetch(sseStreamResponse([sseFrame({ run_id: "r1", status: "failed", progress_percent: 100 })]));
+
+    const { reachedTerminal, events } = await collectRunEvents("r1");
+
+    expect(reachedTerminal).toBe(true);
+    expect(events[0].event.status).toBe("failed");
+  });
+
+  it("falls back to polling: a 401 surfaces via onError and closes non-terminal", async () => {
+    stubFetch(errorResponse(401, "Unauthorized", { detail: "API key required." }));
+
+    const { error, reachedTerminal, events } = await collectRunEvents("r1");
+
+    expect(events).toHaveLength(0);
+    // reachedTerminal=false is the signal the caller (useRunEvents) uses to
+    // disable SSE and resume the 1.5s polling.
+    expect(reachedTerminal).toBe(false);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ message: AUTH_REQUIRED_MESSAGE, status: 401 });
+  });
+
+  it("falls back to polling when the response has no streaming body", async () => {
+    const noBody = {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers(),
+      body: null,
+      json: async () => ({}),
+    } as unknown as Response;
+    stubFetch(noBody);
+
+    const { error, reachedTerminal } = await collectRunEvents("r1");
+
+    expect(reachedTerminal).toBe(false);
+    expect(error).toBeInstanceOf(Error);
   });
 });

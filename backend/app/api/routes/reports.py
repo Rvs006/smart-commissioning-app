@@ -1,13 +1,15 @@
 import json
+import re
 from datetime import UTC, datetime
 from io import BytesIO
 from xml.sax.saxutils import escape
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from fastapi import APIRouter, HTTPException, Response
 from openpyxl import Workbook
 
 from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary
+from app.services.reports_integrity import INTEGRITY_KEY, build_integrity_metadata
 from app.services.run_service import REPORT_JOB_TYPES, RunService
 
 router = APIRouter()
@@ -67,6 +69,7 @@ def download_report(report_id: str) -> Response:
 
     report = _to_report_summary(report_id)
     content, media_type = _build_report_artifact(run, report.output_format)
+    _persist_integrity(run, content)
     return Response(
         content=content,
         media_type=media_type,
@@ -74,12 +77,91 @@ def download_report(report_id: str) -> Response:
     )
 
 
+def _generated_at(run: object) -> str:
+    """Stable artifact-generation timestamp for the run.
+
+    Reports MUST be derivable from the stored run record (the audit
+    requirement), so the "Generated" field cannot be ``datetime.now`` at
+    download time — that would make the bytes non-reproducible and break
+    hash-based verification. The first download persists a fixed timestamp in
+    result_summary; every later regeneration reuses it, yielding byte-identical
+    artifacts that the verify endpoint can re-hash.
+    """
+    summary = run.result_summary if isinstance(run.result_summary, dict) else {}
+    existing = summary.get("report_generated_at")
+    if isinstance(existing, str) and existing:
+        return existing
+    generated_at = datetime.now(UTC).isoformat()
+    service.update_result_summary(run.run_id, {"report_generated_at": generated_at})
+    # Reflect the persisted value on the in-memory run so this request's artifact
+    # matches what future regenerations will produce.
+    if isinstance(run.result_summary, dict):
+        run.result_summary["report_generated_at"] = generated_at
+    return generated_at
+
+
+def _persist_integrity(run: object, artifact: bytes) -> dict[str, object]:
+    """Compute + persist SHA-256 + Ed25519 signature for the artifact bytes.
+
+    Stored under result_summary["integrity"]. Recomputed every download so a
+    regenerated (byte-identical) artifact re-confirms the recorded hash.
+    """
+    metadata = build_integrity_metadata(artifact)
+    service.update_result_summary(run.run_id, {INTEGRITY_KEY: metadata})
+    if isinstance(run.result_summary, dict):
+        run.result_summary[INTEGRITY_KEY] = metadata
+    return metadata
+
+
+# Fixed member timestamp (1980-01-01, the zip epoch) so regenerated artifacts
+# are byte-identical. Reports are derived from the stored run record, so the
+# bytes must be reproducible for hash-based verification — embedded "now"
+# timestamps (zipfile uses localtime; openpyxl stamps created/modified) would
+# otherwise make every regeneration hash differently.
+_ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
+# Fixed instant pinned into openpyxl core properties (docProps/core.xml).
+_ARTIFACT_PROPERTIES_EPOCH = datetime(1980, 1, 1, tzinfo=UTC)
+
+
 def _build_report_artifact(run: object, output_format: str) -> tuple[bytes, str]:
     if output_format == "xlsx":
-        return _build_xlsx_report(run), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        artifact = _normalize_zip_bytes(_build_xlsx_report(run))
+        return artifact, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if output_format == "docx":
-        return _build_docx_report(run), "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    return _build_zip_report(run), "application/zip"
+        artifact = _normalize_zip_bytes(_build_docx_report(run))
+        return artifact, "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return _normalize_zip_bytes(_build_zip_report(run)), "application/zip"
+
+
+def _normalize_zip_bytes(data: bytes) -> bytes:
+    """Rewrite a zip container with deterministic member order + timestamps.
+
+    All three report formats are ZIP containers (xlsx/docx are OOXML zips). The
+    rewrite sorts entries by name and pins every date_time to the zip epoch so
+    the same run record always produces byte-identical artifacts, which is what
+    lets the verify endpoint re-hash a regenerated artifact.
+    """
+    source = BytesIO(data)
+    out = BytesIO()
+    with ZipFile(source, "r") as reader, ZipFile(out, "w", ZIP_DEFLATED) as writer:
+        for name in sorted(reader.namelist()):
+            info = ZipInfo(filename=name, date_time=_ZIP_EPOCH)
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            writer.writestr(info, _pin_member_timestamps(name, reader.read(name)))
+    return out.getvalue()
+
+
+# openpyxl overwrites dcterms:modified with "now" on save regardless of the
+# workbook properties, so pin it (and created) to the epoch in core.xml content.
+_MODIFIED_RE = re.compile(rb"(<dcterms:(?:created|modified)[^>]*>)[^<]*(</dcterms:(?:created|modified)>)")
+
+
+def _pin_member_timestamps(name: str, payload: bytes) -> bytes:
+    """Pin OOXML core-property timestamps so the artifact bytes are reproducible."""
+    if name == "docProps/core.xml":
+        return _MODIFIED_RE.sub(rb"\g<1>1980-01-01T00:00:00Z\g<2>", payload)
+    return payload
 
 
 def _report_rows(run: object) -> list[tuple[str, str]]:
@@ -91,12 +173,17 @@ def _report_rows(run: object) -> list[tuple[str, str]]:
         ("Site", str(run.site_id)),
         ("Status", str(run.status)),
         ("Source runs", ", ".join(str(item) for item in parameters.get("source_run_ids", [])) or "All completed runs"),
-        ("Generated", datetime.now(UTC).isoformat()),
+        ("Generated", _generated_at(run)),
     ]
 
 
 def _build_xlsx_report(run: object) -> bytes:
     workbook = Workbook()
+    # openpyxl stamps docProps/core.xml with the current time on save; pin the
+    # core properties to a fixed instant so the artifact bytes are reproducible
+    # from the run record (required for hash-based verification).
+    workbook.properties.created = _ARTIFACT_PROPERTIES_EPOCH
+    workbook.properties.modified = _ARTIFACT_PROPERTIES_EPOCH
     sheet = workbook.active
     sheet.title = "Report Summary"
     sheet.append(["Field", "Value"])

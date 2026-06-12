@@ -7,6 +7,15 @@ name = "smart-commissioning-core"
 version = "0.1.0"
 description = "Shared UDMI validation and MQTT logic for the Smart Commissioning API and worker."
 requires-python = ">=3.12"
+license = "MIT"
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+  "Topic :: System :: Monitoring",
+  "Development Status :: 3 - Alpha",
+  "Private :: Do Not Upload",
+]
 dependencies = [
   "pydantic>=2.6,<3.0",
   "sqlalchemy>=2.0",
@@ -19,6 +28,10 @@ dependencies = [
 # bacpypes3 when the real backend is selected. The real path REQUIRES on-site
 # validation against actual BACnet devices and has never been integration-tested.
 bacnet = ["bacpypes3>=0.0.98"]
+# Optional tooling for generating an SBOM / license inventory with the
+# off-the-shelf tools (the in-repo scripts/generate_sbom.py uses only the
+# stdlib and needs none of these). See docs/SBOM.md.
+sbom = ["pip-licenses>=5.0", "cyclonedx-bom>=4.0"]
 
 [tool.setuptools.packages.find]
 include = ["smart_commissioning_core*"]
