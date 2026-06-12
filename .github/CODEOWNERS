@@ -1,0 +1,15 @@
+# CODEOWNERS — default reviewers for pull requests.
+#
+# Lines are matched bottom-to-top; the last matching pattern wins. The catch-all
+# below assigns every file to @Rvs006. As the team grows, add more specific
+# patterns ABOVE this line to route directories to their owners, e.g.:
+#
+#   /frontend/   @your-frontend-owner
+#   /backend/    @your-backend-owner
+#   /worker/     @your-worker-owner
+#   /core/       @your-core-owner
+#   /infra/      @your-infra-owner
+#   /docs/       @your-docs-owner
+#
+# Default owner for everything in the repository.
+*       @Rvs006

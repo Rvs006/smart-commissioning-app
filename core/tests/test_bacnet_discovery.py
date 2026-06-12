@@ -9,11 +9,13 @@ import-guard error is checked (skipped if bacpypes3 happens to be installed).
 
 import asyncio
 import importlib.util
+import inspect
 import unittest
 from typing import Any
 
 from smart_commissioning_core.engines.bacnet_discovery import (
     BACKEND_SIMULATED,
+    BacnetDiscoveryBackend,
     Bacpypes3Backend,
     SimulatedBacnetBackend,
     make_bacnet_discovery_engine,
@@ -379,6 +381,57 @@ class Bacpypes3BackendGuardTests(unittest.TestCase):
         backend = Bacpypes3Backend(local_address=None)
         with self.assertRaises(RuntimeError):
             asyncio.run(backend.who_is(0, 100))
+
+
+class Bacpypes3BackendSignatureTests(unittest.TestCase):
+    """Static introspection of the real backend — NO network, NO bacpypes3.
+
+    These tests pin the adapter's async surface so a future edit that breaks the
+    coroutine signatures (the shapes the engine drives, and the ones validated
+    against the bacpypes3 docs) fails loudly here, long before anyone gets to a
+    real controller. Nothing is awaited and bacpypes3 is never imported — we only
+    inspect the class, which constructs without the optional dependency.
+    """
+
+    def test_backend_name_is_bacpypes3(self) -> None:
+        self.assertEqual(Bacpypes3Backend.backend_name, "bacpypes3")
+
+    def test_backend_satisfies_discovery_protocol(self) -> None:
+        # Constructing the backend must NOT import bacpypes3 (import is lazy in
+        # _ensure_app); the instance must still structurally satisfy the Protocol.
+        backend = Bacpypes3Backend(local_address="192.0.2.10/24")
+        self.assertIsInstance(backend, BacnetDiscoveryBackend)
+
+    def test_transport_methods_are_coroutines(self) -> None:
+        for name in ("who_is", "read_object_list", "read_present_value"):
+            method = getattr(Bacpypes3Backend, name, None)
+            self.assertTrue(callable(method), f"{name} must exist")
+            self.assertTrue(
+                inspect.iscoroutinefunction(method),
+                f"{name} must be an async def (the engine awaits it)",
+            )
+
+    def test_close_is_synchronous(self) -> None:
+        close = getattr(Bacpypes3Backend, "close", None)
+        self.assertTrue(callable(close), "close must exist")
+        # VERIFIED against bacpypes3 docs: Application.close() is sync, so the
+        # adapter's close() is a plain (non-async) method.
+        self.assertFalse(
+            inspect.iscoroutinefunction(close),
+            "close must be synchronous (bacpypes3 Application.close() is sync)",
+        )
+
+    def test_who_is_signature(self) -> None:
+        params = list(inspect.signature(Bacpypes3Backend.who_is).parameters)
+        self.assertEqual(params, ["self", "low_limit", "high_limit", "address"])
+
+    def test_read_object_list_signature(self) -> None:
+        params = list(inspect.signature(Bacpypes3Backend.read_object_list).parameters)
+        self.assertEqual(params, ["self", "device"])
+
+    def test_read_present_value_signature(self) -> None:
+        params = list(inspect.signature(Bacpypes3Backend.read_present_value).parameters)
+        self.assertEqual(params, ["self", "device", "obj"])
 
 
 if __name__ == "__main__":
