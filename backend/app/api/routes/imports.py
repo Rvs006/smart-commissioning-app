@@ -2,8 +2,10 @@ import io
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
+from smart_commissioning_core.rbac import Role
 
+from app.core.auth import require_role
 from app.core.config import get_settings
 from app.schemas.imports import (
     ImportBatchSummary,
@@ -15,6 +17,12 @@ from app.services.import_service import ImportService
 
 router = APIRouter()
 service = ImportService()
+
+# RBAC: listing profiles/templates and reading import results is viewer+;
+# creating an import (ingesting an uploaded register) is engineer+ (managing
+# imports is engineer authority).
+require_viewer = require_role(Role.VIEWER)
+require_engineer = require_role(Role.ENGINEER)
 
 _READ_CHUNK_BYTES = 1024 * 1024
 
@@ -55,12 +63,16 @@ def _guard_xlsx_decompressed_size(file_bytes: bytes, max_decompressed_bytes: int
         )
 
 
-@router.get("/profiles", response_model=list[ImportProfileSummary])
+@router.get(
+    "/profiles",
+    response_model=list[ImportProfileSummary],
+    dependencies=[Depends(require_viewer)],
+)
 def list_import_profiles() -> list[ImportProfileSummary]:
     return service.list_profiles()
 
 
-@router.get("/templates/{import_type}.{file_type}")
+@router.get("/templates/{import_type}.{file_type}", dependencies=[Depends(require_viewer)])
 def download_import_template(import_type: ImportType, file_type: str) -> Response:
     try:
         content = service.build_template(import_type, file_type)
@@ -82,7 +94,7 @@ def download_import_template(import_type: ImportType, file_type: str) -> Respons
     )
 
 
-@router.post("", response_model=ImportBatchSummary)
+@router.post("", response_model=ImportBatchSummary, dependencies=[Depends(require_engineer)])
 async def create_import(
     request: Request,
     import_type: ImportType = Form(...),
@@ -120,7 +132,7 @@ async def create_import(
     return summary
 
 
-@router.get("/{import_id}", response_model=ImportBatchSummary)
+@router.get("/{import_id}", response_model=ImportBatchSummary, dependencies=[Depends(require_viewer)])
 def get_import(import_id: str) -> ImportBatchSummary:
     try:
         return service.get_import(import_id)
@@ -128,7 +140,7 @@ def get_import(import_id: str) -> ImportBatchSummary:
         raise HTTPException(status_code=404, detail=f"Import '{import_id}' was not found.") from error
 
 
-@router.get("/{import_id}/errors", response_model=ImportErrorReport)
+@router.get("/{import_id}/errors", response_model=ImportErrorReport, dependencies=[Depends(require_viewer)])
 def get_import_errors(import_id: str) -> ImportErrorReport:
     try:
         return service.get_import_errors(import_id)

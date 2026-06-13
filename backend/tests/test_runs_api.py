@@ -123,7 +123,18 @@ class RunsApiTests(unittest.TestCase):
         first = runs[0]
         self.assertEqual(
             set(first),
-            {"run_id", "job_type", "status", "stage", "progress_percent", "created_at", "updated_at"},
+            {
+                "run_id",
+                "job_type",
+                "status",
+                "stage",
+                "progress_percent",
+                "created_at",
+                "updated_at",
+                # Additive edge attribution for the multi-project hub; null for a
+                # locally created run.
+                "edge_id",
+            },
             "list endpoint returns run summaries",
         )
 

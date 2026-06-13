@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends
+from smart_commissioning_core.rbac import Role
 
 from app.api.routes import (
     blueprint,
@@ -11,9 +12,10 @@ from app.api.routes import (
     imports,
     reports,
     runs,
+    users,
     validation,
 )
-from app.core.auth import require_auth
+from app.core.auth import require_auth, require_role
 
 api_router = APIRouter()
 
@@ -21,16 +23,25 @@ api_router = APIRouter()
 # without credentials (they expose no project data).
 api_router.include_router(health.router, tags=["health"])
 
-# Every other /api/v1 route requires authentication (app.core.auth).
+# Every other /api/v1 route requires authentication (app.core.auth). RBAC is
+# then layered per-route inside each router (require_role on the data/mutation
+# routes); two single-tier routers (blueprint, events) are gated here at the
+# include level, and the hub ingest router is admin-only.
 protected_router = APIRouter(dependencies=[Depends(require_auth)])
-protected_router.include_router(blueprint.router, tags=["blueprint"])
+# Blueprint is a static read-only capability map: any authenticated viewer+.
+protected_router.include_router(
+    blueprint.router, tags=["blueprint"], dependencies=[Depends(require_role(Role.VIEWER))]
+)
 protected_router.include_router(configuration.router, prefix="/configuration", tags=["configuration"])
 protected_router.include_router(imports.router, prefix="/imports", tags=["imports"])
 protected_router.include_router(runs.router, prefix="/runs", tags=["runs"])
 # SSE run-progress streaming (GET /runs/{run_id}/events). Mounted on the same
 # /runs prefix and behind the same auth as the polling endpoints; the frontend
 # consumes it via fetch()+ReadableStream so X-API-Key still rides the request.
-protected_router.include_router(events.router, prefix="/runs", tags=["runs", "events"])
+# Reading run progress is a viewer+ capability, gated at the include level.
+protected_router.include_router(
+    events.router, prefix="/runs", tags=["runs", "events"], dependencies=[Depends(require_role(Role.VIEWER))]
+)
 protected_router.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 protected_router.include_router(validation.router, prefix="/validation", tags=["validation"])
 protected_router.include_router(reports.router, prefix="/reports", tags=["reports"])
@@ -40,6 +51,15 @@ protected_router.include_router(evidence.router, prefix="/evidence", tags=["evid
 # Edge->hub sync: hub ingest endpoint (POST /hub/runs/ingest). The router is
 # always mounted but every route returns 404 unless deployment_role == 'hub'
 # (the role-guard lives in the route so toggling the setting needs no remount).
-# Behind the same auth as every other /api/v1 route.
-protected_router.include_router(hub.router, prefix="/hub", tags=["hub"])
+# Behind the same auth as every other /api/v1 route. Ingest immutably writes
+# cross-edge run records, so it is restricted to admin (the hub operator role).
+# The 404 role-guard runs first for a non-hub instance; on a hub, a non-admin
+# caller gets 403.
+protected_router.include_router(
+    hub.router, prefix="/hub", tags=["hub"], dependencies=[Depends(require_role(Role.ADMIN))]
+)
+# Identity + RBAC: GET /me for any authenticated caller, /users management for
+# admins (require_role(Role.ADMIN) inside the route). Behind the same auth as
+# every other /api/v1 route.
+protected_router.include_router(users.router, tags=["users"])
 api_router.include_router(protected_router)

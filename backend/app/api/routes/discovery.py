@@ -14,13 +14,15 @@ I/O and are allowed without authorization (a side-effect-free preview), matching
 the safety module's stated convention.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
 from smart_commissioning_core.engines.safety import is_authorized
+from smart_commissioning_core.rbac import Role
 
+from app.core.auth import require_role
 from app.core.config import get_settings
 from app.schemas.jobs import (
     DiscoveryPointsResponse,
@@ -47,6 +49,13 @@ from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
 router = APIRouter()
 service = RunService()
 queue_service = JobQueueService()
+
+# RBAC: reading discovery data is viewer+; creating/running a discovery job
+# (which can drive a real network scan) is engineer+. The separate scan
+# authorization consent (parameters.authorized / scan_authorization) still
+# applies on top of this — RBAC is WHO may act, scan-auth is the safety consent.
+require_viewer = require_role(Role.VIEWER)
+require_engineer = require_role(Role.ENGINEER)
 
 
 # Actionable message returned when a real scan lacks authorization. Mirrors the
@@ -88,7 +97,7 @@ def _discovery_repository() -> DiscoveryRepository:
     return DiscoveryRepository(service.engine)
 
 
-@router.post("/ip/runs", response_model=JobAcceptedResponse)
+@router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "ip_discovery")
     parameters = dict(run.parameters)
@@ -114,7 +123,7 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     )
 
 
-@router.post("/bacnet/runs", response_model=JobAcceptedResponse)
+@router.post("/bacnet/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "bacnet_discovery")
     parameters = dict(run.parameters)
@@ -141,7 +150,7 @@ def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedRespons
     )
 
 
-@router.post("/mqtt/runs", response_model=JobAcceptedResponse)
+@router.post("/mqtt/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_mqtt_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "mqtt_discovery")
     parameters = dict(run.parameters)
@@ -189,18 +198,22 @@ def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAccepted
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
-@router.get("/runs", response_model=RunListResponse)
+@router.get("/runs", response_model=RunListResponse, dependencies=[Depends(require_viewer)])
 def list_discovery_runs() -> RunListResponse:
     return RunListResponse(runs=service.list_runs(job_types=DISCOVERY_JOB_TYPES))
 
 
-@router.get("/runs/{run_id}", response_model=RunRecord)
+@router.get("/runs/{run_id}", response_model=RunRecord, dependencies=[Depends(require_viewer)])
 def get_discovery_run(run_id: str) -> RunRecord:
     run = _load_discovery_run(run_id)
     return run
 
 
-@router.get("/runs/{run_id}/results", response_model=DiscoveryResultsResponse)
+@router.get(
+    "/runs/{run_id}/results",
+    response_model=DiscoveryResultsResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_discovery_results(run_id: str) -> DiscoveryResultsResponse:
     run = _load_discovery_run(run_id)
 
@@ -224,7 +237,11 @@ def get_discovery_results(run_id: str) -> DiscoveryResultsResponse:
     )
 
 
-@router.get("/runs/{run_id}/points", response_model=DiscoveryPointsResponse)
+@router.get(
+    "/runs/{run_id}/points",
+    response_model=DiscoveryPointsResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_discovery_points(run_id: str) -> DiscoveryPointsResponse:
     run = _load_discovery_run(run_id)
     return DiscoveryPointsResponse(
@@ -235,7 +252,11 @@ def get_discovery_points(run_id: str) -> DiscoveryPointsResponse:
     )
 
 
-@router.get("/runs/{run_id}/topics", response_model=DiscoveryTopicsResponse)
+@router.get(
+    "/runs/{run_id}/topics",
+    response_model=DiscoveryTopicsResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_discovery_topics(run_id: str) -> DiscoveryTopicsResponse:
     run = _load_discovery_run(run_id)
     return DiscoveryTopicsResponse(

@@ -9,6 +9,7 @@ import {
   validateConfiguration,
 } from "../../api/client";
 import { isSecretSentinel, maskSecretValue } from "./secretField";
+import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
 type FieldKind = "text" | "password" | "select" | "textarea" | "secret" | "readonly";
 
@@ -78,6 +79,10 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
 const secretFields = new Set(["CA Certificate", "Client Certificate", "Private Key"]);
 
 export function ConfigurationPage() {
+  // Publishing configuration (PUT /configuration) and storing secrets are
+  // engineer+ mutations. Viewing the snapshot and validating it stay viewer, so
+  // only the Save and secret-store controls are role-gated here.
+  const { canEngineer } = useSession();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<ConfigurationSnapshot | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
@@ -254,7 +259,12 @@ export function ConfigurationPage() {
           >
             {validationMutation.isPending ? "Validating..." : "Validate Snapshot"}
           </button>
-          <button className="primary-button" disabled={saveMutation.isPending} type="submit">
+          <button
+            className="primary-button"
+            disabled={saveMutation.isPending || !canEngineer}
+            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+            type="submit"
+          >
             {saveMutation.isPending ? "Saving..." : "Save Configuration"}
           </button>
         </aside>
@@ -333,6 +343,7 @@ export function ConfigurationPage() {
             <div className="field-grid">
               {Object.entries(draft[section].values).map(([field, value]) => (
                 <FieldControl
+                  canEngineer={canEngineer}
                   disabled={section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)}
                   field={field}
                   hint={
@@ -362,6 +373,7 @@ export function ConfigurationPage() {
 }
 
 type FieldControlProps = {
+  canEngineer: boolean;
   disabled?: boolean;
   field: string;
   hint?: string;
@@ -378,6 +390,7 @@ type FieldControlProps = {
 };
 
 function FieldControl({
+  canEngineer,
   disabled = false,
   field,
   hint,
@@ -413,8 +426,9 @@ function FieldControl({
           />
           <button
             className="secondary-button compact"
-            disabled={secretPending || !secretContent.trim()}
+            disabled={secretPending || !secretContent.trim() || !canEngineer}
             onClick={onSecretStore}
+            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
             type="button"
           >
             {secretPending ? "Storing..." : "Store masked reference"}

@@ -17,10 +17,38 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     false,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from smart_commissioning_core.db.base import Base, UTCDateTime, utcnow
+
+
+class User(Base):
+    """A per-user identity for role-based access control.
+
+    Each user authenticates with their own API key. Only a HASH of that key is
+    stored (``api_key_hash`` — hashlib.sha256 hex digest); the raw key is shown
+    exactly ONCE at creation time and never persisted. ``role`` is one of the
+    ordered RBAC roles (smart_commissioning_core.rbac.Role) stored as its string
+    value. This coexists with the legacy shared settings.api_key, which acts as a
+    synthetic bootstrap-admin so an operator can create the first user.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    username: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    role: Mapped[str] = mapped_column(String(32))
+    # SHA-256 hex digest of the per-user key. Unique so a key resolves to exactly
+    # one user; indexed because every authenticated request looks a user up by it.
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    # Stamped on each successful authentication (best-effort; nullable until first use).
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
 class Project(Base):

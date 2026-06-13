@@ -44,6 +44,11 @@ class JobSummary(BaseModel):
     progress_percent: int
     created_at: datetime
     updated_at: datetime
+    # Originating edge id (run attribution for the multi-project hub). NULL/None
+    # for a run created on this local edge; populated when the run was ingested
+    # from another edge's signed bundle. Additive: defaults to None so the field
+    # is absent-as-null for local runs and existing callers that don't set it.
+    edge_id: str | None = None
 
 
 class ObservedPort(BaseModel):

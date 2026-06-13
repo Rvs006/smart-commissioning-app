@@ -21,6 +21,7 @@ import {
   toHealthState,
 } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
+import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
 const briefSteps = [
   {
@@ -70,6 +71,9 @@ function severityClass(severity: string): "critical" | "major" | "minor" {
 }
 
 export function DashboardPage() {
+  // Queueing an evidence pack is a report-create (engineer+). A viewer/reviewer
+  // sees the button disabled with an explanatory tooltip rather than a 403.
+  const { canEngineer } = useSession();
   const healthQuery = useQuery({
     queryFn: getHealth,
     queryKey: ["health"],
@@ -232,8 +236,9 @@ export function DashboardPage() {
         </Link>
         <button
           className="secondary-button"
-          disabled={reportMutation.isPending}
+          disabled={reportMutation.isPending || !canEngineer}
           onClick={() => reportMutation.mutate()}
+          title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
           type="button"
         >
           {reportMutation.isPending ? "Queueing..." : "Queue evidence pack"}

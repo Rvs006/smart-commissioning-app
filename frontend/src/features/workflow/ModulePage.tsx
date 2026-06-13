@@ -30,6 +30,7 @@ import { moduleWorkspaces, type IssueRow } from "./operatorData";
 import { discoveryMetrics, discoveryViewFor } from "./discoveryRows";
 import { isTerminalStatus } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
+import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
 type ModulePageProps = {
   moduleRoute: string;
@@ -158,6 +159,10 @@ const defaultPointsetPayload = JSON.stringify(
 );
 
 export function ModulePage({ moduleRoute }: ModulePageProps) {
+  // Discovery/validation/report runs, imports, cancel, publish, and rollback are
+  // all engineer+ mutations server-side. A viewer/reviewer sees these controls
+  // disabled with an explanatory tooltip rather than letting the click 403.
+  const { canEngineer } = useSession();
   const module = getModuleByRoute(moduleRoute);
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
@@ -465,7 +470,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     liveMetrics?.secondaryLabel ?? workspace?.secondaryMetricLabel ?? "accepted inputs";
 
   const activeStatusClass = activeRunStatus ? toStatusClass(activeRunStatus) : "queued";
-  const canCancel = Boolean(activeRun) && Boolean(activeRunStatus) && !activeRunTerminal;
+  // Cancel is an engineer+ mutation; hide it entirely for lower roles so a
+  // viewer/reviewer monitoring a run never sees a button that would 403.
+  const canCancel =
+    canEngineer && Boolean(activeRun) && Boolean(activeRunStatus) && !activeRunTerminal;
 
   // Export wiring: a report download fits the reports module (uses the last
   // queued report). Elsewhere there is no per-run results download endpoint, so
@@ -590,8 +598,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
               <button
                 className="primary-button"
-                disabled={!selectedFile || !selectedImportType || importMutation.isPending}
+                disabled={!selectedFile || !selectedImportType || importMutation.isPending || !canEngineer}
                 onClick={handleImport}
+                title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
                 type="button"
               >
                 {importMutation.isPending ? "Validating..." : "Upload and validate"}
@@ -720,7 +729,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="run-list">
             {module.runActions.length > 0 ? (
               module.runActions.map((action, index) => {
-                const blocked = action.kind === "discovery" && discoveryBlocked;
+                const scanBlocked = action.kind === "discovery" && discoveryBlocked;
+                const blocked = scanBlocked || !canEngineer;
+                // Role gate takes priority in the tooltip; otherwise the existing
+                // scan-authorization hint is shown for a blocked real scan.
+                const blockedTooltip = !canEngineer
+                  ? ENGINEER_REQUIRED_TOOLTIP
+                  : scanBlocked
+                    ? "Confirm scan authorization (or enable dry run) before queueing a real scan."
+                    : undefined;
                 return (
                   <div className="run-card" key={action.label}>
                     <div>
@@ -731,11 +748,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       className="secondary-button compact"
                       disabled={runMutation.isPending || blocked}
                       onClick={() => runMutation.mutate(index)}
-                      title={
-                        blocked
-                          ? "Confirm scan authorization (or enable dry run) before queueing a real scan."
-                          : undefined
-                      }
+                      title={blockedTooltip}
                       type="button"
                     >
                       {runMutation.isPending ? "Queueing..." : scanDryRun && action.kind === "discovery" ? "Preview" : "Queue"}
@@ -844,7 +857,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     {cancelMutation.isPending ? "Cancelling..." : "Cancel run"}
                   </button>
                 )}
-                {activeRun.kind === "validation" &&
+                {canEngineer &&
+                  activeRun.kind === "validation" &&
                   validationRunQuery.data?.job_type === "mqtt_config_publish" &&
                   activeRunTerminal && (
                     <button
@@ -1095,8 +1109,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </label>
           <button
             className="primary-button"
-            disabled={publishMutation.isPending || !publishConfirmed}
+            disabled={publishMutation.isPending || !publishConfirmed || !canEngineer}
             onClick={() => publishMutation.mutate()}
+            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
             type="button"
           >
             {publishMutation.isPending ? "Publishing..." : "Publish and verify next pointset"}

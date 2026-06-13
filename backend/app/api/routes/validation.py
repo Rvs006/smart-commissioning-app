@@ -13,7 +13,7 @@ see :mod:`smart_commissioning_core.mqtt_config_publish` and the ``rollback``
 endpoint below.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.comparison import process_mapping_validation_run
 from smart_commissioning_core.engines.point_validation import process_bacnet_validation_run
@@ -21,8 +21,10 @@ from smart_commissioning_core.mqtt_config_publish_processor import (
     process_mqtt_config_publish_run,
     process_mqtt_config_rollback_run,
 )
+from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
+from app.core.auth import require_role
 from app.core.config import get_settings
 from app.schemas.jobs import (
     JobAcceptedResponse,
@@ -46,6 +48,12 @@ router = APIRouter()
 service = RunService()
 queue_service = JobQueueService()
 settings = get_settings()
+
+# RBAC: reading validation results/issues is viewer+; creating a validation run,
+# publishing an MQTT config, or rolling one back is engineer+ (a publish/rollback
+# is a live write, gated additionally by the scan/publish authorization consent).
+require_viewer = require_role(Role.VIEWER)
+require_engineer = require_role(Role.ENGINEER)
 
 
 def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRecord:
@@ -81,7 +89,7 @@ def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAccepted
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
-@router.post("/udmi/runs", response_model=JobAcceptedResponse)
+@router.post("/udmi/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "udmi_validation")
 
@@ -102,7 +110,11 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     )
 
 
-@router.post("/mqtt-config/runs", response_model=JobAcceptedResponse)
+@router.post(
+    "/mqtt-config/runs",
+    response_model=JobAcceptedResponse,
+    dependencies=[Depends(require_engineer)],
+)
 def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "mqtt_config_publish")
 
@@ -127,7 +139,11 @@ def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResp
     )
 
 
-@router.post("/mqtt-config/runs/{run_id}/rollback", response_model=JobAcceptedResponse)
+@router.post(
+    "/mqtt-config/runs/{run_id}/rollback",
+    response_model=JobAcceptedResponse,
+    dependencies=[Depends(require_engineer)],
+)
 def rollback_mqtt_config_publish(run_id: str) -> JobAcceptedResponse:
     """Republish the previously-captured config value to roll back a publish.
 
@@ -176,7 +192,7 @@ def rollback_mqtt_config_publish(run_id: str) -> JobAcceptedResponse:
     )
 
 
-@router.post("/bacnet/runs", response_model=JobAcceptedResponse)
+@router.post("/bacnet/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_bacnet_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "bacnet_validation")
 
@@ -199,7 +215,7 @@ def create_bacnet_validation_run(request: JobCreateRequest) -> JobAcceptedRespon
     )
 
 
-@router.post("/mapping/runs", response_model=JobAcceptedResponse)
+@router.post("/mapping/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_mapping_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
     run = _create_run(request, "mapping_validation")
 
@@ -222,17 +238,21 @@ def create_mapping_validation_run(request: JobCreateRequest) -> JobAcceptedRespo
     )
 
 
-@router.get("/runs", response_model=RunListResponse)
+@router.get("/runs", response_model=RunListResponse, dependencies=[Depends(require_viewer)])
 def list_validation_runs() -> RunListResponse:
     return RunListResponse(runs=service.list_runs(job_types=VALIDATION_JOB_TYPES))
 
 
-@router.get("/runs/{run_id}", response_model=RunRecord)
+@router.get("/runs/{run_id}", response_model=RunRecord, dependencies=[Depends(require_viewer)])
 def get_validation_run(run_id: str) -> RunRecord:
     return _load_validation_run(run_id)
 
 
-@router.get("/runs/{run_id}/issues", response_model=ValidationIssuesResponse)
+@router.get(
+    "/runs/{run_id}/issues",
+    response_model=ValidationIssuesResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def get_validation_issues(run_id: str) -> ValidationIssuesResponse:
     run = _load_validation_run(run_id)
 

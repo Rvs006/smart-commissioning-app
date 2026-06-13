@@ -1,8 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import { clearApiKey } from "../api/client";
 import { DashboardPage } from "../features/workflow/DashboardPage";
 import { App } from "./App";
+import { SessionProvider } from "./session";
 
 const healthPayload = { status: "ok", timestamp: "2026-06-11T00:00:00Z" };
 
@@ -76,7 +78,9 @@ function renderApp() {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} />
+      <SessionProvider>
+        <RouterProvider router={router} />
+      </SessionProvider>
     </QueryClientProvider>,
   );
 }
@@ -111,6 +115,7 @@ function stubDashboardFetch(runsResponse: unknown = runsPayload) {
 describe("App shell", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    clearApiKey();
   });
 
   it("renders the brand, module navigation, and page title", async () => {

@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { ReviewFeedback } from "../features/workflow/ReviewFeedback";
+import { useSession } from "./sessionContext";
 
 const navItems = [
   { label: "Homepage", number: "01", to: "/" },
@@ -10,6 +12,7 @@ const navItems = [
   { label: "UDMI Workbench", number: "06", to: "/udmi-validation" },
   { label: "Validation", number: "07", to: "/data-validation" },
   { label: "Reports", number: "08", to: "/reports" },
+  { label: "Hub", number: "09", to: "/hub" },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -17,10 +20,12 @@ const pageTitles: Record<string, string> = {
   "/bacnet-discovery": "BACnet Discovery",
   "/configuration": "Configuration",
   "/data-validation": "Data Validation",
+  "/hub": "Multi-Project Hub",
   "/ip-scanner": "IP Scanner",
   "/mqtt-discovery": "MQTT Discovery",
   "/reports": "Reports",
   "/udmi-validation": "UDMI Payload Workbench",
+  "/users": "User Management",
 };
 
 const pageSubtitles: Record<string, string> = {
@@ -28,16 +33,25 @@ const pageSubtitles: Record<string, string> = {
   "/bacnet-discovery": "Review discovered devices, objects and live properties.",
   "/configuration": "Keep connection settings focused and safe to edit.",
   "/data-validation": "Compare point quality and protocol alignment.",
+  "/hub": "Track runs across every project, site, and edge from one operator view.",
   "/ip-scanner": "Find reachable, missing and unexpected hosts.",
   "/mqtt-discovery": "Inspect broker topics, payloads and extracted points.",
   "/reports": "Generate evidence packs and issue reports.",
   "/udmi-validation": "Inspect state, metadata, pointset, and controlled publish evidence in detail.",
+  "/users": "Create, list, and manage operator API keys and roles.",
 };
 
 export function App() {
   const location = useLocation();
+  const { canAdmin } = useSession();
   const pageTitle = pageTitles[location.pathname] ?? "Workspace";
   const pageSubtitle = pageSubtitles[location.pathname] ?? "Commissioning workflow.";
+
+  // The Users tab is admin-only; everyone else never sees the entry (the route
+  // itself stays admin-gated server-side, so this is a UX nicety, not security).
+  const tabs = canAdmin
+    ? [...navItems, { label: "Users", number: "10", to: "/users" }]
+    : navItems;
 
   return (
     <div className="console-shell">
@@ -54,11 +68,12 @@ export function App() {
               Block B Plantroom
             </span>
             <span className="site-pill subtle">API workspace</span>
+            <SessionBadge />
           </div>
         </div>
 
         <nav className="app-tabs" aria-label="Commissioning modules">
-          {navItems.map((item) => (
+          {tabs.map((item) => (
             <NavLink
               className={({ isActive }) => `app-tab${isActive ? " active" : ""}`}
               end={item.to === "/"}
@@ -88,5 +103,77 @@ export function App() {
 
       <ReviewFeedback />
     </div>
+  );
+}
+
+// Current-user indicator + key entry. When a key is set and /me resolves it
+// shows the username + role and a sign-out that clears the key. When no key is
+// set (or the key is invalid) it offers a small key field. No password flow —
+// auth is key-based, exactly as the existing localStorage 'sc.apiKey' path.
+function SessionBadge() {
+  const { me, role, isLoading, error, hasApiKey, signIn, signOut } = useSession();
+  const [keyDraft, setKeyDraft] = useState("");
+  const [open, setOpen] = useState(false);
+
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    signIn(keyDraft);
+    setKeyDraft("");
+    setOpen(false);
+  };
+
+  if (hasApiKey && me) {
+    return (
+      <span className="session-badge" title={`Signed in via ${me.source}`}>
+        <span className="session-badge-id">
+          <strong>{me.username}</strong>
+          <em className={`role-chip role-${role ?? "unknown"}`}>{role}</em>
+        </span>
+        <button className="link-button" onClick={signOut} type="button">
+          Sign out
+        </button>
+      </span>
+    );
+  }
+
+  if (hasApiKey && isLoading) {
+    return <span className="site-pill subtle">Identifying...</span>;
+  }
+
+  // A key is set but /me failed (e.g. invalid/inactive key -> 401). Offer to
+  // clear it and re-enter, rather than leaving the operator stuck.
+  if (hasApiKey && error) {
+    return (
+      <span className="session-badge">
+        <span className="session-badge-id error-text">Key not recognised</span>
+        <button className="link-button" onClick={signOut} type="button">
+          Clear key
+        </button>
+      </span>
+    );
+  }
+
+  if (!open) {
+    return (
+      <button className="site-pill subtle" onClick={() => setOpen(true)} type="button">
+        Set API key
+      </button>
+    );
+  }
+
+  return (
+    <form className="session-key-form" onSubmit={handleSubmit}>
+      <input
+        aria-label="API key"
+        autoFocus
+        onChange={(event) => setKeyDraft(event.target.value)}
+        placeholder="Paste API key"
+        type="password"
+        value={keyDraft}
+      />
+      <button className="secondary-button compact" type="submit">
+        Save
+      </button>
+    </form>
   );
 }

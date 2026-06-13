@@ -20,10 +20,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
+from smart_commissioning_core.rbac import Role
 
 from app.api.routes.reports import _build_report_artifact, _to_report_summary
+from app.core.auth import require_role
 from app.core.runtime import IMPORT_FILES_ROOT, SECRETS_ROOT
 from app.services.backup_service import BackupError, BackupSources, create_backup_bundle
 from app.services.reports_integrity import (
@@ -37,6 +39,13 @@ from app.services.run_service import RunService
 
 router = APIRouter()
 service = RunService()
+
+# RBAC: verifying a report's integrity is read-only (viewer+); building a backup
+# bundle and previewing retention are engineer+; APPLYING retention is a
+# destructive purge reserved for admin.
+require_viewer = require_role(Role.VIEWER)
+require_engineer = require_role(Role.ENGINEER)
+require_admin = require_role(Role.ADMIN)
 
 
 class ReportVerifyResponse(BaseModel):
@@ -53,7 +62,11 @@ class ReportVerifyResponse(BaseModel):
     computed_hash: str
 
 
-@router.get("/reports/{report_id}/verify", response_model=ReportVerifyResponse)
+@router.get(
+    "/reports/{report_id}/verify",
+    response_model=ReportVerifyResponse,
+    dependencies=[Depends(require_viewer)],
+)
 def verify_report(report_id: str) -> ReportVerifyResponse:
     """Recompute the report artifact hash and verify its stored signature.
 
@@ -99,7 +112,7 @@ def verify_report(report_id: str) -> ReportVerifyResponse:
     )
 
 
-@router.post("/backup")
+@router.post("/backup", dependencies=[Depends(require_engineer)])
 def create_backup() -> Response:
     """Build a signed backup bundle and return it as a download.
 
@@ -142,7 +155,7 @@ class RetentionApplyRequest(RetentionPreviewRequest):
     )
 
 
-@router.post("/retention/preview")
+@router.post("/retention/preview", dependencies=[Depends(require_engineer)])
 def retention_preview(request: RetentionPreviewRequest) -> dict[str, object]:
     """DRY-RUN: report runs that WOULD be purged under the policy. Deletes nothing."""
     cutoff = cutoff_from_keep_days(request.keep_days)
@@ -150,7 +163,7 @@ def retention_preview(request: RetentionPreviewRequest) -> dict[str, object]:
     return result.as_dict()
 
 
-@router.post("/retention/apply")
+@router.post("/retention/apply", dependencies=[Depends(require_admin)])
 def retention_apply(request: RetentionApplyRequest) -> dict[str, object]:
     """Destructive purge of eligible (non-evidence) runs older than the cutoff.
 
