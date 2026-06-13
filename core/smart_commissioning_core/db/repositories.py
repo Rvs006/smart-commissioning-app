@@ -27,11 +27,137 @@ from smart_commissioning_core.db.models import (
     ImportRecord,
     Run,
     RunIssue,
+    User,
 )
 
 # Terminal run statuses eligible for sync. In-flight runs (queued/running/...)
 # are NEVER bundled: only finished, immutable records leave the edge.
 TERMINAL_RUN_STATUSES = ("succeeded", "failed", "cancelled")
+
+
+def _user_to_dict(user: User) -> dict[str, object]:
+    """Serialize a User WITHOUT the api_key_hash (never leaked over the API)."""
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+        "is_active": user.is_active,
+        "created_at": user.created_at.isoformat(),
+        "last_used_at": user.last_used_at.isoformat() if user.last_used_at else None,
+    }
+
+
+class UserRepository:
+    """Per-user identities for RBAC.
+
+    Stores only a HASH of each user's API key (``api_key_hash``); the plaintext
+    key is never persisted (the caller shows it once at creation). Serialized
+    dicts (returned by create/list/get) deliberately OMIT the hash so it can
+    never leak through the API.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._session_factory = session_factory(engine)
+
+    def create_user(
+        self,
+        *,
+        user_id: str,
+        username: str,
+        role: str,
+        api_key_hash: str,
+        is_active: bool = True,
+        created_at: datetime | None = None,
+    ) -> dict[str, object]:
+        """Insert a user and return its serialized dict (no key hash).
+
+        Raises IntegrityError on a duplicate username or api_key_hash (both are
+        unique), which the API layer maps to a 409.
+        """
+        record = User(
+            id=user_id,
+            username=username,
+            role=role,
+            api_key_hash=api_key_hash,
+            is_active=is_active,
+            created_at=created_at or datetime.now(UTC),
+        )
+        with self._session_factory.begin() as session:
+            session.add(record)
+            session.flush()
+            return _user_to_dict(record)
+
+    def get_by_api_key_hash(self, api_key_hash: str) -> dict[str, object] | None:
+        """Return the user (incl. is_active + the hash) for a key hash, or None.
+
+        Used on the authentication hot path: unlike the public serializer this
+        DOES include ``api_key_hash`` and ``id`` so the auth layer can build a
+        principal. The hash is internal here — it never reaches an API response.
+        """
+        statement = select(User).where(User.api_key_hash == api_key_hash)
+        with self._session_factory() as session:
+            user = session.scalars(statement).one_or_none()
+            if user is None:
+                return None
+            return {
+                "id": user.id,
+                "username": user.username,
+                "role": user.role,
+                "is_active": user.is_active,
+                "api_key_hash": user.api_key_hash,
+                "created_at": user.created_at.isoformat(),
+                "last_used_at": user.last_used_at.isoformat() if user.last_used_at else None,
+            }
+
+    def get(self, user_id: str) -> dict[str, object] | None:
+        """Return the serialized user (no key hash) by id, or None."""
+        with self._session_factory() as session:
+            user = session.get(User, user_id)
+            return _user_to_dict(user) if user is not None else None
+
+    def list_users(self) -> list[dict[str, object]]:
+        """Return all users (no key hashes), newest first by created_at then id."""
+        statement = select(User).order_by(User.created_at.desc(), User.id.desc())
+        with self._session_factory() as session:
+            return [_user_to_dict(user) for user in session.scalars(statement).all()]
+
+    def count(self) -> int:
+        """Number of users (used for the bootstrap-admin check)."""
+        statement = select(func.count()).select_from(User)
+        with self._session_factory() as session:
+            return int(session.scalar(statement) or 0)
+
+    def set_active(self, user_id: str, *, is_active: bool) -> dict[str, object] | None:
+        """Activate/deactivate a user; return the updated dict or None if absent."""
+        with self._session_factory.begin() as session:
+            user = session.get(User, user_id)
+            if user is None:
+                return None
+            user.is_active = is_active
+            session.flush()
+            return _user_to_dict(user)
+
+    def update_role(self, user_id: str, *, role: str) -> dict[str, object] | None:
+        """Change a user's role; return the updated dict or None if absent."""
+        with self._session_factory.begin() as session:
+            user = session.get(User, user_id)
+            if user is None:
+                return None
+            user.role = role
+            session.flush()
+            return _user_to_dict(user)
+
+    def touch_last_used(self, user_id: str, *, now: datetime | None = None) -> None:
+        """Stamp last_used_at on successful auth; missing ids are ignored.
+
+        Best-effort: a failed touch must never block an otherwise valid request,
+        so callers swallow exceptions around this.
+        """
+        when = now or datetime.now(UTC)
+        with self._session_factory.begin() as session:
+            user = session.get(User, user_id)
+            if user is not None:
+                user.last_used_at = when
 
 
 class ConfigurationRepository:

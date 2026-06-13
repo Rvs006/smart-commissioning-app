@@ -1,6 +1,6 @@
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.models import Run
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -91,17 +91,60 @@ class RunService:
         job_types: set[JobType] | None = None,
         project_id: str | None = None,
         site_id: str | None = None,
+        edge_id: str | None = None,
+        status: JobStatus | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[JobSummary]:
-        records = self._store.list_runs(
-            project_id,
-            site_id,
-            job_type=job_types,
-            limit=limit,
-            offset=offset,
-        )
-        return [JobSummary.model_validate(record) for record in records]
+        """Return run summaries newest-first, including each run's edge_id.
+
+        The core DbRunStore.list_runs intentionally strips edge_id (and the other
+        sync columns) from its public record shape, so this query goes straight to
+        the Run table on the same engine to surface edge attribution and to filter
+        by edge_id / status without touching core. The result is the same
+        ordering (created_at desc, id desc) the store uses, mapped to JobSummary
+        (which now carries the additive edge_id field).
+        """
+        statement = select(
+            Run.id,
+            Run.job_type,
+            Run.status,
+            Run.stage,
+            Run.progress_percent,
+            Run.created_at,
+            Run.updated_at,
+            Run.edge_id,
+        ).order_by(Run.created_at.desc(), Run.id.desc())
+        if project_id is not None:
+            statement = statement.where(Run.project_id == project_id)
+        if site_id is not None:
+            statement = statement.where(Run.site_id == site_id)
+        if job_types is not None:
+            statement = statement.where(Run.job_type.in_(sorted(job_types)))
+        if edge_id is not None:
+            statement = statement.where(Run.edge_id == edge_id)
+        if status is not None:
+            statement = statement.where(Run.status == status)
+        if offset:
+            statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
+
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).all()
+        return [
+            JobSummary(
+                run_id=row.id,
+                job_type=row.job_type,
+                status=row.status,
+                stage=row.stage,
+                progress_percent=row.progress_percent,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                edge_id=row.edge_id,
+            )
+            for row in rows
+        ]
 
     def runtime_ready(self) -> tuple[bool, str]:
         try:

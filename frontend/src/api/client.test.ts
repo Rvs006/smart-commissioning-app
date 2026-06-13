@@ -9,9 +9,11 @@ import {
   getDiscoveryResults,
   getDiscoveryRun,
   getHealth,
+  getMe,
   listReports,
   listRuns,
   parseSseBuffer,
+  roleAtLeast,
   rollbackMqttConfigPublish,
   setApiKey,
   streamRunEvents,
@@ -299,6 +301,51 @@ describe("run and discovery API functions", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/runs");
   });
 
+  it("listRuns passes the new edge_id and status filters and reads edge_id off each run", async () => {
+    setApiKey("stored-key");
+    const payload = {
+      runs: [
+        {
+          run_id: "r-local",
+          job_type: "ip_discovery",
+          status: "succeeded",
+          stage: "done",
+          progress_percent: 100,
+          created_at: "2026-06-11T09:00:00Z",
+          updated_at: "2026-06-11T09:05:00Z",
+          edge_id: null,
+        },
+        {
+          run_id: "r-edge",
+          job_type: "mqtt_discovery",
+          status: "running",
+          stage: "subscribing",
+          progress_percent: 40,
+          created_at: "2026-06-11T09:10:00Z",
+          updated_at: "2026-06-11T09:11:00Z",
+          edge_id: "edge-west-2",
+        },
+      ],
+    };
+    const fetchMock = stubFetch(jsonResponse(payload));
+
+    const result = await listRuns({
+      edgeId: "edge-west-2",
+      jobType: "mqtt_discovery",
+      status: "running",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    // job_type, edge_id, and status all ride the query string.
+    expect(url).toBe(
+      "/api/v1/runs?job_type=mqtt_discovery&edge_id=edge-west-2&status=running",
+    );
+    expect(new Headers(init?.headers).get("X-API-Key")).toBe("stored-key");
+    // edge_id is exposed on each run (null for a local run, populated otherwise).
+    expect(result.runs[0].edge_id).toBeNull();
+    expect(result.runs[1].edge_id).toBe("edge-west-2");
+  });
+
   it("cancelRun POSTs to the cancel endpoint", async () => {
     const payload = { run_id: "r1", job_type: "ip_discovery", status: "cancelled" };
     const fetchMock = stubFetch(jsonResponse(payload));
@@ -346,6 +393,38 @@ describe("run and discovery API functions", () => {
       name: "ApiError",
       status: 401,
     });
+  });
+});
+
+describe("identity (getMe + roleAtLeast)", () => {
+  afterEach(() => {
+    clearApiKey();
+    vi.unstubAllGlobals();
+  });
+
+  it("getMe hits /api/v1/me, attaches the key, and returns the principal", async () => {
+    setApiKey("stored-key");
+    const payload = { username: "site-eng", role: "engineer", source: "user_key" };
+    const fetchMock = stubFetch(jsonResponse(payload));
+
+    await expect(getMe()).resolves.toEqual(payload);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/me");
+    expect(new Headers(init?.headers).get("X-API-Key")).toBe("stored-key");
+  });
+
+  it("roleAtLeast respects the viewer<reviewer<engineer<admin ordering", () => {
+    expect(roleAtLeast("engineer", "engineer")).toBe(true);
+    expect(roleAtLeast("admin", "engineer")).toBe(true);
+    expect(roleAtLeast("viewer", "engineer")).toBe(false);
+    expect(roleAtLeast("reviewer", "engineer")).toBe(false);
+    // Reviewer outranks viewer but not engineer.
+    expect(roleAtLeast("reviewer", "reviewer")).toBe(true);
+    expect(roleAtLeast("viewer", "reviewer")).toBe(false);
+    // Unknown/undefined roles fail closed (treated as below any minimum).
+    expect(roleAtLeast(undefined, "viewer")).toBe(false);
+    expect(roleAtLeast("superuser", "viewer")).toBe(false);
   });
 });
 

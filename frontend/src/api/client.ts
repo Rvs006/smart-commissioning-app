@@ -3,6 +3,48 @@ export type HealthStatus = {
   timestamp: string;
 };
 
+// RBAC roles, ascending privilege. Mirrors smart_commissioning_core.rbac.Role
+// (StrEnum: serialized as the lowercase string). Declaration order here matches
+// the backend ROLE_ORDER so roleAtLeast() can compare by index.
+export const ROLE_ORDER = ["viewer", "reviewer", "engineer", "admin"] as const;
+export type Role = (typeof ROLE_ORDER)[number];
+
+// True when `role` has at least `minimum` privilege. Unknown roles rank lowest
+// (fail-closed): a principal with an unrecognised role is treated as below any
+// real minimum, so gated actions stay hidden rather than wrongly enabled.
+export function roleAtLeast(role: Role | string | undefined, minimum: Role): boolean {
+  const roleRank = ROLE_ORDER.indexOf(role as Role);
+  const minRank = ROLE_ORDER.indexOf(minimum);
+  if (roleRank < 0) {
+    return false;
+  }
+  return roleRank >= minRank;
+}
+
+// GET /api/v1/me — the current principal. source distinguishes a per-user key
+// from the bootstrap shared/local admin.
+export type MeResponse = {
+  username: string;
+  role: Role;
+  source: "user_key" | "shared_key" | "local";
+};
+
+// A user as returned by the admin /users endpoints (never includes key material).
+export type UserRecord = {
+  id: string;
+  username: string;
+  role: Role;
+  is_active: boolean;
+  created_at: string;
+  last_used_at: string | null;
+};
+
+// POST /api/v1/users returns the created user PLUS the one-time plaintext key.
+export type CreateUserResponse = {
+  user: UserRecord;
+  api_key: string;
+};
+
 export type Blueprint = {
   services: string[];
   modules: string[];
@@ -115,6 +157,9 @@ export type RunRecord = {
   progress_percent: number;
   created_at: string;
   updated_at: string;
+  // Originating edge id; null for a run created on the local edge, populated for
+  // runs ingested from another edge. Additive — mirrors the backend JobSummary.
+  edge_id: string | null;
   project_id: string;
   site_id: string;
   parameters: Record<string, unknown>;
@@ -183,6 +228,9 @@ export type JobSummary = {
   progress_percent: number;
   created_at: string;
   updated_at: string;
+  // Originating edge id; null for a run created on the local edge, populated for
+  // runs ingested from another edge. Additive field — see RunRecord.
+  edge_id: string | null;
 };
 
 export type RunListResponse = {
@@ -400,6 +448,44 @@ export function getBlueprint(): Promise<Blueprint> {
   return request<Blueprint>("/blueprint");
 }
 
+// ---------------------------------------------------------------------------
+// Identity + RBAC (Phase 4b).
+//
+// getMe resolves the current principal so the UI can gate engineer/admin
+// actions. The user-admin calls are admin-only and surface the optional
+// user-management view; non-admins never reach them (the entry is hidden).
+// ---------------------------------------------------------------------------
+
+export function getMe(): Promise<MeResponse> {
+  return request<MeResponse>("/me");
+}
+
+export function listUsers(): Promise<UserRecord[]> {
+  return request<UserRecord[]>("/users");
+}
+
+export function createUser(input: { username: string; role: Role }): Promise<CreateUserResponse> {
+  return request<CreateUserResponse>("/users", {
+    body: JSON.stringify({ role: input.role, username: input.username }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+}
+
+export function deactivateUser(userId: string): Promise<UserRecord> {
+  return request<UserRecord>(`/users/${encodeURIComponent(userId)}/deactivate`, {
+    method: "POST",
+  });
+}
+
+export function updateUserRole(userId: string, role: Role): Promise<UserRecord> {
+  return request<UserRecord>(`/users/${encodeURIComponent(userId)}/role`, {
+    body: JSON.stringify({ role }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  });
+}
+
 export function getConfiguration(): Promise<ConfigurationSnapshot> {
   return request<ConfigurationSnapshot>("/configuration");
 }
@@ -592,6 +678,10 @@ export type ListRunsParams = {
   projectId?: string;
   siteId?: string;
   jobType?: JobType;
+  // New filters mirroring the backend GET /runs query params. edge_id is an
+  // exact match on the originating edge; status filters by JobStatus.
+  edgeId?: string;
+  status?: JobStatus;
   limit?: number;
   offset?: number;
 };
@@ -606,6 +696,12 @@ function buildRunsQuery(params?: ListRunsParams): string {
   }
   if (params?.jobType) {
     search.set("job_type", params.jobType);
+  }
+  if (params?.edgeId) {
+    search.set("edge_id", params.edgeId);
+  }
+  if (params?.status) {
+    search.set("status", params.status);
   }
   if (typeof params?.limit === "number") {
     search.set("limit", String(params.limit));

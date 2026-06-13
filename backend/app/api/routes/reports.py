@@ -5,15 +5,22 @@ from io import BytesIO
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
+from smart_commissioning_core.rbac import Role
 
+from app.core.auth import require_role
 from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary
 from app.services.reports_integrity import INTEGRITY_KEY, build_integrity_metadata
 from app.services.run_service import REPORT_JOB_TYPES, RunService
 
 router = APIRouter()
 service = RunService()
+
+# RBAC: listing/reading/downloading a report is viewer+; generating a report
+# (creating a report run) is engineer+.
+require_viewer = require_role(Role.VIEWER)
+require_engineer = require_role(Role.ENGINEER)
 
 
 def _to_report_summary(report_id: str) -> ReportSummary:
@@ -36,13 +43,13 @@ def _to_report_summary(report_id: str) -> ReportSummary:
     )
 
 
-@router.post("", response_model=ReportSummary)
+@router.post("", response_model=ReportSummary, dependencies=[Depends(require_engineer)])
 def create_report(request: ReportRequest) -> ReportSummary:
     _, report = service.create_report_run(request)
     return report
 
 
-@router.get("", response_model=ReportListResponse)
+@router.get("", response_model=ReportListResponse, dependencies=[Depends(require_viewer)])
 def list_reports() -> ReportListResponse:
     reports: list[ReportSummary] = []
     for run in service.list_runs(job_types=REPORT_JOB_TYPES):
@@ -50,7 +57,7 @@ def list_reports() -> ReportListResponse:
     return ReportListResponse(reports=reports)
 
 
-@router.get("/{report_id}", response_model=ReportSummary)
+@router.get("/{report_id}", response_model=ReportSummary, dependencies=[Depends(require_viewer)])
 def get_report(report_id: str) -> ReportSummary:
     try:
         return _to_report_summary(report_id)
@@ -58,7 +65,7 @@ def get_report(report_id: str) -> ReportSummary:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.") from error
 
 
-@router.get("/{report_id}/download")
+@router.get("/{report_id}/download", dependencies=[Depends(require_viewer)])
 def download_report(report_id: str) -> Response:
     try:
         run = service.get_run(report_id)

@@ -1,7 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { clearApiKey, setApiKey } from "../../api/client";
+import { SessionProvider } from "../../app/session";
 import { ModulePage } from "./ModulePage";
+
+// The engineer-gated controls (Queue, Upload, Publish, Cancel) require a known
+// engineer+ role. These wiring tests set a key and stub /me as engineer so the
+// existing engineer behaviour is exercised. A separate role test below covers
+// the viewer (gated) and engineer (enabled) paths explicitly.
+const mePayload = { username: "engineer-1", role: "engineer", source: "user_key" };
 
 const profilesPayload = [
   {
@@ -69,11 +77,16 @@ function renderModule(route: string) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
+  // A key is set so the SessionProvider fetches /me; the stubs below return an
+  // engineer role, matching the pre-RBAC behaviour these wiring tests assert.
+  setApiKey("engineer-key");
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <ModulePage moduleRoute={route} />
-      </MemoryRouter>
+      <SessionProvider>
+        <MemoryRouter>
+          <ModulePage moduleRoute={route} />
+        </MemoryRouter>
+      </SessionProvider>
     </QueryClientProvider>,
   );
 }
@@ -82,6 +95,7 @@ describe("ModulePage discovery wiring", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    clearApiKey();
   });
 
   it("blocks a real scan until authorization is confirmed, then queues and renders live results", async () => {
@@ -89,6 +103,9 @@ describe("ModulePage discovery wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
@@ -112,7 +129,8 @@ describe("ModulePage discovery wiring", () => {
     expect(queueButton).toBeDisabled();
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    expect(queueButton).toBeEnabled();
+    // Enabled once the engineer role resolves (/me) and auth is confirmed.
+    await waitFor(() => expect(queueButton).toBeEnabled());
 
     fireEvent.click(queueButton);
 
@@ -129,6 +147,9 @@ describe("ModulePage discovery wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
@@ -140,13 +161,15 @@ describe("ModulePage discovery wiring", () => {
 
     fireEvent.click(screen.getByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
-    expect(previewButton).toBeEnabled();
+    // Enabled once the engineer role resolves (no scan-auth needed for dry run).
+    await waitFor(() => expect(previewButton).toBeEnabled());
   });
 });
 
 describe("ModulePage reports wiring", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    clearApiKey();
   });
 
   it("disables Export until a report has been queued", async () => {
@@ -154,6 +177,9 @@ describe("ModulePage reports wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
