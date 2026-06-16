@@ -582,7 +582,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const exportEnabled = Boolean(exportReport);
   const exportTooltip = exportEnabled
     ? `Download ${exportReport?.file_name ?? "report"}`
-    : "Queue a report first to enable a real download. Discovery/validation results have no per-run file export endpoint yet.";
+    : "Generate a report first to enable a real download. Discovery/validation results have no per-run file export endpoint yet.";
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
@@ -1256,7 +1256,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               onClick={handleCaptureExport}
               title={
                 captureRows.length === 0
-                  ? "No captured topics yet — queue an MQTT discovery run with this topic filter."
+                  ? "No captured topics yet — run an MQTT discovery with this topic filter."
                   : "Download the latest payload per topic as CSV."
               }
               type="button"
@@ -1329,7 +1329,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <div className="empty-workspace">
                 <strong>No captured payloads yet</strong>
                 <span>
-                  Queue an MQTT discovery run; the latest payload per topic matching the filter appears here
+                  Run an MQTT discovery; the latest payload per topic matching the filter appears here
                   once the run completes. Empty live results stay empty — no sample payloads are shown.
                 </span>
               </div>
@@ -1690,7 +1690,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           {!usingLiveResults && resultRows.length > 0 && (
             <div className="sample-banner" role="note">
               {isDiscoveryModule
-                ? "Sample preview — queue a discovery run to replace this with live results."
+                ? "Sample preview — run a discovery to replace this with live results."
                 : "Sample preview — per-asset result rows are illustrative. The live issues panel and run monitor reflect real run data."}
             </div>
           )}
@@ -1740,8 +1740,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </strong>
                 <span>
                   {isDiscoveryModule
-                    ? "Queue a discovery run; observed devices, points, or topics appear here once it completes."
-                    : "Queue a run to populate results."}
+                    ? "Run a discovery; observed devices, points, or topics appear here once it completes."
+                    : "Run a job to populate results."}
                 </span>
               </div>
             )}
