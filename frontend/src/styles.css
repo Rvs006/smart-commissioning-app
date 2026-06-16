@@ -1107,6 +1107,27 @@ label {
   padding: 10px;
 }
 
+/* Blocking finding: two readable lines instead of one run-on string.
+   The eyebrow shows severity; the headline emphasizes asset + UDMI payload
+   type; the detail line carries the point problem (point — expected/observed). */
+.issue-card.blocking-finding .issue-card-body span {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.issue-card.blocking-finding .issue-card-body strong {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.issue-card.blocking-finding .issue-card-body small {
+  margin-top: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .module-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1137,6 +1158,105 @@ label {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+/* A single descriptive section status pill (replaces the old label+value pair
+   that rendered the same status twice). Wraps so long fault strings stay
+   readable instead of being clipped to a fixed-width chip. */
+.section-status-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 5px 11px;
+  border-radius: 980px;
+  background: var(--green-bg);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.section-status-pill.amber {
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.section-status-pill.red {
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+/* Collapsible section header: the whole heading row is a button so the section
+   can be toggled by keyboard and pointer alike. It keeps the flex layout of the
+   old .section-heading (title block left, status pill right). */
+.section-toggle {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.section-toggle:hover {
+  background: transparent;
+}
+
+.section-toggle-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.section-toggle-caret {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  transition: transform 150ms ease;
+}
+
+.section-toggle[aria-expanded="false"] .section-toggle-caret {
+  transform: rotate(-90deg);
+}
+
+.config-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Inline helper text under an action or input — explains what a control does
+   without competing with the primary copy. */
+.field-note,
+.action-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.action-note {
+  margin-top: 2px;
+}
+
+/* A read-only status field whose value crosses an expiry/validity threshold.
+   Used for the certificate-expiry indicator: red border + red text when the
+   stored expiry date is in the past. */
+.field-expired input,
+input.field-expired {
+  border-color: var(--red);
+  color: var(--red);
+  box-shadow: 0 0 0 1px var(--red);
 }
 
 .secret-field {
@@ -1525,6 +1645,139 @@ label {
   color: var(--red);
   font-size: 11px;
   font-weight: 800;
+}
+
+/* --- Module review additions (templates, capture, multi-point, groups) --- */
+
+/* All-templates panel: one downloadable card per import type for the page. */
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.template-grid .template-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+/* Multi-point MQTT config publish editor. */
+.multi-point-editor {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.compact-heading {
+  align-items: center;
+}
+
+.compact-heading h4 {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.multi-point-editor code,
+.section-copy code {
+  font-family: "SF Mono", SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 11px;
+}
+
+/* UDMI Schedule & Payload Evidence "Execute capture" row. */
+.execute-row {
+  align-items: flex-start;
+  margin-top: 14px;
+}
+
+.execute-note {
+  flex: 1 1 280px;
+  margin: 0;
+}
+
+/* MQTT Explorer-like capture controls. */
+.capture-controls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.payload-cell {
+  max-width: 320px;
+  overflow-wrap: anywhere;
+  font-family: "SF Mono", SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 11px;
+}
+
+/* Per-asset / per-payload-type grouped issue view (UDMI). */
+.asset-group-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.asset-group {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.asset-group-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 11px 13px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.asset-group-toggle strong {
+  font-size: 13px;
+}
+
+.asset-group-toggle span {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.asset-group.open .asset-group-toggle {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.asset-group-detail {
+  display: grid;
+  gap: 12px;
+  padding: 12px 13px;
+}
+
+.payload-type-group {
+  display: grid;
+  gap: 8px;
+}
+
+.payload-type-group h5 {
+  margin: 0;
+  color: var(--accent);
+  font-family: "SF Mono", SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+/* Inline report-linking confirmation in the run monitor. */
+.run-monitor-note {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 @media (max-width: 980px) {

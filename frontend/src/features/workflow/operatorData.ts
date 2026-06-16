@@ -15,6 +15,8 @@
 // Removed as dead (no consumer, no endpoint): projectSummary, runRows,
 // assetRows — replaced by the live queries listed above.
 
+import type { ValidationIssueRecord } from "../../api/client";
+
 export type HealthState = "ready" | "warning" | "failed" | "running" | "queued";
 
 export type IssueRow = {
@@ -25,6 +27,63 @@ export type IssueRow = {
   message: string;
   owner: string;
 };
+
+// Groups validation issues by asset, then by derived payload type (mq9m4bnv).
+// Payload type is read from the issue's issue_type / topic / point_name
+// (pointset, metadata, state) when present; anything else falls into "other".
+// This is DERIVED, not authoritative — the issue schema has no dedicated
+// payload-type field, so the grouping is best-effort over the available fields.
+export type PayloadTypeGroup = {
+  payloadType: string;
+  issues: IssueRow[];
+};
+
+export type AssetIssueGroup = {
+  assetId: string;
+  issues: IssueRow[];
+  byPayloadType: PayloadTypeGroup[];
+};
+
+const PAYLOAD_TYPES = ["pointset", "metadata", "state"] as const;
+
+export function derivePayloadType(issue: ValidationIssueRecord): string {
+  const haystack = `${issue.issue_type ?? ""} ${issue.topic ?? ""} ${issue.point_name ?? ""}`.toLowerCase();
+  for (const type of PAYLOAD_TYPES) {
+    if (haystack.includes(type)) {
+      return type;
+    }
+  }
+  return "other";
+}
+
+export function groupIssuesByAsset(
+  issues: ValidationIssueRecord[],
+  toRow: (issue: ValidationIssueRecord) => IssueRow,
+): AssetIssueGroup[] {
+  const byAsset = new Map<string, { rows: IssueRow[]; byType: Map<string, IssueRow[]> }>();
+  for (const issue of issues) {
+    const assetId = issue.asset_id ?? "Unknown asset";
+    const payloadType = derivePayloadType(issue);
+    const row = toRow(issue);
+    if (!byAsset.has(assetId)) {
+      byAsset.set(assetId, { byType: new Map(), rows: [] });
+    }
+    const entry = byAsset.get(assetId)!;
+    entry.rows.push(row);
+    if (!entry.byType.has(payloadType)) {
+      entry.byType.set(payloadType, []);
+    }
+    entry.byType.get(payloadType)!.push(row);
+  }
+  return Array.from(byAsset.entries()).map(([assetId, entry]) => ({
+    assetId,
+    byPayloadType: Array.from(entry.byType.entries()).map(([payloadType, rows]) => ({
+      issues: rows,
+      payloadType,
+    })),
+    issues: entry.rows,
+  }));
+}
 
 export type WorkflowStage = {
   name: string;
@@ -146,11 +205,11 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     secondaryMetric: "1,284",
     secondaryMetricLabel: "objects indexed",
     tableTitle: "BACnet Devices",
-    columns: ["Device", "Instance", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
+    columns: ["Device", "Instance", "IP Address", "Network Number", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
     rows: [
-      { Device: "Boiler 1 Controller", Instance: "1532001", Objects: "118", "Device Last Discovered": "48 sec ago", "Detailed Status": "I-Am received and object list captured", Result: "Object list captured" },
-      { Device: "Level 3 AHU", Instance: "1532117", Objects: "204", "Device Last Discovered": "7 min ago", "Detailed Status": "BACnet reliability flagged stale on four points", Result: "Four required points missing" },
-      { Device: "CHW Pump Panel", Instance: "1532041", Objects: "96", "Device Last Discovered": "2 min ago", "Detailed Status": "Operational with no fault or stale flags", Result: "Ready" },
+      { Device: "Boiler 1 Controller", Instance: "1532001", "IP Address": "10.10.25.101", "Network Number": "2001", Objects: "118", "Device Last Discovered": "48 sec ago", "Detailed Status": "I-Am received and object list captured", Result: "Object list captured" },
+      { Device: "Level 3 AHU", Instance: "1532117", "IP Address": "10.10.25.117", "Network Number": "2001", Objects: "204", "Device Last Discovered": "7 min ago", "Detailed Status": "BACnet reliability flagged stale on four points", Result: "Four required points missing" },
+      { Device: "CHW Pump Panel", Instance: "1532041", "IP Address": "—", "Network Number": "5", Objects: "96", "Device Last Discovered": "2 min ago", "Detailed Status": "MS/TP segment behind router; no IP", Result: "Ready" },
     ],
     issues: issueRows.filter((issue) => issue.area === "BACnet discovery"),
     evidence: ["Who-Is/I-Am capture", "Device object index", "Property read sample"],
@@ -184,16 +243,16 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     tableTitle: "UDMI Payload Checks",
     columns: ["Asset", "State", "Pointset", "Payload Last Seen", "Message Count", "Raw Payload", "Result"],
     rows: [
-      { Asset: "MDB5-00-043-BLR-1", State: "Present", Pointset: "Present", "Payload Last Seen": "2 min ago", "Message Count": "47", "Raw Payload": "{\"pointset\":{\"points\":{\"fault_status\":{\"present_value\":1}}}}", Result: "Type mismatch" },
-      { Asset: "MDB5-00-044-BLR-2", State: "Present", Pointset: "Present", "Payload Last Seen": "48 sec ago", "Message Count": "52", "Raw Payload": "{\"pointset\":{\"points\":{\"supply_air_temperature_setpoint\":{\"present_value\":22}}}}", Result: "Ready" },
-      { Asset: "AHU-L03-017", State: "Present", Pointset: "Late", "Payload Last Seen": "7 min ago", "Message Count": "8", "Raw Payload": "{\"system\":{\"hardware\":{\"make\":\"Schneider\",\"model\":\"PM5111\"}}}", Result: "Warning" },
+      { Asset: "MDB5-00-043-BLR-1", State: "Present", Pointset: "Present", "Payload Last Seen": "2 min ago", "Message Count": "47", "Raw Payload": "{\"pointset\":{\"points\":{\"fault_status\":{\"present_value\":1}}}}", Result: "Fail — fault_status type mismatch" },
+      { Asset: "MDB5-00-044-BLR-2", State: "Present", Pointset: "Present", "Payload Last Seen": "48 sec ago", "Message Count": "52", "Raw Payload": "{\"pointset\":{\"points\":{\"supply_air_temperature_setpoint\":{\"present_value\":22}}}}", Result: "Pass" },
+      { Asset: "AHU-L03-017", State: "Present", Pointset: "Late", "Payload Last Seen": "7 min ago", "Message Count": "8", "Raw Payload": "{\"system\":{\"hardware\":{\"make\":\"Schneider\",\"model\":\"PM5111\"}}}", Result: "Fail — pointset reporting interval exceeded" },
     ],
     issues: issueRows.filter((issue) => issue.area === "UDMI pointset"),
     evidence: ["State payload evidence", "Pointset payload evidence", "Validation issue JSON"],
   },
   "data-validation": {
     route: "data-validation",
-    title: "Data Validation",
+    title: "BACnet to MQTT Validation",
     headline: "Run MQTT payload checks, BACnet point checks, and BACnet-to-MQTT live value comparisons.",
     primaryMetric: "3",
     primaryMetricLabel: "validation modes",
