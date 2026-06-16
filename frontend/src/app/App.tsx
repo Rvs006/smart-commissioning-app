@@ -101,7 +101,9 @@ export function App() {
         </main>
       </section>
 
-      <ReviewFeedback />
+      {/* The dry-run review widget is a development-only tool; it must not ship
+          to end users in a production build. */}
+      {import.meta.env.DEV ? <ReviewFeedback /> : null}
     </div>
   );
 }

@@ -91,7 +91,7 @@ const modules: ModuleDefinition[] = [
       {
         kind: "discovery",
         label: "Run IP Discovery",
-        helper: "Queues an IP discovery run through the API and tracks it in the run monitor below.",
+        helper: "Runs an IP discovery through the API and tracks it in the run monitor below.",
         runKind: "ip",
         jobType: "ip_discovery"
       }
@@ -121,7 +121,7 @@ const modules: ModuleDefinition[] = [
       {
         kind: "discovery",
         label: "Run BACnet Discovery",
-        helper: "Queues a BACnet discovery run through the API and tracks it in the run monitor below.",
+        helper: "Runs a BACnet discovery through the API and tracks it in the run monitor below.",
         runKind: "bacnet",
         jobType: "bacnet_discovery"
       }
@@ -151,7 +151,7 @@ const modules: ModuleDefinition[] = [
       {
         kind: "discovery",
         label: "Run MQTT Discovery",
-        helper: "Queues an MQTT discovery run through the API and tracks it in the run monitor below.",
+        helper: "Runs an MQTT discovery through the API and tracks it in the run monitor below.",
         runKind: "mqtt",
         jobType: "mqtt_discovery"
       }
@@ -181,7 +181,7 @@ const modules: ModuleDefinition[] = [
       {
         kind: "validation",
         label: "Run UDMI Validation",
-        helper: "Queues a UDMI validation run through the API and tracks it in the run monitor below.",
+        helper: "Runs a UDMI validation through the API and tracks it in the run monitor below.",
         runKind: "udmi",
         jobType: "udmi_validation"
       }
