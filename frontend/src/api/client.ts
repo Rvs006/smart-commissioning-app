@@ -510,6 +510,80 @@ export function updateConfiguration(
   });
 }
 
+// Query string for the optional project/site scoping the configuration
+// endpoints accept (GET/PUT /configuration take project_id + site_id). Kept
+// internal so export/import can target a specific project's snapshot without
+// changing the default getConfiguration/updateConfiguration behaviour.
+function buildConfigurationQuery(projectId?: string, siteId?: string): string {
+  const search = new URLSearchParams();
+  if (projectId) {
+    search.set("project_id", projectId);
+  }
+  if (siteId) {
+    search.set("site_id", siteId);
+  }
+  const query = search.toString();
+  return query ? `?${query}` : "";
+}
+
+// The exportable configuration envelope written to / read from a JSON file. The
+// snapshot is wrapped with provenance so an import can sanity-check what it is
+// loading; only `configuration` is sent back to the API on import.
+export type ConfigurationExport = {
+  kind: "smart-commissioning-configuration";
+  version: 1;
+  exported_at: string;
+  project_id: string | null;
+  site_id: string | null;
+  configuration: ConfigurationSnapshot;
+};
+
+// Reads the current configuration snapshot for a JSON file download. Optionally
+// scoped to a specific project/site so a project-specific config can be reused
+// across systems. Additive: reuses GET /configuration, does not alter
+// getConfiguration. Returns the wrapped envelope the UI serialises to a file.
+export async function exportConfiguration(
+  projectId?: string,
+  siteId?: string,
+): Promise<ConfigurationExport> {
+  const configuration = await request<ConfigurationSnapshot>(
+    `/configuration${buildConfigurationQuery(projectId, siteId)}`,
+  );
+  return {
+    configuration,
+    exported_at: new Date().toISOString(),
+    kind: "smart-commissioning-configuration",
+    project_id: projectId ?? null,
+    site_id: siteId ?? null,
+    version: 1,
+  };
+}
+
+// Accepts a previously exported envelope (or a bare snapshot) and saves it via
+// the existing PUT /configuration path, which validates server-side before
+// persisting. Optionally targets a specific project/site so a reusable config
+// can be applied to another project/system. Throws ApiError on a 400 validation
+// rejection, exactly like updateConfiguration. Additive: does not change
+// updateConfiguration.
+export function importConfiguration(
+  payload: ConfigurationExport | ConfigurationSnapshot,
+  projectId?: string,
+  siteId?: string,
+): Promise<ConfigurationSnapshot> {
+  const configuration =
+    "configuration" in payload && payload.configuration
+      ? payload.configuration
+      : (payload as ConfigurationSnapshot);
+  return request<ConfigurationSnapshot>(
+    `/configuration${buildConfigurationQuery(projectId, siteId)}`,
+    {
+      body: JSON.stringify(configuration),
+      headers: { "Content-Type": "application/json" },
+      method: "PUT",
+    },
+  );
+}
+
 export function storeSecretMaterial(input: {
   field: string;
   content: string;
@@ -652,14 +726,18 @@ export function getValidationIssues(runId: string): Promise<ValidationIssuesResp
   return request<ValidationIssuesResponse>(`/validation/runs/${runId}/issues`);
 }
 
-export function createReport(input: { reportType: ReportType; format?: ReportFormat }): Promise<ReportSummary> {
+export function createReport(input: {
+  reportType: ReportType;
+  format?: ReportFormat;
+  sourceRunIds?: string[];
+}): Promise<ReportSummary> {
   return request<ReportSummary>("/reports", {
     body: JSON.stringify({
       output_format: input.format ?? "zip",
       project_id: "demo-project",
       report_type: input.reportType,
       site_id: "demo-site",
-      source_run_ids: [],
+      source_run_ids: input.sourceRunIds ?? [],
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",

@@ -25,6 +25,8 @@ export const bacnetResultColumns = [
   "Device",
   "Instance",
   "Address",
+  "IP Address",
+  "Network Number",
   "Vendor",
   "Objects",
   "Discovered",
@@ -99,10 +101,18 @@ export function bacnetRowsFromResults(
     const attributes = (device.attributes as Record<string, unknown> | undefined) ?? {};
     const instance = attributes.device_instance ?? "";
     const pointCount = pointCountByInstance.get(String(instance));
+    // IP address and BACnet network number are optional per device. They may be
+    // stamped on the engine attributes (ip_address / network_number) or, for
+    // routed BMS networks, surfaced top-level; read both and show blank when the
+    // engine did not report them (e.g. a local MS/TP segment with no IP).
+    const ipAddress = attributes.ip_address ?? device.ip_address;
+    const networkNumber = attributes.network_number ?? device.network_number;
     return {
       Device: str(device.name),
       Instance: str(instance),
       Address: str(device.address),
+      "IP Address": str(ipAddress),
+      "Network Number": str(networkNumber),
       Vendor: str(device.vendor),
       Objects: pointCount === undefined ? "—" : String(pointCount),
       Discovered: device.created_at ? formatRelativeTime(String(device.created_at)) : "—",
@@ -128,6 +138,35 @@ export function mqttRowsFromResults(results: DiscoveryResultsResponse): Record<s
           : "",
     };
   });
+}
+
+// MQTT wildcard match used by the Explorer-like capture panel's topic filter
+// (mq9nhbzu): '#' matches the rest of the topic, '+' matches exactly one level.
+// Mirrors broker semantics so a filter like "334os/+/+/state" behaves as the
+// operator expects against the captured topic list.
+export function matchesTopicFilter(topic: string, filter: string): boolean {
+  const trimmed = filter.trim();
+  if (trimmed === "" || trimmed === "#") {
+    return true;
+  }
+  const filterParts = trimmed.split("/");
+  const topicParts = topic.split("/");
+  for (let index = 0; index < filterParts.length; index += 1) {
+    const part = filterParts[index];
+    if (part === "#") {
+      return true;
+    }
+    if (index >= topicParts.length) {
+      return false;
+    }
+    if (part === "+") {
+      continue;
+    }
+    if (part !== topicParts[index]) {
+      return false;
+    }
+  }
+  return filterParts.length === topicParts.length;
 }
 
 export type DiscoveryView = {

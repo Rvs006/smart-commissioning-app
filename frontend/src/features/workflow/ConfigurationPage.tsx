@@ -1,9 +1,12 @@
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ConfigurationExport,
   ConfigurationSectionKey,
   ConfigurationSnapshot,
+  exportConfiguration,
   getConfiguration,
+  importConfiguration,
   storeSecretMaterial,
   updateConfiguration,
   validateConfiguration,
@@ -28,6 +31,19 @@ const sectionOrder: ConfigurationSectionKey[] = [
   "logging",
 ];
 
+// Connection-critical sections stay expanded by default so the settings needed
+// before discovery/validation runs are visible without a click. The advanced
+// sections collapse to reduce the wall of fields the original review flagged.
+const defaultExpandedSections: Record<ConfigurationSectionKey, boolean> = {
+  backups: false,
+  bacnet: true,
+  certificates: true,
+  device: true,
+  logging: false,
+  mqtt: true,
+  time: false,
+};
+
 const sectionLabels: Record<ConfigurationSectionKey, string> = {
   backups: "Backup & Restore",
   bacnet: "BACnet Discovery",
@@ -47,6 +63,80 @@ const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
   mqtt: "Broker, client identity, topic, QoS, keep-alive, and optional Mosquitto-style credentials.",
   time: "Timezone and NTP settings used to timestamp evidence and validate stale data.",
 };
+
+// A representative, comprehensive list of IANA timezones spanning every UTC
+// offset region (not just Europe). The stored value is the raw IANA name, so it
+// stays compatible with the configuration "Timezone" field the backend keeps.
+const TIMEZONE_OPTIONS = [
+  "UTC",
+  "Pacific/Midway",
+  "Pacific/Honolulu",
+  "America/Anchorage",
+  "America/Los_Angeles",
+  "America/Denver",
+  "America/Phoenix",
+  "America/Chicago",
+  "America/Mexico_City",
+  "America/New_York",
+  "America/Toronto",
+  "America/Bogota",
+  "America/Caracas",
+  "America/Halifax",
+  "America/Santiago",
+  "America/Sao_Paulo",
+  "America/Argentina/Buenos_Aires",
+  "Atlantic/Azores",
+  "Atlantic/Cape_Verde",
+  "Europe/London",
+  "Europe/Dublin",
+  "Europe/Lisbon",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "Europe/Madrid",
+  "Europe/Rome",
+  "Europe/Amsterdam",
+  "Europe/Brussels",
+  "Europe/Zurich",
+  "Europe/Stockholm",
+  "Europe/Warsaw",
+  "Europe/Athens",
+  "Europe/Helsinki",
+  "Europe/Bucharest",
+  "Europe/Kyiv",
+  "Europe/Istanbul",
+  "Europe/Moscow",
+  "Africa/Casablanca",
+  "Africa/Lagos",
+  "Africa/Cairo",
+  "Africa/Johannesburg",
+  "Africa/Nairobi",
+  "Asia/Jerusalem",
+  "Asia/Riyadh",
+  "Asia/Tehran",
+  "Asia/Dubai",
+  "Asia/Baku",
+  "Asia/Karachi",
+  "Asia/Kolkata",
+  "Asia/Kathmandu",
+  "Asia/Dhaka",
+  "Asia/Yangon",
+  "Asia/Bangkok",
+  "Asia/Jakarta",
+  "Asia/Singapore",
+  "Asia/Hong_Kong",
+  "Asia/Shanghai",
+  "Asia/Taipei",
+  "Asia/Seoul",
+  "Asia/Tokyo",
+  "Australia/Perth",
+  "Australia/Adelaide",
+  "Australia/Brisbane",
+  "Australia/Sydney",
+  "Pacific/Guam",
+  "Pacific/Auckland",
+  "Pacific/Fiji",
+  "Pacific/Tongatapu",
+];
 
 const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, FieldDefinition>>> = {
   bacnet: {
@@ -74,14 +164,59 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
   mqtt: {
     "MQTT Password": { kind: "password" },
   },
+  time: {
+    Timezone: { kind: "select", options: TIMEZONE_OPTIONS },
+  },
 };
 
 const secretFields = new Set(["CA Certificate", "Client Certificate", "Private Key"]);
 
+// The single certificate-expiry indicator field. It is engine/backend-derived
+// (store_secret currently returns expiry:null, so real PEM parsing is on-site),
+// surfaced here as a read-only status: we compare the displayed date to today
+// and flag it red when expired rather than asking the operator to type it.
+const CERT_EXPIRY_FIELD = "Certificate Expiry";
+
+// Classifies a free-text section status into a colour band. Engines set values
+// like "Healthy"/"Connected"/"Valid" (green), "Degraded"/"Stale"/"Warning"
+// (amber), or "Error"/"Failed"/"Unreachable" (red). Unknown strings stay
+// neutral-green so a long fault string still renders in a single pill.
+function statusTone(status: string): "green" | "amber" | "red" {
+  const normalized = status.trim().toLowerCase();
+  if (/(fail|error|unreachable|invalid|expired|disconnected|critical|down)/.test(normalized)) {
+    return "red";
+  }
+  if (/(warn|degrad|stale|pending|partial|retry|unknown|attention)/.test(normalized)) {
+    return "amber";
+  }
+  return "green";
+}
+
+// Parses an expiry value (e.g. "2027-05-20") into a Date, or null when it is
+// blank/unparseable. Kept lenient: the field is a status indicator, so an
+// unparseable value is simply not flagged (rather than wrongly marked expired).
+function parseExpiryDate(value: string): Date | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = new Date(trimmed);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+// True when the parsed expiry date is strictly before the current day.
+function isExpired(value: string): boolean {
+  const expiry = parseExpiryDate(value);
+  if (!expiry) {
+    return false;
+  }
+  return expiry.getTime() < Date.now();
+}
+
 export function ConfigurationPage() {
   // Publishing configuration (PUT /configuration) and storing secrets are
   // engineer+ mutations. Viewing the snapshot and validating it stay viewer, so
-  // only the Save and secret-store controls are role-gated here.
+  // only the Save, Import, and secret-store controls are role-gated here.
   const { canEngineer } = useSession();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<ConfigurationSnapshot | null>(null);
@@ -89,6 +224,12 @@ export function ConfigurationPage() {
   const [secretDrafts, setSecretDrafts] = useState<Record<string, string>>({});
   const [secretFiles, setSecretFiles] = useState<Record<string, string | null>>({});
   const [secretMessage, setSecretMessage] = useState<string | null>(null);
+  const [expandedSections, setExpandedSections] = useState<Record<ConfigurationSectionKey, boolean>>(
+    defaultExpandedSections,
+  );
+  const [transferMessage, setTransferMessage] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const configurationQuery = useQuery({
     queryFn: getConfiguration,
@@ -131,6 +272,43 @@ export function ConfigurationPage() {
     },
   });
 
+  // Export reads the current snapshot (via exportConfiguration -> GET
+  // /configuration) and triggers a JSON file download. The API already returns
+  // password fields masked (sentinel) and certificate material as secret://
+  // references, so the exported envelope never carries raw secret values.
+  const exportMutation = useMutation({
+    mutationFn: () => exportConfiguration(),
+    onSuccess: (envelope) => {
+      downloadConfigurationEnvelope(envelope);
+      setTransferError(null);
+      setTransferMessage(
+        "Exported the current configuration as JSON. Secret material is exported as masked references only, never raw values.",
+      );
+    },
+    onError: (error: Error) => {
+      setTransferMessage(null);
+      setTransferError(error.message);
+    },
+  });
+
+  // Import validates the parsed file client-side, then saves it via
+  // importConfiguration -> PUT /configuration, which validates again
+  // server-side before persisting (surfacing an ApiError on a 400).
+  const importMutation = useMutation({
+    mutationFn: (payload: ConfigurationExport | ConfigurationSnapshot) => importConfiguration(payload),
+    onSuccess: (savedConfiguration) => {
+      queryClient.setQueryData(["configuration"], savedConfiguration);
+      setDraft(normalizeConfigurationForLocks(savedConfiguration));
+      setValidationErrors([]);
+      setTransferError(null);
+      setTransferMessage("Imported configuration was validated by the API and saved as the new snapshot.");
+    },
+    onError: (error: Error) => {
+      setTransferMessage(null);
+      setTransferError(error.message);
+    },
+  });
+
   const changeValue = (section: ConfigurationSectionKey, field: string, value: string) => {
     setDraft((current) => {
       if (!current) {
@@ -159,20 +337,8 @@ export function ConfigurationPage() {
     });
   };
 
-  const changeStatus = (section: ConfigurationSectionKey, status: string) => {
-    setDraft((current) => {
-      if (!current) {
-        return current;
-      }
-
-      return {
-        ...current,
-        [section]: {
-          ...current[section],
-          status,
-        },
-      };
-    });
+  const toggleSection = (section: ConfigurationSectionKey) => {
+    setExpandedSections((current) => ({ ...current, [section]: !current[section] }));
   };
 
   const handleValidate = () => {
@@ -207,6 +373,30 @@ export function ConfigurationPage() {
       return;
     }
     secretMutation.mutate({ content, field, fileName: secretFiles[field] });
+  };
+
+  const handleImportFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0] ?? null;
+    // Reset the input so re-selecting the same file fires onChange again.
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseConfigurationFile(String(reader.result ?? ""));
+      if (!parsed.ok) {
+        setTransferMessage(null);
+        setTransferError(parsed.error);
+        return;
+      }
+      importMutation.mutate(parsed.payload);
+    };
+    reader.onerror = () => {
+      setTransferMessage(null);
+      setTransferError("Could not read the selected configuration file.");
+    };
+    reader.readAsText(file);
   };
 
   if (configurationQuery.isError) {
@@ -259,6 +449,10 @@ export function ConfigurationPage() {
           >
             {validationMutation.isPending ? "Validating..." : "Validate Snapshot"}
           </button>
+          <p className="action-note">
+            Validate Snapshot checks ports, IP/gateway addresses, MQTT topics, and certificate
+            references for validity. It runs server-side checks only and does not save the snapshot.
+          </p>
           <button
             className="primary-button"
             disabled={saveMutation.isPending || !canEngineer}
@@ -267,6 +461,41 @@ export function ConfigurationPage() {
           >
             {saveMutation.isPending ? "Saving..." : "Save Configuration"}
           </button>
+          <p className="action-note">
+            Save Configuration persists the edited snapshot as the new runtime configuration used by
+            discovery and validation services.
+          </p>
+          <div className="config-toolbar">
+            <button
+              className="secondary-button compact"
+              disabled={exportMutation.isPending}
+              onClick={() => exportMutation.mutate()}
+              type="button"
+            >
+              {exportMutation.isPending ? "Exporting..." : "Export JSON"}
+            </button>
+            <button
+              className="secondary-button compact"
+              disabled={importMutation.isPending || !canEngineer}
+              onClick={() => importInputRef.current?.click()}
+              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+              type="button"
+            >
+              {importMutation.isPending ? "Importing..." : "Import JSON"}
+            </button>
+            <input
+              accept="application/json,.json"
+              aria-label="Import configuration JSON file"
+              hidden
+              onChange={handleImportFile}
+              ref={importInputRef}
+              type="file"
+            />
+          </div>
+          <p className="action-note">
+            Export downloads the current configuration as JSON (secrets stay masked) so it can be
+            reused on another project; Import validates a JSON file and saves it as the new snapshot.
+          </p>
         </aside>
       </section>
 
@@ -288,6 +517,20 @@ export function ConfigurationPage() {
         <div className="state-panel success">
           <strong>Configuration saved</strong>
           <span>The persisted runtime snapshot has been updated.</span>
+        </div>
+      )}
+
+      {transferMessage && (
+        <div className="state-panel success">
+          <strong>Configuration transfer</strong>
+          <span>{transferMessage}</span>
+        </div>
+      )}
+
+      {transferError && (
+        <div className="state-panel error">
+          <strong>Configuration import/export failed</strong>
+          <span>{transferError}</span>
         </div>
       )}
 
@@ -324,57 +567,96 @@ export function ConfigurationPage() {
       )}
 
       <section className="config-grid">
-        {sectionOrder.map((section) => (
-          <article className="config-section" key={section}>
-            <div className="section-heading">
-              <div>
-                <span>{sectionLabels[section]}</span>
-                <h3>{draft[section].status}</h3>
-              </div>
-              <label>
-                Section status
-                <input
-                  onChange={(event) => changeStatus(section, event.target.value)}
-                  value={draft[section].status}
-                />
-              </label>
-            </div>
-            <p className="section-copy">{sectionDescriptions[section]}</p>
-            <div className="field-grid">
-              {Object.entries(draft[section].values).map(([field, value]) => (
-                <FieldControl
-                  canEngineer={canEngineer}
-                  disabled={section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)}
-                  field={field}
-                  hint={
-                    section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)
-                      ? "Locked because BBMD is enabled."
-                      : undefined
-                  }
-                  kind={fieldDefinitions[section]?.[field]?.kind ?? "text"}
-                  key={field}
-                  onFileSelect={(file) => handleSecretFile(field, file)}
-                  onSecretChange={(content) => setSecretDrafts((current) => ({ ...current, [field]: content }))}
-                  onSecretStore={() => handleSecretStore(field)}
-                  onValueChange={(nextValue) => changeValue(section, field, nextValue)}
-                  options={fieldDefinitions[section]?.[field]?.options}
-                  secretContent={secretDrafts[field] ?? ""}
-                  secretFileName={secretFiles[field] ?? null}
-                  secretPending={secretMutation.isPending}
-                  value={value}
-                />
-              ))}
-            </div>
-          </article>
-        ))}
+        {sectionOrder.map((section) => {
+          const expanded = expandedSections[section];
+          const status = draft[section].status;
+          const panelId = `config-section-${section}`;
+          return (
+            <article className="config-section" key={section}>
+              <button
+                aria-controls={panelId}
+                aria-expanded={expanded}
+                className="section-toggle"
+                onClick={() => toggleSection(section)}
+                type="button"
+              >
+                <span className="section-toggle-title">
+                  <span className="section-toggle-caret" aria-hidden="true">
+                    ▾
+                  </span>
+                  <span>{sectionLabels[section]}</span>
+                </span>
+                <span className={`section-status-pill ${statusTone(status)}`}>{status}</span>
+              </button>
+              {expanded && (
+                <div id={panelId}>
+                  <p className="section-copy">{sectionDescriptions[section]}</p>
+                  {section === "backups" && (
+                    <p className="field-note">
+                      Backups bundle the runtime database, encrypted secrets, and uploaded import
+                      files. The bundle is built from the app runtime (under the backend runtime
+                      directory by default) and written to a path chosen at backup time via the
+                      backup CLI&apos;s output option. The Backup Location field below records the
+                      intended target for operators; the app does not pick a host directory itself.
+                    </p>
+                  )}
+                  <div className="field-grid">
+                    {Object.entries(draft[section].values).map(([field, value]) => (
+                      <FieldControl
+                        canEngineer={canEngineer}
+                        disabled={section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)}
+                        expired={field === CERT_EXPIRY_FIELD && isExpired(value)}
+                        field={field}
+                        hint={fieldHint(section, field, draft)}
+                        kind={fieldDefinitions[section]?.[field]?.kind ?? "text"}
+                        key={field}
+                        onFileSelect={(file) => handleSecretFile(field, file)}
+                        onSecretChange={(content) => setSecretDrafts((current) => ({ ...current, [field]: content }))}
+                        onSecretStore={() => handleSecretStore(field)}
+                        onValueChange={(nextValue) => changeValue(section, field, nextValue)}
+                        options={fieldDefinitions[section]?.[field]?.options}
+                        secretContent={secretDrafts[field] ?? ""}
+                        secretFileName={secretFiles[field] ?? null}
+                        secretPending={secretMutation.isPending}
+                        value={value}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </article>
+          );
+        })}
       </section>
     </form>
   );
 }
 
+// Per-field helper text. Beyond the BBMD lock hint, the certificate-expiry
+// field gets an honest status note explaining it is a derived indicator (red
+// when the stored expiry date is in the past) rather than a value to type.
+function fieldHint(
+  section: ConfigurationSectionKey,
+  field: string,
+  draft: ConfigurationSnapshot,
+): string | undefined {
+  if (section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)) {
+    return "Locked because BBMD is enabled.";
+  }
+  if (section === "certificates" && field === CERT_EXPIRY_FIELD) {
+    const value = draft.certificates.values[field] ?? "";
+    if (isExpired(value)) {
+      return "Certificate expired: the stored expiry date is in the past.";
+    }
+    return "Status indicator derived from the stored certificate expiry date (read-only).";
+  }
+  return undefined;
+}
+
 type FieldControlProps = {
   canEngineer: boolean;
   disabled?: boolean;
+  expired?: boolean;
   field: string;
   hint?: string;
   kind: FieldKind;
@@ -392,6 +674,7 @@ type FieldControlProps = {
 function FieldControl({
   canEngineer,
   disabled = false,
+  expired = false,
   field,
   hint,
   kind,
@@ -445,6 +728,7 @@ function FieldControl({
       <label>
         {field}
         <select disabled={disabled} onChange={(event) => onValueChange(event.target.value)} value={value}>
+          {!options.includes(value) && value !== "" && <option value={value}>{value}</option>}
           {options.map((option) => (
             <option key={option} value={option}>
               {option}
@@ -467,9 +751,10 @@ function FieldControl({
   }
 
   return (
-    <label>
+    <label className={expired ? "field-expired" : undefined}>
       {field}
       <input
+        className={expired ? "field-expired" : undefined}
         onBlur={() => {
           if (kind === "password" && maskedSentinel && !value) {
             onValueChange(maskedSentinel);
@@ -509,4 +794,61 @@ function normalizeConfigurationForLocks(configuration: ConfigurationSnapshot): C
 
 function isBbmdEnabled(configuration: ConfigurationSnapshot): boolean {
   return configuration.bacnet.values.BBMD === "Enabled";
+}
+
+// Serialises an exported envelope to a downloadable JSON file via a transient
+// object-URL anchor. No secret values are present in the envelope: password
+// fields are masked and certificate material is a secret:// reference.
+function downloadConfigurationEnvelope(envelope: ConfigurationExport): void {
+  const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const stamp = envelope.exported_at.replace(/[:.]/g, "-");
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `smart-commissioning-configuration-${stamp}.json`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+type ParsedConfiguration =
+  | { ok: true; payload: ConfigurationExport | ConfigurationSnapshot }
+  | { ok: false; error: string };
+
+const configurationSectionKeys: ConfigurationSectionKey[] = [...sectionOrder];
+
+// Parses and shape-checks an imported JSON file. Accepts either the exported
+// envelope ({kind, configuration, ...}) or a bare snapshot, and verifies every
+// section is present with a values object before handing it to the API, so an
+// obviously-wrong file is rejected client-side with a clear message.
+function parseConfigurationFile(raw: string): ParsedConfiguration {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { error: "Selected file is not valid JSON.", ok: false };
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return { error: "Configuration file must be a JSON object.", ok: false };
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const candidate =
+    record.configuration && typeof record.configuration === "object"
+      ? (record.configuration as Record<string, unknown>)
+      : record;
+
+  for (const section of configurationSectionKeys) {
+    const sectionValue = candidate[section];
+    if (!sectionValue || typeof sectionValue !== "object") {
+      return { error: `Configuration file is missing the "${section}" section.`, ok: false };
+    }
+    const values = (sectionValue as Record<string, unknown>).values;
+    if (!values || typeof values !== "object") {
+      return { error: `Section "${section}" is missing its values.`, ok: false };
+    }
+  }
+
+  return { ok: true, payload: parsed as ConfigurationExport | ConfigurationSnapshot };
 }

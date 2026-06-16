@@ -10,8 +10,9 @@ import {
   listRuns,
   listValidationRuns,
   type JobSummary,
+  type ValidationIssueRecord,
 } from "../../api/client";
-import { workflowStages } from "./operatorData";
+import { derivePayloadType, workflowStages } from "./operatorData";
 import {
   formatRelativeTime,
   humanizeJobType,
@@ -68,6 +69,41 @@ function severityClass(severity: string): "critical" | "major" | "minor" {
     return "major";
   }
   return "minor";
+}
+
+// Reformats a single blocking finding into two readable lines instead of one
+// run-on string. Reuses derivePayloadType so the homepage labels payloads
+// ("UDMI pointset") the same way the validation module does.
+//   headline: asset + payload type, e.g. "MDB5-00-043-BLR-1 · UDMI pointset"
+//   detail:   the point problem, e.g. "fault_status — expected STRING but received NUMBER"
+// The made-up ISS-#### id is intentionally dropped in favour of this framing.
+type ParsedFinding = {
+  headline: string;
+  detail: string;
+};
+
+function parseBlockingFinding(issue: ValidationIssueRecord): ParsedFinding {
+  const asset = issue.asset_id?.trim() || "Unknown asset";
+  const payloadType = derivePayloadType(issue);
+  const headline = payloadType === "other" ? asset : `${asset} · UDMI ${payloadType}`;
+
+  const point = issue.point_name?.trim() || null;
+  const expected = issue.expected_value?.trim();
+  const observed = issue.observed_value?.trim();
+
+  // Prefer a structured expected/observed comparison; fall back to the
+  // human description, then to the issue type humanized.
+  let problem: string;
+  if (expected || observed) {
+    problem = `expected ${expected || "n/a"} but received ${observed || "n/a"}`;
+  } else if (issue.description?.trim()) {
+    problem = issue.description.trim();
+  } else {
+    problem = issue.issue_type.replace(/_/g, " ");
+  }
+
+  const detail = point ? `${point} — ${problem}` : problem;
+  return { detail, headline };
 }
 
 export function DashboardPage() {
@@ -337,17 +373,19 @@ export function DashboardPage() {
                 </span>
               </div>
             ) : topIssue ? (
-              <div className={`issue-card ${severityClass(topIssue.severity)}`}>
-                <div>
-                  <span>{topIssue.issue_id}</span>
-                  <strong>{topIssue.description}</strong>
-                  <small>
-                    {topIssue.asset_id ?? "Unknown asset"} ·{" "}
-                    {topIssue.issue_type.replace(/_/g, " ")}
-                  </small>
-                </div>
-                <em>Commissioning team</em>
-              </div>
+              (() => {
+                const finding = parseBlockingFinding(topIssue);
+                return (
+                  <div className={`issue-card blocking-finding ${severityClass(topIssue.severity)}`}>
+                    <div className="issue-card-body">
+                      <span>{topIssue.severity} severity</span>
+                      <strong>{finding.headline}</strong>
+                      <small>{finding.detail}</small>
+                    </div>
+                    <em>Commissioning team</em>
+                  </div>
+                );
+              })()
             ) : (
               <div className="empty-workspace">
                 <strong>No blocking findings</strong>

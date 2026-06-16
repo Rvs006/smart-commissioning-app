@@ -7,6 +7,7 @@ import {
   downloadFile,
   getDiscoveryResults,
   getDiscoveryRun,
+  getDiscoveryTopics,
   getValidationIssues,
   getValidationRun,
   getImportErrors,
@@ -18,16 +19,19 @@ import {
   ImportType,
   JobStatus,
   listImportProfiles,
+  listReports,
   rollbackMqttConfigPublish,
   startMqttConfigPublishRun,
   startDiscoveryRun,
   startValidationRun,
+  DiscoveryRowRecord,
   ReportSummary,
+  ReportType,
   ValidationIssueRecord,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
-import { moduleWorkspaces, type IssueRow } from "./operatorData";
-import { discoveryMetrics, discoveryViewFor } from "./discoveryRows";
+import { groupIssuesByAsset, moduleWorkspaces, type IssueRow } from "./operatorData";
+import { discoveryMetrics, discoveryViewFor, matchesTopicFilter } from "./discoveryRows";
 import { isTerminalStatus } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
@@ -54,6 +58,12 @@ type DetailItem = {
 type ScanPort = {
   port: string;
   protocol: "tcp" | "udp";
+};
+
+// One extra point/value pair for a multi-write MQTT config publish (mq9n11wi).
+type PointValuePair = {
+  point: string;
+  value: string;
 };
 
 // Which kind of run is being monitored, so we poll the right status endpoint.
@@ -179,6 +189,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
   const [publishPoint, setPublishPoint] = useState("supply_air_temperature_setpoint");
   const [publishValue, setPublishValue] = useState("22");
+  // Extra point/value pairs written into the SAME config payload alongside the
+  // primary point above. The primary pair stays the one the backend confirm path
+  // verifies; the extras are written but treated as on-site-untested (see note).
+  const [publishExtraPoints, setPublishExtraPoints] = useState<PointValuePair[]>([]);
   const [publishConfirmed, setPublishConfirmed] = useState(false);
   const [publishUseLiveBroker, setPublishUseLiveBroker] = useState(false);
   const [publishPointsetTopic, setPublishPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
@@ -196,9 +210,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("5");
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
+  // Per-asset expansion in the UDMI per-payload-type results view (mq9m4bnv).
+  const [expandedAsset, setExpandedAsset] = useState<string | null>(null);
+  // Reports page: which queued reports are ticked for "Export selected" and a
+  // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
+  const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
+  const [reportToast, setReportToast] = useState<string | null>(null);
+  // MQTT Explorer-like capture inputs (mq9nhbzu). The live broker capture itself
+  // is on-site-untested; this drives the existing mqtt discovery run + topics.
+  const [captureTopicFilter, setCaptureTopicFilter] = useState("#");
+  const [captureSeconds, setCaptureSeconds] = useState("10");
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
+  const allTemplatesDownload = useFileDownload();
 
   const profilesQuery = useQuery({
     queryFn: listImportProfiles,
@@ -272,6 +297,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["discovery-results", activeRun?.runId],
   });
 
+  // Live MQTT topic snapshot for the Explorer-like capture panel (mq9nhbzu).
+  // Reuses the existing per-run topics endpoint; only enabled for an MQTT
+  // discovery run so it never fires on other modules.
+  const captureTopicsQuery = useQuery({
+    enabled:
+      module.route === "mqtt-discovery" &&
+      Boolean(activeRun) &&
+      activeRun?.kind === "discovery" &&
+      isTerminalStatus(discoveryRunQuery.data?.status),
+    queryFn: () => getDiscoveryTopics(activeRun?.runId ?? ""),
+    queryKey: ["discovery-topics", activeRun?.runId],
+  });
+
+  // Reports list for the reports page (per-report selection + Export selected).
+  const reportsQuery = useQuery({
+    enabled: module.route === "reports",
+    queryFn: listReports,
+    queryKey: ["reports-list"],
+  });
+
   // When SSE reports the run terminal but polling is paused, the polled record
   // (and its result_summary) may still be mid-run. Trigger a single refetch so
   // the terminal-gated issues/results queries fire against fresh data.
@@ -291,6 +336,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
+  const resetAllTemplatesDownload = allTemplatesDownload.reset;
 
   useEffect(() => {
     setSelectedImportType(module.importTypes[0] ?? "");
@@ -301,12 +347,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setActiveRun(null);
     setCopyFeedback(null);
     setSelectedResultIndex(0);
+    setExpandedAsset(null);
+    setSelectedReportIds(new Set());
+    setReportToast(null);
     setScanAuthorized(false);
     setScanDryRun(false);
     resetTemplateDownload();
     resetReportDownload();
     resetExportDownload();
-  }, [module.route, module.importTypes, resetTemplateDownload, resetReportDownload, resetExportDownload]);
+    resetAllTemplatesDownload();
+  }, [
+    module.route,
+    module.importTypes,
+    resetTemplateDownload,
+    resetReportDownload,
+    resetExportDownload,
+    resetAllTemplatesDownload,
+  ]);
 
   const importMutation = useMutation({
     mutationFn: async (input: { importType: ImportType; file: File }) => {
@@ -383,7 +440,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         }
       } else {
         setLastReport(result);
-        setRunOutcome(`Report queued. Report ID: ${result.report_id}, file: ${result.file_name}`);
+        setRunOutcome(`Report generated. Report ID: ${result.report_id}, file: ${result.file_name}`);
+        // Report linking (mqautz9j): confirm where the report lives and refresh
+        // the reports list so the new report is selectable for export.
+        setReportToast("Report generated — see the Reports list below to download or export it.");
+        void reportsQuery.refetch();
       }
     },
   });
@@ -394,7 +455,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         confirmed: publishConfirmed,
         expectedPoint: publishPoint,
         expectedValue: parsePublishValue(publishValue),
-        payload: publishPayload,
+        // Compose every point/value pair (primary + extras) into one config
+        // payload so a single publish writes them all. The backend confirm path
+        // still verifies only the primary expected point/value.
+        payload: buildMultiPointPayload(publishPayload, publishPoint, publishValue, publishExtraPoints),
         pointsetTopic: publishPointsetTopic,
         topic: publishTopic,
         useLiveBroker: publishUseLiveBroker,
@@ -424,11 +488,33 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
+  // Generate a report off the back of a completed run (mqautz9j), scoped to the
+  // originating run via source_run_ids so the report actually traces to it.
+  const reportFromRunMutation = useMutation({
+    mutationFn: ({ reportType, runId }: { reportType: ReportType; runId: string }) =>
+      createReport({ format: "zip", reportType, sourceRunIds: [runId] }),
+    onSuccess: (result) => {
+      setReportToast(
+        `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
+      );
+    },
+  });
+
   const availableProfiles =
     profilesQuery.data?.filter((profile) => module.importTypes.includes(profile.import_type)) ?? [];
 
   const selectedProfile = availableProfiles.find(
     (profile) => profile.import_type === selectedImportType,
+  );
+
+  // Index of the UDMI validation run action, used by the Schedule & Payload
+  // Evidence "Execute capture" button so it triggers the same run as the Run
+  // Controls card (mq9n7pbe). Defaults to 0 if the action shape ever changes.
+  const udmiRunActionIndex = Math.max(
+    0,
+    module.runActions.findIndex(
+      (action) => action.kind === "validation" && action.runKind === "udmi",
+    ),
   );
 
   // Live issues for ANY terminal validation run (UDMI, BACnet, mapping), not
@@ -438,6 +524,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? validationIssuesQuery.data.issues.map(toIssueRow)
       : null;
   const visibleIssues = liveIssues ?? workspace?.issues ?? [];
+
+  // Per-asset / per-payload-type grouping for UDMI live issues (mq9m4bnv).
+  // Collapsed shows a cross-payload-type summary per asset; expanding an asset
+  // reveals pointset/metadata/state detail. Derived only from real issue data.
+  const assetIssueGroups = useMemo(() => {
+    if (module.route !== "udmi-validation" || activeRun?.kind !== "validation") {
+      return null;
+    }
+    const records = validationIssuesQuery.data?.issues;
+    if (!records || records.length === 0) {
+      return null;
+    }
+    return groupIssuesByAsset(records, toIssueRow);
+  }, [module.route, activeRun, validationIssuesQuery.data]);
 
   // Live discovery results view (ip/bacnet/mqtt). Built only after a terminal
   // run; until then the table falls back to labelled sample rows.
@@ -519,6 +619,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setScanPorts((current) => current.filter((_entry, entryIndex) => entryIndex !== index));
   };
 
+  const addExtraPublishPoint = () => {
+    setPublishExtraPoints((current) => [...current, { point: "", value: "" }]);
+  };
+
+  const changeExtraPublishPoint = (index: number, field: keyof PointValuePair, value: string) => {
+    setPublishExtraPoints((current) =>
+      current.map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, [field]: value } : entry,
+      ),
+    );
+  };
+
+  const removeExtraPublishPoint = (index: number) => {
+    setPublishExtraPoints((current) => current.filter((_entry, entryIndex) => entryIndex !== index));
+  };
+
   const handleExport = () => {
     if (!exportReport) {
       return;
@@ -528,6 +644,77 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       getReportDownloadPath(exportReport.report_id),
       exportReport.file_name || `${exportReport.report_id}.${exportReport.output_format}`,
     );
+  };
+
+  // Live, downloadable reports from GET /reports. Only succeeded reports have a
+  // real file behind getReportDownloadPath, so only those are selectable.
+  const liveReports = reportsQuery.data?.reports ?? [];
+  const downloadableReports = liveReports.filter((report) => report.status === "succeeded");
+
+  const toggleReportSelection = (reportId: string) => {
+    setSelectedReportIds((current) => {
+      const next = new Set(current);
+      if (next.has(reportId)) {
+        next.delete(reportId);
+      } else {
+        next.add(reportId);
+      }
+      return next;
+    });
+  };
+
+  // Export selected reports (mqatcqb3): download each ticked report through the
+  // authenticated downloadFile path, sequentially so the browser keeps them.
+  const handleExportSelected = async () => {
+    const chosen = downloadableReports.filter((report) => selectedReportIds.has(report.report_id));
+    if (chosen.length === 0) {
+      return;
+    }
+    for (const report of chosen) {
+      await exportDownload.download(
+        `selected-${report.report_id}`,
+        getReportDownloadPath(report.report_id),
+        report.file_name || `${report.report_id}.${report.output_format}`,
+      );
+    }
+  };
+
+  // "Generate report from this run" affordance shown on a terminal validation/
+  // discovery run (mqautz9j). Scopes the report to the originating run id via
+  // source_run_ids so the report traces back to it.
+  const handleGenerateReportFromRun = () => {
+    const runId = activeRun?.runId;
+    if (!runId) {
+      return;
+    }
+    const reportType: ReportType =
+      activeRun?.kind === "discovery"
+        ? ((module.route === "ip-scanner"
+            ? "ip_discovery"
+            : module.route === "bacnet-discovery"
+              ? "bacnet_discovery"
+              : "mqtt_discovery") as ReportType)
+        : "issue_report";
+    reportFromRunMutation.mutate({ reportType, runId });
+  };
+
+  // Latest payload per topic for the MQTT Explorer-like capture (mq9nhbzu),
+  // filtered by the wildcard topic filter and built from the live topics
+  // snapshot. No payloads are fabricated — empty until a real run reports them.
+  const captureRows = useMemo(() => {
+    const topics = captureTopicsQuery.data?.topics ?? [];
+    return topics
+      .map((topic) => mqttCaptureRow(topic))
+      .filter((row) => matchesTopicFilter(row.topic, captureTopicFilter));
+  }, [captureTopicsQuery.data, captureTopicFilter]);
+
+  const handleCaptureExport = () => {
+    if (captureRows.length === 0) {
+      return;
+    }
+    const csv = captureRowsToCsv(captureRows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    triggerBlobDownload(blob, `mqtt-capture-${Date.now()}.csv`);
   };
 
   const handleCopyPayload = async (payload: string, label: string) => {
@@ -736,7 +923,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 const blockedTooltip = !canEngineer
                   ? ENGINEER_REQUIRED_TOOLTIP
                   : scanBlocked
-                    ? "Confirm scan authorization (or enable dry run) before queueing a real scan."
+                    ? "Confirm scan authorization (or enable dry run) before starting a real scan."
                     : undefined;
                 return (
                   <div className="run-card" key={action.label}>
@@ -751,7 +938,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       title={blockedTooltip}
                       type="button"
                     >
-                      {runMutation.isPending ? "Queueing..." : scanDryRun && action.kind === "discovery" ? "Preview" : "Queue"}
+                      {runMutation.isPending
+                        ? "Working..."
+                        : scanDryRun && action.kind === "discovery"
+                          ? "Preview"
+                          : module.route === "reports"
+                            ? "Generate"
+                            : "Run"}
                     </button>
                   </div>
                 );
@@ -870,7 +1063,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
                     </button>
                   )}
+                {canEngineer && activeRunTerminal && (
+                  <button
+                    className="secondary-button compact"
+                    disabled={reportFromRunMutation.isPending}
+                    onClick={handleGenerateReportFromRun}
+                    title="Generate a report for this run type, then find it in the Reports tab."
+                    type="button"
+                  >
+                    {reportFromRunMutation.isPending ? "Generating..." : "Generate report from this run"}
+                  </button>
+                )}
               </div>
+
+              {reportToast && (
+                <span className="run-monitor-note">{reportToast}</span>
+              )}
+              {reportFromRunMutation.isError && (
+                <span className="error-text">{reportFromRunMutation.error.message}</span>
+              )}
 
               {cancelMutation.isError && (
                 <span className="error-text">{cancelMutation.error.message}</span>
@@ -894,6 +1105,71 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
         </article>
       </section>
+
+      {module.importTypes.length > 0 && (
+        <section className="surface">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Templates</span>
+              <h3>Import Templates for This Page</h3>
+            </div>
+          </div>
+          <p className="section-copy">
+            Every register and validation template this page accepts, downloadable as XLSX or CSV.
+            Each template includes the required columns and one realistic example row.
+          </p>
+          <div className="template-grid">
+            {module.importTypes.map((importType) => (
+              <article className="schema-card template-card" key={importType}>
+                <div>
+                  <strong>{formatImportTypeLabel(importType)}</strong>
+                  <p>{importType}.xlsx / {importType}.csv</p>
+                </div>
+                <div className="inline-actions">
+                  <button
+                    className="secondary-button compact"
+                    disabled={allTemplatesDownload.pendingKey !== null}
+                    onClick={() =>
+                      void allTemplatesDownload.download(
+                        `all-${importType}-xlsx`,
+                        getImportTemplatePath(importType, "xlsx"),
+                        `${importType}_template.xlsx`,
+                      )
+                    }
+                    type="button"
+                  >
+                    {allTemplatesDownload.pendingKey === `all-${importType}-xlsx`
+                      ? "Downloading..."
+                      : "XLSX"}
+                  </button>
+                  <button
+                    className="secondary-button compact"
+                    disabled={allTemplatesDownload.pendingKey !== null}
+                    onClick={() =>
+                      void allTemplatesDownload.download(
+                        `all-${importType}-csv`,
+                        getImportTemplatePath(importType, "csv"),
+                        `${importType}_template.csv`,
+                      )
+                    }
+                    type="button"
+                  >
+                    {allTemplatesDownload.pendingKey === `all-${importType}-csv`
+                      ? "Downloading..."
+                      : "CSV"}
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+          {allTemplatesDownload.error && (
+            <div className="state-panel error">
+              <strong>Template download failed</strong>
+              <span>{allTemplatesDownload.error}</span>
+            </div>
+          )}
+        </section>
+      )}
 
       {module.route === "data-validation" && (
         <section className="surface">
@@ -964,6 +1240,107 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             Sent to the API as <strong>{scanPortSpecification(scanPorts) || "common ports"}</strong>. Leave the
             list empty to use the common fallback: 47808/udp, 80/tcp, and 443/tcp.
           </p>
+        </section>
+      )}
+
+      {module.route === "mqtt-discovery" && (
+        <section className="surface">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Live capture</span>
+              <h3>Incoming MQTT Payloads</h3>
+            </div>
+            <button
+              className="secondary-button compact"
+              disabled={captureRows.length === 0}
+              onClick={handleCaptureExport}
+              title={
+                captureRows.length === 0
+                  ? "No captured topics yet — queue an MQTT discovery run with this topic filter."
+                  : "Download the latest payload per topic as CSV."
+              }
+              type="button"
+            >
+              Export to CSV
+            </button>
+          </div>
+          <div className="publish-grid capture-controls">
+            <label>
+              Topic filter (MQTT wildcards: + and #)
+              <input
+                onChange={(event) => setCaptureTopicFilter(event.target.value)}
+                placeholder="334os/+/+/#"
+                value={captureTopicFilter}
+              />
+            </label>
+            <label>
+              Capture duration (seconds)
+              <input
+                inputMode="numeric"
+                onChange={(event) => setCaptureSeconds(event.target.value)}
+                value={captureSeconds}
+              />
+            </label>
+          </div>
+          <p className="section-copy">
+            Subscribes through an MQTT discovery run and shows the latest payload seen per topic. The live
+            broker capture is on-site-untested here; with no broker reachable the run records
+            broker_unreachable and this panel stays empty rather than showing fabricated payloads. Use the
+            Run Controls above (or Cancel) to start and stop capture; duration {captureSeconds || "?"}s and
+            the filter are passed to the discovery run.
+          </p>
+          <div className="data-table-wrap">
+            {captureRows.length > 0 ? (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Topic</th>
+                    <th>Asset</th>
+                    <th>Messages</th>
+                    <th>Latest payload</th>
+                    <th>Copy</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {captureRows.map((row) => (
+                    <tr key={row.topic}>
+                      <td>{row.topic}</td>
+                      <td>{row.asset}</td>
+                      <td>{row.messageCount}</td>
+                      <td className="payload-cell">{row.payload || "—"}</td>
+                      <td>
+                        {row.payload ? (
+                          <button
+                            className="secondary-button compact"
+                            onClick={() => handleCopyPayload(row.payload, row.topic)}
+                            type="button"
+                          >
+                            Copy payload
+                          </button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="empty-workspace">
+                <strong>No captured payloads yet</strong>
+                <span>
+                  Queue an MQTT discovery run; the latest payload per topic matching the filter appears here
+                  once the run completes. Empty live results stay empty — no sample payloads are shown.
+                </span>
+              </div>
+            )}
+          </div>
+          {captureTopicsQuery.isError && (
+            <span className="error-text">
+              Could not load captured topics:{" "}
+              {captureTopicsQuery.error instanceof Error ? captureTopicsQuery.error.message : "request failed"}
+            </span>
+          )}
         </section>
       )}
 
@@ -1043,6 +1420,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </label>
             </div>
           )}
+
+          <div className="inline-actions execute-row">
+            <button
+              className="primary-button compact"
+              disabled={runMutation.isPending || !canEngineer}
+              onClick={() => runMutation.mutate(udmiRunActionIndex)}
+              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+              type="button"
+            >
+              {runMutation.isPending ? "Executing..." : "Execute capture"}
+            </button>
+            <span className="section-copy execute-note">
+              {udmiUseLiveBroker
+                ? "Runs the UDMI validation, capturing the state, metadata, and pointset payloads for the topics above. Live broker capture is on-site-untested; with no broker reachable the engine records broker_unreachable rather than fabricating payloads."
+                : "Runs the UDMI validation against the pasted state, metadata, and pointset payloads above. Tick the broker option to capture live payloads instead (on-site-untested)."}
+            </span>
+          </div>
         </section>
       )}
 
@@ -1060,11 +1454,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <input onChange={(event) => setPublishTopic(event.target.value)} value={publishTopic} />
             </label>
             <label>
-              Expected point
+              Primary point (confirmed)
               <input onChange={(event) => setPublishPoint(event.target.value)} value={publishPoint} />
             </label>
             <label>
-              Expected next present_value
+              Primary set_value
               <input onChange={(event) => setPublishValue(event.target.value)} value={publishValue} />
             </label>
             <label className="publish-payload">
@@ -1072,6 +1466,60 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <textarea onChange={(event) => setPublishPayload(event.target.value)} rows={6} value={publishPayload} />
             </label>
           </div>
+
+          <div className="multi-point-editor">
+            <div className="surface-heading compact-heading">
+              <div>
+                <span className="eyebrow">Additional points</span>
+                <h4>Write Multiple Points in One Config</h4>
+              </div>
+              <button className="secondary-button compact" onClick={addExtraPublishPoint} type="button">
+                Add point
+              </button>
+            </div>
+            {publishExtraPoints.length === 0 ? (
+              <p className="section-copy">
+                Optional. Add extra point/value pairs to write them all in a single config payload alongside
+                the primary point above.
+              </p>
+            ) : (
+              <div className="port-editor">
+                {publishExtraPoints.map((pair, index) => (
+                  <div className="port-row" key={`extra-${index}`}>
+                    <label>
+                      Point name
+                      <input
+                        onChange={(event) => changeExtraPublishPoint(index, "point", event.target.value)}
+                        placeholder="fan_enable"
+                        value={pair.point}
+                      />
+                    </label>
+                    <label>
+                      set_value
+                      <input
+                        onChange={(event) => changeExtraPublishPoint(index, "value", event.target.value)}
+                        placeholder="true"
+                        value={pair.value}
+                      />
+                    </label>
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => removeExtraPublishPoint(index)}
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="section-copy">
+              All pairs are written into one config payload under <code>pointset.points</code>. The backend
+              confirm/verify step checks only the primary point/value above; the additional writes are sent
+              but their confirmation is on-site-untested.
+            </p>
+          </div>
+
           <label className="confirm-row">
             <input
               checked={publishUseLiveBroker}
@@ -1120,6 +1568,102 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <div className="state-panel error">
               <strong>Publish request failed</strong>
               <span>{publishMutation.error.message}</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      {module.route === "reports" && (
+        <section className="surface">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Reports</span>
+              <h3>Generated Reports</h3>
+            </div>
+            <button
+              className="secondary-button compact"
+              disabled={selectedReportIds.size === 0 || exportDownload.pendingKey !== null}
+              onClick={() => void handleExportSelected()}
+              title={
+                selectedReportIds.size === 0
+                  ? "Tick one or more completed reports to export them."
+                  : `Download ${selectedReportIds.size} selected report(s).`
+              }
+              type="button"
+            >
+              {exportDownload.pendingKey?.startsWith("selected-") ? "Exporting..." : "Export selected"}
+            </button>
+          </div>
+          <p className="section-copy">
+            Every report you generate here is stored against its run and listed below. Generate a report from
+            the Run Controls above, or use "Generate report from this run" on a completed discovery or
+            validation run elsewhere — it will appear here, traceable to the run it came from.
+          </p>
+          {reportToast && (
+            <div className="state-panel success" role="status">
+              <strong>Report generated</strong>
+              <span>{reportToast}</span>
+            </div>
+          )}
+          <div className="data-table-wrap">
+            {liveReports.length > 0 ? (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Select</th>
+                    <th>Report</th>
+                    <th>Type</th>
+                    <th>Format</th>
+                    <th>Status</th>
+                    <th>File</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {liveReports.map((report) => {
+                    const downloadable = report.status === "succeeded";
+                    return (
+                      <tr key={report.report_id}>
+                        <td>
+                          <input
+                            aria-label={`Select report ${report.file_name || report.report_id}`}
+                            checked={selectedReportIds.has(report.report_id)}
+                            disabled={!downloadable}
+                            onChange={() => toggleReportSelection(report.report_id)}
+                            title={downloadable ? undefined : "Only completed reports can be exported."}
+                            type="checkbox"
+                          />
+                        </td>
+                        <td>{report.report_id}</td>
+                        <td>{report.report_type}</td>
+                        <td>{report.output_format.toUpperCase()}</td>
+                        <td>
+                          <span className={`status-token ${toStatusClass(report.status)}`}>
+                            {report.status}
+                          </span>
+                        </td>
+                        <td>{report.file_name || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            ) : (
+              <div className="empty-workspace">
+                <strong>{reportsQuery.isLoading ? "Loading reports..." : "No reports yet"}</strong>
+                <span>Generate an Excel or Word report above; it will appear here for selection and export.</span>
+              </div>
+            )}
+          </div>
+          {reportsQuery.isError && (
+            <span className="error-text">
+              Could not load reports:{" "}
+              {reportsQuery.error instanceof Error ? reportsQuery.error.message : "request failed"}
+            </span>
+          )}
+          {exportDownload.error && (
+            <div className="state-panel error">
+              <strong>Export failed</strong>
+              <span>{exportDownload.error}</span>
             </div>
           )}
         </section>
@@ -1225,6 +1769,49 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 ))}
               </div>
 
+              {assetIssueGroups ? (
+                <div className="asset-group-list">
+                  {assetIssueGroups.map((group) => {
+                    const isOpen = expandedAsset === group.assetId;
+                    const typeSummary = group.byPayloadType
+                      .map((entry) => `${entry.payloadType} (${entry.issues.length})`)
+                      .join(", ");
+                    return (
+                      <div className={`asset-group${isOpen ? " open" : ""}`} key={group.assetId}>
+                        <button
+                          aria-expanded={isOpen}
+                          className="asset-group-toggle"
+                          onClick={() => setExpandedAsset(isOpen ? null : group.assetId)}
+                          type="button"
+                        >
+                          <strong>{group.assetId}</strong>
+                          <span>
+                            {group.issues.length} issue{group.issues.length === 1 ? "" : "s"} · {typeSummary}
+                          </span>
+                        </button>
+                        {isOpen && (
+                          <div className="asset-group-detail">
+                            {group.byPayloadType.map((entry) => (
+                              <div className="payload-type-group" key={entry.payloadType}>
+                                <h5>{entry.payloadType}</h5>
+                                {entry.issues.map((issue) => (
+                                  <div className={`issue-card ${issue.severity}`} key={issue.id}>
+                                    <div className="issue-card-body">
+                                      <span>{issue.id}</span>
+                                      <strong>{issue.message}</strong>
+                                      <small>{issue.area}</small>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
               <div className="issue-list compact-list">
                 {visibleIssues.length > 0 ? (
                   visibleIssues.map((issue) => (
@@ -1247,6 +1834,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   </div>
                 )}
               </div>
+              )}
 
               <div className="evidence-list">
                 <h4>Evidence outputs</h4>
@@ -1409,6 +1997,103 @@ function parsePublishValue(value: string): string | number | boolean {
   return Number.isFinite(numeric) && trimmed !== "" ? numeric : trimmed;
 }
 
+// Composes one config payload containing the primary point/value plus any extra
+// pairs (mq9n11wi). Starts from the operator's base payload JSON (so any extra
+// structure they typed is preserved) and merges every pair under
+// pointset.points.<name> = { set_value }. Falls back to a fresh object if the
+// base payload is not valid JSON. The backend confirm path still verifies only
+// the primary point.
+function buildMultiPointPayload(
+  basePayload: string,
+  primaryPoint: string,
+  primaryValue: string,
+  extras: PointValuePair[],
+): string {
+  const pairs = [
+    { point: primaryPoint, value: primaryValue },
+    ...extras,
+  ].filter((pair) => pair.point.trim() !== "");
+  // No extra pairs and the base payload already carries the single point: leave
+  // the operator's payload untouched (preserves the original single-point flow).
+  if (extras.every((pair) => pair.point.trim() === "")) {
+    return basePayload;
+  }
+  let root: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(basePayload) as unknown;
+    root = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    root = {};
+  }
+  const pointset = isRecord(root.pointset) ? { ...root.pointset } : {};
+  const points = isRecord(pointset.points) ? { ...pointset.points } : {};
+  for (const pair of pairs) {
+    points[pair.point.trim()] = { set_value: parsePublishValue(pair.value) };
+  }
+  pointset.points = points;
+  root.pointset = pointset;
+  return JSON.stringify(root);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Human-readable label for an import type, e.g. "bacnet_points" -> "Bacnet Points".
+function formatImportTypeLabel(importType: ImportType): string {
+  return importType
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+// One latest-payload-per-topic row for the MQTT Explorer-like capture panel.
+type CaptureRow = {
+  topic: string;
+  asset: string;
+  lastSeen: string;
+  messageCount: string;
+  payload: string;
+};
+
+function mqttCaptureRow(topic: DiscoveryRowRecord): CaptureRow {
+  const attributes = (topic.attributes as Record<string, unknown> | undefined) ?? {};
+  const lastPayload = topic.last_payload;
+  const payload =
+    lastPayload && typeof lastPayload === "object" && Object.keys(lastPayload).length > 0
+      ? JSON.stringify(lastPayload)
+      : "";
+  return {
+    asset: stringOrDash(attributes.device_ref),
+    lastSeen: topic.created_at ? String(topic.created_at) : "—",
+    messageCount: stringOrDash(topic.message_count),
+    payload,
+    topic: stringOrDash(topic.topic),
+  };
+}
+
+function stringOrDash(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  return typeof value === "string" ? value : String(value);
+}
+
+function captureRowsToCsv(rows: CaptureRow[]): string {
+  const header = ["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"];
+  const escape = (value: string): string => `"${value.replace(/"/g, '""')}"`;
+  const lines = [header.map(escape).join(",")];
+  for (const row of rows) {
+    lines.push(
+      [row.topic, row.asset, row.lastSeen, row.messageCount, row.payload].map(escape).join(","),
+    );
+  }
+  return lines.join("\r\n");
+}
+
+
 function DefaultTemplateInspector({
   selectedImportType,
   selectedProfile,
@@ -1521,6 +2206,8 @@ function buildResultDetailItems(
       { label: "Device", value: row.Device ?? "Selected BACnet device" },
       { label: "Instance", value: row.Instance ?? "Unknown" },
       { label: "Address", value: row.Address ?? "—" },
+      { label: "IP Address", value: row["IP Address"] ?? "—" },
+      { label: "Network Number", value: row["Network Number"] ?? "—" },
       { label: "Vendor", value: row.Vendor ?? "—" },
       { label: "Objects indexed", value: row.Objects ?? "Pending" },
       { label: "Last discovered", value: row.Discovered ?? row["Device Last Discovered"] ?? "Not recorded" },

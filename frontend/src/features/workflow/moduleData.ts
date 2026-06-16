@@ -90,8 +90,8 @@ const modules: ModuleDefinition[] = [
     runActions: [
       {
         kind: "discovery",
-        label: "Queue IP Discovery",
-        helper: "Creates a queued IP discovery run through the API.",
+        label: "Run IP Discovery",
+        helper: "Queues an IP discovery run through the API and tracks it in the run monitor below.",
         runKind: "ip",
         jobType: "ip_discovery"
       }
@@ -120,8 +120,8 @@ const modules: ModuleDefinition[] = [
     runActions: [
       {
         kind: "discovery",
-        label: "Queue BACnet Discovery",
-        helper: "Creates a queued BACnet discovery run through the API.",
+        label: "Run BACnet Discovery",
+        helper: "Queues a BACnet discovery run through the API and tracks it in the run monitor below.",
         runKind: "bacnet",
         jobType: "bacnet_discovery"
       }
@@ -150,8 +150,8 @@ const modules: ModuleDefinition[] = [
     runActions: [
       {
         kind: "discovery",
-        label: "Queue MQTT Discovery",
-        helper: "Creates a queued MQTT discovery run through the API.",
+        label: "Run MQTT Discovery",
+        helper: "Queues an MQTT discovery run through the API and tracks it in the run monitor below.",
         runKind: "mqtt",
         jobType: "mqtt_discovery"
       }
@@ -180,8 +180,8 @@ const modules: ModuleDefinition[] = [
     runActions: [
       {
         kind: "validation",
-        label: "Queue UDMI Validation",
-        helper: "Creates a queued UDMI validation run through the API.",
+        label: "Run UDMI Validation",
+        helper: "Queues a UDMI validation run through the API and tracks it in the run monitor below.",
         runKind: "udmi",
         jobType: "udmi_validation"
       }
@@ -190,8 +190,11 @@ const modules: ModuleDefinition[] = [
       "Keep this as the technical payload workbench while the main Validation page owns normal operator validation runs."
   },
   {
+    // Route stays /data-validation (and the runKind wiring is unchanged); only
+    // the operator-facing title/nav label is renamed per review mqatkxi8. The
+    // optional UDMI + Validation page merge is intentionally out of scope here.
     route: "data-validation",
-    title: "Data Validation",
+    title: "BACnet to MQTT Validation",
     summary:
       "Run three checks in one place: MQTT/UDMI payload health, BACnet point health, and BACnet-to-MQTT live value comparison.",
     purpose:
@@ -254,15 +257,15 @@ const modules: ModuleDefinition[] = [
     runActions: [
       {
         kind: "report",
-        label: "Queue Excel Report",
-        helper: "Creates an XLSX report for review, filtering, and issue handover.",
+        label: "Generate Excel Report",
+        helper: "Generates an XLSX report for review, filtering, and issue handover; it then appears in the Reports list below.",
         format: "xlsx",
         reportType: "issue_report"
       },
       {
         kind: "report",
-        label: "Queue Word Report",
-        helper: "Creates a DOCX report for formal commissioning handover.",
+        label: "Generate Word Report",
+        helper: "Generates a DOCX report for formal commissioning handover; it then appears in the Reports list below.",
         format: "docx",
         reportType: "evidence_pack"
       }

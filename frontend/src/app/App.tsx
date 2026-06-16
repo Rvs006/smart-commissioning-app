@@ -10,7 +10,7 @@ const navItems = [
   { label: "BACnet", number: "04", to: "/bacnet-discovery" },
   { label: "MQTT Discovery", number: "05", to: "/mqtt-discovery" },
   { label: "UDMI Workbench", number: "06", to: "/udmi-validation" },
-  { label: "Validation", number: "07", to: "/data-validation" },
+  { label: "BACnet to MQTT Validation", number: "07", to: "/data-validation" },
   { label: "Reports", number: "08", to: "/reports" },
   { label: "Hub", number: "09", to: "/hub" },
 ];
@@ -19,7 +19,7 @@ const pageTitles: Record<string, string> = {
   "/": "Homepage",
   "/bacnet-discovery": "BACnet Discovery",
   "/configuration": "Configuration",
-  "/data-validation": "Data Validation",
+  "/data-validation": "BACnet to MQTT Validation",
   "/hub": "Multi-Project Hub",
   "/ip-scanner": "IP Scanner",
   "/mqtt-discovery": "MQTT Discovery",

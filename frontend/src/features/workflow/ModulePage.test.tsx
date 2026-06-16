@@ -124,8 +124,8 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("ip-scanner");
 
-    // The real-scan queue button is disabled until the operator confirms.
-    const queueButton = await screen.findByRole("button", { name: "Queue" });
+    // The real-scan run button is disabled until the operator confirms.
+    const queueButton = await screen.findByRole("button", { name: "Run" });
     expect(queueButton).toBeDisabled();
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
@@ -183,6 +183,9 @@ describe("ModulePage reports wiring", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse({ reports: [] });
+        }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
@@ -192,5 +195,117 @@ describe("ModulePage reports wiring", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Export" })).toBeDisabled();
     });
+  });
+
+  it("lists generated reports with per-report selection and an Export selected action", async () => {
+    const reportsPayload = {
+      reports: [
+        {
+          report_id: "rep-1",
+          report_type: "issue_report",
+          output_format: "xlsx",
+          status: "succeeded",
+          file_name: "issue_report.xlsx",
+        },
+        {
+          report_id: "rep-2",
+          report_type: "evidence_pack",
+          output_format: "docx",
+          status: "queued",
+          file_name: "evidence_pack.docx",
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse(reportsPayload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+
+    // Both reports listed; only the succeeded one is selectable for export.
+    const succeededCheckbox = await screen.findByLabelText(/Select report issue_report\.xlsx/i);
+    const queuedCheckbox = screen.getByLabelText(/Select report evidence_pack\.docx/i);
+    expect(queuedCheckbox).toBeDisabled();
+
+    const exportSelected = screen.getByRole("button", { name: "Export selected" });
+    expect(exportSelected).toBeDisabled();
+
+    fireEvent.click(succeededCheckbox);
+    await waitFor(() => expect(exportSelected).toBeEnabled());
+  });
+});
+
+describe("ModulePage labels and templates", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  function stubBasic() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse({ reports: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("renames the discovery run action from Queue to Run", async () => {
+    stubBasic();
+    renderModule("ip-scanner");
+    expect(await screen.findByText("Run IP Discovery")).toBeInTheDocument();
+  });
+
+  it("uses Generate (not Queue) for report run actions", async () => {
+    stubBasic();
+    renderModule("reports");
+    expect(await screen.findByText("Generate Excel Report")).toBeInTheDocument();
+    expect(screen.getByText("Generate Word Report")).toBeInTheDocument();
+  });
+
+  it("exposes XLSX and CSV template downloads for every import type on a page", async () => {
+    stubBasic();
+    renderModule("data-validation");
+    // The all-templates panel lists each import type the validation page accepts.
+    expect(await screen.findByText("Import Templates for This Page")).toBeInTheDocument();
+    expect(screen.getByText("Asset Validation")).toBeInTheDocument();
+    expect(screen.getByText("Bacnet Points")).toBeInTheDocument();
+    expect(screen.getByText("Mqtt Points")).toBeInTheDocument();
+    expect(screen.getByText("Mapping")).toBeInTheDocument();
+    expect(screen.getByText("Tolerances")).toBeInTheDocument();
+    // Each card offers both XLSX and CSV (5 import types -> 5 of each).
+    expect(screen.getAllByRole("button", { name: "XLSX" })).toHaveLength(5);
+    expect(screen.getAllByRole("button", { name: "CSV" })).toHaveLength(5);
+  });
+
+  it("shows IP Address and Network Number columns for BACnet discovery", async () => {
+    stubBasic();
+    renderModule("bacnet-discovery");
+    // Sample BACnet table is shown until a run; it now carries the new columns.
+    expect(await screen.findByRole("columnheader", { name: "IP Address" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Network Number" })).toBeInTheDocument();
   });
 });
