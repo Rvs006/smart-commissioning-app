@@ -178,23 +178,43 @@ def validate_and_publish_config(
 
     previous_config = _capture_previous_config(parameters, topic)
 
-    observed_value = _extract_present_value(next_pointset_payload, expected_point)
-    if expected_point and expected_value is not None and observed_value != expected_value:
-        issues.append(
-            _issue(
-                issues,
-                issue_type="config_override_not_observed",
-                severity="high",
-                description=f"Next pointset payload did not show {expected_point} present_value changed to {expected_value}.",
-                topic=_pointset_topic_from_config(topic),
-                point_name=expected_point,
-                expected_value=str(expected_value),
-                observed_value="missing" if observed_value is None else str(observed_value),
-                suggested_action="Check device command handling and confirm the next pointset event after publishing.",
-                status_detail="override_not_observed",
-                last_seen_at=now,
-            )
+    # Confirm-back covers EVERY written point, not just the primary (mq9n11wi).
+    # Prefer the expected_points list; fall back to the legacy singular
+    # expected_point/expected_value so older callers and rollbacks are unchanged.
+    # One config_override_not_observed issue is raised per point whose
+    # present_value did not change to the expected value in the next pointset.
+    expected_points = _normalize_expected_points(parameters, expected_point, expected_value)
+    confirmed_points: list[dict[str, object]] = []
+    for point_name, point_expected in expected_points:
+        point_observed = _extract_present_value(next_pointset_payload, point_name)
+        confirmed_points.append(
+            {
+                "point": point_name,
+                "expected_value": point_expected,
+                "observed_value": point_observed,
+                "confirmed": point_observed == point_expected,
+            }
         )
+        if point_observed != point_expected:
+            issues.append(
+                _issue(
+                    issues,
+                    issue_type="config_override_not_observed",
+                    severity="high",
+                    description=f"Next pointset payload did not show {point_name} present_value changed to {point_expected}.",
+                    topic=_pointset_topic_from_config(topic),
+                    point_name=point_name,
+                    expected_value=str(point_expected),
+                    observed_value="missing" if point_observed is None else str(point_observed),
+                    suggested_action="Check device command handling and confirm the next pointset event after publishing.",
+                    status_detail="override_not_observed",
+                    last_seen_at=now,
+                )
+            )
+
+    # The singular observed_value summary field reflects the primary (first)
+    # expected point so existing summary consumers keep working.
+    observed_value = confirmed_points[0]["observed_value"] if confirmed_points else None
 
     status = "failed" if issues else "succeeded"
     summary: dict[str, object] = {
@@ -205,6 +225,7 @@ def validate_and_publish_config(
         "expected_point": expected_point,
         "expected_value": expected_value,
         "observed_value": observed_value,
+        "expected_points": confirmed_points,
         "message_count": 1 if next_pointset_payload else 0,
         "broker_publish_attempted": broker_attempted,
         "pointset_topic": pointset_topic,
@@ -313,6 +334,37 @@ def rollback_config(
 
 def _string(value: object) -> str:
     return str(value or "").strip()
+
+
+def _normalize_expected_points(
+    parameters: dict[str, object],
+    primary_point: str,
+    primary_value: object,
+) -> list[tuple[str, object]]:
+    """Expected (point, value) pairs to confirm in the next pointset payload.
+
+    Prefers the ``expected_points`` list (mq9n11wi multi-point confirm-back),
+    each entry shaped ``{"point": str, "value": object}``; falls back to the
+    legacy singular ``expected_point``/``expected_value`` so older callers and
+    rollbacks behave exactly as before. Entries with a blank point name or a
+    ``None`` expected value are dropped (nothing to confirm), matching the
+    original singular guard.
+    """
+    raw = parameters.get("expected_points")
+    pairs: list[tuple[str, object]] = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            point = _string(entry.get("point"))
+            value = entry.get("value")
+            if point and value is not None:
+                pairs.append((point, value))
+    if pairs:
+        return pairs
+    if primary_point and primary_value is not None:
+        return [(primary_point, primary_value)]
+    return []
 
 
 def _extract_present_value(payload: object, point_name: str) -> object | None:

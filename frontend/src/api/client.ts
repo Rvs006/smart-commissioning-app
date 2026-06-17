@@ -185,6 +185,22 @@ export type ValidationIssueRecord = {
   last_seen_at?: string | null;
 };
 
+// Per-payload-type expected-vs-observed view emitted into a UDMI validation
+// run's result_summary.payload_views (mq9m4bnv). Payload content is the real
+// pasted/captured JSON; expected is the sliced expected-schedule facet. A type
+// with observed_present=false has an expected facet but no observed payload.
+export type UdmiPayloadType = {
+  payload_type: "state" | "metadata" | "pointset";
+  expected: unknown;
+  observed: unknown;
+  observed_present: boolean;
+};
+
+export type UdmiAssetPayloadView = {
+  asset_id: string;
+  payload_types: UdmiPayloadType[];
+};
+
 export type ValidationIssuesResponse = {
   run_id: string;
   job_type: JobType;
@@ -679,29 +695,49 @@ export function startValidationRun(input: {
   });
 }
 
+export type ConfigPublishPoint = { point: string; value: string | number | boolean };
+
 export function startMqttConfigPublishRun(input: {
   topic: string;
   payload: string;
   confirmed: boolean;
   expectedPoint?: string;
   expectedValue?: string | number | boolean;
+  // Every point/value the publish should confirm back, primary + extras
+  // (mq9n11wi). When omitted, falls back to the single primary point.
+  expectedPoints?: ConfigPublishPoint[];
   useLiveBroker?: boolean;
   pointsetTopic?: string;
   waitSeconds?: number;
 }): Promise<JobAcceptedResponse> {
+  // Confirm-back must cover EVERY written point (mq9n11wi). Build the expected
+  // list from expectedPoints, falling back to the single primary for
+  // back-compat, and give the local-verify next_pointset_payload a present_value
+  // for each expected point so the no-broker path can confirm them all (a fixed
+  // backend would otherwise report the extras as "missing").
+  const expectedPairs = (input.expectedPoints ?? []).filter((pair) => pair.point.trim() !== "");
+  const allExpected: ConfigPublishPoint[] =
+    expectedPairs.length > 0
+      ? expectedPairs
+      : input.expectedPoint
+        ? [{ point: input.expectedPoint, value: input.expectedValue ?? "" }]
+        : [];
+  const points: Record<string, { present_value: string | number | boolean }> = {};
+  for (const pair of allExpected) {
+    points[pair.point.trim()] = { present_value: pair.value };
+  }
   return request<JobAcceptedResponse>("/validation/mqtt-config/runs", {
     body: JSON.stringify({
       job_type: "mqtt_config_publish",
       parameters: {
         confirmed: input.confirmed,
-        expected_point: input.expectedPoint ?? "",
-        expected_value: input.expectedValue ?? "",
+        expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
+        expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",
+        expected_points: allExpected.map((pair) => ({ point: pair.point.trim(), value: pair.value })),
         pointset_topic: input.pointsetTopic ?? "",
         next_pointset_payload: {
           pointset: {
-            points: input.expectedPoint
-              ? { [input.expectedPoint]: { present_value: input.expectedValue ?? "" } }
-              : {},
+            points,
           },
         },
         payload: input.payload,
@@ -819,6 +855,14 @@ export function getDiscoveryPoints(runId: string): Promise<DiscoveryPointsRespon
 
 export function getDiscoveryTopics(runId: string): Promise<DiscoveryTopicsResponse> {
   return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`);
+}
+
+// Path (display-only; download via downloadFile so the X-API-Key header rides)
+// for the server-generated XLSX of captured topics (mq9nhbzu Excel export). An
+// optional topic filter applies the same +/# wildcard semantics server-side.
+export function getDiscoveryTopicsXlsxPath(runId: string, topicFilter?: string): string {
+  const base = `/discovery/runs/${encodeURIComponent(runId)}/topics.xlsx`;
+  return topicFilter ? `${base}?topic_filter=${encodeURIComponent(topicFilter)}` : base;
 }
 
 export function listValidationRuns(): Promise<RunListResponse> {

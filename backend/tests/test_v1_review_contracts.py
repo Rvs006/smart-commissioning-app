@@ -232,6 +232,71 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertEqual(result.result_summary["message_count"], 3)
         self.assertEqual(result.result_summary["issue_count"], 0)
 
+    def test_payload_views_present_for_direct_inputs(self) -> None:
+        # mq9m4bnv: per-payload-type expected-vs-observed view from pasted inputs.
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": {
+                    "asset_id": "AHU-1000001",
+                    "manufacturer": "ExpectedCo",
+                    "model": "Model-A",
+                    "guid": "ifc://expected",
+                    "units": {"co2_concentration_sensor": "parts_per_million"},
+                },
+                "state_payload": {"system": {"hardware": {"make": "ExpectedCo", "model": "Model-A"}}},
+                "metadata_payload": {"system": {"physical_tag": {"asset": {"guid": "ifc://expected"}}}},
+                "pointset_payload": {"points": {"co2_concentration_sensor": {"present_value": 500}}},
+            }
+        )
+        self.assertEqual(result.result_summary["payload_view_source"], "direct_inputs")
+        views = result.result_summary["payload_views"]
+        self.assertEqual(len(views), 1)
+        self.assertEqual(views[0]["asset_id"], "AHU-1000001")
+        by_type = {pt["payload_type"]: pt for pt in views[0]["payload_types"]}
+        self.assertEqual(set(by_type), {"state", "metadata", "pointset"})
+        self.assertTrue(all(pt["observed_present"] for pt in by_type.values()))
+        # observed payload passes through verbatim; expected facet is sliced.
+        self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
+        self.assertEqual(by_type["state"]["expected"], {"manufacturer": "ExpectedCo", "model": "Model-A"})
+        self.assertEqual(by_type["metadata"]["expected"]["guid"], "ifc://expected")
+
+    def test_payload_views_from_live_capture(self) -> None:
+        def fake_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            return [
+                MqttMessage(
+                    topic="334os/b1/ahu-1000001/state",
+                    payload=b'{"system":{"hardware":{"make":"ExpectedCo","model":"Model-A"}}}',
+                ),
+                MqttMessage(
+                    topic="334os/b1/ahu-1000001/events/pointset",
+                    payload=b'{"pointset":{"points":{"co2_concentration_sensor":{"present_value":500}}}}',
+                ),
+            ]
+
+        result = validate_udmi_full_report(
+            {
+                "broker_host": "mqtt.example.local",
+                "expected_schedule": {"asset_id": "AHU-1000001", "manufacturer": "ExpectedCo"},
+                "state_topic": "334os/b1/ahu-1000001/state",
+                "pointset_topic": "334os/b1/ahu-1000001/events/pointset",
+                "use_live_broker": True,
+            },
+            live_capture=fake_capture,
+        )
+        self.assertEqual(result.result_summary["payload_view_source"], "live_capture")
+        by_type = {
+            pt["payload_type"]: pt for pt in result.result_summary["payload_views"][0]["payload_types"]
+        }
+        self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
+        self.assertTrue(by_type["state"]["observed_present"])
+
+    def test_payload_views_empty_for_fixture_path(self) -> None:
+        # The bundled fixture carries no payload JSON, so the view must stay empty
+        # and be labelled rather than fabricated.
+        result = validate_udmi_full_report({})
+        self.assertEqual(result.result_summary["payload_views"], [])
+        self.assertEqual(result.result_summary["payload_view_source"], "none")
+
 
 class MqttConfigPublishReviewTests(unittest.TestCase):
     def test_job_create_request_accepts_nested_pointset_parameters(self) -> None:

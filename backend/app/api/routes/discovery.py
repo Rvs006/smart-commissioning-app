@@ -14,7 +14,11 @@ I/O and are allowed without authorization (a side-effect-free preview), matching
 the safety module's stated convention.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+from io import BytesIO
+
+from fastapi import APIRouter, Depends, HTTPException, Response
+from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
@@ -265,6 +269,81 @@ def get_discovery_topics(run_id: str) -> DiscoveryTopicsResponse:
         status=run.status,
         topics=_discovery_repository().list_topics(run_id),
     )
+
+
+@router.get("/runs/{run_id}/topics.xlsx", dependencies=[Depends(require_viewer)])
+def export_discovery_topics_xlsx(run_id: str, topic_filter: str | None = None) -> Response:
+    """Export the captured latest-payload-per-topic rows as an XLSX (mq9nhbzu).
+
+    Reuses the same persisted topic rows the capture panel/CSV use (no live
+    broker), generated server-side with openpyxl like reports/import templates,
+    so empty stays empty (no fabricated payloads). An optional ``topic_filter``
+    applies the same ``+``/``#`` wildcard semantics as the on-screen filter so
+    the export matches what the operator sees.
+    """
+    _load_discovery_run(run_id)
+    rows = _discovery_repository().list_topics(run_id)
+    if topic_filter:
+        rows = [row for row in rows if _matches_topic_filter(str(row.get("topic") or ""), topic_filter)]
+    return Response(
+        content=_build_topics_xlsx(rows),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="mqtt-capture-{run_id}.xlsx"'},
+    )
+
+
+def _build_topics_xlsx(rows: list[dict[str, object]]) -> bytes:
+    """Build an XLSX of the capture rows, columns mirroring the panel CSV."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "MQTT Capture"
+    sheet.append(["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"])
+    for row in rows:
+        attributes = row.get("attributes")
+        attributes = attributes if isinstance(attributes, dict) else {}
+        last_payload = row.get("last_payload")
+        payload_text = (
+            json.dumps(last_payload) if isinstance(last_payload, dict) and last_payload else ""
+        )
+        sheet.append(
+            [
+                _xlsx_cell(row.get("topic")),
+                _xlsx_cell(attributes.get("device_ref")),
+                _xlsx_cell(row.get("created_at")),
+                _xlsx_cell(row.get("message_count")),
+                payload_text,
+            ]
+        )
+    for column, width in {"A": 40, "B": 20, "C": 24, "D": 14, "E": 60}.items():
+        sheet.column_dimensions[column].width = width
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+def _xlsx_cell(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    return value if isinstance(value, str) else str(value)
+
+
+def _matches_topic_filter(topic: str, pattern: str) -> bool:
+    """MQTT wildcard match mirroring the frontend matchesTopicFilter (discoveryRows.ts)."""
+    trimmed = pattern.strip()
+    if trimmed in ("", "#"):
+        return True
+    filter_parts = trimmed.split("/")
+    topic_parts = topic.split("/")
+    for index, part in enumerate(filter_parts):
+        if part == "#":
+            return True
+        if index >= len(topic_parts):
+            return False
+        if part == "+":
+            continue
+        if part != topic_parts[index]:
+            return False
+    return len(filter_parts) == len(topic_parts)
 
 
 def _load_discovery_run(run_id: str) -> RunRecord:

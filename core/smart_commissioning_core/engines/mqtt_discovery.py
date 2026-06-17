@@ -108,10 +108,27 @@ def _resolve_topic_filters(parameters: dict[str, Any]) -> list[str]:
     return [DEFAULT_TOPIC_FILTER]
 
 
-def _capture_seconds(parameters: dict[str, Any]) -> float:
+def _capture_seconds(parameters: dict[str, Any]) -> float | None:
+    """Capture window in seconds, or None for an indefinite capture (mq9nhbzu).
+
+    A MISSING ``capture_seconds`` keeps the default window (back-compat). An
+    EXPLICIT 0, empty string, or negative value means "run until stopped (via
+    cancellation) or the message cap" — represented as None downstream.
+    """
     from smart_commissioning_core.mqtt_settings import parse_float
 
-    return parse_float(parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS)
+    raw = parameters.get("capture_seconds")
+    if raw is None:
+        return DEFAULT_CAPTURE_SECONDS
+    if isinstance(raw, str) and not raw.strip():
+        return None
+    # Explicit 0 / negative => indefinite. Do NOT route 0 through parse_float:
+    # it treats the falsy 0 as "missing" and returns the default window.
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        seconds = parse_float(raw, default=DEFAULT_CAPTURE_SECONDS)
+    return None if seconds <= 0 else seconds
 
 
 def _max_messages(parameters: dict[str, Any]) -> int:
@@ -283,6 +300,7 @@ def _run_mqtt_discovery(
                 "broker_port": port,
                 "use_tls": use_tls,
                 "capture_seconds": capture_seconds,
+                "capture_mode": "indefinite" if capture_seconds is None else "bounded",
                 "max_messages": max_messages,
             },
         )
@@ -338,6 +356,7 @@ def _run_mqtt_discovery(
             topics=topic_filters,
             timeout_seconds=capture_seconds,
             max_messages=max_messages,
+            cancel_check=ctx.is_cancelled,
         )
     except (MqttTransportError, OSError, ValueError) as error:
         # NEVER surface raw error text — map to a coarse status only.
@@ -364,7 +383,7 @@ def _aggregate_capture(
     messages: Sequence[MqttMessage],
     *,
     topic_filters: Sequence[str],
-    capture_seconds: float,
+    capture_seconds: float | None,
     max_messages: int,
     project_id: Any,
     site_id: Any,
@@ -427,6 +446,7 @@ def _aggregate_capture(
         "messages_captured": len(messages),
         "topic_filters": list(topic_filters),
         "capture_seconds": capture_seconds,
+        "capture_mode": "indefinite" if capture_seconds is None else "bounded",
         "max_messages": max_messages,
         "broker_status_detail": (
             "messages_captured" if messages else "capture_window_empty"
