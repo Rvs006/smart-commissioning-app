@@ -187,20 +187,38 @@ class BoundTests(unittest.TestCase):
         self.assertEqual(call["max_messages"], mqtt_discovery.DEFAULT_MAX_MESSAGES)
         self.assertEqual(call["topics"], ["#"])
 
-    def test_explicit_zero_is_indefinite(self) -> None:
+    def test_explicit_zero_is_indefinite_on_worker(self) -> None:
         # mq9nhbzu: capture_seconds=0 => indefinite (timeout None) + a cancel
         # check is wired so the run can be stopped; summary labels it indefinite.
+        # Indefinite is honored on the background worker (dramatiq_worker).
         store = FakeRunStore()
         capture = FakeCapture([_json_msg("t/1", {"i": 1})])
         mqtt_discovery.process_mqtt_discovery_run(
             "run_indef", {**_AUTH, "capture_seconds": 0},
-            run_store=store, execution_mode="x",
+            run_store=store, execution_mode="dramatiq_worker",
             live_capture=capture, build_settings=_stub_build,
         )
         call = capture.calls[-1]
         self.assertIsNone(call["timeout_seconds"])
         self.assertTrue(callable(call["cancel_check"]))
         self.assertEqual(store.summary_calls[-1]["capture_mode"], "indefinite")
+        self.assertFalse(store.summary_calls[-1]["indefinite_bounded_inline"])
+
+    def test_indefinite_bounded_on_inline_path(self) -> None:
+        # Inline-hang guard: an indefinite request on a non-worker (inline) path
+        # is bounded to the default window so it can't tie up the request worker,
+        # and the downgrade is flagged. The capture gets a finite timeout.
+        store = FakeRunStore()
+        capture = FakeCapture([_json_msg("t/1", {"i": 1})])
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_inline_indef", {**_AUTH, "capture_seconds": 0},
+            run_store=store, execution_mode="inline_local_fallback",
+            live_capture=capture, build_settings=_stub_build,
+        )
+        call = capture.calls[-1]
+        self.assertEqual(call["timeout_seconds"], mqtt_discovery.DEFAULT_CAPTURE_SECONDS)
+        self.assertEqual(store.summary_calls[-1]["capture_mode"], "bounded")
+        self.assertTrue(store.summary_calls[-1]["indefinite_bounded_inline"])
 
     def test_missing_seconds_is_bounded(self) -> None:
         store = FakeRunStore()
@@ -241,7 +259,7 @@ class CancelDuringCaptureTests(unittest.TestCase):
         store = FlippingStore()
         result = mqtt_discovery.process_mqtt_discovery_run(
             "run_cancel", {**_AUTH, "capture_seconds": 0},
-            run_store=store, execution_mode="x",
+            run_store=store, execution_mode="dramatiq_worker",
             live_capture=CancellingCapture(), build_settings=_stub_build,
         )
         self.assertEqual(result["status"], "cancelled")

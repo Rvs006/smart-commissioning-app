@@ -63,9 +63,6 @@ smart_commissioning_core = ["fixtures/*.json"]
   "alembic/env.py",
   "alembic/script.py.mako",
 ]
-"share/smart_commissioning_core/alembic/versions" = [
-  "alembic/versions/c9663f90f68a_initial_schema.py",
-  "alembic/versions/c4a7ced176a9_engine_framework_discovery_tables_and_.py",
-  "alembic/versions/c998144d98d4_edge_hub_sync_columns.py",
-  "alembic/versions/d1f2a3b4c5d6_users_table_rbac.py",
-]
+# Glob so a newly-added migration ships automatically (setuptools>=62 expands
+# globs in data-files), instead of a hardcoded list that silently drifts.
+"share/smart_commissioning_core/alembic/versions" = ["alembic/versions/*.py"]

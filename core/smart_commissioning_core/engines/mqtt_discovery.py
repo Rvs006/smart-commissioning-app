@@ -273,6 +273,16 @@ def _run_mqtt_discovery(
     capture_seconds = _capture_seconds(ctx.parameters)
     max_messages = _max_messages(ctx.parameters)
 
+    # Inline-hang guard (mq9nhbzu): an indefinite capture (capture_seconds <= 0
+    # => None) blocks until the message cap or cancellation. That is safe on the
+    # background worker, but on the inline / in-request execution path it would
+    # tie up the request worker for the whole capture, so bound it to the default
+    # window there and flag why so the UI/operator can see the downgrade. Run
+    # indefinite captures on the worker (DEPLOYMENT/JOB_EXECUTION via Dramatiq).
+    indefinite_bounded_inline = capture_seconds is None and ctx.execution_mode != "dramatiq_worker"
+    if indefinite_bounded_inline:
+        capture_seconds = DEFAULT_CAPTURE_SECONDS
+
     # DRY RUN: describe the broker/topic/window plan; connect to NOTHING.
     # We do NOT call build_settings against a real provider here unless we can
     # do so without I/O — build_mqtt_connection_settings is pure (no socket),
@@ -301,6 +311,7 @@ def _run_mqtt_discovery(
                 "use_tls": use_tls,
                 "capture_seconds": capture_seconds,
                 "capture_mode": "indefinite" if capture_seconds is None else "bounded",
+                "indefinite_bounded_inline": indefinite_bounded_inline,
                 "max_messages": max_messages,
             },
         )
@@ -376,6 +387,7 @@ def _run_mqtt_discovery(
         project_id=ctx.parameters.get("project_id"),
         site_id=ctx.parameters.get("site_id"),
         cancelled=ctx.is_cancelled(),
+        indefinite_bounded_inline=indefinite_bounded_inline,
     )
 
 
@@ -388,6 +400,7 @@ def _aggregate_capture(
     project_id: Any,
     site_id: Any,
     cancelled: bool,
+    indefinite_bounded_inline: bool = False,
 ) -> EngineResult:
     """Aggregate captured messages into topics + assets + structured records.
 
@@ -447,6 +460,7 @@ def _aggregate_capture(
         "topic_filters": list(topic_filters),
         "capture_seconds": capture_seconds,
         "capture_mode": "indefinite" if capture_seconds is None else "bounded",
+        "indefinite_bounded_inline": indefinite_bounded_inline,
         "max_messages": max_messages,
         "broker_status_detail": (
             "messages_captured" if messages else "capture_window_empty"
