@@ -28,10 +28,11 @@ import {
   DiscoveryRowRecord,
   ReportSummary,
   ReportType,
+  UdmiAssetPayloadView,
   ValidationIssueRecord,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
-import { groupIssuesByAsset, moduleWorkspaces, type IssueRow } from "./operatorData";
+import { groupIssuesByAsset, mergeAssetGroups, moduleWorkspaces, type IssueRow } from "./operatorData";
 import { discoveryMetrics, discoveryViewFor, matchesTopicFilter } from "./discoveryRows";
 import { isTerminalStatus } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
@@ -211,8 +212,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("5");
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
-  // Per-asset expansion in the UDMI per-payload-type results view (mq9m4bnv).
+  // Per-asset expansion in the UDMI per-payload-type results view (mq9m4bnv),
+  // and the nested expected-vs-observed payload expand keyed `${asset}:${type}`.
   const [expandedAsset, setExpandedAsset] = useState<string | null>(null);
+  const [expandedPayloadKey, setExpandedPayloadKey] = useState<string | null>(null);
   // Reports page: which queued reports are ticked for "Export selected" and a
   // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
@@ -546,6 +549,35 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return groupIssuesByAsset(records, toIssueRow);
   }, [module.route, activeRun, validationIssuesQuery.data]);
+
+  // Authoritative per-payload-type expected-vs-observed payloads from the run's
+  // result_summary (mq9m4bnv). Real content only (pasted/captured); never faked.
+  const payloadViews = useMemo<UdmiAssetPayloadView[] | null>(() => {
+    if (module.route !== "udmi-validation" || activeRun?.kind !== "validation") {
+      return null;
+    }
+    const raw = validationRunQuery.data?.result_summary?.payload_views;
+    return Array.isArray(raw) ? (raw as UdmiAssetPayloadView[]) : null;
+  }, [module.route, activeRun, validationRunQuery.data]);
+
+  const payloadViewSource =
+    activeRun?.kind === "validation"
+      ? (validationRunQuery.data?.result_summary?.payload_view_source as string | undefined)
+      : undefined;
+
+  // Merge issue groups with payload views so an asset with payloads but no
+  // issues still shows, and each payload type can reveal expected vs observed.
+  const mergedAssetGroups = useMemo(() => {
+    if (module.route !== "udmi-validation" || activeRun?.kind !== "validation") {
+      return null;
+    }
+    const groups = assetIssueGroups ?? [];
+    const views = payloadViews ?? [];
+    if (groups.length === 0 && views.length === 0) {
+      return null;
+    }
+    return mergeAssetGroups(groups, views);
+  }, [module.route, activeRun, assetIssueGroups, payloadViews]);
 
   // Live discovery results view (ip/bacnet/mqtt). Built only after a terminal
   // run; until then the table falls back to labelled sample rows.
@@ -1807,12 +1839,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 ))}
               </div>
 
-              {assetIssueGroups ? (
+              {mergedAssetGroups ? (
                 <div className="asset-group-list">
-                  {assetIssueGroups.map((group) => {
+                  {payloadViewSource && (
+                    <p className="section-copy">
+                      {payloadViewSource === "live_capture"
+                        ? "Live-captured payloads — expand an asset, then a payload type, to compare expected vs observed."
+                        : payloadViewSource === "direct_inputs"
+                          ? "Pasted payloads — expand an asset, then a payload type, to compare expected vs observed."
+                          : "No payload content for this run (fixture summary only); expand an asset for issue detail per payload type."}
+                    </p>
+                  )}
+                  {mergedAssetGroups.map((group) => {
                     const isOpen = expandedAsset === group.assetId;
-                    const typeSummary = group.byPayloadType
-                      .map((entry) => `${entry.payloadType} (${entry.issues.length})`)
+                    const typeSummary = group.payloadTypes
+                      .map((entry) => {
+                        const parts: string[] = [];
+                        if (entry.issues.length > 0) {
+                          parts.push(`${entry.issues.length} issue${entry.issues.length === 1 ? "" : "s"}`);
+                        }
+                        if (entry.hasPayloadView) {
+                          parts.push("payload");
+                        }
+                        return `${entry.payloadType} (${parts.join(", ") || "ok"})`;
+                      })
                       .join(", ");
                     return (
                       <div className={`asset-group${isOpen ? " open" : ""}`} key={group.assetId}>
@@ -1829,20 +1879,58 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         </button>
                         {isOpen && (
                           <div className="asset-group-detail">
-                            {group.byPayloadType.map((entry) => (
-                              <div className="payload-type-group" key={entry.payloadType}>
-                                <h5>{entry.payloadType}</h5>
-                                {entry.issues.map((issue) => (
-                                  <div className={`issue-card ${issue.severity}`} key={issue.id}>
-                                    <div className="issue-card-body">
-                                      <span>{issue.id}</span>
-                                      <strong>{issue.message}</strong>
-                                      <small>{issue.area}</small>
+                            {group.payloadTypes.map((entry) => {
+                              const payloadKey = `${group.assetId}:${entry.payloadType}`;
+                              const payloadOpen = expandedPayloadKey === payloadKey;
+                              return (
+                                <div className="payload-type-group" key={entry.payloadType}>
+                                  <h5>{entry.payloadType}</h5>
+                                  {entry.issues.map((issue) => (
+                                    <div className={`issue-card ${issue.severity}`} key={issue.id}>
+                                      <div className="issue-card-body">
+                                        <span>{issue.id}</span>
+                                        <strong>{issue.message}</strong>
+                                        <small>{issue.area}</small>
+                                      </div>
                                     </div>
-                                  </div>
-                                ))}
-                              </div>
-                            ))}
+                                  ))}
+                                  {entry.hasPayloadView && (
+                                    <div className="payload-evidence">
+                                      <button
+                                        aria-expanded={payloadOpen}
+                                        className="secondary-button compact"
+                                        onClick={() =>
+                                          setExpandedPayloadKey(payloadOpen ? null : payloadKey)
+                                        }
+                                        type="button"
+                                      >
+                                        {payloadOpen ? "Hide" : "Show"} expected vs observed payload
+                                      </button>
+                                      {payloadOpen && (
+                                        <div className="payload-compare">
+                                          <div>
+                                            <h6>Expected</h6>
+                                            <pre className="payload-cell">
+                                              {entry.expected
+                                                ? JSON.stringify(entry.expected, null, 2)
+                                                : "—"}
+                                            </pre>
+                                          </div>
+                                          <div>
+                                            <h6>Observed</h6>
+                                            <pre className="payload-cell">
+                                              {entry.observedPresent
+                                                ? JSON.stringify(entry.observed, null, 2)
+                                                : "not captured"}
+                                            </pre>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

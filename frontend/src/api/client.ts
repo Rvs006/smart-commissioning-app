@@ -185,6 +185,22 @@ export type ValidationIssueRecord = {
   last_seen_at?: string | null;
 };
 
+// Per-payload-type expected-vs-observed view emitted into a UDMI validation
+// run's result_summary.payload_views (mq9m4bnv). Payload content is the real
+// pasted/captured JSON; expected is the sliced expected-schedule facet. A type
+// with observed_present=false has an expected facet but no observed payload.
+export type UdmiPayloadType = {
+  payload_type: "state" | "metadata" | "pointset";
+  expected: unknown;
+  observed: unknown;
+  observed_present: boolean;
+};
+
+export type UdmiAssetPayloadView = {
+  asset_id: string;
+  payload_types: UdmiPayloadType[];
+};
+
 export type ValidationIssuesResponse = {
   run_id: string;
   job_type: JobType;
