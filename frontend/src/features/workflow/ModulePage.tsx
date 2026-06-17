@@ -306,12 +306,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // discovery run so it never fires on other modules.
   const captureTopicsQuery = useQuery({
     enabled:
-      module.route === "mqtt-discovery" &&
-      Boolean(activeRun) &&
-      activeRun?.kind === "discovery" &&
-      isTerminalStatus(discoveryRunQuery.data?.status),
+      module.route === "mqtt-discovery" && Boolean(activeRun) && activeRun?.kind === "discovery",
     queryFn: () => getDiscoveryTopics(activeRun?.runId ?? ""),
     queryKey: ["discovery-topics", activeRun?.runId],
+    // Poll while the run is active so the table refreshes the instant the run
+    // goes terminal (topics persist at run end), then stop polling (mq9nhbzu).
+    refetchInterval: () =>
+      isTerminalStatus(discoveryRunQuery.data?.status) || runEvents.reachedTerminal ? false : 2000,
   });
 
   // Reports list for the reports page (per-report selection + Export selected).
@@ -1343,10 +1344,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               />
             </label>
             <label>
-              Capture duration (seconds)
+              Capture duration (seconds — 0 or blank = run until stopped)
               <input
                 inputMode="numeric"
                 onChange={(event) => setCaptureSeconds(event.target.value)}
+                placeholder="0 = until stopped"
                 value={captureSeconds}
               />
             </label>
@@ -1354,9 +1356,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <p className="section-copy">
             Subscribes through an MQTT discovery run and shows the latest payload seen per topic. The live
             broker capture is on-site-untested here; with no broker reachable the run records
-            broker_unreachable and this panel stays empty rather than showing fabricated payloads. Use the
-            Run Controls above (or Cancel) to start and stop capture; duration {captureSeconds || "?"}s and
-            the filter are passed to the discovery run.
+            broker_unreachable and this panel stays empty rather than showing fabricated payloads. The
+            filter and duration are sent to the run; set the duration to{" "}
+            <strong>{Number(captureSeconds) > 0 ? `${captureSeconds}s` : "0 (run until stopped)"}</strong> —
+            an indefinite capture runs until you press Cancel above or the message cap is reached. Captured
+            topics appear here when the run completes.
           </p>
           <div className="data-table-wrap">
             {captureRows.length > 0 ? (
@@ -2022,10 +2026,12 @@ function buildDiscoveryParameters(
     if (filter) {
       parameters.topic_filter = filter;
     }
-    const seconds = Number(options.captureSeconds);
-    if (Number.isFinite(seconds) && seconds > 0) {
-      parameters.capture_seconds = seconds;
-    }
+    // Empty / 0 / non-numeric => 0, the backend's "indefinite" sentinel: run
+    // until stopped (Cancel) or the message cap. A positive value is a bounded
+    // capture window. >0 => bounded; otherwise indefinite (mq9nhbzu).
+    const raw = (options.captureSeconds ?? "").trim();
+    const seconds = Number(raw);
+    parameters.capture_seconds = raw !== "" && Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
   }
   return parameters;
 }

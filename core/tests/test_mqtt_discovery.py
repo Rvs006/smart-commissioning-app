@@ -72,9 +72,11 @@ class FakeCapture:
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
-                 timeout_seconds: float, max_messages: int) -> list[MqttMessage]:
+                 timeout_seconds: float | None, max_messages: int,
+                 cancel_check: Any = None) -> list[MqttMessage]:
         self.calls.append({"settings": settings, "topics": list(topics),
-                           "timeout_seconds": timeout_seconds, "max_messages": max_messages})
+                           "timeout_seconds": timeout_seconds, "max_messages": max_messages,
+                           "cancel_check": cancel_check})
         # Honour the max_messages cap the way the real capture would.
         return list(self._messages[:max_messages])
 
@@ -184,6 +186,66 @@ class BoundTests(unittest.TestCase):
         self.assertEqual(call["timeout_seconds"], mqtt_discovery.DEFAULT_CAPTURE_SECONDS)
         self.assertEqual(call["max_messages"], mqtt_discovery.DEFAULT_MAX_MESSAGES)
         self.assertEqual(call["topics"], ["#"])
+
+    def test_explicit_zero_is_indefinite(self) -> None:
+        # mq9nhbzu: capture_seconds=0 => indefinite (timeout None) + a cancel
+        # check is wired so the run can be stopped; summary labels it indefinite.
+        store = FakeRunStore()
+        capture = FakeCapture([_json_msg("t/1", {"i": 1})])
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_indef", {**_AUTH, "capture_seconds": 0},
+            run_store=store, execution_mode="x",
+            live_capture=capture, build_settings=_stub_build,
+        )
+        call = capture.calls[-1]
+        self.assertIsNone(call["timeout_seconds"])
+        self.assertTrue(callable(call["cancel_check"]))
+        self.assertEqual(store.summary_calls[-1]["capture_mode"], "indefinite")
+
+    def test_missing_seconds_is_bounded(self) -> None:
+        store = FakeRunStore()
+        capture = FakeCapture([])
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_bounded", {**_AUTH}, run_store=store, execution_mode="x",
+            live_capture=capture, build_settings=_stub_build,
+        )
+        self.assertEqual(store.summary_calls[-1]["capture_mode"], "bounded")
+
+
+class CancellationTests(unittest.TestCase):
+    def test_cancel_during_capture_stops_and_marks_cancelled(self) -> None:
+        # A store whose cancel flag flips True after the pre-capture check, and a
+        # capture that polls the injected cancel_check and stops early. Proves the
+        # engine passes a working cancel_check and reports a cancelled run with
+        # the partial messages — all without a broker.
+        class FlippingStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self._calls = 0
+
+            def is_cancel_requested(self, run_id: str) -> bool:
+                self._calls += 1
+                return self._calls > 1  # False on the pre-capture check, then True
+
+        class CancellingCapture:
+            def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
+                         timeout_seconds: float | None, max_messages: int,
+                         cancel_check: Any = None) -> list[MqttMessage]:
+                captured: list[MqttMessage] = []
+                for index in range(max_messages):
+                    captured.append(_json_msg(f"t/{index}", {"i": index}))
+                    if cancel_check and cancel_check():
+                        break
+                return captured
+
+        store = FlippingStore()
+        result = mqtt_discovery.process_mqtt_discovery_run(
+            "run_cancel", {**_AUTH, "capture_seconds": 0},
+            run_store=store, execution_mode="x",
+            live_capture=CancellingCapture(), build_settings=_stub_build,
+        )
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(store.summary_calls[-1]["messages_captured"], 1)
 
 
 class DryRunTests(unittest.TestCase):
