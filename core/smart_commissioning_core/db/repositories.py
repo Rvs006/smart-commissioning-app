@@ -34,6 +34,28 @@ from smart_commissioning_core.db.models import (
 # are NEVER bundled: only finished, immutable records leave the edge.
 TERMINAL_RUN_STATUSES = ("succeeded", "failed", "cancelled")
 
+# The RBAC admin role string persisted on User.role (see rbac.Role.ADMIN).
+_ADMIN_ROLE = "admin"
+
+
+class LastAdminError(ValueError):
+    """Raised when an operation would remove the last active admin USER ROW.
+
+    Self-lockout guard: deactivating or demoting the only remaining active
+    admin user would leave the users table with zero active admins, so the
+    repository refuses it. Subclasses ``ValueError`` so existing callers that
+    catch ``ValueError`` still behave sensibly; the API layer catches it
+    specifically and maps it to HTTP 409 Conflict.
+
+    NOTE (bootstrap recovery): the legacy shared-key / local-mode admin
+    principal (see backend app.core.auth) is SYNTHETIC — it is NOT a row in the
+    users table. A deployment can therefore have ZERO admin user rows and still
+    be administrable via that bootstrap key. This guard deliberately reasons
+    ONLY about admin USER ROWS; it does not assume the bootstrap key exists.
+    Blocking the deactivation of the last admin row is precisely what protects
+    a deployment whose ONLY remaining admin path is that one user row.
+    """
+
 
 def _user_to_dict(user: User) -> dict[str, object]:
     """Serialize a User WITHOUT the api_key_hash (never leaked over the API)."""
@@ -127,22 +149,74 @@ class UserRepository:
         with self._session_factory() as session:
             return int(session.scalar(statement) or 0)
 
+    def count_active_admins(self) -> int:
+        """Number of active admin USER ROWS (role == admin AND is_active).
+
+        Backs the last-admin self-lockout guard. Counts only rows in the users
+        table; the synthetic shared-key / local bootstrap admin is NOT a row and
+        is therefore (correctly) not counted here.
+        """
+        with self._session_factory() as session:
+            return self._count_active_admins(session)
+
+    @staticmethod
+    def _count_active_admins(session: Session) -> int:
+        """In-session count of active admin user rows (callable mid-transaction)."""
+        statement = (
+            select(func.count())
+            .select_from(User)
+            .where(User.role == _ADMIN_ROLE, User.is_active.is_(True))
+        )
+        return int(session.scalar(statement) or 0)
+
     def set_active(self, user_id: str, *, is_active: bool) -> dict[str, object] | None:
-        """Activate/deactivate a user; return the updated dict or None if absent."""
+        """Activate/deactivate a user; return the updated dict or None if absent.
+
+        Self-lockout guard: deactivating the LAST active admin user row is
+        refused with :class:`LastAdminError`. The check re-counts active admins
+        within this same transaction (after pinning the target row) so two
+        concurrent deactivations cannot race past it. Reactivating
+        (``is_active=True``) and deactivating any non-admin / non-last admin are
+        unaffected.
+        """
         with self._session_factory.begin() as session:
             user = session.get(User, user_id)
             if user is None:
                 return None
+            # Only a deactivation of an active admin can drop the admin count.
+            if (
+                not is_active
+                and user.is_active
+                and user.role == _ADMIN_ROLE
+                and self._count_active_admins(session) <= 1
+            ):
+                raise LastAdminError("cannot deactivate the last active admin")
             user.is_active = is_active
             session.flush()
             return _user_to_dict(user)
 
     def update_role(self, user_id: str, *, role: str) -> dict[str, object] | None:
-        """Change a user's role; return the updated dict or None if absent."""
+        """Change a user's role; return the updated dict or None if absent.
+
+        Self-lockout guard: demoting the LAST active admin user row away from
+        ``admin`` is refused with :class:`LastAdminError`. As with
+        :meth:`set_active`, the active-admin count is re-evaluated inside this
+        transaction so a concurrent demotion cannot slip the last admin through.
+        Promoting TO admin, or changing the role of an inactive admin (who is
+        not counted as active), is unaffected.
+        """
         with self._session_factory.begin() as session:
             user = session.get(User, user_id)
             if user is None:
                 return None
+            # Only demoting an *active* admin away from admin can drop the count.
+            if (
+                role != _ADMIN_ROLE
+                and user.role == _ADMIN_ROLE
+                and user.is_active
+                and self._count_active_admins(session) <= 1
+            ):
+                raise LastAdminError("cannot demote the last active admin")
             user.role = role
             session.flush()
             return _user_to_dict(user)

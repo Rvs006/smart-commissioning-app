@@ -16,10 +16,15 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Private :: Do Not Upload",
 ]
+# Runtime dependencies are EXACT-PINNED ("==") to the versions that the test
+# suite was last run against, so a fresh CI install resolves the SAME tested
+# versions as local. Unpinned ">=" ranges previously let CI pull newer
+# releases than local, producing a "passes-local-fails-CI" failure. To bump a
+# dependency: change the pin here, re-run the test suite locally, then commit.
 dependencies = [
-  "pydantic>=2.6,<3.0",
-  "sqlalchemy>=2.0",
-  "alembic>=1.13",
+  "pydantic==2.12.5",
+  "sqlalchemy==2.0.49",
+  "alembic==1.18.4",
 ]
 
 [project.optional-dependencies]
@@ -36,5 +41,31 @@ sbom = ["pip-licenses>=5.0", "cyclonedx-bom>=4.0"]
 [tool.setuptools.packages.find]
 include = ["smart_commissioning_core*"]
 
+[tool.setuptools]
+# Honour MANIFEST.in so the Alembic env ships in the sdist too.
+include-package-data = true
+
 [tool.setuptools.package-data]
 smart_commissioning_core = ["fixtures/*.json"]
+
+# The Alembic migration environment (alembic.ini + alembic/**) lives at the
+# project root, not inside the smart_commissioning_core package, because the
+# Alembic CLI and env.py expect that conventional layout. setuptools will not
+# auto-package files outside the package tree, so we ship them as data-files.
+# In a built wheel these land under
+#   smart_commissioning_core-<ver>.data/data/share/smart_commissioning_core/...
+# and on install resolve to <sys.prefix>/share/smart_commissioning_core/...,
+# which smart_commissioning_core.db.migrate locates at runtime (it also keeps
+# the editable source-tree path working as a fallback).
+[tool.setuptools.data-files]
+"share/smart_commissioning_core" = ["alembic.ini"]
+"share/smart_commissioning_core/alembic" = [
+  "alembic/env.py",
+  "alembic/script.py.mako",
+]
+"share/smart_commissioning_core/alembic/versions" = [
+  "alembic/versions/c9663f90f68a_initial_schema.py",
+  "alembic/versions/c4a7ced176a9_engine_framework_discovery_tables_and_.py",
+  "alembic/versions/c998144d98d4_edge_hub_sync_columns.py",
+  "alembic/versions/d1f2a3b4c5d6_users_table_rbac.py",
+]

@@ -1,0 +1,14 @@
+# Ship the Alembic migration environment in the sdist so non-editable
+# installs (pip install ./core, wheels) carry the migration scripts.
+#
+# alembic.ini and the alembic/ tree live at the project root (next to this
+# file), NOT under the smart_commissioning_core/ package, because the Alembic
+# CLI and env.py expect that conventional layout. setuptools therefore will
+# not auto-include them as package-data; we declare them here for the sdist
+# and via [tool.setuptools.data-files] in pyproject.toml for the wheel.
+include alembic.ini
+recursive-include alembic *.py *.mako
+# Never ship compiled caches.
+global-exclude *.pyc
+prune alembic/__pycache__
+prune alembic/versions/__pycache__

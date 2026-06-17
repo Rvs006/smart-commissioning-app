@@ -1,10 +1,23 @@
 from collections.abc import Callable
 
-from smart_commissioning_core.mqtt_transport import MqttConnectionSettings
+from smart_commissioning_core.mqtt_transport import (
+    MqttConnectionSettings,
+    set_secret_resolver,  # re-exported for callers that import it from this module
+)
 
 ConfigurationValuesProvider = Callable[[], tuple[dict[str, object], dict[str, object]]]
 
 _configuration_values_provider: ConfigurationValuesProvider | None = None
+
+__all__ = [
+    "ConfigurationValuesProvider",
+    "build_mqtt_connection_settings",
+    "parse_bool",
+    "parse_float",
+    "parse_int",
+    "set_configuration_values_provider",
+    "set_secret_resolver",
+]
 
 
 def set_configuration_values_provider(provider: ConfigurationValuesProvider | None) -> None:

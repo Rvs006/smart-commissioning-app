@@ -23,7 +23,7 @@ import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from smart_commissioning_core.db.repositories import UserRepository
+from smart_commissioning_core.db.repositories import LastAdminError, UserRepository
 from smart_commissioning_core.rbac import Role
 from sqlalchemy.exc import IntegrityError
 
@@ -101,8 +101,16 @@ def list_users() -> list[UserResponse]:
     dependencies=[Depends(require_role(Role.ADMIN))],
 )
 def deactivate_user(user_id: str) -> UserResponse:
-    """Deactivate a user (admin only). Their key then fails authentication (401)."""
-    updated = _repository().set_active(user_id, is_active=False)
+    """Deactivate a user (admin only). Their key then fails authentication (401).
+
+    Refuses to deactivate the last active admin user (409): the system must
+    always retain at least one active admin USER ROW. (The synthetic shared-key
+    bootstrap admin is a separate recovery path and is not counted here.)
+    """
+    try:
+        updated = _repository().set_active(user_id, is_active=False)
+    except LastAdminError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return UserResponse(**updated)
@@ -114,8 +122,16 @@ def deactivate_user(user_id: str) -> UserResponse:
     dependencies=[Depends(require_role(Role.ADMIN))],
 )
 def update_user_role(user_id: str, payload: UpdateRoleRequest) -> UserResponse:
-    """Change a user's role (admin only)."""
-    updated = _repository().update_role(user_id, role=payload.role.value)
+    """Change a user's role (admin only).
+
+    Refuses to demote the last active admin user away from ``admin`` (409): the
+    system must always retain at least one active admin USER ROW. (The synthetic
+    shared-key bootstrap admin is a separate recovery path and is not counted.)
+    """
+    try:
+        updated = _repository().update_role(user_id, role=payload.role.value)
+    except LastAdminError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return UserResponse(**updated)

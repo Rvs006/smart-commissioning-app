@@ -25,6 +25,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 _SHARED_KEY = "test-rbac-shared-admin-key"
@@ -100,6 +101,41 @@ class RbacApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()
+
+    def _repo(self):
+        """A UserRepository bound to the test engine (used for direct assertions).
+
+        The tests share one SQLite DB across the class and accumulate admin rows,
+        so last-admin assertions reduce the live count to exactly ONE active admin
+        row by deactivating the extras, then exercise the guard against that row.
+        """
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.repositories import UserRepository
+
+        return UserRepository(get_engine())
+
+    def _reduce_to_single_active_admin(self) -> str:
+        """Leave exactly one active admin USER ROW; return that user's id.
+
+        Creates a fresh admin to act as the survivor, then deactivates every
+        OTHER currently-active admin row directly via the repository (bypassing
+        the route guard, which would itself refuse the final deactivation). This
+        isolates the last-admin test from admin rows other tests have created.
+        """
+        repo = self._repo()
+        # Unique survivor per call: tests share one class-level SQLite DB, so a
+        # fixed username would 409 on the second test that reduces to one admin.
+        survivor = self._create_user(f"last-admin-survivor-{uuid.uuid4().hex[:8]}", "admin")
+        survivor_id = survivor["user"]["id"]
+        for user in repo.list_users():
+            if (
+                user["role"] == "admin"
+                and user["is_active"]
+                and user["id"] != survivor_id
+            ):
+                repo.set_active(user["id"], is_active=False)
+        self.assertEqual(repo.count_active_admins(), 1)
+        return survivor_id
 
     # -- bootstrap / shared-key admin -----------------------------------------
 
@@ -232,6 +268,113 @@ class RbacApiTests(unittest.TestCase):
         # The user now passes an engineer-gated check via /me showing the new role.
         me = self.client.get("/api/v1/me", headers={"X-API-Key": created["api_key"]})
         self.assertEqual(me.json()["role"], "engineer")
+
+    # -- last-admin self-lockout guard ----------------------------------------
+
+    def test_count_active_admins_helper_is_correct(self) -> None:
+        repo = self._repo()
+        before = repo.count_active_admins()
+
+        # A new active admin row increments the count by exactly one.
+        admin = self._create_user("count-admin", "admin")
+        self.assertEqual(repo.count_active_admins(), before + 1)
+
+        # A non-admin user does not change the active-admin count.
+        self._create_user("count-viewer", "viewer")
+        self.assertEqual(repo.count_active_admins(), before + 1)
+
+        # Deactivating that admin (another active admin still exists) decrements it.
+        repo.set_active(admin["user"]["id"], is_active=False)
+        self.assertEqual(repo.count_active_admins(), before)
+
+    def test_cannot_deactivate_last_active_admin_returns_409(self) -> None:
+        survivor_id = self._reduce_to_single_active_admin()
+        response = self.client.post(
+            f"/api/v1/users/{survivor_id}/deactivate", headers=self._admin_headers()
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("last active admin", response.json()["detail"])
+        # The guard did not mutate the row: the survivor is still an active admin.
+        self.assertEqual(self._repo().count_active_admins(), 1)
+        survivor = self._repo().get(survivor_id)
+        self.assertTrue(survivor["is_active"])
+        self.assertEqual(survivor["role"], "admin")
+
+    def test_cannot_demote_last_active_admin_returns_409(self) -> None:
+        survivor_id = self._reduce_to_single_active_admin()
+        response = self.client.post(
+            f"/api/v1/users/{survivor_id}/role",
+            headers=self._admin_headers(),
+            json={"role": "engineer"},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("last active admin", response.json()["detail"])
+        # The row is unchanged: still an active admin.
+        survivor = self._repo().get(survivor_id)
+        self.assertTrue(survivor["is_active"])
+        self.assertEqual(survivor["role"], "admin")
+
+    def test_can_deactivate_admin_when_another_active_admin_exists(self) -> None:
+        repo = self._repo()
+        first = self._create_user("two-admins-a", "admin")
+        second = self._create_user("two-admins-b", "admin")
+        # With at least two active admins, deactivating one is allowed.
+        self.assertGreaterEqual(repo.count_active_admins(), 2)
+        response = self.client.post(
+            f"/api/v1/users/{first['user']['id']}/deactivate",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["is_active"])
+        # The second admin remains active and administrable.
+        self.assertTrue(repo.get(second["user"]["id"])["is_active"])
+
+    def test_can_demote_admin_when_another_active_admin_exists(self) -> None:
+        repo = self._repo()
+        first = self._create_user("demote-admins-a", "admin")
+        self._create_user("demote-admins-b", "admin")
+        self.assertGreaterEqual(repo.count_active_admins(), 2)
+        response = self.client.post(
+            f"/api/v1/users/{first['user']['id']}/role",
+            headers=self._admin_headers(),
+            json={"role": "engineer"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["role"], "engineer")
+
+    def test_deactivating_a_non_admin_is_unaffected_even_as_only_admin_low(self) -> None:
+        # The guard is about ADMIN rows only: a non-admin can always be
+        # deactivated regardless of how many admins exist.
+        viewer = self._create_user("guard-irrelevant-viewer", "viewer")
+        response = self.client.post(
+            f"/api/v1/users/{viewer['user']['id']}/deactivate",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["is_active"])
+
+    def test_demoting_a_non_admin_is_unaffected(self) -> None:
+        engineer = self._create_user("guard-irrelevant-eng", "engineer")
+        response = self.client.post(
+            f"/api/v1/users/{engineer['user']['id']}/role",
+            headers=self._admin_headers(),
+            json={"role": "viewer"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["role"], "viewer")
+
+    def test_last_admin_repo_guard_raises_last_admin_error(self) -> None:
+        # Direct repository-level contract: the guard raises LastAdminError
+        # (a ValueError subclass) rather than silently mutating.
+        from smart_commissioning_core.db.repositories import LastAdminError
+
+        survivor_id = self._reduce_to_single_active_admin()
+        repo = self._repo()
+        with self.assertRaises(LastAdminError):
+            repo.set_active(survivor_id, is_active=False)
+        with self.assertRaises(LastAdminError):
+            repo.update_role(survivor_id, role="viewer")
+        self.assertIsInstance(LastAdminError("x"), ValueError)
 
     def test_deactivate_unknown_user_is_404(self) -> None:
         response = self.client.post(

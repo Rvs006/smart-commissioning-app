@@ -1,6 +1,8 @@
 import json
+import os
 import socket
 import ssl
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -9,6 +11,55 @@ from pathlib import Path
 
 class MqttTransportError(RuntimeError):
     pass
+
+
+# -- secret:// cert resolver hook -------------------------------------------
+# Cert fields (CA / client cert / private key) may be either a plain
+# filesystem path OR a ``secret://`` reference into the encrypted secret store
+# (Phase 2). This module has no access to the secret store itself, so the
+# owning service (the API's ConfigurationService, or the worker when the
+# secrets volume is shared) registers a resolver that maps a ``secret://`` ref
+# to its DECRYPTED bytes. When unset, ``secret://`` refs resolve to nothing and
+# the TLS context is built without that material (same as today).
+
+SecretResolver = Callable[[str], bytes | None]
+
+_secret_resolver: SecretResolver | None = None
+
+
+def set_secret_resolver(resolver: SecretResolver | None) -> None:
+    """Register the callable that resolves a ``secret://`` ref to decrypted bytes.
+
+    The resolver receives the full reference (e.g. ``secret://client-cert-...``)
+    and returns the decrypted material as ``bytes`` (PEM text encoded as UTF-8 is
+    fine) or ``None`` if it cannot resolve it. It MUST NOT raise for a missing
+    secret; raising is treated the same as ``None`` (the field is skipped) so a
+    resolver error never leaks into the TLS error path. Plain filesystem paths
+    never reach the resolver.
+    """
+    global _secret_resolver
+    _secret_resolver = resolver
+
+
+def _resolve_secret_material(ref: str) -> bytes | None:
+    """Resolve a ``secret://`` ref to decrypted bytes via the registered resolver.
+
+    Returns ``None`` when no resolver is registered, the resolver returns
+    nothing, or the resolver raises (a resolver failure must not abort the
+    handshake setup with a credential-bearing exception)."""
+    if _secret_resolver is None:
+        return None
+    try:
+        material = _secret_resolver(ref)
+    except Exception:
+        return None
+    if material is None:
+        return None
+    return material if isinstance(material, bytes) else bytes(material)
+
+
+def _is_secret_ref(value: str | None) -> bool:
+    return bool(value) and value.startswith("secret://")
 
 
 @dataclass(frozen=True)
@@ -49,11 +100,18 @@ class MqttClient:
         self.socket_factory = socket_factory or socket.create_connection
         self._socket: socket.socket | None = None
         self._packet_id = 1
+        # Temp files materialized from secret:// cert material; removed on exit.
+        self._temp_cert_files: list[str] = []
 
     def __enter__(self) -> "MqttClient":
         raw_socket = self.socket_factory((self.settings.host, self.settings.port), self.settings.timeout_seconds)
         raw_socket.settimeout(self.settings.timeout_seconds)
-        self._socket = self._wrap_tls(raw_socket) if self.settings.use_tls else raw_socket
+        try:
+            self._socket = self._wrap_tls(raw_socket) if self.settings.use_tls else raw_socket
+        finally:
+            # Cert material was loaded into the SSLContext; the temp files are no
+            # longer needed once wrap_socket has consumed them.
+            self._cleanup_temp_cert_files()
         self._connect()
         return self
 
@@ -64,6 +122,7 @@ class MqttClient:
             pass
         if self._socket:
             self._socket.close()
+        self._cleanup_temp_cert_files()
 
     def publish(self, topic: str, payload: str | bytes) -> None:
         payload_bytes = payload.encode("utf-8") if isinstance(payload, str) else payload
@@ -138,12 +197,83 @@ class MqttClient:
             raise MqttTransportError(f"MQTT broker rejected the connection: {errors.get(response[1], response[1])}.")
 
     def _wrap_tls(self, raw_socket: socket.socket) -> socket.socket:
-        context = ssl.create_default_context(cafile=_path_if_file(self.settings.ca_certificate))
-        client_cert = _path_if_file(self.settings.client_certificate)
-        private_key = _path_if_file(self.settings.private_key)
-        if client_cert:
-            context.load_cert_chain(certfile=client_cert, keyfile=private_key)
+        """Build the SSLContext, resolving secret:// cert refs to decrypted material.
+
+        CA / client-cert / private-key fields are each handled independently:
+
+        * a plain filesystem path keeps today's behavior (loaded by path);
+        * a ``secret://`` reference is resolved to decrypted bytes via the
+          registered secret resolver and loaded IN MEMORY where the ssl API
+          allows it (the CA via ``load_verify_locations(cadata=...)``), or via a
+          transient 0600 temp file where the API requires a path
+          (``load_cert_chain`` has no in-memory form). Temp files are removed by
+          the caller (``__enter__``/``__exit__``) once the context has consumed
+          them.
+
+        HONESTY: this materializes + loads the cert material; the real TLS
+        handshake against a live broker is on-site-untested.
+        """
+        context = self._build_ssl_context()
+        client_cert_path = self._resolve_cert_field_to_path(self.settings.client_certificate)
+        private_key_path = self._resolve_cert_field_to_path(self.settings.private_key)
+        if client_cert_path:
+            context.load_cert_chain(certfile=client_cert_path, keyfile=private_key_path)
         return context.wrap_socket(raw_socket, server_hostname=self.settings.host)
+
+    def _build_ssl_context(self) -> ssl.SSLContext:
+        """Create the verifying SSLContext, loading the CA from a path or secret."""
+        ca_field = self.settings.ca_certificate
+        if _is_secret_ref(ca_field):
+            material = _resolve_secret_material(ca_field)
+            context = ssl.create_default_context()
+            if material is not None:
+                # Prefer in-memory loading for the CA: no temp file needed.
+                context.load_verify_locations(cadata=material.decode("utf-8"))
+            return context
+        return ssl.create_default_context(cafile=_path_if_file(ca_field))
+
+    def _resolve_cert_field_to_path(self, value: str | None) -> str | None:
+        """Return a filesystem path for a cert field, materializing secrets.
+
+        Plain paths are returned as-is (when they exist). A ``secret://`` ref is
+        resolved to decrypted bytes and written to a transient 0600 temp file
+        whose path is returned; the file is tracked for cleanup. Returns ``None``
+        when there is nothing loadable (no resolver / missing secret / missing
+        file), preserving today's behavior for plain paths.
+        """
+        if _is_secret_ref(value):
+            material = _resolve_secret_material(value)
+            if material is None:
+                return None
+            return self._materialize_temp_cert(material)
+        return _path_if_file(value)
+
+    def _materialize_temp_cert(self, material: bytes) -> str:
+        """Write decrypted cert material to a transient owner-only (0600) file.
+
+        On POSIX the 0600 mode is enforced via ``os.open``; on Windows the mode
+        bits only map onto the read-only attribute, so isolation there relies on
+        the host ACL. The file is tracked and removed on context exit.
+        """
+        fd, path = tempfile.mkstemp(prefix="mqtt-tls-", suffix=".pem")
+        try:
+            os.write(fd, material)
+        finally:
+            os.close(fd)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        self._temp_cert_files.append(path)
+        return path
+
+    def _cleanup_temp_cert_files(self) -> None:
+        for path in self._temp_cert_files:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self._temp_cert_files.clear()
 
     def _next_packet_id(self) -> int:
         packet_id = self._packet_id

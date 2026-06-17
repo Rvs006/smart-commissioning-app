@@ -16,11 +16,16 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Private :: Do Not Upload",
 ]
+# Runtime dependencies are EXACT-PINNED ("==") to the versions the test suite
+# was last run against, so a fresh CI install resolves the SAME tested versions
+# as local. Unpinned ">=" ranges previously let CI pull newer releases than
+# local, producing a "passes-local-fails-CI" failure. To bump a dependency:
+# change the pin here, re-run the tests locally, then commit.
 dependencies = [
-  "dramatiq[redis]>=1.17.1,<2.0",
-  "pydantic-settings>=2.6.1,<3.0",
-  "sqlalchemy>=2.0.36,<3.0",
-  "psycopg[binary]>=3.2.3,<4.0"
+  "dramatiq[redis]==1.18.0",
+  "pydantic-settings==2.13.1",
+  "sqlalchemy==2.0.49",
+  "psycopg[binary]==3.3.4"
 ]
 
 [project.optional-dependencies]

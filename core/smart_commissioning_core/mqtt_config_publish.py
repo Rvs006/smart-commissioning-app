@@ -178,43 +178,63 @@ def validate_and_publish_config(
 
     previous_config = _capture_previous_config(parameters, topic)
 
-    # Confirm-back covers EVERY written point, not just the primary (mq9n11wi).
-    # Prefer the expected_points list; fall back to the legacy singular
-    # expected_point/expected_value so older callers and rollbacks are unchanged.
-    # One config_override_not_observed issue is raised per point whose
-    # present_value did not change to the expected value in the next pointset.
-    expected_points = _normalize_expected_points(parameters, expected_point, expected_value)
-    confirmed_points: list[dict[str, object]] = []
-    for point_name, point_expected in expected_points:
-        point_observed = _extract_present_value(next_pointset_payload, point_name)
-        confirmed_points.append(
+    # Multi-point confirm: build the set of expected (point, value) pairs from
+    # (in priority order) an explicit parameters['expected_points'] list, OR by
+    # deriving them from the published config payload's pointset.points
+    # set_value entries, OR the legacy single expected_point/expected_value pair.
+    # Each expected point is checked against the captured next pointset's
+    # present_value, with a per-point pass/fail in result_summary and one issue
+    # per mismatch. The single-point path stays unchanged for back-compat.
+    expected_points = _resolve_expected_points(
+        parameters,
+        expected_point=expected_point,
+        expected_value=expected_value,
+        published_payload=payload,
+        have_pointset=next_pointset_payload is not None,
+    )
+    point_checks: list[dict[str, object]] = []
+    for expected in expected_points:
+        point_name = expected["point"]
+        target_value = expected["value"]
+        observed = _extract_present_value(next_pointset_payload, point_name)
+        matched = observed == target_value
+        point_checks.append(
             {
                 "point": point_name,
-                "expected_value": point_expected,
-                "observed_value": point_observed,
-                "confirmed": point_observed == point_expected,
+                "expected_value": target_value,
+                "observed_value": observed,
+                "matched": matched,
             }
         )
-        if point_observed != point_expected:
+        if not matched:
             issues.append(
                 _issue(
                     issues,
                     issue_type="config_override_not_observed",
                     severity="high",
-                    description=f"Next pointset payload did not show {point_name} present_value changed to {point_expected}.",
+                    description=f"Next pointset payload did not show {point_name} present_value changed to {target_value}.",
                     topic=_pointset_topic_from_config(topic),
                     point_name=point_name,
-                    expected_value=str(point_expected),
-                    observed_value="missing" if point_observed is None else str(point_observed),
+                    expected_value=str(target_value),
+                    observed_value="missing" if observed is None else str(observed),
                     suggested_action="Check device command handling and confirm the next pointset event after publishing.",
                     status_detail="override_not_observed",
                     last_seen_at=now,
                 )
             )
 
-    # The singular observed_value summary field reflects the primary (first)
-    # expected point so existing summary consumers keep working.
-    observed_value = confirmed_points[0]["observed_value"] if confirmed_points else None
+    # Back-compat single-point summary fields: when exactly one point was
+    # checked (the legacy single-point shape, or a single-entry multi-point
+    # set), keep reporting expected_point/expected_value/observed_value as
+    # before. Multi-point detail always lives in point_checks.
+    primary_check = point_checks[0] if len(point_checks) == 1 else None
+    summary_expected_point = primary_check["point"] if primary_check else expected_point
+    summary_expected_value = primary_check["expected_value"] if primary_check else expected_value
+    summary_observed_value = (
+        primary_check["observed_value"]
+        if primary_check
+        else _extract_present_value(next_pointset_payload, expected_point)
+    )
 
     status = "failed" if issues else "succeeded"
     summary: dict[str, object] = {
@@ -222,10 +242,33 @@ def validate_and_publish_config(
         "publish_confirmed": confirmed,
         "payload_bytes": len(payload_text.encode("utf-8")),
         "payload_keys": list(payload.keys()) if isinstance(payload, dict) else [],
-        "expected_point": expected_point,
-        "expected_value": expected_value,
-        "observed_value": observed_value,
-        "expected_points": confirmed_points,
+        "expected_point": summary_expected_point,
+        "expected_value": summary_expected_value,
+        "observed_value": summary_observed_value,
+        "expected_point_count": len(point_checks),
+        "matched_point_count": sum(1 for check in point_checks if check["matched"]),
+        # "parted": at least one expected point matched but not all of them, so
+        # the publish partially confirmed. (status is still "failed" because a
+        # mismatch raised an issue.) Lets the UI distinguish a total miss from a
+        # partial confirm without re-deriving from point_checks.
+        "partial_confirm": (
+            len(point_checks) > 1
+            and 0 < sum(1 for check in point_checks if check["matched"]) < len(point_checks)
+        ),
+        "point_checks": point_checks,
+        # Back-compat mirror of the per-point results under the original key with
+        # a "confirmed" alias (PR #7 summary contract), so consumers/tests that
+        # read result_summary["expected_points"][].confirmed keep working
+        # alongside the richer point_checks/matched schema above.
+        "expected_points": [
+            {
+                "point": check["point"],
+                "expected_value": check["expected_value"],
+                "observed_value": check["observed_value"],
+                "confirmed": check["matched"],
+            }
+            for check in point_checks
+        ],
         "message_count": 1 if next_pointset_payload else 0,
         "broker_publish_attempted": broker_attempted,
         "pointset_topic": pointset_topic,
@@ -318,9 +361,13 @@ def rollback_config(
     if previous_config.get("topic"):
         rollback_parameters["topic"] = previous_config["topic"]
     # A rollback does not assert a new expected override value; drop any
-    # forward-publish expectation so the rollback is judged on publish success.
+    # forward-publish expectation (single- AND multi-point) so the rollback is
+    # judged on publish success, and suppress deriving an expectation from the
+    # republished payload's set_values.
     rollback_parameters.pop("expected_point", None)
     rollback_parameters.pop("expected_value", None)
+    rollback_parameters.pop("expected_points", None)
+    rollback_parameters["_suppress_expected_point_derivation"] = True
     # Do not re-capture a "previous of the previous"; mark this as a rollback.
     rollback_parameters.pop("previous_config_payload", None)
     rollback_parameters.pop("previous_config", None)
@@ -336,35 +383,89 @@ def _string(value: object) -> str:
     return str(value or "").strip()
 
 
-def _normalize_expected_points(
+def _resolve_expected_points(
     parameters: dict[str, object],
-    primary_point: str,
-    primary_value: object,
-) -> list[tuple[str, object]]:
-    """Expected (point, value) pairs to confirm in the next pointset payload.
+    *,
+    expected_point: str,
+    expected_value: object,
+    published_payload: object,
+    have_pointset: bool,
+) -> list[dict[str, object]]:
+    """Build the list of expected ``{point, value}`` pairs to confirm.
 
-    Prefers the ``expected_points`` list (mq9n11wi multi-point confirm-back),
-    each entry shaped ``{"point": str, "value": object}``; falls back to the
-    legacy singular ``expected_point``/``expected_value`` so older callers and
-    rollbacks behave exactly as before. Entries with a blank point name or a
-    ``None`` expected value are dropped (nothing to confirm), matching the
-    original singular guard.
+    Priority:
+
+    1. ``parameters['expected_points']`` — an explicit list of
+       ``{"point": <name>, "value": <set_value>}`` mappings (the multi-point
+       contract; the frontend can send the full expected set directly). Always
+       honored when supplied.
+    2. Otherwise, DERIVE the expected set from the published config payload's
+       ``pointset.points.<name>.set_value`` entries (the multi-point payload the
+       frontend now publishes). Each point's set_value is what the next pointset
+       should report as present_value. Derivation only runs when there is a next
+       pointset to verify against (a captured live pointset or a supplied
+       ``next_pointset_payload``) or when the caller opts in with
+       ``confirm_published_points`` — so a fire-and-forget publish with no
+       captured pointset does NOT manufacture spurious mismatches (back-compat).
+    3. Otherwise fall back to the legacy single ``expected_point`` /
+       ``expected_value`` pair (unchanged back-compat).
+
+    A point is only kept when it has a non-empty name and a non-None value, so a
+    payload without set_values (or an empty expected list) yields no checks —
+    identical to today's behavior when no expectation is supplied.
     """
-    raw = parameters.get("expected_points")
-    pairs: list[tuple[str, object]] = []
-    if isinstance(raw, list):
-        for entry in raw:
+    explicit = parameters.get("expected_points")
+    if isinstance(explicit, list):
+        resolved: list[dict[str, object]] = []
+        for entry in explicit:
             if not isinstance(entry, dict):
                 continue
-            point = _string(entry.get("point"))
-            value = entry.get("value")
-            if point and value is not None:
-                pairs.append((point, value))
-    if pairs:
-        return pairs
-    if primary_point and primary_value is not None:
-        return [(primary_point, primary_value)]
+            name = _string(entry.get("point") or entry.get("name"))
+            value = entry["value"] if "value" in entry else entry.get("set_value")
+            if name and value is not None:
+                resolved.append({"point": name, "value": value})
+        if resolved:
+            return resolved
+
+    should_derive = (
+        not parse_bool(parameters.get("_suppress_expected_point_derivation"))
+        and (have_pointset or parse_bool(parameters.get("confirm_published_points")))
+    )
+    if should_derive:
+        derived = _derive_expected_from_payload(published_payload)
+        if derived:
+            return derived
+
+    if expected_point and expected_value is not None:
+        return [{"point": expected_point, "value": expected_value}]
     return []
+
+
+def _derive_expected_from_payload(payload: object) -> list[dict[str, object]]:
+    """Derive expected ``{point, value}`` pairs from a config payload's set_values.
+
+    Reads ``pointset.points.<name>.set_value`` from the published config payload;
+    each set_value is the value the next pointset's present_value should match.
+    """
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, dict):
+        return []
+    points = payload.get("pointset", {})
+    points = points.get("points", {}) if isinstance(points, dict) else {}
+    if not isinstance(points, dict):
+        return []
+    resolved: list[dict[str, object]] = []
+    for name, point in points.items():
+        if not isinstance(point, dict) or "set_value" not in point:
+            continue
+        value = point.get("set_value")
+        if value is not None:
+            resolved.append({"point": str(name), "value": value})
+    return resolved
 
 
 def _extract_present_value(payload: object, point_name: str) -> object | None:
