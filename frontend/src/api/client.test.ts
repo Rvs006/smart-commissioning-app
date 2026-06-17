@@ -8,6 +8,7 @@ import {
   getApiKey,
   getDiscoveryResults,
   getDiscoveryRun,
+  getDiscoveryTopicsXlsxPath,
   getHealth,
   getMe,
   listReports,
@@ -393,6 +394,22 @@ describe("run and discovery API functions", () => {
       name: "ApiError",
       status: 401,
     });
+  });
+});
+
+describe("getDiscoveryTopicsXlsxPath", () => {
+  it("returns the topics.xlsx path with no filter", () => {
+    expect(getDiscoveryTopicsXlsxPath("run_1")).toBe("/discovery/runs/run_1/topics.xlsx");
+  });
+
+  it("appends a URL-encoded topic_filter when provided", () => {
+    expect(getDiscoveryTopicsXlsxPath("run_1", "334os/+/+/#")).toBe(
+      "/discovery/runs/run_1/topics.xlsx?topic_filter=334os%2F%2B%2F%2B%2F%23",
+    );
+  });
+
+  it("encodes the run id", () => {
+    expect(getDiscoveryTopicsXlsxPath("run/1")).toBe("/discovery/runs/run%2F1/topics.xlsx");
   });
 });
 

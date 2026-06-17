@@ -8,6 +8,7 @@ import {
   getDiscoveryResults,
   getDiscoveryRun,
   getDiscoveryTopics,
+  getDiscoveryTopicsXlsxPath,
   getValidationIssues,
   getValidationRun,
   getImportErrors,
@@ -724,6 +725,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     triggerBlobDownload(blob, `mqtt-capture-${Date.now()}.csv`);
   };
 
+  // Excel export (mq9nhbzu): the XLSX is generated server-side (openpyxl, same
+  // as reports/templates) and pulled through the authenticated download helper,
+  // scoped to the active run and the current topic filter.
+  const handleCaptureExportXlsx = () => {
+    if (captureRows.length === 0 || !activeRun?.runId) {
+      return;
+    }
+    void exportDownload.download(
+      "capture-xlsx",
+      getDiscoveryTopicsXlsxPath(activeRun.runId, captureTopicFilter),
+      `mqtt-capture-${Date.now()}.xlsx`,
+    );
+  };
+
   const handleCopyPayload = async (payload: string, label: string) => {
     try {
       await navigator.clipboard.writeText(payload);
@@ -1257,19 +1272,34 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <span className="eyebrow">Live capture</span>
               <h3>Incoming MQTT Payloads</h3>
             </div>
-            <button
-              className="secondary-button compact"
-              disabled={captureRows.length === 0}
-              onClick={handleCaptureExport}
-              title={
-                captureRows.length === 0
-                  ? "No captured topics yet — run an MQTT discovery with this topic filter."
-                  : "Download the latest payload per topic as CSV."
-              }
-              type="button"
-            >
-              Export to CSV
-            </button>
+            <div className="inline-actions">
+              <button
+                className="secondary-button compact"
+                disabled={captureRows.length === 0}
+                onClick={handleCaptureExport}
+                title={
+                  captureRows.length === 0
+                    ? "No captured topics yet — run an MQTT discovery with this topic filter."
+                    : "Download the latest payload per topic as CSV."
+                }
+                type="button"
+              >
+                Export to CSV
+              </button>
+              <button
+                className="secondary-button compact"
+                disabled={captureRows.length === 0 || exportDownload.pendingKey !== null}
+                onClick={handleCaptureExportXlsx}
+                title={
+                  captureRows.length === 0
+                    ? "No captured topics yet — run an MQTT discovery with this topic filter."
+                    : "Download the latest payload per topic as an Excel (XLSX) file."
+                }
+                type="button"
+              >
+                {exportDownload.pendingKey === "capture-xlsx" ? "Exporting..." : "Export to XLSX"}
+              </button>
+            </div>
           </div>
           <div className="publish-grid capture-controls">
             <label>

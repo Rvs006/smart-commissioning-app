@@ -841,6 +841,14 @@ export function getDiscoveryTopics(runId: string): Promise<DiscoveryTopicsRespon
   return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`);
 }
 
+// Path (display-only; download via downloadFile so the X-API-Key header rides)
+// for the server-generated XLSX of captured topics (mq9nhbzu Excel export). An
+// optional topic filter applies the same +/# wildcard semantics server-side.
+export function getDiscoveryTopicsXlsxPath(runId: string, topicFilter?: string): string {
+  const base = `/discovery/runs/${encodeURIComponent(runId)}/topics.xlsx`;
+  return topicFilter ? `${base}?topic_filter=${encodeURIComponent(topicFilter)}` : base;
+}
+
 export function listValidationRuns(): Promise<RunListResponse> {
   return request<RunListResponse>("/validation/runs");
 }
