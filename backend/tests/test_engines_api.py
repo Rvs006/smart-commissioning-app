@@ -264,9 +264,8 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
     def test_topics_xlsx_export_includes_persisted_rows(self) -> None:
         from io import BytesIO
 
-        from openpyxl import load_workbook
-
         from app.api.routes import discovery as discovery_routes
+        from openpyxl import load_workbook
 
         run_id = self._mqtt_dry_run_id()
         discovery_routes._discovery_repository().replace_topics(
@@ -293,9 +292,8 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
     def test_topics_xlsx_topic_filter_narrows_rows(self) -> None:
         from io import BytesIO
 
-        from openpyxl import load_workbook
-
         from app.api.routes import discovery as discovery_routes
+        from openpyxl import load_workbook
 
         run_id = self._mqtt_dry_run_id()
         discovery_routes._discovery_repository().replace_topics(

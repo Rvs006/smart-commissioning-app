@@ -212,7 +212,7 @@ class BoundTests(unittest.TestCase):
         self.assertEqual(store.summary_calls[-1]["capture_mode"], "bounded")
 
 
-class CancellationTests(unittest.TestCase):
+class CancelDuringCaptureTests(unittest.TestCase):
     def test_cancel_during_capture_stops_and_marks_cancelled(self) -> None:
         # A store whose cancel flag flips True after the pre-capture check, and a
         # capture that polls the injected cancel_check and stops early. Proves the
