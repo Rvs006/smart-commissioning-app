@@ -233,6 +233,93 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(topics.status_code, 200, topics.text)
         self.assertEqual(topics.json()["topics"], [])
 
+    def _mqtt_dry_run_id(self) -> str:
+        return self._post(
+            "/api/v1/discovery/mqtt/runs",
+            {"dry_run": True, "broker_host": "mqtt.example.local"},
+            "mqtt_discovery",
+        ).json()["run_id"]
+
+    def test_topics_xlsx_export_empty_for_dry_run(self) -> None:
+        # mq9nhbzu Excel export: a dry run has no topics, so the workbook must be
+        # header-only (no fabricated rows) and carry the xlsx download headers.
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        run_id = self._mqtt_dry_run_id()
+        resp = self.client.get(f"/api/v1/discovery/runs/{run_id}/topics.xlsx")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(
+            resp.headers["content-type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertIn("attachment", resp.headers["content-disposition"])
+        self.assertIn(".xlsx", resp.headers["content-disposition"])
+        sheet = load_workbook(BytesIO(resp.content)).active
+        rows = list(sheet.iter_rows(values_only=True))
+        self.assertEqual(rows[0], ("Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"))
+        self.assertEqual(len(rows), 1, "empty capture stays empty — no fabricated data rows")
+
+    def test_topics_xlsx_export_includes_persisted_rows(self) -> None:
+        from io import BytesIO
+
+        from app.api.routes import discovery as discovery_routes
+        from openpyxl import load_workbook
+
+        run_id = self._mqtt_dry_run_id()
+        discovery_routes._discovery_repository().replace_topics(
+            run_id,
+            [
+                {
+                    "topic": "334os/b1/ahu-1/state",
+                    "last_payload": {"present_value": 22},
+                    "message_count": 3,
+                    "attributes": {"device_ref": "AHU-1"},
+                }
+            ],
+        )
+        resp = self.client.get(f"/api/v1/discovery/runs/{run_id}/topics.xlsx")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        rows = list(load_workbook(BytesIO(resp.content)).active.iter_rows(values_only=True))
+        self.assertEqual(len(rows), 2)
+        data = rows[1]
+        self.assertEqual(data[0], "334os/b1/ahu-1/state")
+        self.assertEqual(data[1], "AHU-1")
+        self.assertEqual(data[3], "3")
+        self.assertIn("present_value", data[4])
+
+    def test_topics_xlsx_topic_filter_narrows_rows(self) -> None:
+        from io import BytesIO
+
+        from app.api.routes import discovery as discovery_routes
+        from openpyxl import load_workbook
+
+        run_id = self._mqtt_dry_run_id()
+        discovery_routes._discovery_repository().replace_topics(
+            run_id,
+            [
+                {"topic": "334os/b1/ahu-1/state", "last_payload": {"a": 1}, "message_count": 1, "attributes": {}},
+                {
+                    "topic": "334os/b1/ahu-1/events/pointset",
+                    "last_payload": {"b": 2},
+                    "message_count": 1,
+                    "attributes": {},
+                },
+            ],
+        )
+        resp = self.client.get(
+            f"/api/v1/discovery/runs/{run_id}/topics.xlsx",
+            params={"topic_filter": "334os/+/+/state"},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        topics = [row[0] for row in load_workbook(BytesIO(resp.content)).active.iter_rows(min_row=2, values_only=True)]
+        self.assertEqual(topics, ["334os/b1/ahu-1/state"])
+
+    def test_topics_xlsx_404_for_unknown_run(self) -> None:
+        resp = self.client.get("/api/v1/discovery/runs/run_does_not_exist/topics.xlsx")
+        self.assertEqual(resp.status_code, 404, resp.text)
+
 
 class PointValidationApiTests(_EngineApiTestCase):
     def test_inline_point_validation_flags_mismatch(self) -> None:

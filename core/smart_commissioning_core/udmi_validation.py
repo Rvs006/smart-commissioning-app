@@ -78,6 +78,11 @@ def validate_udmi_full_report(
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
     latest_payload = _latest_payload_timestamp(parameters or {})
+    # Per-asset, per-payload-type expected-vs-observed view for the results UI
+    # (mq9m4bnv). Built only from real payloads the validator already has
+    # (pasted inputs or live capture); the fixture path carries no payload JSON,
+    # so it returns [] and is labelled 'none' rather than fabricating content.
+    payload_views = _build_payload_views(parameters or {})
     result_summary: dict[str, object] = {
         "expected_devices": len(expected_devices),
         "publishing_seen": max(0, len(expected_devices) - len(not_publishing)),
@@ -92,6 +97,12 @@ def validate_udmi_full_report(
         "broker_capture_attempted": capture_summary["attempted"],
         "broker_status_detail": capture_summary["status_detail"],
         "captured_topics": capture_summary["captured_topics"],
+        "payload_views": payload_views,
+        "payload_view_source": _payload_view_source(
+            parameters or {},
+            capture_attempted=bool(capture_summary["attempted"]),
+            has_views=bool(payload_views),
+        ),
     }
     return UdmiValidationResult(
         result_summary=result_summary,
@@ -543,6 +554,75 @@ def _messages(value: Any) -> list[str]:
 
 def _state_severity(message: str) -> str:
     return "high" if "offline" in message.lower() else "medium"
+
+
+def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict[str, Any] | None:
+    """Slice of the expected schedule that maps to a payload type.
+
+    Mirrors the facets _review_payload_issues compares so the per-type view's
+    "expected" column stays consistent with the issue logic: manufacturer/model
+    -> state, guid/units -> metadata, units -> pointset.
+    """
+    if payload_type == "state":
+        facet = {key: expected[key] for key in ("manufacturer", "model") if expected.get(key) is not None}
+    elif payload_type == "metadata":
+        facet = {key: expected[key] for key in ("guid", "units") if expected.get(key) is not None}
+    elif payload_type == "pointset":
+        facet = {key: expected[key] for key in ("units",) if expected.get(key) is not None}
+    else:
+        facet = {}
+    return facet or None
+
+
+def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object]]:
+    """Per-asset, per-payload-type expected-vs-observed payload view (mq9m4bnv).
+
+    Uses only payloads the validator actually holds: ``expected_schedule``
+    (expected facets) and the ``state_payload``/``metadata_payload``/
+    ``pointset_payload`` observed payloads (pasted by the operator or written in
+    by live capture). A payload type is omitted when neither an expected facet
+    nor an observed payload exists, so nothing is fabricated. Single UDMI asset
+    per run, matching the rest of this module.
+    """
+    expected = _dict_or_empty(parameters.get("expected_schedule"))
+    observed_by_type = {
+        "state": _dict_or_empty(parameters.get("state_payload")),
+        "metadata": _dict_or_empty(parameters.get("metadata_payload")),
+        "pointset": _dict_or_empty(parameters.get("pointset_payload")),
+    }
+    payload_types: list[dict[str, object]] = []
+    for payload_type in ("state", "metadata", "pointset"):
+        observed = observed_by_type[payload_type]
+        expected_facet = _expected_payload_facet(expected, payload_type) if expected else None
+        if not observed and not expected_facet:
+            continue
+        payload_types.append(
+            {
+                "payload_type": payload_type,
+                "expected": expected_facet,
+                "observed": observed or None,
+                "observed_present": bool(observed),
+            }
+        )
+    if not payload_types:
+        return []
+    asset_id = str(expected.get("asset_id") or "UDMI asset")
+    return [{"asset_id": asset_id, "payload_types": payload_types}]
+
+
+def _payload_view_source(
+    parameters: dict[str, object], *, capture_attempted: bool, has_views: bool
+) -> str:
+    """Label the origin of the payload views so the UI never implies fabrication."""
+    if not has_views:
+        return "none"
+    has_observed = any(
+        isinstance(parameters.get(key), dict) and parameters.get(key)
+        for key in ("state_payload", "metadata_payload", "pointset_payload")
+    )
+    if capture_attempted and has_observed:
+        return "live_capture"
+    return "direct_inputs"
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:

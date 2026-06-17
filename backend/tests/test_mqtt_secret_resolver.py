@@ -69,10 +69,16 @@ class SecretResolverWiringTests(unittest.TestCase):
 
 class ImportRegistersResolverTests(unittest.TestCase):
     def test_importing_services_registers_the_resolver(self) -> None:
-        # Importing the package wires both hooks; assert a resolver is set.
-        import app.services  # noqa: F401
+        # Importing the package wires both hooks. app.services may already be
+        # imported (cached) and a sibling test's cleanup may have reset the
+        # global, so reload to re-run the module-level set_secret_resolver call.
+        import importlib
 
+        import app.services
+
+        importlib.reload(app.services)
         self.assertIsNotNone(mqtt_transport._secret_resolver)
+        self.addCleanup(mqtt_transport.set_secret_resolver, None)
 
 
 if __name__ == "__main__":

@@ -147,9 +147,14 @@ class MqttClient:
         *,
         expected_topics: set[str] | None = None,
         timeout_seconds: float,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> MqttMessage | None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            # Observe cancellation promptly even mid-window (used by long /
+            # indefinite captures so the Cancel control stops them quickly).
+            if cancel_check is not None and cancel_check():
+                return None
             remaining = max(0.1, min(self.settings.timeout_seconds, deadline - time.monotonic()))
             try:
                 self._require_socket().settimeout(remaining)
@@ -311,23 +316,44 @@ def subscribe_and_capture(
     settings: MqttConnectionSettings,
     *,
     topics: list[str],
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     max_messages: int,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> list[MqttMessage]:
+    """Subscribe to ``topics`` and collect messages up to ``max_messages``.
+
+    ``timeout_seconds`` bounds the capture window; pass ``None`` for an
+    indefinite capture that runs until ``cancel_check`` returns True or the
+    message cap is reached (mq9nhbzu "run until stopped"). The loop polls in
+    short slices so cancellation is observed promptly in both modes.
+    """
     messages: list[MqttMessage] = []
     expected_topics = set(topics)
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
     with MqttClient(settings) as client:
         for topic in topics:
             client.subscribe(topic)
-        deadline = time.monotonic() + timeout_seconds
-        while len(messages) < max_messages and time.monotonic() < deadline:
+        while len(messages) < max_messages:
+            if cancel_check is not None and cancel_check():
+                break
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                poll = max(0.1, min(1.0, remaining))
+            else:
+                # Indefinite: poll in 1s slices, re-checking cancel each time.
+                poll = 1.0
             message = client.read_publish_any(
                 expected_topics=expected_topics,
-                timeout_seconds=max(0.1, deadline - time.monotonic()),
+                timeout_seconds=poll,
+                cancel_check=cancel_check,
             )
-            if message is None:
-                break
-            messages.append(message)
+            if message is not None:
+                messages.append(message)
+            # No message this slice: keep looping (re-check cancel/deadline)
+            # rather than breaking, so a quiet broker does not end the window
+            # early and an indefinite capture keeps waiting.
     return messages
 
 

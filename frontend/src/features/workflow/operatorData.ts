@@ -15,7 +15,7 @@
 // Removed as dead (no consumer, no endpoint): projectSummary, runRows,
 // assetRows — replaced by the live queries listed above.
 
-import type { ValidationIssueRecord } from "../../api/client";
+import type { UdmiAssetPayloadView, ValidationIssueRecord } from "../../api/client";
 
 export type HealthState = "ready" | "warning" | "failed" | "running" | "queued";
 
@@ -83,6 +83,92 @@ export function groupIssuesByAsset(
     })),
     issues: entry.rows,
   }));
+}
+
+// Merge issue groups with the authoritative per-payload-type payload views from
+// result_summary.payload_views (mq9m4bnv). Each asset's payload types union its
+// issues (when any) with expected/observed payload content (when pasted or
+// captured). Assets that have payload content but ZERO issues still appear, so a
+// clean multi-payload asset shows its payload types rather than nothing.
+export type MergedPayloadType = {
+  payloadType: string;
+  issues: IssueRow[];
+  expected: unknown;
+  observed: unknown;
+  observedPresent: boolean;
+  hasPayloadView: boolean;
+};
+
+export type MergedAssetGroup = {
+  assetId: string;
+  issues: IssueRow[];
+  payloadTypes: MergedPayloadType[];
+};
+
+const PAYLOAD_TYPE_ORDER = ["pointset", "metadata", "state"];
+
+function payloadTypeRank(type: string): number {
+  const index = PAYLOAD_TYPE_ORDER.indexOf(type);
+  return index === -1 ? PAYLOAD_TYPE_ORDER.length : index;
+}
+
+export function mergeAssetGroups(
+  issueGroups: AssetIssueGroup[],
+  payloadViews: UdmiAssetPayloadView[],
+): MergedAssetGroup[] {
+  type Acc = { issues: IssueRow[]; types: Map<string, MergedPayloadType> };
+  const order: string[] = [];
+  const byAsset = new Map<string, Acc>();
+  const ensureAsset = (assetId: string): Acc => {
+    let acc = byAsset.get(assetId);
+    if (!acc) {
+      acc = { issues: [], types: new Map() };
+      byAsset.set(assetId, acc);
+      order.push(assetId);
+    }
+    return acc;
+  };
+  const ensureType = (acc: Acc, payloadType: string): MergedPayloadType => {
+    let entry = acc.types.get(payloadType);
+    if (!entry) {
+      entry = {
+        payloadType,
+        issues: [],
+        expected: null,
+        observed: null,
+        observedPresent: false,
+        hasPayloadView: false,
+      };
+      acc.types.set(payloadType, entry);
+    }
+    return entry;
+  };
+
+  for (const group of issueGroups) {
+    const acc = ensureAsset(group.assetId);
+    acc.issues.push(...group.issues);
+    for (const entry of group.byPayloadType) {
+      ensureType(acc, entry.payloadType).issues.push(...entry.issues);
+    }
+  }
+  for (const view of payloadViews) {
+    const acc = ensureAsset(view.asset_id);
+    for (const pt of view.payload_types) {
+      const entry = ensureType(acc, pt.payload_type);
+      entry.expected = pt.expected;
+      entry.observed = pt.observed;
+      entry.observedPresent = pt.observed_present;
+      entry.hasPayloadView = true;
+    }
+  }
+
+  return order.map((assetId) => {
+    const acc = byAsset.get(assetId)!;
+    const payloadTypes = Array.from(acc.types.values()).sort(
+      (a, b) => payloadTypeRank(a.payloadType) - payloadTypeRank(b.payloadType),
+    );
+    return { assetId, issues: acc.issues, payloadTypes };
+  });
 }
 
 export type WorkflowStage = {

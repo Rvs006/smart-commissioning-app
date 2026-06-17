@@ -25,6 +25,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 _SHARED_KEY = "test-rbac-shared-admin-key"
@@ -122,7 +123,9 @@ class RbacApiTests(unittest.TestCase):
         isolates the last-admin test from admin rows other tests have created.
         """
         repo = self._repo()
-        survivor = self._create_user("last-admin-survivor", "admin")
+        # Unique survivor per call: tests share one class-level SQLite DB, so a
+        # fixed username would 409 on the second test that reduces to one admin.
+        survivor = self._create_user(f"last-admin-survivor-{uuid.uuid4().hex[:8]}", "admin")
         survivor_id = survivor["user"]["id"]
         for user in repo.list_users():
             if (

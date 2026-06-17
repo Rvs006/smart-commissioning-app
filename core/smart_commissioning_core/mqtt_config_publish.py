@@ -256,6 +256,19 @@ def validate_and_publish_config(
             and 0 < sum(1 for check in point_checks if check["matched"]) < len(point_checks)
         ),
         "point_checks": point_checks,
+        # Back-compat mirror of the per-point results under the original key with
+        # a "confirmed" alias (PR #7 summary contract), so consumers/tests that
+        # read result_summary["expected_points"][].confirmed keep working
+        # alongside the richer point_checks/matched schema above.
+        "expected_points": [
+            {
+                "point": check["point"],
+                "expected_value": check["expected_value"],
+                "observed_value": check["observed_value"],
+                "confirmed": check["matched"],
+            }
+            for check in point_checks
+        ],
         "message_count": 1 if next_pointset_payload else 0,
         "broker_publish_attempted": broker_attempted,
         "pointset_topic": pointset_topic,
