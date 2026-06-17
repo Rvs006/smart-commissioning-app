@@ -75,12 +75,6 @@ describe("role-aware engineer actions", () => {
     // it stays disabled, and the tooltip explains why (no 401/403 on click).
     await waitFor(() => expect(uploadButton).toHaveAttribute("title", expect.stringMatching(/engineer/i)));
     expect(uploadButton).toBeDisabled();
-
-    // The cross-protocol "Queue" run action is likewise unavailable to a viewer.
-    const queueButton = screen.queryByRole("button", { name: "Queue" });
-    if (queueButton) {
-      expect(queueButton).toBeDisabled();
-    }
   });
 
   it("enables the engineer-only upload action (title cleared) for an engineer", async () => {

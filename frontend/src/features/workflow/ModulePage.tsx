@@ -370,6 +370,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetAllTemplatesDownload,
   ]);
 
+  // Auto-clear the report confirmation toast after a few seconds so a stale
+  // "report generated" note does not linger on the page (mqautz9j follow-up).
+  useEffect(() => {
+    if (!reportToast) {
+      return;
+    }
+    const timer = setTimeout(() => setReportToast(null), 8000);
+    return () => clearTimeout(timer);
+  }, [reportToast]);
+
   const importMutation = useMutation({
     mutationFn: async (input: { importType: ImportType; file: File }) => {
       const summary = await createImport({
