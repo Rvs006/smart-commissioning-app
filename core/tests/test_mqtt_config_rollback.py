@@ -279,5 +279,74 @@ class BrokerErrorDoesNotLeakCredentialsTests(unittest.TestCase):
         self.assertEqual(result["error_message"], "MQTT config publish failed; see server logs.")
 
 
+class MultiPointConfirmTests(unittest.TestCase):
+    """Confirm-back must cover every written point, not just the primary (mq9n11wi).
+
+    These exercise the validate-only (no broker) path: the caller supplies the
+    next_pointset_payload directly, so confirmation is fully dev-testable.
+    """
+
+    def test_all_points_confirmed_no_issues(self) -> None:
+        result = validate_and_publish_config(
+            {
+                "topic": "site/ahu-1/config",
+                "payload": "{}",
+                "confirmed": True,
+                "expected_points": [
+                    {"point": "sat", "value": 22},
+                    {"point": "fan", "value": True},
+                ],
+                "next_pointset_payload": {
+                    "pointset": {"points": {"sat": {"present_value": 22}, "fan": {"present_value": True}}}
+                },
+            }
+        )
+        self.assertEqual(result.issues, [])
+        confirmed = result.result_summary["expected_points"]
+        self.assertEqual(len(confirmed), 2)
+        self.assertTrue(all(point["confirmed"] for point in confirmed))
+        self.assertEqual(result.result_summary["status"], "succeeded")
+
+    def test_one_point_not_confirmed_raises_single_issue(self) -> None:
+        result = validate_and_publish_config(
+            {
+                "topic": "site/ahu-1/config",
+                "payload": "{}",
+                "confirmed": True,
+                "expected_points": [
+                    {"point": "sat", "value": 22},
+                    {"point": "fan", "value": True},
+                ],
+                # sat is confirmed; fan never appears in the next pointset.
+                "next_pointset_payload": {"pointset": {"points": {"sat": {"present_value": 22}}}},
+            }
+        )
+        overrides = [i for i in result.issues if i.issue_type == "config_override_not_observed"]
+        self.assertEqual(len(overrides), 1)
+        self.assertEqual(overrides[0].point_name, "fan")
+        self.assertEqual(overrides[0].observed_value, "missing")
+        confirmed = {point["point"]: point["confirmed"] for point in result.result_summary["expected_points"]}
+        self.assertTrue(confirmed["sat"])
+        self.assertFalse(confirmed["fan"])
+        self.assertEqual(result.result_summary["status"], "failed")
+
+    def test_legacy_singular_expected_point_still_confirmed(self) -> None:
+        # No expected_points list => fall back to the singular primary point,
+        # exactly as before this change.
+        result = validate_and_publish_config(
+            {
+                "topic": "site/ahu-1/config",
+                "payload": "{}",
+                "confirmed": True,
+                "expected_point": "sat",
+                "expected_value": 22,
+                "next_pointset_payload": {"pointset": {"points": {"sat": {"present_value": 22}}}},
+            }
+        )
+        self.assertEqual(result.issues, [])
+        self.assertEqual(result.result_summary["observed_value"], 22)
+        self.assertEqual(len(result.result_summary["expected_points"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

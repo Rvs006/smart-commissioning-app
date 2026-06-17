@@ -398,6 +398,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           jobType: action.jobType,
           parameters: buildDiscoveryParameters(action, {
             authorized: scanAuthorized,
+            captureSeconds,
+            captureTopicFilter,
             dryRun: scanDryRun,
             scanPorts,
           }),
@@ -455,9 +457,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         confirmed: publishConfirmed,
         expectedPoint: publishPoint,
         expectedValue: parsePublishValue(publishValue),
+        // Confirm-back now covers every written point (mq9n11wi): pass the
+        // primary plus all extra pairs as expected so the backend verifies each.
+        expectedPoints: [
+          { point: publishPoint, value: parsePublishValue(publishValue) },
+          ...publishExtraPoints.map((pair) => ({ point: pair.point, value: parsePublishValue(pair.value) })),
+        ],
         // Compose every point/value pair (primary + extras) into one config
-        // payload so a single publish writes them all. The backend confirm path
-        // still verifies only the primary expected point/value.
+        // payload so a single publish writes them all.
         payload: buildMultiPointPayload(publishPayload, publishPoint, publishValue, publishExtraPoints),
         pointsetTopic: publishPointsetTopic,
         topic: publishTopic,
@@ -1514,9 +1521,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             )}
             <p className="section-copy">
-              All pairs are written into one config payload under <code>pointset.points</code>. The backend
-              confirm/verify step checks only the primary point/value above; the additional writes are sent
-              but their confirmation is on-site-untested.
+              All pairs are written into one config payload under <code>pointset.points</code>, and the
+              backend confirm/verify step now checks every point/value here — one issue is raised per point
+              whose value is not confirmed back. Live-broker confirmation (vs. the local verify) remains
+              on-site-untested, the same as for the primary point.
             </p>
           </div>
 
@@ -1867,7 +1875,13 @@ function scanPortSpecification(ports: ScanPort[]): string {
 // specification. Mirrors the backend safety contract (parameters.authorized).
 function buildDiscoveryParameters(
   action: Extract<ModuleRunAction, { kind: "discovery" }>,
-  options: { authorized: boolean; dryRun: boolean; scanPorts: ScanPort[] },
+  options: {
+    authorized: boolean;
+    dryRun: boolean;
+    scanPorts: ScanPort[];
+    captureTopicFilter?: string;
+    captureSeconds?: string;
+  },
 ): Record<string, unknown> {
   const parameters: Record<string, unknown> = {};
   if (options.dryRun) {
@@ -1881,6 +1895,19 @@ function buildDiscoveryParameters(
   }
   if (action.runKind === "ip") {
     parameters.port_specification = scanPortSpecification(options.scanPorts);
+  }
+  // MQTT discovery: forward the operator's topic filter and capture window so
+  // the engine subscribes to the requested topics for the requested duration
+  // (mq9nhbzu). The backend reads topic_filter + capture_seconds.
+  if (action.runKind === "mqtt") {
+    const filter = options.captureTopicFilter?.trim();
+    if (filter) {
+      parameters.topic_filter = filter;
+    }
+    const seconds = Number(options.captureSeconds);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      parameters.capture_seconds = seconds;
+    }
   }
   return parameters;
 }
