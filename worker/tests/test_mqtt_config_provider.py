@@ -28,9 +28,8 @@ _WORKER_ROOT = Path(__file__).resolve().parents[1]
 if str(_WORKER_ROOT) not in sys.path:
     sys.path.insert(0, str(_WORKER_ROOT))
 
-from cryptography.fernet import Fernet  # noqa: E402
-
 from app import mqtt_config_provider as provider  # noqa: E402
+from cryptography.fernet import Fernet  # noqa: E402
 
 PEM_CONTENT = b"-----BEGIN CERTIFICATE-----\nworker-client-xyz\n-----END CERTIFICATE-----"
 KEY_FILE = ".secret_store_key"
