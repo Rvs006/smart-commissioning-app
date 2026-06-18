@@ -23,6 +23,14 @@ api_router = APIRouter()
 # without credentials (they expose no project data).
 api_router.include_router(health.router, tags=["health"])
 
+# Import format helpers (profile list + blank templates) are unauthenticated:
+# they expose only column headers and a synthetic example row, i.e. the format
+# an engineer needs to prepare a register before they have an API key. Mounted
+# on api_router (not protected_router) so no key is required. Registered before
+# the protected /imports routes so GET /imports/profiles resolves here rather
+# than matching the protected GET /imports/{import_id}.
+api_router.include_router(imports.public_router, prefix="/imports", tags=["imports"])
+
 # Every other /api/v1 route requires authentication (app.core.auth). RBAC is
 # then layered per-route inside each router (require_role on the data/mutation
 # routes); two single-tier routers (blueprint, events) are gated here at the
