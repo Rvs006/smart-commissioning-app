@@ -1,0 +1,199 @@
+<#
+.SYNOPSIS
+    PRE-SITE preflight for the Smart Commissioning App (Windows/PowerShell).
+.DESCRIPTION
+    Runs on the technician laptop BEFORE any live action. SAFE / side-effect-free
+    only: it never scans, never publishes/subscribes to the broker, never prints
+    secret material. Mirrors the auth + Invoke-WebRequest patterns of
+    scripts/smoke_local.ps1.
+
+      1. GET  /api/v1/health                      -> 200 status=ok
+      2. GET  /api/v1/ready                        -> 200 status=ready
+      3. GET  /metrics                             -> Prometheus exposition text
+      4. GET  /api/v1/configuration                -> snapshot present
+      5. cert refs (certificates section)          -> non-empty secret:// refs
+      6. POST /api/v1/discovery/ip/runs  (dry_run) -> plan, NO packets
+      7. POST /api/v1/discovery/mqtt/runs(dry_run) -> plan w/ broker host:port
+      8. TCP connect to broker host:port           -> reachable, NO MQTT bytes
+.PARAMETER BaseUrl
+    Base URL of the running API. Defaults to http://127.0.0.1:8000
+.PARAMETER ApiKey
+    Shared API key for the hosted profile (env SC_API_KEY). Omit for local/loopback.
+.NOTES
+    Exit code: 0 if every check passed, 1 otherwise.
+#>
+[CmdletBinding()]
+param(
+    [string]$BaseUrl   = 'http://127.0.0.1:8000',
+    [string]$ApiKey    = $env:SC_API_KEY,
+    [string]$ProjectId = $(if ($env:SC_PROJECT_ID) { $env:SC_PROJECT_ID } else { 'demo-project' }),
+    [string]$SiteId    = $(if ($env:SC_SITE_ID)    { $env:SC_SITE_ID }    else { 'demo-site' })
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$BaseUrl = $BaseUrl.TrimEnd('/')
+$Api     = "$BaseUrl/api/v1"
+
+$CurlTimeout  = if ($env:SC_CURL_TIMEOUT)  { [int]$env:SC_CURL_TIMEOUT }  else { 15 }
+$PollAttempts = if ($env:SC_POLL_ATTEMPTS) { [int]$env:SC_POLL_ATTEMPTS } else { 30 }
+$PollInterval = if ($env:SC_POLL_INTERVAL) { [double]$env:SC_POLL_INTERVAL } else { 1 }
+$TcpTimeout   = if ($env:SC_TCP_TIMEOUT)   { [int]$env:SC_TCP_TIMEOUT }   else { 5 }
+
+$script:PassCount = 0
+$script:FailCount = 0
+function Write-Pass([string]$m) { $script:PassCount++; Write-Host 'PASS ' -ForegroundColor Green -NoNewline; Write-Host $m }
+function Write-Fail([string]$m) { $script:FailCount++; Write-Host 'FAIL ' -ForegroundColor Red   -NoNewline; Write-Host $m }
+function Write-Info([string]$m) { Write-Host "     $m" -ForegroundColor DarkGray }
+
+$Headers = @{}
+if (-not [string]::IsNullOrWhiteSpace($ApiKey)) {
+    $Headers['X-API-Key'] = $ApiKey
+    Write-Info 'Auth: sending X-API-Key (hosted profile).'
+} else {
+    Write-Info 'Auth: no API key set, assuming local/loopback profile.'
+}
+
+function Invoke-Api {
+    param([Parameter(Mandatory)][string]$Url, [string]$Method = 'GET', [string]$JsonBody = $null)
+    $p = @{ Uri = $Url; Method = $Method; Headers = $Headers; TimeoutSec = $CurlTimeout; UseBasicParsing = $true }
+    if ($null -ne $JsonBody) { $p['Body'] = $JsonBody; $p['ContentType'] = 'application/json' }
+    try {
+        $resp = Invoke-WebRequest @p
+        $status = [int]$resp.StatusCode; $content = $resp.Content
+    } catch {
+        $status = 0; $content = $null
+        $exResp = $_.Exception.Response
+        if ($null -ne $exResp) {
+            try { $status = [int]$exResp.StatusCode } catch { $status = 0 }
+            try { $r = New-Object System.IO.StreamReader($exResp.GetResponseStream()); $content = $r.ReadToEnd() } catch { $content = $null }
+        }
+    }
+    $obj = $null
+    if (-not [string]::IsNullOrWhiteSpace($content)) { try { $obj = $content | ConvertFrom-Json } catch { $obj = $null } }
+    return @{ Status = $status; Body = $obj; Raw = $content }
+}
+
+Write-Host "Pre-site preflight against $BaseUrl  (project=$ProjectId site=$SiteId)"
+Write-Host '--------------------------------------------------'
+
+# --- 1. health -------------------------------------------------------------
+$r = Invoke-Api -Url "$Api/health"
+if ($r.Status -eq 200 -and $null -ne $r.Body -and $r.Body.status -eq 'ok') {
+    Write-Pass 'GET /api/v1/health -> 200 status=ok'
+} else { Write-Fail "GET /api/v1/health -> HTTP $($r.Status) (expected 200/ok)" }
+
+# --- 2. ready --------------------------------------------------------------
+$r = Invoke-Api -Url "$Api/ready"
+$readyStatus = if ($null -ne $r.Body) { $r.Body.status } else { '' }
+if ($r.Status -eq 200 -and $readyStatus -eq 'ready') {
+    Write-Pass 'GET /api/v1/ready -> 200 status=ready'
+} else {
+    Write-Fail "GET /api/v1/ready -> HTTP $($r.Status) status='$readyStatus' (expected 200/ready)"
+    Write-Info 'A 503 means a required dependency (DB, or Redis in queue mode) is down.'
+}
+
+# --- 3. metrics ------------------------------------------------------------
+$r = Invoke-Api -Url "$BaseUrl/metrics"
+if ($r.Status -eq 200 -and $r.Raw -match '(?m)^# (HELP|TYPE) |sct_') {
+    Write-Pass 'GET /metrics -> 200 Prometheus exposition text'
+} else { Write-Fail "GET /metrics -> HTTP $($r.Status) (expected 200 Prometheus text)" }
+
+# --- 4. configuration present ----------------------------------------------
+$cfg = $null
+$r = Invoke-Api -Url "$Api/configuration?project_id=$ProjectId&site_id=$SiteId"
+if ($r.Status -eq 200 -and $null -ne $r.Body -and $null -ne $r.Body.mqtt) {
+    $cfg = $r.Body
+    Write-Pass 'GET /api/v1/configuration -> 200 snapshot present'
+} else { Write-Fail "GET /api/v1/configuration -> HTTP $($r.Status) (expected 200 snapshot)" }
+
+# --- 5. secret:// cert refs (presence + shape; NO material) ----------------
+if ($null -ne $cfg -and $null -ne $cfg.certificates -and $null -ne $cfg.certificates.values) {
+    $certValues = $cfg.certificates.values
+    $secretCount = 0; $valueCount = 0; $empty = @()
+    foreach ($field in @('CA Certificate', 'Client Certificate', 'Private Key')) {
+        $val = $certValues.$field
+        if ([string]::IsNullOrWhiteSpace($val)) { $empty += "'$field'" }
+        elseif ($val.StartsWith('secret://')) { $secretCount++ }
+        else { $valueCount++ }   # plain path / value — valid TLS config too
+    }
+    if ($empty.Count -eq 0) {
+        Write-Pass "MQTT-TLS cert fields all set ($secretCount secret:// ref, $valueCount path/value)"
+        Write-Info 'Confirm live TLS load on site: secret:// refs decrypt server-side; the in-memory CA + temp client-cert load is on-site-untested.'
+    } else {
+        # Empty cert fields are NOT a hard failure: the broker may be plaintext.
+        Write-Info "MQTT-TLS cert field(s) empty: $($empty -join ' ') — OK if this broker is plaintext; set them before a TLS (8883) broker run."
+    }
+} else { Write-Fail 'cert-ref check skipped (no configuration snapshot)' }
+
+# --- 6. DRY-RUN IP discovery (plan only, no packets) -----------------------
+$ipBody = @{
+    project_id = $ProjectId; site_id = $SiteId; job_type = 'ip_discovery'
+    parameters = @{ dry_run = $true; cidr = '192.0.2.0/30'; ports = @(47808, 1883) }
+} | ConvertTo-Json -Compress
+$discId = $null
+$r = Invoke-Api -Url "$Api/discovery/ip/runs" -Method 'POST' -JsonBody $ipBody
+if ($r.Status -eq 200 -and $null -ne $r.Body -and $r.Body.run_id) { $discId = $r.Body.run_id }
+if ($discId) {
+    $st = ''; $plan = $null
+    for ($i = 0; $i -lt $PollAttempts; $i++) {
+        $r = Invoke-Api -Url "$Api/discovery/runs/$discId"
+        if ($r.Status -eq 200 -and $null -ne $r.Body) { $st = $r.Body.status; if ($st -in @('succeeded','failed','cancelled')) { break } }
+        Start-Sleep -Seconds $PollInterval
+    }
+    if ($r.Status -eq 200 -and $null -ne $r.Body.result_summary -and ($r.Body.result_summary.PSObject.Properties.Name -contains 'dry_run_plan')) {
+        $plan = $r.Body.result_summary.dry_run_plan
+    }
+    if ($st -eq 'succeeded' -and $null -ne $plan -and [int]$plan.target_count -gt 0) {
+        Write-Pass "dry-run IP discovery returned a plan (target_count=$($plan.target_count), no scan)"
+    } else { Write-Fail "dry-run IP discovery did not return a plan (status='$st')" }
+} else { Write-Fail "POST /api/v1/discovery/ip/runs (dry_run) -> HTTP $($r.Status) (expected 200)" }
+
+# --- 7. DRY-RUN MQTT discovery (plan only; resolves configured broker) -----
+$mqttBody = @{ project_id = $ProjectId; site_id = $SiteId; job_type = 'mqtt_discovery'; parameters = @{ dry_run = $true } } | ConvertTo-Json -Compress
+$mqId = $null; $brokerHost = $null; $brokerPort = $null
+$r = Invoke-Api -Url "$Api/discovery/mqtt/runs" -Method 'POST' -JsonBody $mqttBody
+if ($r.Status -eq 200 -and $null -ne $r.Body -and $r.Body.run_id) { $mqId = $r.Body.run_id }
+if ($mqId) {
+    $st = ''; $plan = $null
+    for ($i = 0; $i -lt $PollAttempts; $i++) {
+        $r = Invoke-Api -Url "$Api/discovery/runs/$mqId"
+        if ($r.Status -eq 200 -and $null -ne $r.Body) { $st = $r.Body.status; if ($st -in @('succeeded','failed','cancelled')) { break } }
+        Start-Sleep -Seconds $PollInterval
+    }
+    if ($r.Status -eq 200 -and $null -ne $r.Body.result_summary -and ($r.Body.result_summary.PSObject.Properties.Name -contains 'dry_run_plan')) {
+        $plan = $r.Body.result_summary.dry_run_plan
+        $brokerHost = $plan.broker_host; $brokerPort = $plan.broker_port
+    }
+    if ($st -eq 'succeeded' -and $null -ne $plan) {
+        Write-Pass "dry-run MQTT discovery returned a plan (broker $brokerHost`:$brokerPort, no connection)"
+    } else { Write-Fail "dry-run MQTT discovery did not return a plan (status='$st')" }
+} else { Write-Fail "POST /api/v1/discovery/mqtt/runs (dry_run) -> HTTP $($r.Status) (expected 200)" }
+
+# --- 8. Broker TCP reachability (NO MQTT bytes, no handshake) --------------
+if (-not [string]::IsNullOrWhiteSpace($brokerHost) -and $brokerPort) {
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $client.BeginConnect($brokerHost, [int]$brokerPort, $null, $null)
+        if ($iar.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TcpTimeout)) -and $client.Connected) {
+            $client.EndConnect($iar)
+            Write-Pass "TCP reach $brokerHost`:$brokerPort (socket opened+closed, no MQTT bytes)"
+        } else {
+            Write-Fail "TCP reach $brokerHost`:$brokerPort FAILED (firewall/route/broker down?)"
+        }
+    } catch {
+        Write-Fail "TCP reach $brokerHost`:$brokerPort FAILED (firewall/route/broker down?)"
+    } finally { $client.Close() }
+} else { Write-Fail 'broker TCP probe skipped (no broker host:port from MQTT dry-run plan)' }
+
+# --- summary ---------------------------------------------------------------
+Write-Host '--------------------------------------------------'
+$total = $script:PassCount + $script:FailCount
+if ($script:FailCount -eq 0) {
+    Write-Host "PREFLIGHT PASSED  $($script:PassCount)/$total checks OK" -ForegroundColor Green
+    exit 0
+} else {
+    Write-Host "PREFLIGHT FAILED  $($script:PassCount) passed, $($script:FailCount) failed (of $total)" -ForegroundColor Red
+    exit 1
+}
