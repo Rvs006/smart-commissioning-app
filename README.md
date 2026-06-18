@@ -100,9 +100,17 @@ cd smart-commissioning-app
 
 Brings up frontend + API + worker + Postgres + Redis. Requires Docker.
 
+`API_KEY` is required in this profile — generate one, then start the stack. **Use the block for your shell** (the `export` form is bash/macOS/Linux only; on Windows PowerShell `export` fails with `'export' is not recognized`):
+
 ```bash
-# API_KEY is required in this profile (generate one):
-export API_KEY=$(openssl rand -hex 32)        # PowerShell: $env:API_KEY = (openssl rand -hex 32)
+# bash / macOS / Linux
+export API_KEY=$(openssl rand -hex 32)
+docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+```
+
+```powershell
+# Windows PowerShell
+$env:API_KEY = (openssl rand -hex 32)
 docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
 ```
 

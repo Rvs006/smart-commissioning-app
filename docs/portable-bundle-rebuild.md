@@ -96,6 +96,12 @@ cd frontend && npm ci && npm run build && cd ..
 Produces `frontend/dist/` (already present in this checkout, so this step is a
 no-op refresh here).
 
+> The in-app engineer **Review Comments** widget ships in every build by default.
+> To cut a GA bundle without it, set the build-time flag:
+> `VITE_REVIEW_COMMENTS=false npm run build`. This is a Vite build-time variable
+> baked into `frontend/dist/` at build — not read at runtime, so it has no entry
+> in any `.env`.
+
 ---
 
 ## 4. Assemble the portable bundle (PyInstaller + Alembic-shipping)
