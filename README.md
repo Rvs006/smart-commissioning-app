@@ -15,6 +15,10 @@ commission smart buildings: bring up a project's network/BACnet/MQTT/certificate
 the expected register, scan the live building network, confirm every device is publishing
 UDMI-compliant data that matches the design, and hand the client a tamper-evident evidence pack.
 
+> 🆕 **New to the project?** Start with **[docs/what-is-this.md](docs/what-is-this.md)** — a
+> one-page plain-English explanation of what the app is, what it does, and how to explain it to an
+> engineer (both the human "why" and the technical "how").
+
 ---
 
 ## What it does
@@ -167,6 +171,7 @@ Smart Commissioning Tool Specification.pdf
 
 | Document | Covers |
 | --- | --- |
+| [docs/what-is-this.md](docs/what-is-this.md) | Plain-English onboarding: what the app is, what it does, how to explain it |
 | [docs/production-architecture.md](docs/production-architecture.md) | System model mapping the specification to the production build |
 | [docs/runbook.md](docs/runbook.md) | Deploy, operate, and recover (hosted compose + edge/portable profiles) |
 | [docs/security-posture.md](docs/security-posture.md) | Threat model, auth, secret handling, scan-safety, IEC 62443 alignment |
