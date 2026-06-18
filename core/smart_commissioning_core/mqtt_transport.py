@@ -139,6 +139,17 @@ class MqttClient:
         if len(payload) < 3 or payload[2] == 0x80:
             raise MqttTransportError("MQTT broker rejected the subscription.")
 
+    def ping(self) -> None:
+        """Send an MQTT PINGREQ (0xC0) keepalive.
+
+        The capture loop only recv()s, so on a quiet broker no bytes are sent
+        after CONNECT/SUBSCRIBE; a spec-compliant broker drops a client that is
+        silent for 1.5x keep_alive. Sending PINGREQ before keep_alive elapses
+        keeps a long/indefinite capture connected. The PINGRESP (0xD0) reply is
+        consumed and ignored by read_publish_any (it only returns PUBLISH 0x30).
+        """
+        self._send_packet(0xC0, b"")
+
     def read_publish(self, *, expected_topic: str, timeout_seconds: float) -> MqttMessage | None:
         return self.read_publish_any(expected_topics={expected_topic}, timeout_seconds=timeout_seconds)
 
@@ -330,12 +341,22 @@ def subscribe_and_capture(
     messages: list[MqttMessage] = []
     expected_topics = set(topics)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    # Keepalive: ping at keep_alive/2 so a quiet broker does not drop a long /
+    # indefinite capture (the loop is otherwise recv-only after SUBSCRIBE).
+    ping_interval = max(1.0, settings.keep_alive / 2.0) if settings.keep_alive and settings.keep_alive > 0 else None
+    last_ping = time.monotonic()
     with MqttClient(settings) as client:
         for topic in topics:
             client.subscribe(topic)
         while len(messages) < max_messages:
             if cancel_check is not None and cancel_check():
                 break
+            if ping_interval is not None and time.monotonic() - last_ping >= ping_interval:
+                try:
+                    client.ping()
+                except (OSError, MqttTransportError):
+                    break  # connection lost — stop the capture cleanly
+                last_ping = time.monotonic()
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
