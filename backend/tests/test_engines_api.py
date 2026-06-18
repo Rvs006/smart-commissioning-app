@@ -320,6 +320,32 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         resp = self.client.get("/api/v1/discovery/runs/run_does_not_exist/topics.xlsx")
         self.assertEqual(resp.status_code, 404, resp.text)
 
+    def test_run_parameter_secrets_redacted_to_client_but_real_internally(self) -> None:
+        # A broker password / inline private key passed as run parameters must be
+        # redacted in the API response (any viewer) but kept server-side so
+        # execution + rollback still read the real values.
+        run_id = self._post(
+            "/api/v1/discovery/mqtt/runs",
+            {
+                "dry_run": True,
+                "broker_host": "mqtt.example.local",
+                "password": "hunter2",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+            },
+            "mqtt_discovery",
+        ).json()["run_id"]
+        got = self.client.get(f"/api/v1/discovery/runs/{run_id}")
+        self.assertEqual(got.status_code, 200, got.text)
+        params = got.json()["parameters"]
+        self.assertEqual(params["password"], "********")
+        self.assertEqual(params["private_key"], "********")
+        self.assertEqual(params["broker_host"], "mqtt.example.local")  # non-secret untouched
+        self.assertNotIn("hunter2", got.text)
+        # Server-side attribute access (rollback/execution) keeps the real value.
+        from app.api.routes import discovery as discovery_routes
+
+        self.assertEqual(discovery_routes.service.get_run(run_id).parameters["password"], "hunter2")
+
 
 class PointValidationApiTests(_EngineApiTestCase):
     def test_inline_point_validation_flags_mismatch(self) -> None:
