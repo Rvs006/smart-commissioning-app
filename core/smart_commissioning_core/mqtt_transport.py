@@ -323,6 +323,28 @@ def publish_config_and_wait_for_pointset(
         return client.read_publish(expected_topic=pointset_topic, timeout_seconds=timeout_seconds)
 
 
+def read_retained_config(
+    settings: MqttConnectionSettings,
+    *,
+    config_topic: str,
+    timeout_seconds: float,
+) -> str | None:
+    """Read the broker's RETAINED message on ``config_topic`` for rollback.
+
+    A retained config message is delivered by the broker immediately on
+    subscribe, so a short subscribe-and-read snapshots the device's current
+    config WITHOUT publishing anything (read-only: SUBSCRIBE only). Returns the
+    payload text, or None if no retained message arrives within the window. Must
+    be called BEFORE a forward publish so the captured value is the prior config.
+    """
+    with MqttClient(settings) as client:
+        client.subscribe(config_topic)
+        message = client.read_publish(expected_topic=config_topic, timeout_seconds=timeout_seconds)
+    if message is None:
+        return None
+    return message.payload.decode("utf-8", errors="replace")
+
+
 def subscribe_and_capture(
     settings: MqttConnectionSettings,
     *,

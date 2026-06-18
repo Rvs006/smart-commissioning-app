@@ -89,6 +89,34 @@ class ForwardPublishCapturesPreviousTests(unittest.TestCase):
         self.assertEqual(previous["topic"], "site/ahu-1/config")
         self.assertIn("18", previous["payload"])
 
+    def test_live_retained_read_captures_prior_value_before_publish(self) -> None:
+        # A live broker_reader snapshots the device's PRIOR retained config before
+        # the forward publish, so rollback restores the real prior value (18), not
+        # the value being published (22). Injected reader => no real socket.
+        reads: dict[str, Any] = {}
+
+        def fake_reader(_settings: Any, *, config_topic: str, timeout_seconds: float) -> str | None:
+            reads["topic"] = config_topic
+            return '{"pointset":{"points":{"sat":{"set_value":18}}}}'
+
+        result = validate_and_publish_config(
+            {
+                "topic": "site/ahu-1/config",
+                "payload": '{"pointset":{"points":{"sat":{"set_value":22}}}}',
+                "confirmed": True,
+                "use_live_broker": True,
+                "broker_host": "mqtt.example.local",
+                "authorized": True,
+            },
+            broker_publisher=lambda *a, **k: MqttMessage(topic="x", payload=b'{"pointset":{"points":{}}}'),
+            broker_reader=fake_reader,
+        )
+        previous = result.result_summary["previous_config"]
+        self.assertEqual(previous["source"], "live_retained_read")
+        self.assertTrue(previous["captured"])
+        self.assertIn("18", previous["payload"])  # PRIOR value, not the published 22
+        self.assertEqual(reads["topic"], "site/ahu-1/config")
+
 
 class RollbackConfigTests(unittest.TestCase):
     def test_rollback_republishes_previous_payload_via_publisher(self) -> None:
@@ -273,6 +301,7 @@ class BrokerErrorDoesNotLeakCredentialsTests(unittest.TestCase):
             run_store=store,
             execution_mode="inline_local_fallback",
             broker_publisher=boom_publisher,
+            broker_reader=None,  # not testing the retained read; avoid a real socket
         )
         self.assertEqual(result["status"], "failed")
         self.assertNotIn(BrokerErrorDoesNotLeakCredentialsTests._SECRET, str(result["error_message"]))
