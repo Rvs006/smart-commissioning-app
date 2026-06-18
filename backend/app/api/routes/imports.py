@@ -15,12 +15,27 @@ from app.schemas.imports import (
 )
 from app.services.import_service import ImportService
 
+# Two routers at the same /imports prefix:
+#   * public_router  — the unauthenticated format helpers (profile list + blank
+#     templates). router.py mounts it OUTSIDE the protected router so these GETs
+#     need no API key, mirroring the health endpoints.
+#   * router         — the authenticated import operations (upload + result reads),
+#     mounted under the protected router (require_auth) with per-route RBAC.
+public_router = APIRouter()
 router = APIRouter()
 service = ImportService()
 
-# RBAC: listing profiles/templates and reading import results is viewer+;
-# creating an import (ingesting an uploaded register) is engineer+ (managing
-# imports is engineer authority).
+# RBAC posture:
+#   * GET /profiles and GET /templates/... are PUBLIC (no auth). They expose only
+#     the import *format* — import-type names, required column headers, and one
+#     synthetic example row — i.e. the documentation an engineer needs to prepare
+#     a register before they have an API key. No project/site data is revealed.
+#     (Hosted deployments still sit behind TLS + network isolation per
+#     docs/team-pilot-deployment.md; this only removes the app-level key gate on
+#     two static format helpers.)
+#   * Reading an import's RESULTS (GET /{import_id}, /{import_id}/errors) stays
+#     viewer+ — those reflect real uploaded register data.
+#   * Creating an import (ingesting an uploaded register) stays engineer+.
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
 
@@ -63,17 +78,15 @@ def _guard_xlsx_decompressed_size(file_bytes: bytes, max_decompressed_bytes: int
         )
 
 
-@router.get(
-    "/profiles",
-    response_model=list[ImportProfileSummary],
-    dependencies=[Depends(require_viewer)],
-)
+@public_router.get("/profiles", response_model=list[ImportProfileSummary])
 def list_import_profiles() -> list[ImportProfileSummary]:
+    # Public: import-format metadata only (see RBAC posture note above).
     return service.list_profiles()
 
 
-@router.get("/templates/{import_type}.{file_type}", dependencies=[Depends(require_viewer)])
+@public_router.get("/templates/{import_type}.{file_type}")
 def download_import_template(import_type: ImportType, file_type: str) -> Response:
+    # Public: a blank format helper (column headers + one example row), no data.
     try:
         content = service.build_template(import_type, file_type)
     except ValueError as error:

@@ -140,6 +140,18 @@ class ApiKeyModeTests(_AuthClientTestCase):
         self.assertEqual(self.client.get("/api/v1/health").status_code, 200)
         self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
 
+    def test_import_format_helpers_reachable_without_key(self) -> None:
+        # The import profile list and blank templates are public format helpers
+        # (import-type names, required column headers, one example row -- no
+        # project data), so they answer without a key even in api_key mode,
+        # unlike _PROTECTED_PATH above which 401s. Regression guard for the
+        # "Template download failed -- Authentication required" report.
+        self.assertEqual(self.client.get("/api/v1/imports/profiles").status_code, 200)
+        for fmt in ("csv", "xlsx"):
+            response = self.client.get(f"/api/v1/imports/templates/ip_register.{fmt}")
+            self.assertEqual(response.status_code, 200, f"{fmt}: {response.text}")
+            self.assertTrue(response.content)
+
     def test_schema_endpoints_hidden_in_api_key_mode(self) -> None:
         # Hosted deployments must not disclose the API surface to
         # unauthenticated clients: schema endpoints answer 404.
