@@ -1,97 +1,169 @@
 # Smart Commissioning App
 
+> Commissioning and verification platform for smart-building Master Systems Integrators (MSIs) —
+> configure a site, discover its devices, validate UDMI/BACnet/MQTT data against what was
+> specified, and export signed commissioning evidence.
+
 ![CI](https://github.com/Rvs006/smart-commissioning-app/actions/workflows/ci.yml/badge.svg)
+![status](https://img.shields.io/badge/status-pre--production%20(pending%20on--site%20validation)-orange)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
+![python](https://img.shields.io/badge/python-3.12-blue)
+![node](https://img.shields.io/badge/node-22-green)
 
-## Status
+Branded **ELECTRACOM "Smart Commissioning Tool"**, this is the web platform our engineers use to
+commission smart buildings: bring up a project's network/BACnet/MQTT/certificate settings, import
+the expected register, scan the live building network, confirm every device is publishing
+UDMI-compliant data that matches the design, and hand the client a tamper-evident evidence pack.
 
-Production-hardened across phases 0–4b: persistence (SQLAlchemy/Alembic),
-authentication + secret encryption at rest, real discovery/validation engines
-with scan-safety controls, observability/evidence-integrity/backup-restore, and
-signed edge → hub run synchronization. CI is green on the blocking `python`
-and `frontend` jobs; the `sbom` license gate runs as a non-blocking
-(`continue-on-error`) job.
+---
 
-Live-network paths — active scanning against real BMS/OT hardware, a real MQTT
-broker, Postgres/Redis, a remote hub, and the Docker image build — were
-developed without access to that infrastructure and are **pending on-site
-validation**. See [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md)
-for the checklist that must pass before company-wide production rollout.
+## What it does
 
-This repository currently contains:
+Commissioning a smart building means proving that hundreds of field devices were installed,
+addressed, and configured to match the design — and producing evidence of it. This tool turns that
+manual, error-prone checklist into a repeatable five-stage workflow:
 
-- the functional specification in `Smart Commissioning Tool Specification.pdf`
-- the standalone UDMI payload validator in `device_udmi_payload_validation/`
-- the first production scaffold in `frontend/`, `backend/`, `worker/`, `infra/`, and `docs/`
+| Stage | What happens | Pages |
+| --- | --- | --- |
+| **1. Configure** | Capture the site's network, BACnet, MQTT broker (with TLS certs), time/NTP and backup settings. Export/import per-project config so the same engineer can jump between projects. | Configuration |
+| **2. Import** | Upload the *expected* register (CSV/XLSX) — the devices and points the design says should exist. Every module ships a downloadable template. | each module |
+| **3. Discover** | Scan the live network: IP sweep, BACnet device/object discovery, and MQTT topic capture (MQTT-Explorer-style wildcard subscription with latest-payload export). | IP Scanner, BACnet Discovery, MQTT Discovery |
+| **4. Validate** | Check observed data against the design: UDMI payload validation (pointset / metadata / state, expected-vs-observed) and BACnet ↔ MQTT comparison within tolerances. Result is a clear **Pass / Fail** with reasons. | UDMI Validation, BACnet to MQTT Validation |
+| **5. Report** | Export a commissioning evidence pack (XLSX / DOCX / ZIP) scoped to the runs you choose, carrying the actual findings and stamped with an integrity signature. | Reports |
 
-The original UI prototypes (`smart_commissiong_tool_ui.jsx`, `preview.html`, `smart_commissioning_tool_FIXED_fast.html`, and the zip-inspector dev tools) were removed after the baseline commit and remain available in git history (baseline commit `3471050`).
+A controlled **MQTT config publish** path (multi-point write + read-back confirm, with rollback)
+lets an engineer correct a device's setpoints and prove the change took effect.
 
-## Production Direction
+---
 
-The real application should be built as a multi-service system:
+## Architecture
 
-- `frontend/`: React + TypeScript + Vite operator UI
-- `backend/`: FastAPI HTTP API and domain contracts
-- `worker/`: background discovery and validation jobs
-- `infra/`: local Docker Compose stack for API, worker, Postgres, Redis, and object storage
-- `docs/`: product and architecture decisions
+One codebase, three deployment profiles. The core scan/validation logic lives in a shared Python
+package (`smart_commissioning_core`) used identically by the API and the background worker, so an
+in-request "inline" run and a queued worker run behave the same.
 
-The original HTML and JSX prototypes served as reference material for the product workflow and visual design; they were never the production runtime and can be retrieved from git history (baseline commit `3471050`).
+```mermaid
+flowchart LR
+    U[Operator browser] --> FE[Frontend<br/>React + Vite / nginx]
+    FE -->|/api| API[Backend API<br/>FastAPI]
+    API --> CORE[Core engines<br/>IP · BACnet · MQTT · UDMI]
+    API --> Q[[Redis queue]]
+    Q --> W[Worker<br/>Dramatiq]
+    W --> CORE
+    CORE -->|scan / publish| NET{{Building network<br/>BACnet · MQTT · IP}}
+    API --> DB[(SQLite or Postgres<br/>SQLAlchemy + Alembic)]
+    W --> DB
+    DB -. signed edge to hub sync .-> HUB[(Central Hub<br/>Postgres · RBAC · aggregation)]
+```
 
-## Repository Layout
+**Deployment profiles** (`DEPLOYMENT_ROLE`):
+
+- **`standalone` / portable** — a single Windows `.exe`, SQLite, jobs run inline, bound to
+  `127.0.0.1`, no broker/DB/Redis required. For one engineer on one laptop, including air-gapped OT
+  networks. (A commissioning tool *must* run on the site network — central-only can't reach
+  air-gapped sites.)
+- **`edge`** — the on-site instance that does the live scanning, then pushes signed run bundles to a
+  hub (online, or offline via a carried `.scbundle` file).
+- **`hub`** — a central, multi-project instance (Postgres, company SSO/RBAC) that ingests edge runs
+  fail-closed (trusted-edge allowlist, signature + per-run hash verification, immutable upsert).
+
+---
+
+## Tech stack
+
+| Layer | Tech |
+| --- | --- |
+| Frontend | React 18, TypeScript, Vite, TanStack Query/Router |
+| API | FastAPI (Python 3.12), Pydantic v2 |
+| Worker | Dramatiq on Redis |
+| Core | `smart_commissioning_core` — engines, UDMI/MQTT logic, persistence |
+| Persistence | SQLAlchemy 2 + Alembic — SQLite (local) / PostgreSQL (hosted) |
+| Packaging | PyInstaller Windows portable bundle; Docker Compose hosted stack |
+
+---
+
+## Quickstart
+
+> The repository is **private** — your engineer needs to be added as a collaborator
+> (GitHub → repo → **Settings → Collaborators**) before they can clone it.
+
+```bash
+git clone https://github.com/Rvs006/smart-commissioning-app.git
+cd smart-commissioning-app
+```
+
+### Option A — Hosted stack (Docker, one command)
+
+Brings up frontend + API + worker + Postgres + Redis. Requires Docker.
+
+```bash
+# API_KEY is required in this profile (generate one):
+export API_KEY=$(openssl rand -hex 32)        # PowerShell: $env:API_KEY = (openssl rand -hex 32)
+docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+```
+
+Then open **http://127.0.0.1:8080** (nginx serves the UI and proxies `/api` → the API). See
+[infra/README.md](infra/README.md) for the full hosted runbook.
+
+### Option B — Local dev profile (no broker / Postgres / Redis)
+
+Single-user loopback profile: SQLite, jobs inline, auth bypassed for `127.0.0.1`. Requires
+**Python 3.12** and **Node 22**.
+
+```bash
+# 1) install the three editable Python packages + the frontend
+pip install -e ./core -e ./backend -e ./worker
+cd frontend && npm ci && cd ..
+
+# 2) backend API (terminal 1)
+cd backend
+AUTH_MODE=local JOB_EXECUTION_MODE=inline DEPLOYMENT_ROLE=hub \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 3) seed demo data + frontend (terminal 2)
+python scripts/seed_demo.py --base-url http://127.0.0.1:8000
+npm --prefix frontend run dev      # http://localhost:5173, proxies /api -> 8000
+```
+
+> **Enable the engineer action buttons.** Run / Publish / Export are gated on an API key even in
+> local mode. Open the app, press **F12 → Console**, run once:
+> `localStorage.setItem('sc.apiKey','local-dev')`, then reload. One-command offline smoke:
+> `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
+
+### Option C — Windows portable bundle
+
+Build a self-contained directory bundle (exe + backend + core + frontend) with
+`packaging/windows_portable/build.ps1`; double-click `SmartCommissioningApp.exe`. See
+[docs/portable-bundle-rebuild.md](docs/portable-bundle-rebuild.md).
+
+---
+
+## Reviewing the V1 design feedback?
+
+[docs/review-comments-verification.md](docs/review-comments-verification.md) maps all **24 design
+review comments → ✅ implemented**, each with `file:line` evidence and the exact localhost route to
+see it in the running app.
+
+---
+
+## Repository layout
 
 ```text
-docs/
-frontend/
-backend/
-core/
-worker/
-infra/
-packaging/
-deliverables/
-device_udmi_payload_validation/
+frontend/    React + TypeScript operator UI
+backend/     FastAPI HTTP API (smart-commissioning-api)
+worker/      Dramatiq background jobs (smart-commissioning-worker)
+core/        smart_commissioning_core — engines, UDMI/MQTT logic, DB models, Alembic migrations
+infra/       Docker Compose stack (frontend, api, worker, Postgres, Redis)
+packaging/   Windows portable bundle (launcher + build.ps1)
+scripts/     seed_demo, smoke tests, Phase 5 preflight, edge→hub sync CLI
+docs/        architecture, runbook, security posture, on-site validation
+device_udmi_payload_validation/   standalone reference UDMI validator
 Smart Commissioning Tool Specification.pdf
 ```
 
-## Run it locally (local profile — no broker / Postgres / Redis)
+---
 
-Single-user loopback profile: SQLite, jobs run inline, auth bypassed for `127.0.0.1`.
-
-1. Backend API:
-   ```bash
-   cd backend
-   AUTH_MODE=local JOB_EXECUTION_MODE=inline DEPLOYMENT_ROLE=hub \
-     python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-   ```
-2. Seed demo data (optional): `python scripts/seed_demo.py --base-url http://127.0.0.1:8000`
-3. Frontend: `npm --prefix frontend run dev` → http://localhost:5173 (proxies `/api` → 8000)
-
-Engineer action buttons (Run / Publish / Export) are gated on an API key even in local
-mode — in the browser console run `localStorage.setItem('sc.apiKey','local-dev')`, then
-reload. One-command offline smoke: `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
-
-**Hosted stack** (Postgres + Redis + worker via Docker):
-`docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build`
-— see [docs/runbook.md](docs/runbook.md).
-
-### Reviewing the V1 design feedback?
-
-[docs/review-comments-verification.md](docs/review-comments-verification.md) maps all
-**24 DP review comments → ✅ implemented**, each with `file:line` evidence and the exact
-localhost steps to see it in the running app.
-
-## What Exists Today
-
-- `frontend/` — React + TypeScript operator UI (Homepage, Configuration, IP/BACnet/MQTT
-  discovery, UDMI and BACnet-to-MQTT validation, Reports, Hub, Users) wired to live API data.
-- `backend/` — FastAPI API with per-user RBAC, secret encryption at rest, evidence
-  integrity, backup/restore, and edge → hub sync.
-- `core/smart_commissioning_core/` — shared engines (IP scan, BACnet/MQTT discovery, UDMI
-  validation, BACnet ↔ MQTT comparison, controlled config publish) with scan-safety and
-  dry-run controls, plus the SQLAlchemy/Alembic persistence layer (SQLite local, Postgres hosted).
-- `worker/` — Dramatiq background jobs running the same engines off Redis.
-- `docs/production-architecture.md` maps the specification to the production build.
-
-## Docs
+## Documentation
 
 | Document | Covers |
 | --- | --- |
@@ -102,12 +174,46 @@ localhost steps to see it in the running app.
 | [docs/observability.md](docs/observability.md) | Structured logs, Prometheus metrics, alerts/SLOs, crash log |
 | [docs/backup-restore.md](docs/backup-restore.md) | Backup/restore + retention, RPO/RTO guidance per profile |
 | [docs/protocol-conformance.md](docs/protocol-conformance.md) | UDMI/MQTT/BACnet support: tested vs. simulated vs. live-untested |
-| [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory (see `docs/SBOM.generated.md`) |
+| [docs/review-comments-verification.md](docs/review-comments-verification.md) | The 24 design-review comments mapped to code + localhost verify steps |
 | [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) | On-site validation checklist for live-network/infra paths |
-| [docs/v1-review-checklist.md](docs/v1-review-checklist.md) | V1 review notes mapped to the production scaffold |
-| [docs/review-comments-verification.md](docs/review-comments-verification.md) | The 24 DP design-review comments mapped to code (`file:line`) + localhost verify steps |
+| [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | Safe controlled-pilot boundary + hosted setup for the team |
+| [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory |
+
+---
+
+## Security & safety
+
+- **Auth** — `local` (loopback-only, portable default) or `api_key` mode; per-user **RBAC**
+  (`viewer < reviewer < engineer < admin`) gates every route, with a race-safe last-admin guard.
+- **Secrets at rest** — broker passwords and TLS keys are Fernet-encrypted (`0600`), masked on read,
+  and redacted from API responses; never returned to clients.
+- **Scan safety** — live scans are **dry-run by default**, require an explicit authorization flag,
+  are rate-throttled, and support cooperative cancellation. No packets leave without consent.
+- **Evidence integrity** — reports and backups are hashed (SHA-256) and signed (detached Ed25519);
+  restores verify before writing (with a zip-slip guard).
+- **Honest status** — live-infrastructure paths that have not been run against real hardware are
+  marked as such, never faked. See the honesty rule in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Project status & roadmap
+
+**Code-complete and hardened, pending on-site sign-off.** Phases 0–4b are built and merged:
+persistence, auth + secret encryption, real discovery/validation engines with scan-safety,
+observability / evidence-integrity / backup-restore, and signed edge → hub sync. CI is green on the
+blocking `python` and `frontend` jobs.
+
+The **only gate to production is Phase 5 on-site validation** — the live paths (active scanning
+against real BMS/OT hardware, a real MQTT broker, Postgres/Redis at scale, a remote hub) were
+developed without that infrastructure and must be validated on site. A controlled team **pilot**
+(config / import / fixture-validation / dry-run / reports) is safe today; see
+[docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) and
+[docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
+
+---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, lint, CI gates, and
-branch/PR conventions, and [CHANGELOG.md](CHANGELOG.md) for the change history.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the exact commands CI runs (tests, lint, type
+checks), the npm-lockfile lesson, and branch/PR conventions. Change history is in
+[CHANGELOG.md](CHANGELOG.md); third-party notices in [NOTICE](NOTICE).
