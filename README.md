@@ -43,6 +43,7 @@ The original HTML and JSX prototypes served as reference material for the produc
 docs/
 frontend/
 backend/
+core/
 worker/
 infra/
 packaging/
@@ -51,25 +52,43 @@ device_udmi_payload_validation/
 Smart Commissioning Tool Specification.pdf
 ```
 
-## Local Startup Plan
+## Run it locally (local profile — no broker / Postgres / Redis)
 
-The scaffold is intended to become runnable with the following flow:
+Single-user loopback profile: SQLite, jobs run inline, auth bypassed for `127.0.0.1`.
 
-1. Start infrastructure:
-   `docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build`
-2. Frontend:
-   `cd frontend && npm install && npm run dev`
-3. Backend:
-   `cd backend && python -m pip install -e . && uvicorn app.main:app --reload`
-4. Worker:
-   `cd worker && python -m pip install -e . && dramatiq app.tasks`
+1. Backend API:
+   ```bash
+   cd backend
+   AUTH_MODE=local JOB_EXECUTION_MODE=inline DEPLOYMENT_ROLE=hub \
+     python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
+2. Seed demo data (optional): `python scripts/seed_demo.py --base-url http://127.0.0.1:8000`
+3. Frontend: `npm --prefix frontend run dev` → http://localhost:5173 (proxies `/api` → 8000)
+
+Engineer action buttons (Run / Publish / Export) are gated on an API key even in local
+mode — in the browser console run `localStorage.setItem('sc.apiKey','local-dev')`, then
+reload. One-command offline smoke: `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
+
+**Hosted stack** (Postgres + Redis + worker via Docker):
+`docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build`
+— see [docs/runbook.md](docs/runbook.md).
+
+### Reviewing the V1 design feedback?
+
+[docs/review-comments-verification.md](docs/review-comments-verification.md) maps all
+**24 DP review comments → ✅ implemented**, each with `file:line` evidence and the exact
+localhost steps to see it in the running app.
 
 ## What Exists Today
 
-- `frontend/` is a clean shell for the real React app.
-- `backend/` exposes the initial API surface and contracts.
-- `backend/` now persists configuration and import metadata in `backend/runtime/` as a bootstrap storage layer before the PostgreSQL repository is introduced.
-- `worker/` exposes the initial job names for discovery, UDMI validation, mapping validation, and reporting.
+- `frontend/` — React + TypeScript operator UI (Homepage, Configuration, IP/BACnet/MQTT
+  discovery, UDMI and BACnet-to-MQTT validation, Reports, Hub, Users) wired to live API data.
+- `backend/` — FastAPI API with per-user RBAC, secret encryption at rest, evidence
+  integrity, backup/restore, and edge → hub sync.
+- `core/smart_commissioning_core/` — shared engines (IP scan, BACnet/MQTT discovery, UDMI
+  validation, BACnet ↔ MQTT comparison, controlled config publish) with scan-safety and
+  dry-run controls, plus the SQLAlchemy/Alembic persistence layer (SQLite local, Postgres hosted).
+- `worker/` — Dramatiq background jobs running the same engines off Redis.
 - `docs/production-architecture.md` maps the specification to the production build.
 
 ## Docs
@@ -86,6 +105,7 @@ The scaffold is intended to become runnable with the following flow:
 | [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory (see `docs/SBOM.generated.md`) |
 | [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) | On-site validation checklist for live-network/infra paths |
 | [docs/v1-review-checklist.md](docs/v1-review-checklist.md) | V1 review notes mapped to the production scaffold |
+| [docs/review-comments-verification.md](docs/review-comments-verification.md) | The 24 DP design-review comments mapped to code (`file:line`) + localhost verify steps |
 
 ## Contributing
 
