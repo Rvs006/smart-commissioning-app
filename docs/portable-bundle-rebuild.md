@@ -104,7 +104,14 @@ The launcher is **not** frozen self-contained for Alembic: in
 `run_smart_commissioning_app.py::configure_environment` it expects sibling source
 dirs `<root>/backend`, `<root>/frontend/dist`, and (if present) `<root>/core` on
 `sys.path`. Build the exe, then assemble the directory bundle. **Either** of two
-Alembic-shipping options works — pick one:
+Alembic-shipping options works — pick one.
+
+> **Turnkey:** `packaging/windows_portable/build.ps1` automates Option A
+> end-to-end (frontend build → PyInstaller freeze → bundle assembly with the
+> cache trimming below + a sanity check that `core/alembic.ini` landed). Run
+> `pwsh packaging/windows_portable/build.ps1` (or `-SkipFrontend` to reuse an
+> existing `frontend/dist`). The freeze + clean-box launch are still build-box /
+> on-site steps (see §6). The raw commands below document what the script does.
 
 **Option A (recommended — mirrors backend/ and frontend/): ship the `core/`
 source tree next to the exe.** `migrate.py::_SOURCE_TREE_ROOT` then resolves
@@ -138,12 +145,11 @@ data-files branch of `migrate._candidate_roots()`. This needs a spec edit
 `datas=[]`, which is why the old build shipped no Alembic). Option A is simpler
 and is what the launcher's `core_root` check already anticipates.
 
-> The committed launcher is the only tracked file under
-> `packaging/windows_portable/`; there is **no committed build script or .spec**
-> (the `.spec` under `build/` is a git-ignored generated artifact). The two
-> commands above are the reproducible build — consider committing a
-> `packaging/windows_portable/build.ps1` capturing Option A so the bundle is
-> turnkey (out of scope for this read-only pass).
+> `packaging/windows_portable/build.ps1` (Option A) and the launcher are the
+> tracked files under `packaging/windows_portable/`; there is still **no
+> committed `.spec`** (PyInstaller generates one under `build/pyinstaller/`, a
+> git-ignored artifact). The script is the reproducible build; the two raw
+> command blocks above remain as documentation of what it does.
 
 ---
 
