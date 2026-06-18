@@ -297,6 +297,27 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertEqual(result.result_summary["payload_views"], [])
         self.assertEqual(result.result_summary["payload_view_source"], "none")
 
+    def test_payload_views_multi_asset_from_assets_list(self) -> None:
+        # A multi-AHU run supplies a per-asset `assets` list; the payload view
+        # emits one entry per asset (single top-level params stay back-compat).
+        result = validate_udmi_full_report(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "AHU-1", "manufacturer": "Acme"},
+                        "state_payload": {"system": {"hardware": {"make": "Acme"}}},
+                    },
+                    {
+                        "expected_schedule": {"asset_id": "AHU-2", "units": {"co2": "parts_per_million"}},
+                        "pointset_payload": {"points": {"co2": {"present_value": 400}}},
+                    },
+                ]
+            }
+        )
+        views = result.result_summary["payload_views"]
+        self.assertEqual({view["asset_id"] for view in views}, {"AHU-1", "AHU-2"})
+        self.assertEqual(result.result_summary["payload_view_source"], "direct_inputs")
+
 
 class MqttConfigPublishReviewTests(unittest.TestCase):
     def test_job_create_request_accepts_nested_pointset_parameters(self) -> None:

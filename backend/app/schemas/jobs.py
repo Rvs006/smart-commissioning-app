@@ -3,6 +3,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
+# ValidationIssueRecord moved to the shared core package; imported here so existing
+# `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
+from smart_commissioning_core.records import ValidationIssueRecord  # noqa: F401
+
 _SECRET_SENTINEL = "********"
 # Parameter key substrings whose values are broker/cert secrets. Redacted only
 # when a RunRecord is SERIALIZED to an API client (model_dump/JSON response);
@@ -26,9 +30,6 @@ def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, obje
             redacted[key] = value
     return redacted
 
-# ValidationIssueRecord moved to the shared core package; imported here so existing
-# `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
-from smart_commissioning_core.records import ValidationIssueRecord  # noqa: F401
 
 JobType = Literal[
     "ip_discovery",

@@ -13,7 +13,6 @@ from smart_commissioning_core.mqtt_transport import (
     MqttMessage,
     MqttTransportError,
     publish_config_and_wait_for_pointset,
-    read_retained_config,
 )
 from smart_commissioning_core.records import ValidationIssueRecord
 

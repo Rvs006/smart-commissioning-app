@@ -574,22 +574,12 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
     return facet or None
 
 
-def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object]]:
-    """Per-asset, per-payload-type expected-vs-observed payload view (mq9m4bnv).
+def _asset_payload_view(expected: dict[str, Any], observed_by_type: dict[str, dict]) -> dict[str, object] | None:
+    """Build ONE asset's per-payload-type expected-vs-observed view, or None.
 
-    Uses only payloads the validator actually holds: ``expected_schedule``
-    (expected facets) and the ``state_payload``/``metadata_payload``/
-    ``pointset_payload`` observed payloads (pasted by the operator or written in
-    by live capture). A payload type is omitted when neither an expected facet
-    nor an observed payload exists, so nothing is fabricated. Single UDMI asset
-    per run, matching the rest of this module.
+    A payload type is omitted when neither an expected facet nor an observed
+    payload exists, so nothing is fabricated.
     """
-    expected = _dict_or_empty(parameters.get("expected_schedule"))
-    observed_by_type = {
-        "state": _dict_or_empty(parameters.get("state_payload")),
-        "metadata": _dict_or_empty(parameters.get("metadata_payload")),
-        "pointset": _dict_or_empty(parameters.get("pointset_payload")),
-    }
     payload_types: list[dict[str, object]] = []
     for payload_type in ("state", "metadata", "pointset"):
         observed = observed_by_type[payload_type]
@@ -605,9 +595,48 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
             }
         )
     if not payload_types:
-        return []
+        return None
     asset_id = str(expected.get("asset_id") or "UDMI asset")
-    return [{"asset_id": asset_id, "payload_types": payload_types}]
+    return {"asset_id": asset_id, "payload_types": payload_types}
+
+
+def _observed_by_type(source: dict[str, object]) -> dict[str, dict]:
+    return {
+        "state": _dict_or_empty(source.get("state_payload")),
+        "metadata": _dict_or_empty(source.get("metadata_payload")),
+        "pointset": _dict_or_empty(source.get("pointset_payload")),
+    }
+
+
+def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object]]:
+    """Per-asset, per-payload-type expected-vs-observed payload view (mq9m4bnv).
+
+    Uses only payloads the validator actually holds: ``expected_schedule``
+    (expected facets) and the ``state_payload``/``metadata_payload``/
+    ``pointset_payload`` observed payloads (pasted by the operator or written in
+    by live capture); nothing is fabricated.
+
+    Multi-asset sites: an optional ``assets`` list (each entry
+    ``{expected_schedule, state_payload, metadata_payload, pointset_payload}``)
+    emits one view per asset, so a real multi-AHU run shows every device's
+    payload evidence. The single top-level ``expected_schedule``/``*_payload``
+    stays the single-asset back-compat path. NOTE: issue VALIDATION is still
+    single-schedule per run; this view simply surfaces all per-asset payloads
+    supplied.
+    """
+    assets = parameters.get("assets")
+    if isinstance(assets, list) and assets:
+        views: list[dict[str, object]] = []
+        for entry in assets:
+            if not isinstance(entry, dict):
+                continue
+            view = _asset_payload_view(_dict_or_empty(entry.get("expected_schedule")), _observed_by_type(entry))
+            if view is not None:
+                views.append(view)
+        return views
+
+    view = _asset_payload_view(_dict_or_empty(parameters.get("expected_schedule")), _observed_by_type(parameters))
+    return [view] if view is not None else []
 
 
 def _payload_view_source(
