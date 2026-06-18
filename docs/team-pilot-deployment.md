@@ -63,6 +63,11 @@ docker compose -f infra/docker-compose.yml config   # renders with your .env
 ```
 **STOP** if either fails — fix before going further.
 
+> The `frontend` image bakes in the in-app **Review Comments** widget by default.
+> To build a GA image without it, pass the Vite build-time flag at frontend build
+> time (`VITE_REVIEW_COMMENTS=false`). It is a build-time variable, **not** a
+> compose runtime value — do not add it to `infra/.env` (it has no effect there).
+
 ### 3.2 Secrets
 ```sh
 cd infra && cp .env.example .env

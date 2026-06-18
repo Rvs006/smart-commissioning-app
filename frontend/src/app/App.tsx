@@ -101,9 +101,12 @@ export function App() {
         </main>
       </section>
 
-      {/* The dry-run review widget is a development-only tool; it must not ship
-          to end users in a production build. */}
-      {import.meta.env.DEV ? <ReviewFeedback /> : null}
+      {/* Engineer review-comments widget. Faithful to the standalone HTML review
+          build, it ships in every build so pilot engineers can capture feedback
+          from the packaged/hosted app — not just `npm run dev`. Comments stay in
+          the browser (localStorage) until exported, so it carries no backend risk.
+          Set VITE_REVIEW_COMMENTS=false at build time to drop it from a GA build. */}
+      {import.meta.env.VITE_REVIEW_COMMENTS !== "false" ? <ReviewFeedback /> : null}
     </div>
   );
 }
