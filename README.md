@@ -150,6 +150,40 @@ Build a self-contained directory bundle (exe + backend + core + frontend) with
 
 ---
 
+## Signing in (API key)
+
+On a **hosted deployment** (Option A) the app requires an API key to view real
+data and to take any action. Without one you will see **"Authentication required
+— set an API key"** on pages like Reports, and Run / Upload / Generate / Export
+stay disabled. This is expected — set your key once and it is remembered in the
+browser.
+
+> **The key is the `API_KEY` value used to start the stack** — the same value you
+> generated for [Option A](#option-a--hosted-stack-docker-one-command). On the
+> host you can read it with `grep API_KEY infra/.env`.
+
+**Set it in the app (the only step your engineer needs):**
+
+1. Open the app and click **"Set API key"** at the **top-right** of the header.
+2. Paste the key and click **Save**. The page reloads and shows your role.
+3. Done — Reports, runs, results, uploads, and network scans now work.
+
+**Better than sharing the admin key — give each engineer their own:** sign in
+with the `API_KEY` (it acts as **admin**), open the **Users** tab, create a user
+with the right role (e.g. `engineer`), and hand them the **one-time key** shown.
+They set it the same way. See [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md).
+
+**What works without any key:** the blank import **templates** (Download
+XLSX/CSV) and the **import-profile list** are public format helpers — column
+headers plus one example row, no project data — so an engineer can prepare a
+register before they have a key.
+
+> **Local dev (Option B) and the portable bundle (Option C)** auto-trust
+> `127.0.0.1`, so no key is needed there. To enable the engineer action buttons
+> in local dev, see the note under Option B.
+
+---
+
 ## Reviewing the V1 design feedback?
 
 [docs/review-comments-verification.md](docs/review-comments-verification.md) maps all **24 design
