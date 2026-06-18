@@ -6,6 +6,7 @@ from pathlib import Path
 from secrets import token_hex
 from typing import Literal
 
+from cryptography import x509
 from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
 from sqlalchemy.engine import Engine
@@ -357,8 +358,14 @@ class ConfigurationService:
         secret_ref = f"secret://{field.lower().replace(' ', '-')}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{token_hex(4)}"
         write_secret_material(secret_ref, content)
 
+        expiry = self._certificate_expiry(field, content)
         configuration = self.load(project_id, site_id, mask_secrets=False)
         configuration.certificates.values[field] = secret_ref
+        # Reflect the real uploaded cert's expiry so the read-only "Certificate
+        # Expiry" status pill (mq9ll2vf) is driven by the actual notAfter, not a
+        # seeded placeholder. Private Key / unparseable uploads leave it as-is.
+        if expiry is not None:
+            configuration.certificates.values["Certificate Expiry"] = expiry
         self.save(configuration, project_id=project_id, site_id=site_id)
 
         return SecretMaterialResponse(
@@ -367,7 +374,7 @@ class ConfigurationService:
             file_name=request.file_name,
             fingerprint=digest[:16],
             validity=self._secret_validity(field, content),
-            expiry=None,
+            expiry=expiry,
             masked=True,
         )
 
@@ -484,3 +491,18 @@ class ConfigurationService:
         if expected_marker in content:
             return "stored"
         return "stored_unparsed"
+
+    def _certificate_expiry(self, field: str, content: str) -> str | None:
+        """The uploaded certificate's notAfter date (YYYY-MM-DD), or None.
+
+        Returns None for a Private Key (no expiry) or content that does not parse
+        as an X.509 PEM, so a non-cert upload never crashes the store path.
+        """
+        if field not in {"CA Certificate", "Client Certificate"}:
+            return None
+        try:
+            certificate = x509.load_pem_x509_certificate(content.encode("utf-8"))
+        except (ValueError, TypeError):
+            return None
+        not_after = getattr(certificate, "not_valid_after_utc", None) or certificate.not_valid_after
+        return not_after.date().isoformat()

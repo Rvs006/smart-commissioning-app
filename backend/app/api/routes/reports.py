@@ -184,6 +184,41 @@ def _report_rows(run: object) -> list[tuple[str, str]]:
     ]
 
 
+_FINDING_COLUMNS = ("Source Run", "Issue ID", "Asset", "Severity", "Type", "Description")
+
+
+def _source_run_findings(run: object) -> list[dict[str, str]]:
+    """Issues from the report's source runs, flattened + deterministically sorted.
+
+    A report scoped to ``source_run_ids`` must carry the ACTUAL findings of those
+    runs (not just an id label) to be a usable MSI handover deliverable. Terminal
+    runs' issues are immutable, so the sorted output keeps the artifact
+    byte-reproducible (required by the integrity verify endpoint).
+    """
+    source_ids = run.parameters.get("source_run_ids", [])
+    if not isinstance(source_ids, list):
+        return []
+    findings: list[dict[str, str]] = []
+    for source_id in source_ids:
+        try:
+            source = service.get_run(str(source_id))
+        except FileNotFoundError:
+            continue
+        for issue in source.issues:
+            findings.append(
+                {
+                    "Source Run": str(source_id),
+                    "Issue ID": str(getattr(issue, "issue_id", "") or ""),
+                    "Asset": str(getattr(issue, "asset_id", "") or ""),
+                    "Severity": str(getattr(issue, "severity", "") or ""),
+                    "Type": str(getattr(issue, "issue_type", "") or ""),
+                    "Description": str(getattr(issue, "description", "") or ""),
+                }
+            )
+    findings.sort(key=lambda finding: (finding["Source Run"], finding["Issue ID"]))
+    return findings
+
+
 def _build_xlsx_report(run: object) -> bytes:
     workbook = Workbook()
     # openpyxl stamps docProps/core.xml with the current time on save; pin the
@@ -198,6 +233,15 @@ def _build_xlsx_report(run: object) -> bytes:
         sheet.append(list(row))
     sheet.column_dimensions["A"].width = 24
     sheet.column_dimensions["B"].width = 56
+    # Findings from the scoped source runs (the actual report content, not just
+    # the metadata above). Empty source runs -> a header-only Findings sheet.
+    findings = _source_run_findings(run)
+    findings_sheet = workbook.create_sheet("Findings")
+    findings_sheet.append(list(_FINDING_COLUMNS))
+    for finding in findings:
+        findings_sheet.append([finding[column] for column in _FINDING_COLUMNS])
+    for column, width in {"A": 26, "B": 16, "C": 18, "D": 12, "E": 22, "F": 70}.items():
+        findings_sheet.column_dimensions[column].width = width
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -208,11 +252,27 @@ def _build_docx_report(run: object) -> bytes:
         f"<w:p><w:r><w:t>{escape(label)}: {escape(value)}</w:t></w:r></w:p>"
         for label, value in _report_rows(run)
     )
+    findings = _source_run_findings(run)
+    findings_heading = "<w:p><w:r><w:t>Findings</w:t></w:r></w:p>"
+    if findings:
+        findings_xml = "\n".join(
+            "<w:p><w:r><w:t>"
+            + escape(
+                f"{finding['Source Run']} · {finding['Issue ID']} · {finding['Severity']} · "
+                f"{finding['Asset']} · {finding['Type']}: {finding['Description']}"
+            )
+            + "</w:t></w:r></w:p>"
+            for finding in findings
+        )
+    else:
+        findings_xml = "<w:p><w:r><w:t>No findings in the scoped source runs.</w:t></w:r></w:p>"
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
     <w:p><w:r><w:t>Smart Commissioning Report</w:t></w:r></w:p>
     {paragraphs}
+    {findings_heading}
+    {findings_xml}
     <w:sectPr/>
   </w:body>
 </w:document>"""
@@ -242,4 +302,7 @@ def _build_zip_report(run: object) -> bytes:
     buffer = BytesIO()
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         archive.writestr("summary.json", json.dumps(dict(_report_rows(run)), indent=2))
+        # The actual findings from the scoped source runs (deterministically
+        # ordered so the artifact stays byte-reproducible).
+        archive.writestr("findings.json", json.dumps(_source_run_findings(run), indent=2))
     return buffer.getvalue()

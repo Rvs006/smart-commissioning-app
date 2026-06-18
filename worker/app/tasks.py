@@ -141,7 +141,13 @@ def _discovery_loader(run_id: str):
     return list(discovery_repository.list_points(run_id))
 
 
-@dramatiq.actor(queue_name="discovery")
+# Engine actors set max_retries=0: a failed engine run is already recorded as a
+# terminal failure by run_engine, so Dramatiq's default ~20x exponential-backoff
+# retry would re-run a deterministic failure (or a TimeLimitExceeded on a long
+# capture) into a retry storm while the run row stays "running". time_limit is
+# generous for discovery so a legitimate long/indefinite capture (bounded by
+# max_messages + cancel) is not killed mid-run.
+@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
 def discover_ip_range(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting IP discovery", extra={"actor": "discover_ip_range"})
@@ -157,7 +163,7 @@ def discover_ip_range(run_id: str, parameters: dict) -> None:
         logger.info("Finished IP discovery", extra={"actor": "discover_ip_range"})
 
 
-@dramatiq.actor(queue_name="discovery")
+@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
 def discover_bacnet(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet discovery", extra={"actor": "discover_bacnet"})
@@ -178,7 +184,7 @@ def discover_bacnet(run_id: str, parameters: dict) -> None:
         logger.info("Finished BACnet discovery", extra={"actor": "discover_bacnet"})
 
 
-@dramatiq.actor(queue_name="discovery")
+@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
 def discover_mqtt(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting MQTT discovery", extra={"actor": "discover_mqtt"})
@@ -199,7 +205,7 @@ def discover_mqtt(run_id: str, parameters: dict) -> None:
         logger.info("Finished MQTT discovery", extra={"actor": "discover_mqtt"})
 
 
-@dramatiq.actor(queue_name="validation")
+@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
 def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting UDMI validation", extra={"actor": "validate_udmi_payloads"})
@@ -214,7 +220,7 @@ def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
         logger.info("Finished UDMI validation", extra={"actor": "validate_udmi_payloads"})
 
 
-@dramatiq.actor(queue_name="validation")
+@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
 def publish_mqtt_config(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting MQTT config publish", extra={"actor": "publish_mqtt_config"})
@@ -230,7 +236,7 @@ def publish_mqtt_config(run_id: str, parameters: dict) -> None:
         logger.info("Finished MQTT config publish", extra={"actor": "publish_mqtt_config"})
 
 
-@dramatiq.actor(queue_name="validation")
+@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
 def validate_bacnet_points(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet point validation", extra={"actor": "validate_bacnet_points"})
@@ -246,7 +252,7 @@ def validate_bacnet_points(run_id: str, parameters: dict) -> None:
         logger.info("Finished BACnet point validation", extra={"actor": "validate_bacnet_points"})
 
 
-@dramatiq.actor(queue_name="validation")
+@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
 def compare_bacnet_mqtt(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})

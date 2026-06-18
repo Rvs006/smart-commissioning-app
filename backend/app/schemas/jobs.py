@@ -1,11 +1,35 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 # ValidationIssueRecord moved to the shared core package; imported here so existing
 # `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
 from smart_commissioning_core.records import ValidationIssueRecord  # noqa: F401
+
+_SECRET_SENTINEL = "********"
+# Parameter key substrings whose values are broker/cert secrets. Redacted only
+# when a RunRecord is SERIALIZED to an API client (model_dump/JSON response);
+# attribute access (run.parameters, used server-side to execute a run and to
+# re-publish on rollback) is untouched, so live runs and rollback still receive
+# the real values. This closes the hole where a broker password / inline private
+# key passed as a run parameter was echoed to any viewer via GET .../runs/{id}.
+_SENSITIVE_PARAM_SUBSTRINGS = ("password", "private_key", "client_certificate", "ca_certificate")
+
+
+def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, object]:
+    """Replace broker/cert secret values with a sentinel for API serialization."""
+    redacted: dict[str, object] = {}
+    for key, value in parameters.items():
+        lowered = key.casefold()
+        if any(token in lowered for token in _SENSITIVE_PARAM_SUBSTRINGS) and value not in (None, ""):
+            redacted[key] = _SECRET_SENTINEL
+        elif isinstance(value, str) and "-----BEGIN" in value:
+            redacted[key] = _SECRET_SENTINEL  # inline PEM material
+        else:
+            redacted[key] = value
+    return redacted
+
 
 JobType = Literal[
     "ip_discovery",
@@ -82,6 +106,13 @@ class RunRecord(JobSummary):
     result_summary: dict[str, object] = Field(default_factory=dict)
     issues: list[ValidationIssueRecord] = Field(default_factory=list)
     error_message: str | None = None
+
+    @field_serializer("parameters")
+    def _redact_parameters(self, parameters: dict[str, object]) -> dict[str, object]:
+        # Runs on JSON/model_dump serialization (the API response) only — not on
+        # attribute access — so broker/cert secrets never reach an API client
+        # while server-side execution/rollback still read the real values.
+        return redact_sensitive_parameters(parameters)
 
 
 class RunListResponse(BaseModel):

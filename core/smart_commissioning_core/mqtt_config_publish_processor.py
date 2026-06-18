@@ -3,10 +3,14 @@ from typing import Any
 
 from smart_commissioning_core.mqtt_config_publish import (
     BrokerPublisher,
+    ConfigReader,
     rollback_config,
     validate_and_publish_config,
 )
-from smart_commissioning_core.mqtt_transport import publish_config_and_wait_for_pointset
+from smart_commissioning_core.mqtt_transport import (
+    publish_config_and_wait_for_pointset,
+    read_retained_config,
+)
 from smart_commissioning_core.run_store import RunStore
 
 _logger = logging.getLogger(__name__)
@@ -24,6 +28,7 @@ def process_mqtt_config_publish_run(
     run_store: RunStore,
     execution_mode: str,
     broker_publisher: BrokerPublisher | None = publish_config_and_wait_for_pointset,
+    broker_reader: ConfigReader | None = read_retained_config,
 ) -> Any:
     run_store.update_run_status(
         run_id,
@@ -33,7 +38,9 @@ def process_mqtt_config_publish_run(
     )
 
     try:
-        result = validate_and_publish_config(parameters, broker_publisher=broker_publisher)
+        result = validate_and_publish_config(
+            parameters, broker_publisher=broker_publisher, broker_reader=broker_reader
+        )
         run_store.update_result_summary(
             run_id,
             {

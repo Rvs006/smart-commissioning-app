@@ -85,6 +85,17 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Liveness: the worker is useless if it cannot reach Redis (its only job
+    # source). A wedged Redis consumer connection surfaces here even though the
+    # process is still up, so `restart: unless-stopped` (which only restarts on
+    # exit) does not catch it. A failing probe + the runs-by-status "running not
+    # draining" metric are the two signals an operator alerts on.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,redis; redis.from_url(os.environ['REDIS_URL']).ping()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   postgres:
     image: postgres:16.9-alpine

@@ -320,6 +320,32 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         resp = self.client.get("/api/v1/discovery/runs/run_does_not_exist/topics.xlsx")
         self.assertEqual(resp.status_code, 404, resp.text)
 
+    def test_run_parameter_secrets_redacted_to_client_but_real_internally(self) -> None:
+        # A broker password / inline private key passed as run parameters must be
+        # redacted in the API response (any viewer) but kept server-side so
+        # execution + rollback still read the real values.
+        run_id = self._post(
+            "/api/v1/discovery/mqtt/runs",
+            {
+                "dry_run": True,
+                "broker_host": "mqtt.example.local",
+                "password": "hunter2",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+            },
+            "mqtt_discovery",
+        ).json()["run_id"]
+        got = self.client.get(f"/api/v1/discovery/runs/{run_id}")
+        self.assertEqual(got.status_code, 200, got.text)
+        params = got.json()["parameters"]
+        self.assertEqual(params["password"], "********")
+        self.assertEqual(params["private_key"], "********")
+        self.assertEqual(params["broker_host"], "mqtt.example.local")  # non-secret untouched
+        self.assertNotIn("hunter2", got.text)
+        # Server-side attribute access (rollback/execution) keeps the real value.
+        from app.api.routes import discovery as discovery_routes
+
+        self.assertEqual(discovery_routes.service.get_run(run_id).parameters["password"], "hunter2")
+
 
 class PointValidationApiTests(_EngineApiTestCase):
     def test_inline_point_validation_flags_mismatch(self) -> None:
@@ -357,6 +383,46 @@ class PointValidationApiTests(_EngineApiTestCase):
         issue_types = {issue["issue_type"] for issue in issues}
         self.assertIn("out_of_tolerance", issue_types)
         self.assertIn("missing_point", issue_types)
+
+
+class ReportFindingsApiTests(_EngineApiTestCase):
+    def test_report_zip_carries_source_run_findings(self) -> None:
+        import json as _json
+        import zipfile
+        from io import BytesIO
+
+        # A validation run that produces a real finding (a required point missing).
+        run_id = self._post(
+            "/api/v1/validation/bacnet/runs",
+            {
+                "expected_points": [
+                    {"Expected point name": "MissingPoint", "Required/optional flag": "required"}
+                ],
+                "observed_points": [],
+            },
+            "bacnet_validation",
+        ).json()["run_id"]
+        # A report scoped to that run must carry its findings, not just metadata.
+        report = self.client.post(
+            "/api/v1/reports",
+            json={
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "report_type": "issue_report",
+                "output_format": "zip",
+                "source_run_ids": [run_id],
+            },
+        )
+        self.assertEqual(report.status_code, 200, report.text)
+        report_id = report.json()["report_id"]
+        download = self.client.get(f"/api/v1/reports/{report_id}/download")
+        self.assertEqual(download.status_code, 200, download.text)
+        archive = zipfile.ZipFile(BytesIO(download.content))
+        self.assertIn("findings.json", archive.namelist())
+        findings = _json.loads(archive.read("findings.json"))
+        self.assertTrue(findings, "a scoped report must carry the source run's findings")
+        self.assertEqual(findings[0]["Source Run"], run_id)
+        self.assertIn("missing_point", {finding["Type"] for finding in findings})
 
 
 class MappingComparisonApiTests(_EngineApiTestCase):

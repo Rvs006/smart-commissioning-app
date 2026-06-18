@@ -155,5 +155,48 @@ class WriteOnlyUpdateTests(SecretStorageTestCase):
         self.assertEqual(self.service.load(mask_secrets=False).mqtt.values["MQTT Password"], "")
 
 
+class CertificateExpiryTests(SecretStorageTestCase):
+    @staticmethod
+    def _self_signed_cert(not_after) -> str:
+        from datetime import UTC, datetime
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.x509.oid import NameOID
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "expiry-test")])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime(2020, 1, 1, tzinfo=UTC))
+            .not_valid_after(not_after)
+            .sign(key, hashes.SHA256())
+        )
+        return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+    def test_storing_a_certificate_parses_and_records_its_expiry(self) -> None:
+        from datetime import UTC, datetime
+
+        pem = self._self_signed_cert(datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC))
+        response = self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="client.pem", content=pem)
+        )
+        # notAfter parsed and returned, and the config's expiry pill reflects it.
+        self.assertEqual(response.expiry, "2030-01-02")
+        snapshot = self.service.load(mask_secrets=False)
+        self.assertEqual(snapshot.certificates.values["Certificate Expiry"], "2030-01-02")
+
+    def test_private_key_has_no_expiry(self) -> None:
+        response = self.service.store_secret(
+            SecretMaterialRequest(field="Private Key", file_name="device.key", content=KEY_CONTENT)
+        )
+        self.assertIsNone(response.expiry)
+
+
 if __name__ == "__main__":
     unittest.main()

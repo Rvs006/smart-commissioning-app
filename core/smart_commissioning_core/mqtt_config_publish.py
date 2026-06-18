@@ -24,12 +24,16 @@ class MqttConfigPublishResult:
 
 
 BrokerPublisher = Callable[..., MqttMessage | None]
+# Reads the broker's retained config payload for rollback (read-only SUBSCRIBE);
+# injectable so tests can supply a fake and so a caller can disable the live read.
+ConfigReader = Callable[..., str | None]
 
 
 def validate_and_publish_config(
     parameters: dict[str, object],
     *,
     broker_publisher: BrokerPublisher | None = publish_config_and_wait_for_pointset,
+    broker_reader: ConfigReader | None = None,
 ) -> MqttConfigPublishResult:
     topic = _string(parameters.get("topic"))
     payload_text = _string(parameters.get("payload"))
@@ -105,6 +109,18 @@ def validate_and_publish_config(
     elif simulate_error in {"unreachable", "network"}:
         issues.append(_connection_issue(issues, topic, "broker_unreachable", "MQTT broker could not be reached."))
 
+    # Capture the prior retained config BEFORE publishing so a later rollback can
+    # restore the real prior value (a live retained read AFTER the publish would
+    # capture the just-published value). Read-only SUBSCRIBE; gated by the same
+    # use_live_broker/authorization as the publish (authorization enforced above).
+    previous_config = _capture_previous_config(
+        parameters,
+        topic,
+        use_live_broker=use_live_broker,
+        broker_reader=broker_reader,
+        wait_seconds=wait_seconds,
+    )
+
     if use_live_broker and not issues:
         broker_attempted = True
         if broker_publisher is None:
@@ -175,8 +191,6 @@ def validate_and_publish_config(
                         f"Live MQTT publish/subscribe failed ({broker_status_detail}).",
                     )
                 )
-
-    previous_config = _capture_previous_config(parameters, topic)
 
     # Multi-point confirm: build the set of expected (point, value) pairs from
     # (in priority order) an explicit parameters['expected_points'] list, OR by
@@ -288,19 +302,39 @@ def validate_and_publish_config(
     return MqttConfigPublishResult(result_summary=summary, issues=issues)
 
 
-def _capture_previous_config(parameters: dict[str, object], topic: str) -> dict[str, object]:
+def _capture_previous_config(
+    parameters: dict[str, object],
+    topic: str,
+    *,
+    use_live_broker: bool = False,
+    broker_reader: ConfigReader | None = None,
+    wait_seconds: float = 5.0,
+) -> dict[str, object]:
     """Capture the prior retained config value on ``topic`` for rollback.
 
-    HONESTY: reading a broker's RETAINED message requires a reachable broker,
-    which does not exist in this environment. So this captures whatever prior
-    value the caller can provide via ``parameters['previous_config_payload']``
-    (e.g. a value the operator snapshotted earlier); when none is supplied we
-    record ``captured: False`` and leave ``payload`` null. The live capture of
-    the retained value off a real broker is on-site-validation surface and is
-    listed in the task's ``live_untested`` output.
+    Order of preference: (1) a LIVE retained read off the broker when
+    ``use_live_broker`` and a ``broker_reader`` are available — the device's
+    actual current /config, subscribed read-only before the forward publish;
+    (2) a value the caller snapshotted via ``parameters['previous_config_payload']``;
+    (3) nothing (``captured: False``). The live read is the real read-modify-
+    restore path; it is on-site-untested (no broker in dev) but no longer a stub.
 
     Shape: ``{"topic", "payload" (str|None), "captured" (bool), "source"}``.
     """
+    if use_live_broker and broker_reader is not None and topic:
+        try:
+            settings = build_mqtt_connection_settings(parameters)
+            retained = broker_reader(settings, config_topic=topic, timeout_seconds=wait_seconds)
+        except (MqttTransportError, OSError, ValueError):
+            retained = None
+        if isinstance(retained, str) and retained.strip():
+            return {
+                "topic": topic,
+                "payload": retained,
+                "captured": True,
+                "source": "live_retained_read",
+            }
+
     supplied = parameters.get("previous_config_payload")
     if supplied is None:
         supplied = parameters.get("previous_config")
@@ -372,7 +406,11 @@ def rollback_config(
     rollback_parameters.pop("previous_config_payload", None)
     rollback_parameters.pop("previous_config", None)
 
-    result = validate_and_publish_config(rollback_parameters, broker_publisher=broker_publisher)
+    # A rollback restores a known prior value, so it does not capture a "previous
+    # of the previous" — skip the live retained read on the rollback republish.
+    result = validate_and_publish_config(
+        rollback_parameters, broker_publisher=broker_publisher, broker_reader=None
+    )
     summary = dict(result.result_summary)
     summary["rollback"] = True
     summary["rolled_back_payload_bytes"] = len(payload_text.encode("utf-8"))
