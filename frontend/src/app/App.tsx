@@ -4,16 +4,31 @@ import { ReviewFeedback } from "../features/workflow/ReviewFeedback";
 import { useSession } from "./sessionContext";
 import { getTheme, toggleTheme, type ThemeMode } from "./theme";
 
-const navItems = [
-  { label: "Homepage", number: "01", to: "/" },
-  { label: "Configuration", number: "02", to: "/configuration" },
-  { label: "IP Discovery", number: "03", to: "/ip-scanner" },
-  { label: "BACnet", number: "04", to: "/bacnet-discovery" },
-  { label: "MQTT Discovery", number: "05", to: "/mqtt-discovery" },
-  { label: "UDMI Workbench", number: "06", to: "/udmi-validation" },
-  { label: "BACnet to MQTT Validation", number: "07", to: "/data-validation" },
-  { label: "Reports", number: "08", to: "/reports" },
-  { label: "Hub", number: "09", to: "/hub" },
+// Navigation grouped by the commissioning workflow stage (Configure → Discover
+// → Validate → Report → Operate) instead of a flat list of equal tabs, so the
+// nav reflects the order of the job. Home stays a standalone entry.
+type NavGroup = { stage: string | null; items: { label: string; to: string }[] };
+
+const NAV_GROUPS: NavGroup[] = [
+  { stage: null, items: [{ label: "Home", to: "/" }] },
+  { stage: "Configure", items: [{ label: "Configuration", to: "/configuration" }] },
+  {
+    stage: "Discover",
+    items: [
+      { label: "IP Discovery", to: "/ip-scanner" },
+      { label: "BACnet", to: "/bacnet-discovery" },
+      { label: "MQTT Discovery", to: "/mqtt-discovery" },
+    ],
+  },
+  {
+    stage: "Validate",
+    items: [
+      { label: "UDMI Workbench", to: "/udmi-validation" },
+      { label: "BACnet to MQTT Validation", to: "/data-validation" },
+    ],
+  },
+  { stage: "Report", items: [{ label: "Reports", to: "/reports" }] },
+  { stage: "Operate", items: [{ label: "Hub", to: "/hub" }] },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -48,11 +63,16 @@ export function App() {
   const pageTitle = pageTitles[location.pathname] ?? "Workspace";
   const pageSubtitle = pageSubtitles[location.pathname] ?? "Commissioning workflow.";
 
-  // The Users tab is admin-only; everyone else never sees the entry (the route
-  // itself stays admin-gated server-side, so this is a UX nicety, not security).
-  const tabs = canAdmin
-    ? [...navItems, { label: "Users", number: "10", to: "/users" }]
-    : navItems;
+  // The Users entry is admin-only; everyone else never sees it (the route itself
+  // stays admin-gated server-side, so this is a UX nicety, not security). It
+  // lives in the Operate group alongside the Hub.
+  const navGroups: NavGroup[] = canAdmin
+    ? NAV_GROUPS.map((group) =>
+        group.stage === "Operate"
+          ? { ...group, items: [...group.items, { label: "Users", to: "/users" }] }
+          : group,
+      )
+    : NAV_GROUPS;
 
   return (
     <div className="console-shell">
@@ -82,17 +102,23 @@ export function App() {
           </div>
         </div>
 
-        <nav className="app-tabs" aria-label="Commissioning modules">
-          {tabs.map((item) => (
-            <NavLink
-              className={({ isActive }) => `app-tab${isActive ? " active" : ""}`}
-              end={item.to === "/"}
-              key={item.to}
-              to={item.to}
-            >
-              <span className="app-tab-num">{item.number}</span>
-              <span className="app-tab-label">{item.label}</span>
-            </NavLink>
+        <nav className="app-tabs grouped" aria-label="Commissioning modules">
+          {navGroups.map((group) => (
+            <div className="nav-group" key={group.stage ?? "home"}>
+              {group.stage ? <span className="nav-group-label">{group.stage}</span> : null}
+              <div className="nav-group-items">
+                {group.items.map((item) => (
+                  <NavLink
+                    className={({ isActive }) => `app-tab${isActive ? " active" : ""}`}
+                    end={item.to === "/"}
+                    key={item.to}
+                    to={item.to}
+                  >
+                    <span className="app-tab-label">{item.label}</span>
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
       </header>

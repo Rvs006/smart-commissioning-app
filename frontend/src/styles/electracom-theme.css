@@ -1314,3 +1314,59 @@
 .module-steps[data-step="results"] > .app-grid[data-stepgroup~="results"] {
   display: grid;
 }
+
+/* ============================================================================
+   Workflow-stage grouped nav — clusters the module tabs under the stage they
+   belong to (Configure / Discover / Validate / Report / Operate) so the nav
+   mirrors the job order instead of a flat row of equal tabs.
+   ============================================================================ */
+.app-tabs.grouped {
+  align-items: flex-end;
+  gap: 0;
+}
+
+.nav-group {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  gap: 3px;
+  padding: 7px 14px 0;
+}
+
+/* Hairline divider between stage groups. */
+.nav-group + .nav-group::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 12px;
+  bottom: 10px;
+  width: 1px;
+  background: var(--border);
+}
+
+.nav-group-label {
+  padding-left: 7px;
+  color: var(--muted);
+  font-family: "SF Mono", SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.nav-group-items {
+  display: flex;
+  gap: 2px;
+}
+
+.app-tabs.grouped .app-tab {
+  padding: 9px 12px;
+}
+
+@media (max-width: 720px) {
+  .nav-group {
+    padding: 6px 10px 0;
+  }
+}
