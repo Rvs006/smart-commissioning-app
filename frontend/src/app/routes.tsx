@@ -5,8 +5,15 @@ import { DashboardPage } from "../features/workflow/DashboardPage";
 import { HubPage } from "../features/workflow/HubPage";
 import { ModulePage } from "../features/workflow/ModulePage";
 import { UsersPage } from "../features/workflow/UsersPage";
+import { BriefPage } from "../features/brief/BriefPage";
+import { LearningPage } from "../features/learning/LearningPage";
 
 export const router = createHashRouter([
+  // Standalone product surfaces (own demo-shell header), mirroring the
+  // Electracom reference's Product Brief + Course. "Launch the App" enters the
+  // console layout below.
+  { path: "brief", element: <BriefPage /> },
+  { path: "learning", element: <LearningPage /> },
   {
     path: "/",
     element: <App />,

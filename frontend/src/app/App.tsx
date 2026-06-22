@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { ReviewFeedback } from "../features/workflow/ReviewFeedback";
 import { useSession } from "./sessionContext";
+import { getTheme, toggleTheme, type ThemeMode } from "./theme";
 
 const navItems = [
   { label: "Homepage", number: "01", to: "/" },
@@ -58,11 +59,20 @@ export function App() {
       <header className="app-header">
         <div className="app-brand-bar">
           <NavLink className="app-brand" to="/">
+            <img className="brand-logo" src="/electracom-logo.png" alt="Electracom" />
+            <span className="app-brand-divider" />
             <span className="app-brand-title">Smart Commissioning Tool</span>
             <span className="app-brand-kind">Commissioning workspace</span>
           </NavLink>
 
           <div className="app-header-meta">
+            <Link className="header-pill" to="/brief">
+              Brief
+            </Link>
+            <Link className="header-pill" to="/learning">
+              Learning
+            </Link>
+            <ThemeToggle />
             <span className="site-pill">
               <span className="site-pill-dot" />
               Block B Plantroom
@@ -108,6 +118,24 @@ export function App() {
           Set VITE_REVIEW_COMMENTS=false at build time to drop it from a GA build. */}
       {import.meta.env.VITE_REVIEW_COMMENTS !== "false" ? <ReviewFeedback /> : null}
     </div>
+  );
+}
+
+// Light/dark switch. Mirrors the reference app's theme toggle; the warm token
+// palette in electracom-theme.css keys off the `data-theme` attribute.
+function ThemeToggle() {
+  const [mode, setMode] = useState<ThemeMode>(() => getTheme());
+
+  return (
+    <button
+      aria-label="Toggle colour theme"
+      className="header-pill"
+      onClick={() => setMode(toggleTheme())}
+      title="Toggle light / dark"
+      type="button"
+    >
+      {mode === "dark" ? "☀ Light" : "☾ Dark"}
+    </button>
   );
 }
 
