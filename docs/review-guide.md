@@ -27,6 +27,14 @@ cd smart-commissioning-app
 Pick one. **Option A** is fastest for a pure UI review; **Option B** gives you
 live data end-to-end.
 
+> **Do you need an API key?** No shared/secret key is committed to this repo (by
+> design). For **local review you need no real key** — the backend trusts
+> loopback (`127.0.0.1`) as admin; to enable the Run / Publish / Export buttons
+> in local mode, set a harmless placeholder in the browser console once:
+> `localStorage.setItem('sc.apiKey','local-dev')` (the value is ignored on
+> loopback). Only the **Docker stack (Option B)** needs a real key, which you
+> generate yourself — see its sign-in step.
+
 ### Option A — Frontend only (quickest, no backend)
 
 Requires **Node 22**.
