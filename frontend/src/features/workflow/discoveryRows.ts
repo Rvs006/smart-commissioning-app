@@ -233,3 +233,55 @@ export function discoveryMetrics(
   }
   return null;
 }
+
+// Honest primary/secondary metrics for the validation routes, derived from a
+// terminal validation run's result_summary. Returns null for run kinds that
+// carry no comparable counts (e.g. mqtt_config_publish, which can run under
+// either validation route) so the card shows a neutral empty state, never NaN.
+export function validationMetrics(
+  route: string,
+  summary: Record<string, unknown> | undefined,
+): { primary: string; primaryLabel: string; secondary: string; secondaryLabel: string } | null {
+  if (!summary) {
+    return null;
+  }
+  const num = (key: string): number | undefined => {
+    const value = summary[key];
+    return typeof value === "number" ? value : undefined;
+  };
+
+  if (route === "udmi-validation") {
+    // UDMI/MQTT payload validation: expected_devices is present only for the
+    // udmi_validation kind; absent for an mqtt_config_publish run -> null.
+    const expected = num("expected_devices");
+    if (expected === undefined) {
+      return null;
+    }
+    const seen = num("publishing_seen") ?? 0;
+    const conformance = expected > 0 ? Math.round((seen / expected) * 100) : 0;
+    return {
+      primary: `${conformance}%`,
+      primaryLabel: "payload conformance",
+      secondary: String(num("issue_count") ?? 0),
+      secondaryLabel: "blocking issues",
+    };
+  }
+
+  if (route === "data-validation") {
+    // BACnet point / mapping comparison runs carry total + ok + issue_count;
+    // a publish run does not -> null (neutral empty state).
+    const ok = num("ok");
+    const total = num("total");
+    if (ok === undefined || total === undefined) {
+      return null;
+    }
+    return {
+      primary: String(ok),
+      primaryLabel: "checks passed",
+      secondary: String(num("issue_count") ?? total - ok),
+      secondaryLabel: "issues found",
+    };
+  }
+
+  return null;
+}
