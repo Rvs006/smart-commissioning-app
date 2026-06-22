@@ -81,8 +81,10 @@ export function App() {
           <NavLink className="app-brand" to="/">
             <img className="brand-logo" src="/electracom-logo.png" alt="Electracom" />
             <span className="app-brand-divider" />
-            <span className="app-brand-title">Smart Commissioning Tool</span>
-            <span className="app-brand-kind">Commissioning workspace</span>
+            <span className="app-brand-text">
+              <span className="app-brand-title">Smart Commissioning Tool</span>
+              <span className="app-brand-kind">Commissioning workspace</span>
+            </span>
           </NavLink>
 
           <div className="app-header-meta">
