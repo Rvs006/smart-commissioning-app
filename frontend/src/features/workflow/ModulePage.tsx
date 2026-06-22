@@ -79,6 +79,10 @@ type ActiveRun = {
   kind: "discovery" | "validation";
 };
 
+// The module page is split into three stages so the operator works one screen
+// at a time instead of scrolling a single long page of every control at once.
+type ModuleStep = "setup" | "run" | "results";
+
 const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discovery"]);
 
 const validationModeCards = [
@@ -229,6 +233,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // is on-site-untested; this drives the existing mqtt discovery run + topics.
   const [captureTopicFilter, setCaptureTopicFilter] = useState("#");
   const [captureSeconds, setCaptureSeconds] = useState("10");
+  const [step, setStep] = useState<ModuleStep>("setup");
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
@@ -362,6 +367,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReportToast(null);
     setScanAuthorized(false);
     setScanDryRun(false);
+    setStep("setup");
     resetTemplateDownload();
     resetReportDownload();
     resetExportDownload();
@@ -384,6 +390,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     const timer = setTimeout(() => setReportToast(null), 8000);
     return () => clearTimeout(timer);
   }, [reportToast]);
+
+  // Step flow: advance to Run the moment a run is queued, and to Results when it
+  // reaches a terminal state, so the operator follows the job rather than
+  // hunting down a long page. Manual step clicks still override at any time.
+  useEffect(() => {
+    if (activeRun) {
+      setStep("run");
+    }
+  }, [activeRun]);
+
+  // Only a *successful* run advances to Results. A failed/cancelled run is left
+  // on the Run step, where the monitor shows the terminal status and
+  // activeRunError — otherwise the operator would land on an empty Results view
+  // with no clue why the job ended.
+  useEffect(() => {
+    if (activeRunTerminal && activeRunStatus === "succeeded") {
+      setStep("results");
+    }
+  }, [activeRunTerminal, activeRunStatus]);
 
   const importMutation = useMutation({
     mutationFn: async (input: { importType: ImportType; file: File }) => {
@@ -466,6 +491,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         // Report linking (mqautz9j): confirm where the report lives and refresh
         // the reports list so the new report is selectable for export.
         setReportToast("Report generated — see the Reports list below to download or export it.");
+        setStep("results");
         void reportsQuery.refetch();
       }
     },
@@ -860,7 +886,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </div>
       </section>
 
-      <section className="app-grid two-col">
+      <StepNav
+        step={step}
+        onStep={setStep}
+        hasRun={Boolean(activeRun)}
+        terminal={activeRunTerminal}
+      />
+
+      <div className="module-steps" data-step={step}>
+      <section className="app-grid two-col" data-stepgroup="setup run">
         <article className="surface">
           <div className="surface-heading">
             <div>
@@ -1215,7 +1249,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       </section>
 
       {module.importTypes.length > 0 && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Templates</span>
@@ -1280,7 +1314,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "data-validation" && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Validation modes</span>
@@ -1301,7 +1335,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "ip-scanner" && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Scan settings</span>
@@ -1352,7 +1386,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "mqtt-discovery" && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="run">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Live capture</span>
@@ -1471,7 +1505,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "udmi-validation" && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Validation inputs</span>
@@ -1567,7 +1601,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "udmi-validation" && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="run">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Controlled publish</span>
@@ -1701,7 +1735,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "reports" && (
-        <section className="surface">
+        <section className="surface" data-stepgroup="results">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Reports</span>
@@ -1796,7 +1830,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </section>
       )}
 
-      <section className="app-grid two-col wide-left">
+      <section className="app-grid two-col wide-left" data-stepgroup="results">
         <article className="surface">
           <div className="surface-heading">
             <div>
@@ -2033,7 +2067,48 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
         </aside>
       </section>
+      </div>
     </div>
+  );
+}
+
+// Segmented Setup / Run / Results control. Gates the module's sections (via the
+// data-step / data-stepgroup CSS in electracom-theme.css) so only the active
+// stage's panels render — replacing one long scroll with one screen per task.
+function StepNav({
+  step,
+  onStep,
+  hasRun,
+  terminal,
+}: {
+  step: ModuleStep;
+  onStep: (next: ModuleStep) => void;
+  hasRun: boolean;
+  terminal: boolean;
+}) {
+  const steps: { id: ModuleStep; label: string }[] = [
+    { id: "setup", label: "Setup" },
+    { id: "run", label: "Run" },
+    { id: "results", label: "Results" },
+  ];
+  return (
+    <nav aria-label="Module steps" className="step-nav">
+      {steps.map((entry, index) => {
+        const done = (entry.id === "setup" && hasRun) || (entry.id === "run" && terminal);
+        return (
+          <button
+            aria-current={step === entry.id ? "step" : undefined}
+            className={step === entry.id ? "active" : undefined}
+            key={entry.id}
+            onClick={() => onStep(entry.id)}
+            type="button"
+          >
+            <span className={`step-num${done ? " step-done" : ""}`}>{done ? "✓" : index + 1}</span>
+            {entry.label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 

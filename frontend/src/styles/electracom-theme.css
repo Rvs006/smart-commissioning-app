@@ -1220,3 +1220,94 @@
 [data-theme="dark"] .dc-role-pill.active {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--dc-bdr);
 }
+
+/* ============================================================================
+   Module step layout — one task per screen instead of one long scroll.
+   A segmented Setup / Run / Results control gates the module's sections so the
+   operator sees only the stage they are in. Theme-native (reuses tokens).
+   ============================================================================ */
+.step-nav {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 5px;
+  border: 1px solid var(--border-soft);
+  border-radius: 980px;
+  background: var(--surface-2);
+}
+
+.step-nav button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 980px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+
+.step-nav button:hover {
+  color: var(--ink);
+}
+
+.step-nav button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow), 0 0 0 1px var(--border);
+}
+
+.step-nav .step-num {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.step-nav button.active .step-num {
+  background: var(--accent);
+  color: #fff;
+}
+
+.step-nav .step-num.step-done {
+  background: var(--green);
+  color: #fff;
+}
+
+/* The step container keeps the app-page grid rhythm for whichever sections show. */
+.module-steps {
+  display: grid;
+  gap: 16px;
+}
+
+/* Hide every grouped section, then reveal only the active step's sections. The
+   grid rule below has higher specificity so .app-grid sections keep their
+   two-column layout when shown. */
+.module-steps > [data-stepgroup] {
+  display: none;
+}
+
+.module-steps[data-step="setup"] > [data-stepgroup~="setup"],
+.module-steps[data-step="run"] > [data-stepgroup~="run"],
+.module-steps[data-step="results"] > [data-stepgroup~="results"] {
+  display: block;
+}
+
+.module-steps[data-step="setup"] > .app-grid[data-stepgroup~="setup"],
+.module-steps[data-step="run"] > .app-grid[data-stepgroup~="run"],
+.module-steps[data-step="results"] > .app-grid[data-stepgroup~="results"] {
+  display: grid;
+}
