@@ -682,6 +682,7 @@
 }
 
 .dc-stat-val {
+  display: block;
   font-size: 30px;
   font-weight: 800;
   color: var(--dc-ac);
@@ -689,6 +690,7 @@
 }
 
 .dc-stat-lab {
+  display: block;
   font-family: var(--dc-mono);
   font-size: 10px;
   text-transform: uppercase;
@@ -696,6 +698,7 @@
   color: var(--dc-mu);
   margin-top: 6px;
   font-weight: 600;
+  line-height: 1.4;
 }
 
 .dc-role-picker {

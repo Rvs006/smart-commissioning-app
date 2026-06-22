@@ -44,6 +44,10 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   Section Reference, and a role-based Guided Tour) and a **Learning** path
   (`/#/learning` — role-based walkthroughs). Content is scoped to this app's own
   modules — theme and format only, no feature copy.
+- **Step-based module layout** — each module page is now split into a
+  **Setup / Run / Results** segmented flow so the operator works one screen at a
+  time instead of scrolling every panel at once. The step auto-advances (Run when
+  a run is queued, Results on success) and manual step clicks always override.
 
 ### Changed
 
@@ -69,6 +73,12 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   issue.
 - Regenerated the frontend lockfile with **npm 10** for cross-npm compatibility,
   and regenerated it to include the full esbuild dependency tree.
+- Replaced placeholder/marketing figures on the Product Brief "at a glance"
+  stats (`∞`, `100%`, "console for every site") with honest, verifiable facts
+  (deployment profiles, access roles, evidence signature schemes), and fixed the
+  stat value/label rendering inline (now stacked) so they no longer overlap.
+- Failed/cancelled runs stay on the module **Run** step (where the monitor shows
+  the error) instead of auto-advancing to an empty Results view.
 
 ### Removed
 
