@@ -400,11 +400,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [activeRun]);
 
+  // Only a *successful* run advances to Results. A failed/cancelled run is left
+  // on the Run step, where the monitor shows the terminal status and
+  // activeRunError — otherwise the operator would land on an empty Results view
+  // with no clue why the job ended.
   useEffect(() => {
-    if (activeRunTerminal) {
+    if (activeRunTerminal && activeRunStatus === "succeeded") {
       setStep("results");
     }
-  }, [activeRunTerminal]);
+  }, [activeRunTerminal, activeRunStatus]);
 
   const importMutation = useMutation({
     mutationFn: async (input: { importType: ImportType; file: File }) => {
