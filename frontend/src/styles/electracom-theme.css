@@ -1370,3 +1370,27 @@
     padding: 6px 10px 0;
   }
 }
+
+/* ============================================================================
+   Header bar tidy — the added Brief/Learning/Dark pills pushed the brand + meta
+   past the 1180 cap, wrapping the title to two lines and the right cluster to a
+   second row. Stack the brand kicker under the title (reclaims width), keep the
+   title on one line, and stop the meta cluster wrapping on desktop.
+   ============================================================================ */
+.app-brand-text {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.app-brand-title {
+  white-space: nowrap;
+}
+
+@media (min-width: 900px) {
+  .app-header-meta {
+    flex-wrap: nowrap;
+  }
+}
