@@ -33,7 +33,12 @@ import {
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { groupIssuesByAsset, mergeAssetGroups, moduleWorkspaces, type IssueRow } from "./operatorData";
-import { discoveryMetrics, discoveryViewFor, matchesTopicFilter } from "./discoveryRows";
+import {
+  discoveryMetrics,
+  discoveryViewFor,
+  matchesTopicFilter,
+  validationMetrics,
+} from "./discoveryRows";
 import { isTerminalStatus } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
@@ -614,11 +619,40 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     ? buildResultDetailItems(module.route, selectedResult, usingLiveResults)
     : [];
 
-  const primaryMetric = liveMetrics?.primary ?? workspace?.primaryMetric ?? "Ready";
-  const primaryMetricLabel = liveMetrics?.primaryLabel ?? workspace?.primaryMetricLabel ?? module.integrationStatus;
-  const secondaryMetric = liveMetrics?.secondary ?? workspace?.secondaryMetric ?? String(module.importTypes.length);
-  const secondaryMetricLabel =
-    liveMetrics?.secondaryLabel ?? workspace?.secondaryMetricLabel ?? "accepted inputs";
+  // Honest headline metrics: real numbers derived from the latest terminal run
+  // (discovery, validation, or reports). When nothing has run there is no number
+  // to show, so the card renders a neutral empty state — never a hardcoded
+  // sample value presented as if it were a real result.
+  const metricsView = useMemo<{
+    primary: string;
+    primaryLabel: string;
+    secondary: string;
+    secondaryLabel: string;
+  } | null>(() => {
+    if (liveMetrics) {
+      return liveMetrics;
+    }
+    if (
+      (module.route === "udmi-validation" || module.route === "data-validation") &&
+      isTerminalStatus(validationRunQuery.data?.status)
+    ) {
+      const derived = validationMetrics(module.route, validationRunQuery.data?.result_summary);
+      if (derived) {
+        return derived;
+      }
+    }
+    if (module.route === "reports" && !reportsQuery.isLoading && reportsQuery.data) {
+      const reports = reportsQuery.data.reports;
+      const ready = reports.filter((report) => report.status === "succeeded").length;
+      return {
+        primary: String(ready),
+        primaryLabel: "reports ready",
+        secondary: String(reports.length),
+        secondaryLabel: "reports generated",
+      };
+    }
+    return null;
+  }, [liveMetrics, module.route, validationRunQuery.data, reportsQuery.isLoading, reportsQuery.data]);
 
   const activeStatusClass = activeRunStatus ? toStatusClass(activeRunStatus) : "queued";
   // Cancel is an engineer+ mutation; hide it entirely for lower roles so a
@@ -806,14 +840,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <p>{workspace?.headline ?? module.summary}</p>
         </div>
         <div className="module-metrics">
-          <article>
-            <strong>{primaryMetric}</strong>
-            <span>{primaryMetricLabel}</span>
-          </article>
-          <article>
-            <strong>{secondaryMetric}</strong>
-            <span>{secondaryMetricLabel}</span>
-          </article>
+          {metricsView ? (
+            <>
+              <article>
+                <strong>{metricsView.primary}</strong>
+                <span>{metricsView.primaryLabel}</span>
+              </article>
+              <article>
+                <strong>{metricsView.secondary}</strong>
+                <span>{metricsView.secondaryLabel}</span>
+              </article>
+            </>
+          ) : (
+            <article className="module-metrics-empty">
+              <strong>—</strong>
+              <span>{module.route === "reports" ? "No reports yet" : "No run yet"}</span>
+            </article>
+          )}
         </div>
       </section>
 

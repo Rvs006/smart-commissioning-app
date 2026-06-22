@@ -140,6 +140,35 @@ describe("ModulePage discovery wiring", () => {
     expect(await screen.findByText("plant-controller")).toBeInTheDocument();
     // Live banner is shown, not a fabricated "Result" verdict column.
     expect(screen.getByText(/Live discovery observations/i)).toBeInTheDocument();
+
+    // Headline metric now reflects the real run (hosts_responsive: 1), never the
+    // old hardcoded "118" sample.
+    expect(await screen.findByText("responsive hosts")).toBeInTheDocument();
+    expect(screen.queryByText("118")).not.toBeInTheDocument();
+  });
+
+  it("shows a neutral empty-state metric (no hardcoded sample) before any run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    // Before any run the headline metric is a neutral empty state, NOT the old
+    // hardcoded sample ("118" / "reachable hosts") that looked like a real scan.
+    expect(await screen.findByText("No run yet")).toBeInTheDocument();
+    expect(screen.queryByText("118")).not.toBeInTheDocument();
+    expect(screen.queryByText("reachable hosts")).not.toBeInTheDocument();
   });
 
   it("shows a dry-run preview button that needs no authorization", async () => {

@@ -6,9 +6,13 @@
 //
 // What stays sample (kept here, labelled in the UI as "Sample preview"):
 //  - workflowStages: no workflow-status aggregate endpoint exists.
-//  - moduleWorkspaces.*.rows / metrics for validation modules + the "Result"
-//    interpretation columns: register-comparison verdicts are produced by a
+//  - moduleWorkspaces.*.rows + the "Result" interpretation columns for
+//    validation modules: register-comparison verdicts are produced by a
 //    validation run, not returned by discovery results.
+//
+// Headline metric numbers are NOT sample data: they derive from the latest live
+// run (discoveryMetrics / validationMetrics in discoveryRows.ts, and the report
+// queue for /reports). When no run exists the card shows a neutral empty state.
 //  - issueRows: illustrative issue copy used only as a labelled fallback when no
 //    live validation run has been executed yet.
 //
@@ -182,10 +186,6 @@ export type ModuleWorkspace = {
   route: string;
   title: string;
   headline: string;
-  primaryMetric: string;
-  primaryMetricLabel: string;
-  secondaryMetric: string;
-  secondaryMetricLabel: string;
   tableTitle: string;
   rows: Array<Record<string, string>>;
   columns: string[];
@@ -268,10 +268,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "ip-scanner",
     title: "IP Scanner",
     headline: "Find reachable, missing, and rogue network hosts against the expected register.",
-    primaryMetric: "118",
-    primaryMetricLabel: "reachable hosts",
-    secondaryMetric: "6",
-    secondaryMetricLabel: "exceptions",
     tableTitle: "Network Scan Results",
     columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
     rows: [
@@ -286,10 +282,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "bacnet-discovery",
     title: "BACnet Discovery",
     headline: "Discover BACnet devices, object lists, and property health before validation.",
-    primaryMetric: "37",
-    primaryMetricLabel: "devices discovered",
-    secondaryMetric: "1,284",
-    secondaryMetricLabel: "objects indexed",
     tableTitle: "BACnet Devices",
     columns: ["Device", "Instance", "IP Address", "Network Number", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
     rows: [
@@ -304,10 +296,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "mqtt-discovery",
     title: "MQTT Discovery",
     headline: "Subscribe to broker topics, capture payloads, and compare telemetry to the register.",
-    primaryMetric: "412",
-    primaryMetricLabel: "topics observed",
-    secondaryMetric: "9",
-    secondaryMetricLabel: "silent topics",
     tableTitle: "MQTT Topic Observations",
     columns: ["Topic", "Asset", "Payload Last Seen", "Message Count", "Detailed Connection Status", "Raw Payload", "Result"],
     rows: [
@@ -322,10 +310,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "udmi-validation",
     title: "UDMI Payload Workbench",
     headline: "Inspect state, metadata, pointset, and controlled publish payloads in detail.",
-    primaryMetric: "94%",
-    primaryMetricLabel: "payload conformance",
-    secondaryMetric: "3",
-    secondaryMetricLabel: "blocking issues",
     tableTitle: "UDMI Payload Checks",
     columns: ["Asset", "State", "Pointset", "Payload Last Seen", "Message Count", "Raw Payload", "Result"],
     rows: [
@@ -340,10 +324,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "data-validation",
     title: "BACnet to MQTT Validation",
     headline: "Run MQTT payload checks, BACnet point checks, and BACnet-to-MQTT live value comparisons.",
-    primaryMetric: "3",
-    primaryMetricLabel: "validation modes",
-    secondaryMetric: "1,041",
-    secondaryMetricLabel: "points ready to compare",
     tableTitle: "Live Validation Results",
     columns: ["Asset", "Point", "BACnet", "MQTT", "Tolerance", "Result"],
     rows: [
@@ -358,10 +338,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "reports",
     title: "Reports",
     headline: "Create evidence packs, issue reports, and commissioning handover outputs.",
-    primaryMetric: "2",
-    primaryMetricLabel: "export formats",
-    secondaryMetric: "14",
-    secondaryMetricLabel: "open findings",
     tableTitle: "Report Queue",
     columns: ["Report", "Source", "Status", "File"],
     rows: [

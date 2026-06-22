@@ -1,6 +1,7 @@
 import io
 import zipfile
 from pathlib import Path
+from typing import get_args
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from smart_commissioning_core.rbac import Role
@@ -24,6 +25,11 @@ from app.services.import_service import ImportService
 public_router = APIRouter()
 router = APIRouter()
 service = ImportService()
+
+# Valid import-type names, derived from the ImportType literal so the set stays
+# in sync with the schema. Used to reject an unknown type with 400 (consistent
+# with an unknown file extension) instead of FastAPI's enum-path-param 422.
+_VALID_IMPORT_TYPES = set(get_args(ImportType))
 
 # RBAC posture:
 #   * GET /profiles and GET /templates/... are PUBLIC (no auth). They expose only
@@ -85,8 +91,17 @@ def list_import_profiles() -> list[ImportProfileSummary]:
 
 
 @public_router.get("/templates/{import_type}.{file_type}")
-def download_import_template(import_type: ImportType, file_type: str) -> Response:
+def download_import_template(import_type: str, file_type: str) -> Response:
     # Public: a blank format helper (column headers + one example row), no data.
+    # import_type is a plain str (not an ImportType path param) so an unknown
+    # type returns 400 — consistent with an unknown extension — rather than the
+    # 422 FastAPI would raise for an invalid enum path param. Validate here
+    # before build_template, which would otherwise KeyError (500) on a bad type.
+    if import_type not in _VALID_IMPORT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown import type '{import_type}'. Valid types: {', '.join(sorted(_VALID_IMPORT_TYPES))}.",
+        )
     try:
         content = service.build_template(import_type, file_type)
     except ValueError as error:

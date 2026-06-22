@@ -152,6 +152,15 @@ class ApiKeyModeTests(_AuthClientTestCase):
             self.assertEqual(response.status_code, 200, f"{fmt}: {response.text}")
             self.assertTrue(response.content)
 
+    def test_template_bad_inputs_return_400_not_422(self) -> None:
+        # Both an unknown import type and an unknown file extension return 400
+        # (import_type is validated in-handler, not via an enum path param that
+        # would 422). The route stays public -- no key required to be rejected.
+        bad_type = self.client.get("/api/v1/imports/templates/not_a_type.csv")
+        self.assertEqual(bad_type.status_code, 400, bad_type.text)
+        bad_ext = self.client.get("/api/v1/imports/templates/ip_register.pdf")
+        self.assertEqual(bad_ext.status_code, 400, bad_ext.text)
+
     def test_schema_endpoints_hidden_in_api_key_mode(self) -> None:
         # Hosted deployments must not disclose the API surface to
         # unauthenticated clients: schema endpoints answer 404.
