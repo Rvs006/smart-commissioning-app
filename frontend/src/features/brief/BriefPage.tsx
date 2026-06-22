@@ -373,16 +373,16 @@ export function BriefPage() {
                 <span className="dc-stat-lab">pipeline stages</span>
               </div>
               <div className="dc-stat">
-                <span className="dc-stat-val">1</span>
-                <span className="dc-stat-lab">console for every site</span>
+                <span className="dc-stat-val">3</span>
+                <span className="dc-stat-lab">deployment profiles: standalone, edge, hub</span>
               </div>
               <div className="dc-stat">
-                <span className="dc-stat-val">∞</span>
-                <span className="dc-stat-lab">recorded runs &amp; history</span>
+                <span className="dc-stat-val">4</span>
+                <span className="dc-stat-lab">access roles: viewer, reviewer, engineer, admin</span>
               </div>
               <div className="dc-stat">
-                <span className="dc-stat-val">100%</span>
-                <span className="dc-stat-lab">evidence-backed sign-off</span>
+                <span className="dc-stat-val">2</span>
+                <span className="dc-stat-lab">evidence signatures: SHA-256 hash + Ed25519</span>
               </div>
             </div>
 

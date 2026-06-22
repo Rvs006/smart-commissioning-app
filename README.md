@@ -48,6 +48,10 @@ ships two standalone onboarding surfaces (linked from the header, or reachable d
 - **Learning** — `/#/learning` — pick-your-role walkthroughs of the exact modules each role
   (Commissioning Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
 
+Each module page is organised as a **Setup → Run → Results** step flow (a segmented control at the
+top of the page), so an operator works one screen at a time rather than scrolling every control at
+once. The step advances automatically as a run is queued and completes.
+
 ---
 
 ## Architecture
