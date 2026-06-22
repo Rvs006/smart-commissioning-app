@@ -48,6 +48,9 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   **Setup / Run / Results** segmented flow so the operator works one screen at a
   time instead of scrolling every panel at once. The step auto-advances (Run when
   a run is queued, Results on success) and manual step clicks always override.
+- **Workflow-stage navigation** — the module tabs are now grouped under the stage
+  they belong to (**Configure / Discover / Validate / Report / Operate**) instead
+  of a flat row of equal tabs, so the nav mirrors the order of the job.
 
 ### Changed
 
