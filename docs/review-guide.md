@@ -90,6 +90,42 @@ sharing the admin key, see [docs/team-pilot-deployment.md](team-pilot-deployment
 > Local dev (Option B in the README) and the portable bundle auto-trust
 > `127.0.0.1`, so no key is needed there.
 
+### Option C — Full functional test locally (no committed key)
+
+The fastest way to exercise the **real** workflow — discovery, validation,
+imports, reports — without Docker and **without any committed secret**. In local
+mode the backend trusts loopback (`127.0.0.1`) as **admin**, so no real key is
+needed. Requires **Python 3.12** and **Node 22**.
+
+```bash
+# 1) install the Python packages + frontend
+pip install -e ./core -e ./backend -e ./worker
+cd frontend && npm ci && cd ..
+
+# 2) backend API in local mode (terminal 1) — loopback is trusted as admin
+cd backend
+AUTH_MODE=local JOB_EXECUTION_MODE=inline DEPLOYMENT_ROLE=hub \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 3) seed demo data + run the frontend (terminal 2)
+python scripts/seed_demo.py --base-url http://127.0.0.1:8000
+npm --prefix frontend run dev      # http://localhost:5173 (proxies /api -> 8000)
+```
+
+Then enable the action buttons once in the browser console (F12). The value is a
+**non-secret placeholder** — it works only because loopback is already trusted,
+so it is safe to share and is not a real credential:
+
+```js
+localStorage.setItem('sc.apiKey', 'local-dev');
+location.reload();
+```
+
+Now Run / Publish / Export / Generate all work. This is full functional testing
+of the safe paths (configure, import, fixture/dry-run validation, reports) with
+nothing secret committed to the repo. One-command offline smoke test:
+`scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
+
 ---
 
 ## 3. What to review
