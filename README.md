@@ -38,6 +38,16 @@ manual, error-prone checklist into a repeatable five-stage workflow:
 A controlled **MQTT config publish** path (multi-point write + read-back confirm, with rollback)
 lets an engineer correct a device's setpoints and prove the change took effect.
 
+### In-app onboarding — Brief & Learning
+
+The console is branded in the **Electracom** theme with a **light/dark toggle** in the header, and
+ships two standalone onboarding surfaces (linked from the header, or reachable directly):
+
+- **Product Brief** — `/#/brief` — what the tool is and how it works, in four tabs: Basics, Key
+  Features, Section Reference, and a role-based **Guided Tour**.
+- **Learning** — `/#/learning` — pick-your-role walkthroughs of the exact modules each role
+  (Commissioning Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
+
 ---
 
 ## Architecture
