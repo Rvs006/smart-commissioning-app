@@ -37,6 +37,13 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 - **On-site validation checklist** — Phase 5 checklist (`docs/phase5-onsite-validation.md`)
   enumerating the live-network / real-infrastructure steps that must pass before
   production rollout.
+- **Electracom UI theme + in-app Brief & Learning** — restyled the operator
+  console to the Electracom "Smart Point" look & feel (warm palette, teal accent,
+  brand logo) with a **light/dark theme toggle**, and added two standalone
+  onboarding surfaces: a **Product Brief** (`/#/brief` — Basics, Key Features,
+  Section Reference, and a role-based Guided Tour) and a **Learning** path
+  (`/#/learning` — role-based walkthroughs). Content is scoped to this app's own
+  modules — theme and format only, no feature copy.
 
 ### Changed
 
@@ -44,6 +51,9 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   with an app-level API, a shared issue model, and persistent run history.
 - Aligned the frontend CI Node version to the lockfile's npm and raised the test
   timeout to stabilize the frontend job.
+- Restyled the whole operator console via a design-token override (warm cream +
+  teal Electracom palette) with a dark mode, and ran a dark-mode legibility pass
+  (review-comments launcher, badge, and card elevation on the dark page).
 
 ### Security
 
