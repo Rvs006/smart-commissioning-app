@@ -19,6 +19,9 @@ UDMI-compliant data that matches the design, and hand the client a tamper-eviden
 > one-page plain-English explanation of what the app is, what it does, and how to explain it to an
 > engineer (both the human "why" and the technical "how").
 
+> 👀 **Here to review the app?** Read **[docs/review-guide.md](docs/review-guide.md)** — how to run
+> it (frontend-only or full-stack Docker), what to look at, and what is in scope for this round.
+
 ---
 
 ## What it does
@@ -230,6 +233,7 @@ Smart Commissioning Tool Specification.pdf
 | Document | Covers |
 | --- | --- |
 | [docs/what-is-this.md](docs/what-is-this.md) | Plain-English onboarding: what the app is, what it does, how to explain it |
+| [docs/review-guide.md](docs/review-guide.md) | How to review this build: run it, what to look at, scope for this round |
 | [docs/production-architecture.md](docs/production-architecture.md) | System model mapping the specification to the production build |
 | [docs/runbook.md](docs/runbook.md) | Deploy, operate, and recover (hosted compose + edge/portable profiles) |
 | [docs/security-posture.md](docs/security-posture.md) | Threat model, auth, secret handling, scan-safety, IEC 62443 alignment |

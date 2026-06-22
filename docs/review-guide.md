@@ -1,0 +1,109 @@
+# How to review this build
+
+A short guide for an engineer picking up the Smart Commissioning App to review.
+It covers how to run it, what to look at, and what is in scope for this round.
+
+> Looking for the deeper references instead? See
+> [docs/quickstart.md](quickstart.md) (5-minute run + safe smoke test),
+> [docs/team-pilot-deployment.md](team-pilot-deployment.md) (pilot boundary),
+> and the [README](../README.md).
+
+---
+
+## 1. Access
+
+The repository is **private** — you need to be added as a collaborator
+(GitHub → repo → **Settings → Collaborators**) before you can clone it.
+
+```bash
+git clone https://github.com/Rvs006/smart-commissioning-app.git
+cd smart-commissioning-app
+```
+
+---
+
+## 2. Run it
+
+Pick one. **Option A** is fastest for a pure UI review; **Option B** gives you
+live data end-to-end.
+
+### Option A — Frontend only (quickest, no backend)
+
+Requires **Node 22**.
+
+```bash
+cd frontend
+npm ci
+npm run dev          # http://localhost:5173
+```
+
+This renders the whole UI (theme, navigation, Brief, Learning, every module
+page). Calls to `/api` will show errors because no backend is running — that is
+**expected**, not a bug.
+
+### Option B — Full stack (live data, Docker)
+
+Brings up frontend + API + worker + Postgres + Redis. Requires **Docker**. This
+profile needs an `API_KEY`.
+
+```bash
+# macOS / Linux (bash)
+export API_KEY=$(openssl rand -hex 32)
+docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+```
+
+```powershell
+# Windows PowerShell
+$env:API_KEY = (openssl rand -hex 32)
+docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+```
+
+Then open **http://127.0.0.1:8080** (nginx serves the UI and proxies `/api`).
+Full hosted runbook: [infra/README.md](../infra/README.md).
+
+**Sign in:** click **"Set API key"** at the top-right of the header, paste the
+`API_KEY` you generated, and Save. The page reloads and shows your role. To give
+each engineer their own key instead of sharing the admin key, see
+[docs/team-pilot-deployment.md](team-pilot-deployment.md).
+
+> Local dev (Option B in the README) and the portable bundle auto-trust
+> `127.0.0.1`, so no key is needed there.
+
+---
+
+## 3. What to review
+
+- **Theme** — the Electracom-branded console, with a **light/dark toggle** in
+  the header (try both).
+- **Workflow-stage navigation** — the module tabs are grouped by stage:
+  **Configure → Discover → Validate → Report → Operate**, so the nav follows the
+  order of the job.
+- **Step-based module pages** — each module is a **Setup → Run → Results** flow
+  (a segmented control at the top), one screen per task instead of a long scroll.
+  The step advances automatically as a run is queued and completes.
+- **Product Brief** — `/#/brief` — Basics, Key Features, Section Reference, and a
+  role-based Guided Tour.
+- **Learning** — `/#/learning` — pick-your-role walkthroughs.
+- **Safe end-to-end paths (Option B)** — configure the site, import registers,
+  run fixture / dry-run validation, and generate reports.
+
+---
+
+## 4. Scope for this round
+
+- **In scope:** UI review and safe functional testing — configure, import
+  registers, fixture/dry-run validation, and reports.
+- **Not validated yet:** live-network testing — real BACnet/MQTT scans against
+  site hardware, a live broker, and scale — is gated on the planned **on-site
+  validation phase** (see [docs/phase5-onsite-validation.md](phase5-onsite-validation.md)).
+  Please do not treat live scans as production-ready.
+
+---
+
+## 5. Where to read more
+
+- [README.md](../README.md) — run options and feature overview.
+- [docs/what-is-this.md](what-is-this.md) — plain-English explanation of the app.
+- [CHANGELOG.md](../CHANGELOG.md), "Unreleased" — the full list of recent changes.
+- [docs/v1-review-checklist.md](v1-review-checklist.md) — V1 review notes mapped to
+  the implementation.

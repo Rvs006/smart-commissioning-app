@@ -51,6 +51,10 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 - **Workflow-stage navigation** — the module tabs are now grouped under the stage
   they belong to (**Configure / Discover / Validate / Report / Operate**) instead
   of a flat row of equal tabs, so the nav mirrors the order of the job.
+- **Reviewer guide** — `docs/review-guide.md`: a single page for an engineer
+  picking up the app to review — how to run it (frontend-only or full-stack
+  Docker), what to look at, and what is in scope for this round. Linked from the
+  README header and the documentation table.
 
 ### Changed
 
