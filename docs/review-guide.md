@@ -43,28 +43,41 @@ page). Calls to `/api` will show errors because no backend is running — that i
 
 ### Option B — Full stack (live data, Docker)
 
-Brings up frontend + API + worker + Postgres + Redis. Requires **Docker**. This
-profile needs an `API_KEY`.
+Brings up frontend + API + worker + Postgres + Redis. Requires **Docker**.
+
+First create a real env file from the template and fill in `API_KEY` and
+`POSTGRES_PASSWORD` with generated secrets. **Do not run with `--env-file
+infra/.env.example`** — its placeholder `POSTGRES_PASSWORD` would be baked into
+the Postgres data volume on first start, so a later switch to real secrets
+breaks DB auth until the volume is recreated.
 
 ```bash
-# macOS / Linux (bash)
-export API_KEY=$(openssl rand -hex 32)
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+# from the repo root
+cp infra/.env.example infra/.env
+# set real secrets in infra/.env (edit the file, or use sed):
+#   API_KEY=...           (openssl rand -hex 32)
+#   POSTGRES_PASSWORD=... (openssl rand -hex 32)
+
+docker compose -f infra/docker-compose.yml --env-file infra/.env up --build
 ```
 
-```powershell
-# Windows PowerShell
-$env:API_KEY = (openssl rand -hex 32)
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
-```
+> On Windows, edit `infra/.env` in an editor and paste the output of
+> `openssl rand -hex 32` into `API_KEY` and `POSTGRES_PASSWORD`.
 
 Then open **http://127.0.0.1:8080** (nginx serves the UI and proxies `/api`).
 Full hosted runbook: [infra/README.md](../infra/README.md).
 
-**Sign in:** click **"Set API key"** at the top-right of the header, paste the
-`API_KEY` you generated, and Save. The page reloads and shows your role. To give
-each engineer their own key instead of sharing the admin key, see
-[docs/team-pilot-deployment.md](team-pilot-deployment.md).
+**Reset the stack** (drop the DB volume so Postgres re-initialises cleanly — use
+this if you change `POSTGRES_PASSWORD` after the first run):
+
+```bash
+docker compose -f infra/docker-compose.yml down -v
+```
+
+**Sign in:** click **"Set API key"** at the top-right of the header, paste your
+`API_KEY` (read it back with `grep API_KEY infra/.env`), and Save. The page
+reloads and shows your role. To give each engineer their own key instead of
+sharing the admin key, see [docs/team-pilot-deployment.md](team-pilot-deployment.md).
 
 > Local dev (Option B in the README) and the portable bundle auto-trust
 > `127.0.0.1`, so no key is needed there.
