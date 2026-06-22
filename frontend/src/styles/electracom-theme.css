@@ -1389,7 +1389,11 @@
   white-space: nowrap;
 }
 
-@media (min-width: 900px) {
+/* Only force a single row once the bar is actually wide enough for the brand
+   plus the full controls cluster (~1000px of content + padding). Below this the
+   meta cluster keeps wrapping, so nothing is clipped in the 981–1079px range
+   where the bar is single-row but still narrow. */
+@media (min-width: 1080px) {
   .app-header-meta {
     flex-wrap: nowrap;
   }
