@@ -1154,3 +1154,69 @@
   .dc-tab-label { font-size: 12px; }
   .dc-pipeline { grid-template-columns: 1fr; }
 }
+
+/* ============================================================================
+   Dark-mode legibility overrides
+   ----------------------------------------------------------------------------
+   Scoped to [data-theme="dark"] only — light mode is untouched. These fix two
+   classes of problem found in the dark palette:
+     1. The floating "Review Comments" feedback launcher in styles.css uses
+        background: var(--ink) + color:#fff and a hardcoded white count badge.
+        In dark mode --ink flips to near-white (#e8e6e0), so the button and its
+        unread-count badge become near-white-on-white -> invisible. (BLOCKER)
+     2. Several dc-* surfaces hardcode warm, light-tuned drop shadows
+        (rgba(44,42,40,...)) that vanish on the #1a1d24 dark page, flattening
+        cards/hero/pipeline/etc. Re-point them at the --shadow / --shadow-strong
+        tokens (which the dark block already redefines to black-based shadows).
+   ============================================================================ */
+
+/* --- BLOCKER: floating Review Comments toggle + unread-count badge ----------
+   A neutral dark pill (surface-3 + ink ≈ 9:1) mirrors the light-mode intent of
+   a dark pill with light text, and beats white-on-teal (~2.7:1, which failed
+   even large-text AA). The count is a light chip with dark digits, matching the
+   light-mode badge. */
+[data-theme="dark"] .review-feedback-toggle {
+  background: var(--surface-3);
+  color: var(--ink);
+  border-color: var(--border);
+}
+
+[data-theme="dark"] .review-feedback-count {
+  background: var(--ink);
+  color: var(--surface);
+}
+
+/* Empty-state placeholder: muted (#7c7670) only hits ~3.3:1 on the dark panel;
+   lift it to --text for comfortable reading. */
+[data-theme="dark"] .review-feedback-empty {
+  color: var(--text);
+}
+
+/* --- Cosmetic: restore elevation on dc-* surfaces in dark mode -------------- */
+[data-theme="dark"] .dc-hero {
+  box-shadow: var(--shadow-strong);
+}
+
+[data-theme="dark"] .dc-card {
+  box-shadow: var(--shadow);
+}
+
+[data-theme="dark"] .dc-card:hover {
+  box-shadow: var(--shadow-strong);
+}
+
+[data-theme="dark"] .dc-pipeline {
+  box-shadow: var(--shadow-strong);
+}
+
+[data-theme="dark"] .dc-stat,
+[data-theme="dark"] .dc-icon-row,
+[data-theme="dark"] .dc-walk-step,
+[data-theme="dark"] .dc-pipe-result,
+[data-theme="dark"] .dc-ref-card {
+  box-shadow: var(--shadow);
+}
+
+[data-theme="dark"] .dc-role-pill.active {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px var(--dc-bdr);
+}
