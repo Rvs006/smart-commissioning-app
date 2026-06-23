@@ -78,7 +78,7 @@ export function App() {
     <div className="console-shell">
       <header className="app-header">
         <div className="app-brand-bar">
-          <NavLink className="app-brand" to="/">
+          <NavLink className="app-brand" title="Go to the Homepage" to="/">
             <img className="brand-logo" src="/electracom-logo.png" alt="Electracom" />
             <span className="app-brand-divider" />
             <span className="app-brand-text">
@@ -88,18 +88,28 @@ export function App() {
           </NavLink>
 
           <div className="app-header-meta">
-            <Link className="header-pill" to="/brief">
+            <Link
+              className="header-pill"
+              title="Product brief — what the tool is and how it works"
+              to="/brief"
+            >
               Brief
             </Link>
-            <Link className="header-pill" to="/learning">
+            <Link
+              className="header-pill"
+              title="Role-based learning walkthroughs"
+              to="/learning"
+            >
               Learning
             </Link>
             <ThemeToggle />
-            <span className="site-pill">
+            <span className="site-pill" title="Active commissioning site">
               <span className="site-pill-dot" />
               Block B Plantroom
             </span>
-            <span className="site-pill subtle">API workspace</span>
+            <span className="site-pill subtle" title="Connected to the backend API workspace">
+              API workspace
+            </span>
             <SessionBadge />
           </div>
         </div>
@@ -188,7 +198,9 @@ function SessionBadge() {
       <span className="session-badge" title={`Signed in via ${me.source}`}>
         <span className="session-badge-id">
           <strong>{me.username}</strong>
-          <em className={`role-chip role-${role ?? "unknown"}`}>{role}</em>
+          <em className={`role-chip role-${role ?? "unknown"}`} title={`Your access role: ${role}`}>
+            {role}
+          </em>
         </span>
         <button className="link-button" onClick={signOut} type="button">
           Sign out
