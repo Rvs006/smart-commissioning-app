@@ -1398,3 +1398,27 @@
     flex-wrap: nowrap;
   }
 }
+
+/* ============================================================================
+   Configuration page card gaps — the 2-column CSS grid sized every row to its
+   tallest card, so the very tall "Certificates & Keys" card (three paste
+   textareas) left large empty gaps under its shorter row-partners. Use a
+   balanced multi-column (masonry-style) flow so the section cards pack tightly
+   with no row-alignment gaps. Cards never split across a column.
+   ============================================================================ */
+.config-grid {
+  display: block;
+  column-count: 2;
+  column-gap: 14px;
+}
+
+.config-grid > .config-section {
+  margin: 0 0 14px;
+  break-inside: avoid;
+}
+
+@media (max-width: 980px) {
+  .config-grid {
+    column-count: 1;
+  }
+}
