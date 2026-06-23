@@ -55,6 +55,13 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   picking up the app to review — how to run it (frontend-only or full-stack
   Docker), what to look at, and what is in scope for this round. Linked from the
   README header and the documentation table.
+- **Header chip hover tooltips** — the header chips now explain themselves on
+  hover (active site, "API workspace", the access-role chip, the Brief/Learning
+  links, and the brand logo).
+- **Configuration field hover hints** — every Configuration field shows a short
+  hover tooltip describing what it is (MQTT broker/port/QoS/keep-alive, BACnet,
+  certificates, NTP, backup, logging), keeping the "no inline info-icons"
+  decision (hover only).
 
 ### Changed
 
@@ -86,6 +93,16 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   stat value/label rendering inline (now stacked) so they no longer overlap.
 - Failed/cancelled runs stay on the module **Run** step (where the monitor shows
   the error) instead of auto-advancing to an empty Results view.
+- Tidied the header bar so the brand and the controls cluster stay on a single
+  row at common widths (they previously wrapped to two ragged lines once the
+  Brief/Learning/Dark chips were added); narrow widths still wrap cleanly.
+- Removed the large empty gaps between Configuration cards: the two-column grid
+  sized each row to its tallest card, so the very tall Certificates card left
+  space under its shorter neighbours. The cards now pack in a balanced
+  multi-column (masonry) flow.
+- Certificates & Keys is compact by default — each secret (CA cert, client cert,
+  private key) shows its masked value with a **Replace…** action; the paste box
+  and file picker only appear when replacing.
 
 ### Removed
 
