@@ -653,6 +653,63 @@ function fieldHint(
   return undefined;
 }
 
+// Short hover descriptions per configuration field, shown as the label's title
+// (hover). Keeps the V1 "no inline info-icons" decision while still giving an
+// operator a one-line "what is this" on demand. Keyed by field label; an
+// unmapped field simply has no tooltip.
+const FIELD_TOOLTIPS: Record<string, string> = {
+  // Network Basics
+  Hostname: "Gateway hostname that identifies this device on the network.",
+  "IP Assignment": "How the gateway gets its address — Static IP or DHCP.",
+  "IP Address": "The gateway's IPv4 address on the site network.",
+  "Subnet Mask": "Mask defining the size of the local subnet.",
+  Gateway: "Default gateway (router) IP for traffic leaving the subnet.",
+  "DNS Servers": "DNS resolver IPs, comma-separated.",
+  "VLAN ID": "802.1Q VLAN tag for the gateway's network, if used.",
+  // BACnet Discovery
+  "BACnet Network Number": "Logical BACnet network this gateway lives on.",
+  "UDP Port": "BACnet/IP UDP port (default 47808).",
+  "Device Instance Range": "Range of BACnet device instance IDs to discover.",
+  BBMD: "BACnet Broadcast Management Device — relays broadcasts across subnets.",
+  "BBMD Address": "IP of the BBMD to register with.",
+  "BBMD UDP Port": "UDP port of the BBMD.",
+  "Foreign Device": "Register as a BBMD foreign device (locked when BBMD is enabled).",
+  TTL: "Foreign-device registration time-to-live, in seconds.",
+  // MQTT Settings
+  "MQTT Broker FQDN or IP Address": "Hostname or IP of the MQTT broker to connect to.",
+  Port: "MQTT broker TCP port (1883 plain, 8883 TLS).",
+  "Client ID": "Unique client identifier this gateway connects with.",
+  "Root Topic": "Base MQTT topic prefix for this site's messages.",
+  QoS: "MQTT delivery guarantee — 0 at most once, 1 at least once, 2 exactly once.",
+  "Keep Alive Interval": "Seconds between MQTT keep-alive pings.",
+  "MQTT Username": "Broker username, if authentication is required.",
+  "MQTT Password": "Broker password (stored masked).",
+  // Certificates & Keys
+  "CA Certificate": "Trusted CA cert used to verify the broker's TLS certificate.",
+  "Client Certificate": "Client TLS certificate for mutual authentication.",
+  "Private Key": "Private key paired with the client certificate.",
+  "Key Password": "Passphrase protecting the private key, if any.",
+  "Certificate Expiry": "Read-only status derived from the stored certificate's expiry date.",
+  // Time & NTP
+  Timezone: "Site timezone used to timestamp commissioning evidence.",
+  "Primary NTP Server": "Main NTP source used to sync the gateway clock.",
+  "Secondary NTP Server": "Fallback NTP source.",
+  "NTP Sync Interval": "Seconds between NTP clock syncs.",
+  // Backup & Restore
+  "Backup Schedule": "How often automatic backups run.",
+  "Backup Retention": "How long backups are kept before pruning.",
+  "Encrypted Backups": "Whether backup bundles are encrypted at rest.",
+  "Backup Location": "Intended target path for backups (operator reference).",
+  "Last Backup Status": "Result of the most recent backup.",
+  "Restore Action": "Restore readiness / available restore action.",
+  // Logging & Diagnostics
+  "Log Level": "Verbosity of runtime logs (Info, Debug, etc.).",
+  "Log Retention": "How long log files are kept.",
+  "Remote Syslog Target": "IP/host of a remote syslog collector, if used.",
+  "Syslog Port": "Port of the remote syslog target.",
+  "Diagnostics Mode": "Extra diagnostic logging toggle.",
+};
+
 type FieldControlProps = {
   canEngineer: boolean;
   disabled?: boolean;
@@ -689,34 +746,59 @@ function FieldControl({
   value,
 }: FieldControlProps) {
   const [maskedSentinel, setMaskedSentinel] = useState<string | null>(null);
+  // Secret material (CA cert, client cert, private key) is collapsed to the
+  // masked value + a "Replace…" button by default, so the Certificates card
+  // stays compact. The paste box + file picker only appear when replacing.
+  const [showSecretEditor, setShowSecretEditor] = useState(false);
 
   if (kind === "secret" || secretFields.has(field)) {
     return (
-      <label className="secret-field">
+      <label className="secret-field" title={FIELD_TOOLTIPS[field]}>
         {field}
         <input readOnly value={maskSecretValue(value)} />
-        <textarea
-          onChange={(event) => onSecretChange(event.target.value)}
-          placeholder={`Paste ${field.toLowerCase()} content`}
-          rows={4}
-          value={secretContent}
-        />
-        <div className="inline-actions">
-          <input
-            accept=".pem,.crt,.cer,.key,.p12,.pfx"
-            onChange={(event) => onFileSelect(event.target.files?.[0] ?? null)}
-            type="file"
-          />
+        {showSecretEditor ? (
+          <>
+            <textarea
+              onChange={(event) => onSecretChange(event.target.value)}
+              placeholder={`Paste ${field.toLowerCase()} content`}
+              rows={4}
+              value={secretContent}
+            />
+            <div className="inline-actions">
+              <input
+                accept=".pem,.crt,.cer,.key,.p12,.pfx"
+                onChange={(event) => onFileSelect(event.target.files?.[0] ?? null)}
+                type="file"
+              />
+              <button
+                className="secondary-button compact"
+                disabled={secretPending || !secretContent.trim() || !canEngineer}
+                onClick={onSecretStore}
+                title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                type="button"
+              >
+                {secretPending ? "Storing..." : "Store masked reference"}
+              </button>
+              <button
+                className="secondary-button compact"
+                onClick={() => setShowSecretEditor(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        ) : (
           <button
-            className="secondary-button compact"
-            disabled={secretPending || !secretContent.trim() || !canEngineer}
-            onClick={onSecretStore}
-            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+            className="secondary-button compact inline-link-button"
+            disabled={!canEngineer}
+            onClick={() => setShowSecretEditor(true)}
+            title={canEngineer ? "Paste or upload a new value" : ENGINEER_REQUIRED_TOOLTIP}
             type="button"
           >
-            {secretPending ? "Storing..." : "Store masked reference"}
+            Replace…
           </button>
-        </div>
+        )}
         {secretFileName && <small>Loaded from {secretFileName}</small>}
         {hint && <small>{hint}</small>}
       </label>
@@ -725,7 +807,7 @@ function FieldControl({
 
   if (kind === "select") {
     return (
-      <label>
+      <label title={FIELD_TOOLTIPS[field]}>
         {field}
         <select disabled={disabled} onChange={(event) => onValueChange(event.target.value)} value={value}>
           {!options.includes(value) && value !== "" && <option value={value}>{value}</option>}
@@ -742,7 +824,7 @@ function FieldControl({
 
   if (kind === "textarea") {
     return (
-      <label>
+      <label title={FIELD_TOOLTIPS[field]}>
         {field}
         <textarea disabled={disabled} onChange={(event) => onValueChange(event.target.value)} rows={4} value={value} />
         {hint && <small>{hint}</small>}
@@ -751,7 +833,7 @@ function FieldControl({
   }
 
   return (
-    <label className={expired ? "field-expired" : undefined}>
+    <label className={expired ? "field-expired" : undefined} title={FIELD_TOOLTIPS[field]}>
       {field}
       <input
         className={expired ? "field-expired" : undefined}
