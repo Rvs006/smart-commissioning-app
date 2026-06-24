@@ -171,7 +171,37 @@ nothing secret committed to the repo. One-command offline smoke test:
 
 ---
 
-## 5. Where to read more
+## 5. Testing real scans in a lab (optional)
+
+The build is not feature-limited — it contains the real discovery engines, so if
+you have a **lab with real BACnet devices and/or an MQTT broker** you can run
+genuine (non-dry-run) scans against them. "Not validated" means it has not been
+*proven* on hardware yet, not that it cannot scan — a lab run is exactly the kind
+of validation that helps.
+
+Three things are needed:
+
+1. **Be on the lab network.** The app serves its UI on `127.0.0.1`, but the scan
+   engine reaches out over whatever network the host machine is on. Run it on a
+   machine on the same network as the devices:
+   - **BACnet/IP** — the same L2 subnet (it broadcasts on UDP 47808), or point it
+     at a **BBMD** if the devices sit on another subnet.
+   - **MQTT** — the broker must be reachable from the host.
+2. **Configure the connection** (Configuration tab): IP range / ports, BACnet
+   network + BBMD, and the MQTT broker host + credentials.
+3. **Authorize the real scan.** On a discovery module, **untick "Dry run"** and
+   **tick "I am authorized to scan this network."** Without that flag a real scan
+   is refused with a `403` — the deliberate safety guard. Then **Run**.
+
+It will send real packets and return the devices / objects / topics it finds.
+Scans stay rate-throttled and authorization-gated even in a lab (by design).
+Because the live paths are unvalidated, expect possible rough edges (vendor
+quirks, timing, addressing, scale) — please report anything that breaks; that
+feedback is what clears the on-site validation gate.
+
+---
+
+## 6. Where to read more
 
 - [README.md](../README.md) — run options and feature overview.
 - [docs/what-is-this.md](what-is-this.md) — plain-English explanation of the app.
