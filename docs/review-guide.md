@@ -24,18 +24,24 @@ cd smart-commissioning-app
 
 ## 2. Run it
 
-Pick one. **Option A** is fastest for a pure UI review; **Option B** gives you
-live data end-to-end.
+Three run paths below — pick one. For a review, **Run path 3 (full app locally,
+no key) is recommended**. Run path 1 is the fastest if you only want to see the
+UI.
+
+> ⚠️ These **"Run path"** numbers are specific to this guide. The numbered
+> **Option A / B / C** in the main [README](../README.md#quickstart) are a
+> *different* list (deployment profiles) — to review the app, just follow the run
+> paths here and ignore the README's option letters.
 
 > **Do you need an API key?** No shared/secret key is committed to this repo (by
 > design). For **local review you need no real key** — the backend trusts
 > loopback (`127.0.0.1`) as admin; to enable the Run / Publish / Export buttons
 > in local mode, set a harmless placeholder in the browser console once:
 > `localStorage.setItem('sc.apiKey','local-dev')` (the value is ignored on
-> loopback). Only the **Docker stack (Option B)** needs a real key, which you
+> loopback). Only the **Docker path (Run path 2)** needs a real key, which you
 > generate yourself — see its sign-in step.
 
-### Option A — Frontend only (quickest, no backend)
+### Run path 1 — Frontend only (quickest UI look, no backend)
 
 Requires **Node 22**.
 
@@ -49,7 +55,7 @@ This renders the whole UI (theme, navigation, Brief, Learning, every module
 page). Calls to `/api` will show errors because no backend is running — that is
 **expected**, not a bug.
 
-### Option B — Full stack (live data, Docker)
+### Run path 2 — Full stack with Docker (live data, needs a key)
 
 Brings up frontend + API + worker + Postgres + Redis. Requires **Docker**.
 
@@ -87,10 +93,10 @@ docker compose -f infra/docker-compose.yml down -v
 reloads and shows your role. To give each engineer their own key instead of
 sharing the admin key, see [docs/team-pilot-deployment.md](team-pilot-deployment.md).
 
-> Local dev (Option B in the README) and the portable bundle auto-trust
-> `127.0.0.1`, so no key is needed there.
+> The local and portable deployment profiles auto-trust `127.0.0.1`, so no key
+> is needed there — only this Docker path needs one.
 
-### Option C — Full functional test locally (no committed key)
+### Run path 3 — Full app locally, no key (recommended for review)
 
 The fastest way to exercise the **real** workflow — discovery, validation,
 imports, reports — without Docker and **without any committed secret**. In local
@@ -141,8 +147,8 @@ nothing secret committed to the repo. One-command offline smoke test:
 - **Product Brief** — `/#/brief` — Basics, Key Features, Section Reference, and a
   role-based Guided Tour.
 - **Learning** — `/#/learning` — pick-your-role walkthroughs.
-- **Safe end-to-end paths (Option B)** — configure the site, import registers,
-  run fixture / dry-run validation, and generate reports.
+- **Safe end-to-end paths (Run path 2 or 3)** — configure the site, import
+  registers, run fixture / dry-run validation, and generate reports.
 
 ---
 
