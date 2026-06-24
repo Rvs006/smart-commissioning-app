@@ -24,6 +24,14 @@ cd smart-commissioning-app
 
 ## 2. Run it
 
+> ⬇️ **Windows + just want to run it (no setup)?** Download
+> `SmartCommissioningApp_Windows_Portable.zip` from the
+> **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**,
+> unzip it, and double-click `SmartCommissioningApp.exe` — it serves the whole app at
+> <http://127.0.0.1:8000/>. No clone, Node, Python, Docker, or key needed. To enable the action
+> buttons, run once in the browser console (F12): `localStorage.setItem('sc.apiKey','local-dev')`.
+> The source run paths below are for Mac/Linux or if you want to run from the code.
+
 Three run paths below — pick one. For a review, **Run path 3 (full app locally,
 no key) is recommended**. Run path 1 is the fastest if you only want to see the
 UI.
