@@ -22,6 +22,11 @@ UDMI-compliant data that matches the design, and hand the client a tamper-eviden
 > 👀 **Here to review the app?** Read **[docs/review-guide.md](docs/review-guide.md)** — how to run
 > it (frontend-only or full-stack Docker), what to look at, and what is in scope for this round.
 
+> ⬇️ **On Windows and just want to run it?** Download the prebuilt app from the
+> **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**
+> (`SmartCommissioningApp_Windows_Portable.zip`) — unzip, double-click
+> `SmartCommissioningApp.exe`, open <http://127.0.0.1:8000/>. No install, no Docker, no key.
+
 ---
 
 ## What it does
