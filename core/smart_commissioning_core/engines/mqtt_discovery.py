@@ -55,6 +55,7 @@ from typing import Any
 from smart_commissioning_core.engines.base import (
     EngineContext,
     EngineResult,
+    make_cancel_checker,
 )
 from smart_commissioning_core.engines.safety import (
     build_dry_run_plan,
@@ -215,7 +216,7 @@ def process_mqtt_discovery_run(
     from smart_commissioning_core.engines.base import ThrottleConfig as _ThrottleConfig
     from smart_commissioning_core.engines.base import run_engine as _run_engine
 
-    is_cancelled = _make_cancel_checker(run_store, run_id)
+    is_cancelled = make_cancel_checker(run_store, run_id)
     ctx = _Ctx(
         run_id=run_id,
         parameters=dict(parameters or {}),
@@ -233,27 +234,10 @@ def process_mqtt_discovery_run(
             build_settings=build_settings,
         )
 
-    persister = persist_records or _noop_records
-    return _run_engine(ctx, engine, persist_records=persister)
-
-
-def _noop_records(_run_id: str, _records: Sequence[dict[str, Any]]) -> None:
-    """Default structured-record persister: does nothing."""
-
-
-def _make_cancel_checker(run_store: Any, run_id: str) -> Callable[[], bool]:
-    """Build a cancellation checker from a (possibly) cancellable run store."""
-    checker = getattr(run_store, "is_cancel_requested", None)
-    if not callable(checker):
-        return lambda: False
-
-    def _check() -> bool:
-        try:
-            return bool(checker(run_id))
-        except Exception:
-            return False
-
-    return _check
+    # persist_records None -> run_engine's own _noop_persister default.
+    if persist_records is None:
+        return _run_engine(ctx, engine)
+    return _run_engine(ctx, engine, persist_records=persist_records)
 
 
 def _run_mqtt_discovery(

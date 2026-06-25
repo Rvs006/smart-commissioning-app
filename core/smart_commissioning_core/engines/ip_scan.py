@@ -50,6 +50,7 @@ from smart_commissioning_core.engines.base import (
     EngineContext,
     EngineResult,
     Throttle,
+    make_cancel_checker,
     run_engine,
 )
 from smart_commissioning_core.engines.safety import (
@@ -281,7 +282,7 @@ def process_ip_discovery_run(
     from smart_commissioning_core.engines.base import EngineContext as _Ctx
     from smart_commissioning_core.engines.base import ThrottleConfig as _ThrottleConfig
 
-    is_cancelled = _make_cancel_checker(run_store, run_id)
+    is_cancelled = make_cancel_checker(run_store, run_id)
     ctx = _Ctx(
         run_id=run_id,
         parameters=dict(parameters or {}),
@@ -297,32 +298,10 @@ def process_ip_discovery_run(
     async def engine(engine_ctx: EngineContext) -> EngineResult:
         return await _run_ip_discovery(engine_ctx, probe=probe, reverse_lookup=reverse_lookup)
 
-    persister = persist_records or _noop_records
-    return run_engine(ctx, engine, persist_records=persister)
-
-
-def _noop_records(_run_id: str, _records: Sequence[dict[str, Any]]) -> None:
-    """Default structured-record persister: does nothing."""
-
-
-def _make_cancel_checker(run_store: Any, run_id: str) -> Callable[[], bool]:
-    """Build a cancellation checker from a (possibly) cancellable run store.
-
-    If the store advertises ``is_cancel_requested`` (CancellableRunStore) we use
-    it; otherwise cancellation is never requested. Never raises — the framework
-    treats a raising checker as not-cancelled, and we also guard here.
-    """
-    checker = getattr(run_store, "is_cancel_requested", None)
-    if not callable(checker):
-        return lambda: False
-
-    def _check() -> bool:
-        try:
-            return bool(checker(run_id))
-        except Exception:
-            return False
-
-    return _check
+    # persist_records None -> run_engine's own _noop_persister default.
+    if persist_records is None:
+        return run_engine(ctx, engine)
+    return run_engine(ctx, engine, persist_records=persist_records)
 
 
 async def _run_ip_discovery(

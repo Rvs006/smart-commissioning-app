@@ -27,7 +27,7 @@ from dramatiq.brokers.redis import RedisBroker
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
-from smart_commissioning_core.engines.base import ThrottleConfig
+from smart_commissioning_core.engines.base import ThrottleConfig, make_cancel_checker
 from smart_commissioning_core.engines.comparison import process_mapping_validation_run
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
@@ -85,23 +85,6 @@ def _build_throttle(parameters: dict) -> ThrottleConfig:
     else:
         rate = max(parsed, _MIN_SCAN_RATE_LIMIT_PER_SEC)
     return ThrottleConfig(max_concurrency=concurrency, rate_limit_per_sec=rate, connect_timeout_s=timeout)
-
-
-def _make_cancel_checker(run_id: str):
-    """Cooperative-cancellation checker bound to a run via the DbRunStore.
-
-    BACnet discovery + point/mapping validation processors accept an explicit
-    is_cancelled; passing this honours POST /runs/{id}/cancel on the worker path.
-    Never raises: any store error reads as not-cancelled.
-    """
-
-    def _check() -> bool:
-        try:
-            return bool(run_store.is_cancel_requested(run_id))
-        except Exception:
-            return False
-
-    return _check
 
 
 def _is_dry_run(parameters: dict) -> bool:
@@ -179,7 +162,7 @@ def discover_bacnet(run_id: str, parameters: dict) -> None:
             throttle=_build_throttle(parameters),
             dry_run=_is_dry_run(parameters),
             persist_records=_persist_devices_and_points,
-            is_cancelled=_make_cancel_checker(run_id),
+            is_cancelled=make_cancel_checker(run_store, run_id),
         )
         logger.info("Finished BACnet discovery", extra={"actor": "discover_bacnet"})
 
@@ -247,7 +230,7 @@ def validate_bacnet_points(run_id: str, parameters: dict) -> None:
             execution_mode="dramatiq_worker",
             import_loader=_import_loader,
             discovery_loader=_discovery_loader,
-            is_cancelled=_make_cancel_checker(run_id),
+            is_cancelled=make_cancel_checker(run_store, run_id),
         )
         logger.info("Finished BACnet point validation", extra={"actor": "validate_bacnet_points"})
 
@@ -263,7 +246,7 @@ def compare_bacnet_mqtt(run_id: str, parameters: dict) -> None:
             execution_mode="dramatiq_worker",
             import_loader=_import_loader,
             discovery_loader=_discovery_loader,
-            is_cancelled=_make_cancel_checker(run_id),
+            is_cancelled=make_cancel_checker(run_store, run_id),
         )
         logger.info("Finished BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})
 
