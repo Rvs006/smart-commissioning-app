@@ -162,6 +162,42 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertIn("authoriz", response.json()["detail"].lower())
 
+    def test_no_cidr_falls_back_to_imported_register_addresses(self) -> None:
+        # Upload an IP register with NO hostname column + a duplicate address,
+        # then run discovery with no cidr/range: the route must scan the register's
+        # deduped Expected IP addresses (not fail) — the core bug this fixes.
+        csv = (
+            b"Project/site,System,Asset ID,Asset name,Expected IP address,Expected services/ports\n"
+            b"M,ACS,A1,Cam,10.10.100.230,80/tcp\n"
+            b"M,ACS,A2,Door,10.10.100.230,80/tcp\n"  # dup address -> deduped
+            b"M,ACS,A3,NVR,10.10.100.74,80/tcp\n"
+        )
+        up = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "ip_register", "project_id": "demo-project", "site_id": "demo-site"},
+            files={"file": ("reg.csv", csv, "text/csv")},
+        )
+        self.assertEqual((up.status_code, up.json()["accepted_rows"], up.json()["rejected_rows"]), (200, 3, 0), up.text)
+
+        run = self._post(
+            "/api/v1/discovery/ip/runs",
+            {"authorized": True, "ports": [9], "scan_connect_timeout_s": 1, "scan_rate_limit_per_sec": 0},
+            "ip_discovery",
+        )
+        self.assertEqual(run.status_code, 200, run.text)
+        self.assertEqual(run.json()["status"], "succeeded")
+        record = self.client.get(f"/api/v1/discovery/runs/{run.json()['run_id']}").json()
+        self.assertEqual(sorted(record["parameters"]["addresses"]), ["10.10.100.230", "10.10.100.74"])
+
+    def test_no_targets_and_no_register_rejected_with_400(self) -> None:
+        response = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            json={"project_id": "empty-p", "site_id": "empty-s", "job_type": "ip_discovery",
+                  "parameters": {"authorized": True}},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("scan target", response.json()["detail"].lower())
+
 
 class BacnetDiscoveryApiTests(_EngineApiTestCase):
     def test_simulated_backend_end_to_end_persists_devices_and_points(self) -> None:
