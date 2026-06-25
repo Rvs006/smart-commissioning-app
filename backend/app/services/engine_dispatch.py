@@ -25,7 +25,13 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
-from smart_commissioning_core.engines.base import ThrottleConfig
+
+# make_cancel_checker re-exported from core (single impl in engines.base) so the
+# API routes keep importing it from here.
+from smart_commissioning_core.engines.base import (  # noqa: F401
+    ThrottleConfig,
+    make_cancel_checker,
+)
 
 # Hard floor for the active-scan rate limiter. A request may lower the rate but
 # can never disable it (set it to None / unlimited): the limiter always stays a
@@ -75,29 +81,6 @@ def build_throttle(
         rate_limit_per_sec=rate,
         connect_timeout_s=timeout,
     )
-
-
-def make_cancel_checker(run_store: Any, run_id: str) -> Callable[[], bool]:
-    """Build a cooperative-cancellation checker bound to a run.
-
-    Some engine processors (BACnet discovery, point/mapping validation) accept
-    an explicit ``is_cancelled`` rather than deriving one from the store, so the
-    inline route path must supply it to honour ``POST /runs/{id}/cancel``. The
-    IP/MQTT engines derive their own checker from the store and do not need this.
-    Never raises: a missing ``is_cancel_requested`` or any store error reads as
-    not-cancelled, so cancellation logic can never crash a run.
-    """
-    checker = getattr(run_store, "is_cancel_requested", None)
-    if not callable(checker):
-        return lambda: False
-
-    def _check() -> bool:
-        try:
-            return bool(checker(run_id))
-        except Exception:
-            return False
-
-    return _check
 
 
 def is_dry_run(parameters: dict[str, Any]) -> bool:

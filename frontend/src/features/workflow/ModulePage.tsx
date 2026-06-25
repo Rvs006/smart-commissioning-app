@@ -996,6 +996,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       <span key={column}>{column}</span>
                     ))}
                   </div>
+                  {(selectedProfile.optional_columns ?? []).length > 0 && (
+                    <>
+                      <strong>Optional columns</strong>
+                      <div className="tag-cloud">
+                        {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
+                          <span key={column} className="optional">{column}</span>
+                        ))}
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -2428,6 +2438,9 @@ function DefaultTemplateInspector({
         <h4>Template columns</h4>
         {(selectedProfile?.required_columns ?? []).map((column) => (
           <span key={column}>{column}</span>
+        ))}
+        {(selectedProfile?.optional_columns ?? []).map((column) => (
+          <span key={column} className="optional">{column} (optional)</span>
         ))}
       </div>
     </div>

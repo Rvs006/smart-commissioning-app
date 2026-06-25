@@ -55,6 +55,28 @@ def _never_cancelled() -> bool:
     return False
 
 
+def make_cancel_checker(run_store: object, run_id: str) -> CancelChecker:
+    """Build a cooperative-cancellation checker from a (possibly) cancellable store.
+
+    Uses ``is_cancel_requested`` when the store advertises it
+    (CancellableRunStore); otherwise cancellation is never requested. Never
+    raises — a missing method or any store error reads as not-cancelled, so
+    cancellation can never crash a run. Shared by every engine + the API/worker
+    dispatch so the four identical copies don't drift.
+    """
+    checker = getattr(run_store, "is_cancel_requested", None)
+    if not callable(checker):
+        return _never_cancelled
+
+    def _check() -> bool:
+        try:
+            return bool(checker(run_id))
+        except Exception:
+            return False
+
+    return _check
+
+
 @dataclass(slots=True)
 class ThrottleConfig:
     """Conservative concurrency/rate limits for active-scan engines.

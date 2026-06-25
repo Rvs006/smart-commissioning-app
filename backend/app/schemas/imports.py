@@ -21,6 +21,7 @@ class ImportProfileSummary(BaseModel):
     import_type: ImportType
     description: str
     required_columns: list[str]
+    optional_columns: list[str] = Field(default_factory=list)
     duplicate_key_fields: list[str]
 
 

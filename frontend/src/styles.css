@@ -1418,6 +1418,15 @@ input.field-expired {
   font-weight: 760;
 }
 
+/* Optional (not-required) columns: muted, so operators can tell at a glance
+   they may leave the field blank (e.g. Expected hostname). */
+.tag-cloud span.optional,
+.evidence-list span.optional {
+  background: transparent;
+  color: var(--text-secondary, #6b6b70);
+  box-shadow: inset 0 0 0 1px var(--border, #d0d0d5);
+}
+
 .empty-workspace {
   display: grid;
   justify-content: start;

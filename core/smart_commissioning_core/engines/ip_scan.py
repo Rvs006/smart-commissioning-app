@@ -50,6 +50,7 @@ from smart_commissioning_core.engines.base import (
     EngineContext,
     EngineResult,
     Throttle,
+    make_cancel_checker,
     run_engine,
 )
 from smart_commissioning_core.engines.safety import (
@@ -114,13 +115,24 @@ async def _default_connect(host: str, port: int, timeout: float) -> bool:
 def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
     """Expand the target spec into an ordered, de-duplicated list of IP strings.
 
-    Accepts either ``cidr`` (e.g. ``"10.0.0.0/30"``) or an inclusive
-    ``start``/``end`` range. ``cidr`` takes precedence if both are present.
-    Host bits are kept for /31 and /32; for larger blocks the network/broadcast
-    addresses are dropped (``hosts()`` semantics). Raises ``ValueError`` on a
-    malformed/empty/oversized spec so ``run_engine`` records a sanitized failure.
+    Accepts one of three target shapes, in precedence order:
+
+    * ``cidr`` (e.g. ``"10.0.0.0/30"``) — host bits kept for /31 and /32; for
+      larger blocks the network/broadcast addresses are dropped (``hosts()``).
+    * an inclusive ``start``/``end`` range.
+    * an explicit ``addresses`` list of IP strings — this is how an imported IP
+      register's *Expected IP address* column is scanned (the route fills it in
+      when the operator hasn't given a ``cidr``/range), so "upload register then
+      run discovery" sweeps exactly the registered hosts.
+
+    Raises ``ValueError`` on a malformed/empty/oversized spec so ``run_engine``
+    records a sanitized failure (the route pre-empts the common "no target"
+    case with a clear 400 before the engine runs).
     """
     cidr = parameters.get("cidr")
+    start = parameters.get("start") or parameters.get("start_ip")
+    end = parameters.get("end") or parameters.get("end_ip")
+    addresses = parameters.get("addresses")
     hosts: list[str] = []
     if cidr:
         if not isinstance(cidr, str):
@@ -128,13 +140,9 @@ def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
         network = ipaddress.ip_network(cidr.strip(), strict=False)
         iterable = network.hosts() if network.num_addresses > 2 else network
         hosts = [str(ip) for ip in iterable]
-    else:
-        start = parameters.get("start") or parameters.get("start_ip")
-        end = parameters.get("end") or parameters.get("end_ip")
+    elif start or end:
         if not start or not end:
-            raise ValueError(
-                "IP discovery requires either 'cidr' or a 'start'/'end' IP range."
-            )
+            raise ValueError("IP discovery 'start'/'end' range requires both a start and an end IP.")
         start_addr = ipaddress.ip_address(str(start).strip())
         end_addr = ipaddress.ip_address(str(end).strip())
         if start_addr.version != end_addr.version:
@@ -145,6 +153,22 @@ def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
             str(ipaddress.ip_address(value))
             for value in range(int(start_addr), int(end_addr) + 1)
         ]
+    elif addresses is not None:
+        if not isinstance(addresses, (list, tuple)):
+            raise ValueError("addresses must be a list of IP address strings.")
+        for value in addresses:
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                hosts.append(str(ipaddress.ip_address(text)))
+            except ValueError as error:
+                raise ValueError(f"addresses contains an invalid IP: {value!r}") from error
+    else:
+        raise ValueError(
+            "IP discovery requires a target: import an IP register, or provide "
+            "'cidr', a 'start'/'end' range, or an 'addresses' list."
+        )
 
     if not hosts:
         raise ValueError("IP discovery target spec expanded to zero hosts.")
@@ -258,7 +282,7 @@ def process_ip_discovery_run(
     from smart_commissioning_core.engines.base import EngineContext as _Ctx
     from smart_commissioning_core.engines.base import ThrottleConfig as _ThrottleConfig
 
-    is_cancelled = _make_cancel_checker(run_store, run_id)
+    is_cancelled = make_cancel_checker(run_store, run_id)
     ctx = _Ctx(
         run_id=run_id,
         parameters=dict(parameters or {}),
@@ -274,32 +298,10 @@ def process_ip_discovery_run(
     async def engine(engine_ctx: EngineContext) -> EngineResult:
         return await _run_ip_discovery(engine_ctx, probe=probe, reverse_lookup=reverse_lookup)
 
-    persister = persist_records or _noop_records
-    return run_engine(ctx, engine, persist_records=persister)
-
-
-def _noop_records(_run_id: str, _records: Sequence[dict[str, Any]]) -> None:
-    """Default structured-record persister: does nothing."""
-
-
-def _make_cancel_checker(run_store: Any, run_id: str) -> Callable[[], bool]:
-    """Build a cancellation checker from a (possibly) cancellable run store.
-
-    If the store advertises ``is_cancel_requested`` (CancellableRunStore) we use
-    it; otherwise cancellation is never requested. Never raises — the framework
-    treats a raising checker as not-cancelled, and we also guard here.
-    """
-    checker = getattr(run_store, "is_cancel_requested", None)
-    if not callable(checker):
-        return lambda: False
-
-    def _check() -> bool:
-        try:
-            return bool(checker(run_id))
-        except Exception:
-            return False
-
-    return _check
+    # persist_records None -> run_engine's own _noop_persister default.
+    if persist_records is None:
+        return run_engine(ctx, engine)
+    return run_engine(ctx, engine, persist_records=persist_records)
 
 
 async def _run_ip_discovery(

@@ -46,14 +46,25 @@ class ImportProfile:
     required_columns: tuple[str, ...]
     duplicate_key_fields: tuple[str, ...]
     row_validator: Callable[[dict[str, str], int], list[ImportErrorRecord]]
+    # Recognised-but-not-required columns. Included in the downloadable template
+    # and canonicalised into accepted rows when present, but an empty/missing
+    # value never rejects a row (e.g. "Expected hostname", which most sites do
+    # not populate).
+    optional_columns: tuple[str, ...] = ()
 
     def as_summary(self) -> ImportProfileSummary:
         return ImportProfileSummary(
             import_type=self.import_type,
             description=self.description,
             required_columns=list(self.required_columns),
+            optional_columns=list(self.optional_columns),
             duplicate_key_fields=list(self.duplicate_key_fields),
         )
+
+    @property
+    def template_columns(self) -> tuple[str, ...]:
+        """Required columns followed by optional ones, for template + mapping."""
+        return (*self.required_columns, *self.optional_columns)
 
 
 def _normalize_header(value: object) -> str:
@@ -145,9 +156,12 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Asset ID",
             "Asset name",
             "Expected IP address",
-            "Expected hostname",
             "Expected services/ports",
         ),
+        # Hostname is rarely used on commissioning networks, so it is optional:
+        # the column is offered in the template and preserved when present, but a
+        # blank value never rejects the row.
+        optional_columns=("Expected hostname",),
         duplicate_key_fields=("Asset ID", "Expected IP address"),
         row_validator=_make_validator(
             (
@@ -156,7 +170,6 @@ PROFILES: dict[ImportType, ImportProfile] = {
                 "Asset ID",
                 "Asset name",
                 "Expected IP address",
-                "Expected hostname",
                 "Expected services/ports",
             ),
             (_field_check("Expected IP address", _validate_ip),),
@@ -642,10 +655,13 @@ class ImportService:
             mapped_row: dict[str, str] = {}
             for header, value in row.items():
                 mapped_row[header] = value.strip()
-            for required in profile.required_columns:
-                source_header = header_lookup.get(_normalize_key(required))
+            # Canonicalise required AND optional columns so header casing/spacing
+            # variants land under the profile's canonical names (optional ones
+            # only when actually present in the file).
+            for column in profile.template_columns:
+                source_header = header_lookup.get(_normalize_key(column))
                 if source_header is not None:
-                    mapped_row[required] = row.get(source_header, "").strip()
+                    mapped_row[column] = row.get(source_header, "").strip()
             mapped_rows.append(mapped_row)
 
         return mapped_rows, missing_columns
@@ -658,18 +674,20 @@ class ImportService:
         return "partial"
 
     def _build_csv_template(self, profile: ImportProfile, example: dict[str, str]) -> bytes:
+        columns = list(profile.template_columns)
         buffer = io.StringIO()
-        writer = csv.DictWriter(buffer, fieldnames=list(profile.required_columns), lineterminator="\n")
+        writer = csv.DictWriter(buffer, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
-        writer.writerow({column: example.get(column, "") for column in profile.required_columns})
+        writer.writerow({column: example.get(column, "") for column in columns})
         return buffer.getvalue().encode("utf-8-sig")
 
     def _build_xlsx_template(self, profile: ImportProfile, example: dict[str, str]) -> bytes:
+        columns = list(profile.template_columns)
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "Default import template"
-        sheet.append(list(profile.required_columns))
-        sheet.append([example.get(column, "") for column in profile.required_columns])
+        sheet.append(columns)
+        sheet.append([example.get(column, "") for column in columns])
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
 

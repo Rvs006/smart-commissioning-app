@@ -99,6 +99,7 @@ export type ImportProfileSummary = {
   import_type: ImportType;
   description: string;
   required_columns: string[];
+  optional_columns?: string[];
   duplicate_key_fields: string[];
 };
 
