@@ -101,10 +101,6 @@ def _discovery_repository() -> DiscoveryRepository:
     return DiscoveryRepository(service.engine)
 
 
-def _import_repository() -> ImportRepository:
-    return ImportRepository(service.engine)
-
-
 # Explicit target keys an operator may set to scope an IP sweep. When none are
 # present, the scan falls back to the imported IP register's expected addresses.
 _EXPLICIT_IP_TARGET_KEYS = ("cidr", "start", "start_ip", "end", "end_ip", "addresses")
@@ -113,50 +109,35 @@ _EXPLICIT_IP_TARGET_KEYS = ("cidr", "start", "start_ip", "end", "end_ip", "addre
 def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
     """Resolve scan targets for an IP discovery run.
 
-    If the operator supplied an explicit target (``cidr`` / ``start``-``end`` /
-    ``addresses``), it is used untouched. Otherwise ``addresses`` is filled from
-    the most recent accepted IP register import for this project/site, so the
+    An explicit target (``cidr`` / ``start``-``end`` / ``addresses``) is used
+    untouched. Otherwise ``addresses`` is filled from the newest accepted IP
+    register import for this project/site (deduped, first-seen order), so the
     "import register -> run discovery" flow sweeps exactly the registered hosts
-    (the engine itself only knew how to expand a cidr/range, which the frontend
-    never supplied — hence the previous opaque "engine failed"). Raises 400 when
-    there is genuinely nothing to scan, with an actionable message instead of the
-    engine's sanitized failure.
+    — the engine only knew how to expand a cidr/range, which the frontend never
+    supplied (the old opaque "engine failed"). Raises 400 when there is nothing
+    to scan, with an actionable message instead of the sanitized engine failure.
     """
     if any(parameters.get(key) for key in _EXPLICIT_IP_TARGET_KEYS):
         return
-    addresses = _ip_register_targets(project_id, site_id)
-    if not addresses:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No scan targets found. Import an IP register (with an "
-                "'Expected IP address' column) for this project/site, or provide a "
-                "'cidr' or 'start'/'end' range, before running IP discovery."
-            ),
-        )
-    parameters["addresses"] = addresses
-
-
-def _ip_register_targets(project_id: str, site_id: str) -> list[str]:
-    """Expected IP addresses from the most recent accepted ip_register import.
-
-    De-duplicated in first-seen order, drawn from the newest import that
-    actually carries addresses; empty when no usable register exists for scope.
-    """
-    imports = _import_repository().list(
+    imports = ImportRepository(service.engine).list(
         project_id=project_id, site_id=site_id, import_type="ip_register"
     )
     for record in imports:  # newest-first
-        seen: set[str] = set()
-        ordered: list[str] = []
-        for row in record.get("accepted_rows", []):
-            value = str(row.get("Expected IP address", "") or "").strip()
-            if value and value not in seen:
-                seen.add(value)
-                ordered.append(value)
-        if ordered:
-            return ordered
-    return []
+        addresses = list(dict.fromkeys(
+            a for row in record.get("accepted_rows", [])
+            if (a := str(row.get("Expected IP address", "") or "").strip())
+        ))
+        if addresses:
+            parameters["addresses"] = addresses
+            return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "No scan targets found. Import an IP register (with an "
+            "'Expected IP address' column) for this project/site, or provide a "
+            "'cidr' or 'start'/'end' range, before running IP discovery."
+        ),
+    )
 
 
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
