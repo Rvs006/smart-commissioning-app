@@ -114,13 +114,24 @@ async def _default_connect(host: str, port: int, timeout: float) -> bool:
 def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
     """Expand the target spec into an ordered, de-duplicated list of IP strings.
 
-    Accepts either ``cidr`` (e.g. ``"10.0.0.0/30"``) or an inclusive
-    ``start``/``end`` range. ``cidr`` takes precedence if both are present.
-    Host bits are kept for /31 and /32; for larger blocks the network/broadcast
-    addresses are dropped (``hosts()`` semantics). Raises ``ValueError`` on a
-    malformed/empty/oversized spec so ``run_engine`` records a sanitized failure.
+    Accepts one of three target shapes, in precedence order:
+
+    * ``cidr`` (e.g. ``"10.0.0.0/30"``) — host bits kept for /31 and /32; for
+      larger blocks the network/broadcast addresses are dropped (``hosts()``).
+    * an inclusive ``start``/``end`` range.
+    * an explicit ``addresses`` list of IP strings — this is how an imported IP
+      register's *Expected IP address* column is scanned (the route fills it in
+      when the operator hasn't given a ``cidr``/range), so "upload register then
+      run discovery" sweeps exactly the registered hosts.
+
+    Raises ``ValueError`` on a malformed/empty/oversized spec so ``run_engine``
+    records a sanitized failure (the route pre-empts the common "no target"
+    case with a clear 400 before the engine runs).
     """
     cidr = parameters.get("cidr")
+    start = parameters.get("start") or parameters.get("start_ip")
+    end = parameters.get("end") or parameters.get("end_ip")
+    addresses = parameters.get("addresses")
     hosts: list[str] = []
     if cidr:
         if not isinstance(cidr, str):
@@ -128,13 +139,9 @@ def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
         network = ipaddress.ip_network(cidr.strip(), strict=False)
         iterable = network.hosts() if network.num_addresses > 2 else network
         hosts = [str(ip) for ip in iterable]
-    else:
-        start = parameters.get("start") or parameters.get("start_ip")
-        end = parameters.get("end") or parameters.get("end_ip")
+    elif start or end:
         if not start or not end:
-            raise ValueError(
-                "IP discovery requires either 'cidr' or a 'start'/'end' IP range."
-            )
+            raise ValueError("IP discovery 'start'/'end' range requires both a start and an end IP.")
         start_addr = ipaddress.ip_address(str(start).strip())
         end_addr = ipaddress.ip_address(str(end).strip())
         if start_addr.version != end_addr.version:
@@ -145,6 +152,22 @@ def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
             str(ipaddress.ip_address(value))
             for value in range(int(start_addr), int(end_addr) + 1)
         ]
+    elif addresses is not None:
+        if not isinstance(addresses, (list, tuple)):
+            raise ValueError("addresses must be a list of IP address strings.")
+        for value in addresses:
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                hosts.append(str(ipaddress.ip_address(text)))
+            except ValueError as error:
+                raise ValueError(f"addresses contains an invalid IP: {value!r}") from error
+    else:
+        raise ValueError(
+            "IP discovery requires a target: import an IP register, or provide "
+            "'cidr', a 'start'/'end' range, or an 'addresses' list."
+        )
 
     if not hosts:
         raise ValueError("IP discovery target spec expanded to zero hosts.")

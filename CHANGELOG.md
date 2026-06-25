@@ -83,6 +83,24 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **IP discovery now scans the imported register.** "Run IP Discovery" failed
+  with an opaque "engine failed" because the frontend never supplied a scan
+  target (`cidr`/range) and the engine had no other source of hosts. The IP route
+  now falls back to the **Expected IP address** column of the most recent accepted
+  IP register import for the project/site (the engine gained an explicit
+  `addresses` target), so "upload register → run discovery" sweeps exactly the
+  registered hosts. When no register and no range exist, the API returns an
+  actionable **400** instead of the sanitized engine failure.
+- **Reports are downloadable immediately.** Report generation has no worker
+  actor — the artifact is built on demand at download — yet the report run was
+  left at the default `queued` status forever, so the UI (which only exports
+  `succeeded` reports) showed "Queued" and never let you download. Report runs
+  are now marked `succeeded` on creation.
+- **Expected hostname is optional on the IP register.** Hostnames are rarely used
+  on commissioning networks, so a blank `Expected hostname` no longer rejects a
+  row (it was previously required). The column is still offered in the template
+  and preserved when present; the import panel now lists it under **Optional
+  columns**.
 - Fixed a secret-corruption bug, a dead error panel, and a fixture path-traversal
   issue.
 - Regenerated the frontend lockfile with **npm 10** for cross-npm compatibility,

@@ -73,6 +73,18 @@ class RunService:
                 "source_run_ids": request.source_run_ids,
             },
         )
+        # Reports are NOT processed by a worker actor: the artifact is built
+        # on-demand from the stored run record at GET /reports/{id}/download. A
+        # report run therefore has nothing to wait for — it is ready the moment
+        # it is created. Without this the run sat at the default "queued" status
+        # forever and the UI (which only offers a download for "succeeded"
+        # reports) could never export it. Mark it terminal-succeeded immediately.
+        run = self.update_run_status(
+            run.run_id,
+            status="succeeded",
+            stage="report_ready",
+            progress_percent=100,
+        )
         report = ReportSummary(
             report_id=run.run_id,
             report_type=request.report_type,

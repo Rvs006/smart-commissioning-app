@@ -19,7 +19,7 @@ from io import BytesIO
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
-from smart_commissioning_core.db.repositories import DiscoveryRepository
+from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
@@ -101,17 +101,80 @@ def _discovery_repository() -> DiscoveryRepository:
     return DiscoveryRepository(service.engine)
 
 
+def _import_repository() -> ImportRepository:
+    return ImportRepository(service.engine)
+
+
+# Explicit target keys an operator may set to scope an IP sweep. When none are
+# present, the scan falls back to the imported IP register's expected addresses.
+_EXPLICIT_IP_TARGET_KEYS = ("cidr", "start", "start_ip", "end", "end_ip", "addresses")
+
+
+def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
+    """Resolve scan targets for an IP discovery run.
+
+    If the operator supplied an explicit target (``cidr`` / ``start``-``end`` /
+    ``addresses``), it is used untouched. Otherwise ``addresses`` is filled from
+    the most recent accepted IP register import for this project/site, so the
+    "import register -> run discovery" flow sweeps exactly the registered hosts
+    (the engine itself only knew how to expand a cidr/range, which the frontend
+    never supplied — hence the previous opaque "engine failed"). Raises 400 when
+    there is genuinely nothing to scan, with an actionable message instead of the
+    engine's sanitized failure.
+    """
+    if any(parameters.get(key) for key in _EXPLICIT_IP_TARGET_KEYS):
+        return
+    addresses = _ip_register_targets(project_id, site_id)
+    if not addresses:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No scan targets found. Import an IP register (with an "
+                "'Expected IP address' column) for this project/site, or provide a "
+                "'cidr' or 'start'/'end' range, before running IP discovery."
+            ),
+        )
+    parameters["addresses"] = addresses
+
+
+def _ip_register_targets(project_id: str, site_id: str) -> list[str]:
+    """Expected IP addresses from the most recent accepted ip_register import.
+
+    De-duplicated in first-seen order, drawn from the newest import that
+    actually carries addresses; empty when no usable register exists for scope.
+    """
+    imports = _import_repository().list(
+        project_id=project_id, site_id=site_id, import_type="ip_register"
+    )
+    for record in imports:  # newest-first
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for row in record.get("accepted_rows", []):
+            value = str(row.get("Expected IP address", "") or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                ordered.append(value)
+        if ordered:
+            return ordered
+    return []
+
+
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "ip_discovery")
-    parameters = dict(run.parameters)
+    # Validate authorization + resolve scan targets BEFORE creating the run, so a
+    # rejected request never leaves an orphaned queued run, and the resolved
+    # register addresses are persisted into the run record (the worker path reads
+    # run.parameters, not just the inline dict).
+    parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    _ensure_ip_targets(request.project_id, request.site_id, parameters)
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
 
     def run_inline() -> RunRecord:
         persist = make_device_persister(_discovery_repository())
         return process_ip_discovery_run(
             run.run_id,
-            parameters,
+            dict(run.parameters),
             run_store=service,
             execution_mode="inline_local_fallback",
             throttle=_settings_throttle(parameters),
