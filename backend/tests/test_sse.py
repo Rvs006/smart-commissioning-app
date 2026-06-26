@@ -15,6 +15,7 @@ process-wide SCT_TEST_DATABASE_URL is reused so the engine instantiated at the
 first app.main import points at the same file across modules.
 """
 
+import asyncio
 import atexit
 import json
 import os
@@ -227,26 +228,17 @@ class SseEventsApiTests(unittest.TestCase):
         self.assertEqual(timeout_frames[0]["data"]["run_id"], run_id)
 
     def test_client_abort_mid_stream_does_not_raise(self) -> None:
-        from unittest import mock
-
         import app.api.routes.events as events_module
 
         run_id = self._seed_nonterminal_run()
 
-        # A long cap + tiny poll keeps the generator alive while we abort it. The
-        # client closes the stream mid-flight (break before reading to the end);
-        # the generator must exit on CancelledError WITHOUT raising.
-        with (
-            mock.patch.object(events_module, "MAX_STREAM_SECONDS", 600.0),
-            mock.patch.object(events_module, "POLL_INTERVAL_SECONDS", 0.001),
-        ):
-            with self.client.stream("GET", f"/api/v1/runs/{run_id}/events") as response:
-                self.assertEqual(response.status_code, 200)
-                # Read the first frame, then abandon the stream early (client abort).
-                for _chunk in response.iter_text():
-                    break
-            # Exiting the context closes the response; reaching here means the
-            # generator did not propagate an unhandled exception.
+        async def close_after_first_frame() -> None:
+            stream = events_module._run_event_stream(run_id)
+            await stream.__anext__()
+            with self.assertRaises(StopAsyncIteration):
+                await stream.athrow(asyncio.CancelledError)
+
+        asyncio.run(close_after_first_frame())
 
         # The app stays usable after an aborted stream (no leaked/raised state).
         followup = self.client.get("/api/v1/runs/run_00000000000000_deadbeef/events")

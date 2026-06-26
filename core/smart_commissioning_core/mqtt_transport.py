@@ -177,7 +177,7 @@ class MqttClient:
             topic_length = int.from_bytes(payload[:2], "big")
             topic = payload[2 : 2 + topic_length].decode("utf-8", errors="replace")
             message_payload = payload[2 + topic_length :]
-            if expected_topics is None or topic in expected_topics:
+            if expected_topics is None or any(_topic_matches_filter(topic, expected) for expected in expected_topics):
                 return MqttMessage(topic=topic, payload=message_payload)
         return None
 
@@ -407,6 +407,21 @@ def _encode_utf8(value: str) -> bytes:
     if len(data) > 65535:
         raise MqttTransportError("MQTT string field is too long.")
     return len(data).to_bytes(2, "big") + data
+
+
+def _topic_matches_filter(topic: str, topic_filter: str) -> bool:
+    if topic_filter == "#":
+        return True
+    topic_parts = topic.split("/")
+    filter_parts = topic_filter.split("/")
+    for index, part in enumerate(filter_parts):
+        if part == "#":
+            return True
+        if index >= len(topic_parts):
+            return False
+        if part != "+" and part != topic_parts[index]:
+            return False
+    return len(topic_parts) == len(filter_parts)
 
 
 def _encode_remaining_length(length: int) -> bytes:

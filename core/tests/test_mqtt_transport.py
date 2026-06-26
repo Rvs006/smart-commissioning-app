@@ -47,5 +47,24 @@ class PingTests(unittest.TestCase):
         self.assertIn(b"\xc0\x00", bytes(sock.sent))
 
 
+class PublishFilterTests(unittest.TestCase):
+    def test_read_publish_any_accepts_wildcard_subscription_filter(self) -> None:
+        sock = RecordingSocket()
+        client = MqttClient(_settings(), socket_factory=lambda _addr, _t: sock)
+        client._socket = sock
+        topic = "MNVRHS-09-R09-LIGH-LT0399/events/pointset"
+        payload = len(topic).to_bytes(2, "big") + topic.encode("utf-8") + b'{"ok":true}'
+
+        for expected_filter in ("#", "MNVRHS-09-R09-LIGH-LT0399/#"):
+            with self.subTest(expected_filter=expected_filter):
+                with mock.patch.object(client, "_read_packet", return_value=(0x30, payload)):
+                    message = client.read_publish_any(
+                        expected_topics={expected_filter},
+                        timeout_seconds=1,
+                    )
+                self.assertIsNotNone(message)
+                self.assertEqual(message.topic, topic)
+
+
 if __name__ == "__main__":
     unittest.main()
