@@ -106,9 +106,36 @@ def _validate_topic(row: dict[str, str], row_number: int, field: str) -> list[Im
     value = row.get(field, "").strip()
     if not value:
         return []
-    if " " in value or "/" not in value:
-        return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_topic", message=f"{field} must be a valid MQTT topic path.")]
+    # A topic field may hold one topic, a "prefix/#" wildcard (covers an asset's
+    # metadata/state/events topics in one entry), or a comma-separated list of
+    # those. Validate each segment; "#"/"+" wildcards are allowed.
+    for topic in (part.strip() for part in value.split(",")):
+        if not topic:
+            continue
+        if " " in topic or ("/" not in topic and topic not in ("#", "+")):
+            return [
+                ImportErrorRecord(
+                    row_number=row_number,
+                    field=field,
+                    code="invalid_topic",
+                    message=f"{field} must be a valid MQTT topic path (use '/', optional '#'/'+' wildcards).",
+                )
+            ]
     return []
+
+
+def _validate_asset_identity(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    """Accept the row as long as Asset ID OR Asset name is present (one-of)."""
+    if row.get("Asset ID", "").strip() or row.get("Asset name", "").strip():
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="Asset ID",
+            code="missing_asset_identity",
+            message="Provide an Asset ID or an Asset name (at least one is required).",
+        )
+    ]
 
 
 def _base_row_validation(required_columns: tuple[str, ...], row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
@@ -153,26 +180,29 @@ PROFILES: dict[ImportType, ImportProfile] = {
         required_columns=(
             "Project/site",
             "System",
-            "Asset ID",
-            "Asset name",
             "Expected IP address",
             "Expected services/ports",
         ),
-        # Hostname is rarely used on commissioning networks, so it is optional:
-        # the column is offered in the template and preserved when present, but a
-        # blank value never rejects the row.
-        optional_columns=("Expected hostname",),
+        # Asset ID / Asset name are one-of (see _validate_asset_identity), and
+        # hostname is rarely used on commissioning networks. "Ports that should
+        # not be enabled" lists ports flagged if found open (same syntax as
+        # Expected services/ports). All are offered in the template and preserved
+        # when present, but the base "must not be empty" check never applies.
+        optional_columns=(
+            "Asset ID",
+            "Asset name",
+            "Expected hostname",
+            "Ports that should not be enabled",
+        ),
         duplicate_key_fields=("Asset ID", "Expected IP address"),
         row_validator=_make_validator(
             (
                 "Project/site",
                 "System",
-                "Asset ID",
-                "Asset name",
                 "Expected IP address",
                 "Expected services/ports",
             ),
-            (_field_check("Expected IP address", _validate_ip),),
+            (_validate_asset_identity, _field_check("Expected IP address", _validate_ip)),
         ),
     ),
     "bacnet_register": ImportProfile(
@@ -211,34 +241,45 @@ PROFILES: dict[ImportType, ImportProfile] = {
         required_columns=(
             "Project/site",
             "System",
-            "Asset ID",
-            "Asset name",
             "Expected topic",
-            "Payload type",
             "Expected schema version",
             "Expected points",
             "Expected units",
             "Expected reporting interval",
             "Source protocol",
+        ),
+        # Asset ID / Asset name are one-of (_validate_asset_identity). Notes and
+        # Payload type are optional: a blank Payload type means "check metadata,
+        # state and pointset". Make/Model/GUID feed the UDMI metadata/state match
+        # (udmi_validation expected_schedule); Site/Serial/Room/Firmware are
+        # captured for the same comparison surface.
+        optional_columns=(
+            "Asset ID",
+            "Asset name",
+            "Payload type",
             "Notes",
+            "Site",
+            "Serial number",
+            "Room",
+            "GUID",
+            "Make",
+            "Model",
+            "Firmware",
         ),
         duplicate_key_fields=("Asset ID", "Expected topic"),
         row_validator=_make_validator(
             (
                 "Project/site",
                 "System",
-                "Asset ID",
-                "Asset name",
                 "Expected topic",
-                "Payload type",
                 "Expected schema version",
                 "Expected points",
                 "Expected units",
                 "Expected reporting interval",
                 "Source protocol",
-                "Notes",
             ),
             (
+                _validate_asset_identity,
                 _field_check("Expected topic", _validate_topic),
                 _field_check("Expected reporting interval", _validate_numeric),
             ),
@@ -404,6 +445,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "Expected IP address": "10.10.25.117",
         "Expected hostname": "ahu-l03-017",
         "Expected services/ports": "47808/udp, 443/tcp",
+        "Ports that should not be enabled": "23/tcp, 21/tcp",
     },
     "bacnet_register": {
         "Project/site": "ElectraCom / Block B Plantroom",
@@ -419,14 +461,24 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "System": "BMS",
         "Asset ID": "MTR-ENERGY-009",
         "Asset name": "Energy Meter 9",
-        "Expected topic": "electracom/sct/1532/meter/009/events/pointset",
-        "Payload type": "pointset",
+        # "prefix/#" encapsulates this asset's metadata/state/events topics.
+        "Expected topic": "electracom/sct/1532/meter/009/#",
+        # Blank Payload type => check metadata, state and pointset.
+        "Payload type": "",
         "Expected schema version": "1.5.2",
-        "Expected points": "energy_sensor",
-        "Expected units": "kwh",
+        # Multiple points / units for one asset, comma-separated.
+        "Expected points": "energy_sensor,power_sensor",
+        "Expected units": "kwh,kw",
         "Expected reporting interval": "60",
         "Source protocol": "MQTT",
-        "Notes": "Default commissioning import example.",
+        "Notes": "",
+        "Site": "Block B",
+        "Serial number": "EM-009-SN-00421",
+        "Room": "Level 3 plantroom",
+        "GUID": "ifc://electracom/EM-1001001",
+        "Make": "ExpectedCo",
+        "Model": "Model-A",
+        "Firmware": "1.4.2",
     },
     "asset_validation": {
         "Project/site": "ElectraCom / Block B Plantroom",
