@@ -83,6 +83,12 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **MQTT wildcard capture now accepts real publish topics.** The raw MQTT
+  transport now matches subscribed filters such as `#` and `prefix/#` against
+  concrete broker publish topics, so MQTT discovery / live UDMI capture no
+  longer drops messages just because the subscription filter is broader than the
+  received topic. Covered by a transport regression test; live broker validation
+  is still part of Phase 5.
 - **IP discovery now scans the imported register.** "Run IP Discovery" failed
   with an opaque "engine failed" because the frontend never supplied a scan
   target (`cidr`/range) and the engine had no other source of hosts. The IP route
@@ -135,7 +141,9 @@ validation before production rollout:
 
 - **Live-network discovery/scanning** — active IP sweep and BACnet Who-Is
   against a real BMS/OT network (only ever run in dry-run / offline fixtures).
-- **Live MQTT broker** — real broker connectivity, TLS, and UDMI message capture.
+- **Live MQTT broker** — real broker connectivity, TLS, and UDMI message capture
+  against site devices. Wildcard topic-filter matching is unit-tested, but the
+  actual broker/device run still requires Phase 5 validation.
 - **Postgres** — the hosted profile's PostgreSQL system of record under load.
 - **Docker image build** — building and running the `infra/` Compose stack on a
   real Docker daemon.

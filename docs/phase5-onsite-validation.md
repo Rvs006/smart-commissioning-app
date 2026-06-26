@@ -82,7 +82,7 @@ Legend: ☐ = to verify · **STOP** = a failure here blocks production rollout.
 ## 5. MQTT discovery + UDMI (real broker)
 
 - ☐ Connect to the real broker over the hand-rolled MQTT 3.1.1 client: **TLS**, username/password, and (if used) client-cert auth. The TLS/auth path was never exercised live. **STOP** on handshake/auth failures and fix before trusting results.
-- ☐ Wildcard subscribe captures real topics/payloads within the bounded window; topic/message counts render from real data.
+- ☐ Wildcard subscribe captures real topics/payloads within the bounded window; verify both `#` and a scoped `prefix/#` filter capture concrete broker publish topics, and topic/message counts render from real data.
 - ☐ UDMI validation against **live** state/pointset capture (not just the bundled fixture): silent-device detection, units, schedule checks behave on real payloads.
 - ☐ Broker credentials never appear in run `result_summary`, issue text, or logs (sanitization verified in tests — confirm on real broker errors).
 - ☐ **`secret://` cert resolution at connect time (live)**: with config holding `secret://` CA/client-cert/private-key refs, confirm the handshake materializes them — CA in-memory (`load_verify_locations(cadata=…)`), client cert + key to transient 0600 temp files removed after the context is built (`MqttClient.__enter__`/`__exit__`). **STOP** on handshake/auth failure.

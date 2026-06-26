@@ -35,12 +35,14 @@ Issue taxonomy emitted (`ValidationIssueRecord`, prefixes): `UDMI-NP`
 (metadata_validation).
 
 **Live capture** (subscribing to a device's `…/state`, `…/metadata`,
-`…/pointset` topics on a live broker) is **live-untested**: with no broker
-egress the engine honestly records `live_capture_unavailable`,
+`…/pointset` topics, or a broader `#` / `prefix/#` filter on a live broker) is
+**live-untested**: with no broker egress the engine honestly records
+`live_capture_unavailable`,
 `missing_capture_topics`, `broker_unreachable`/`tls_error`/
 `authentication_error`/`broker_timeout`, or `live_capture_timeout` rather than
 fabricating payloads. The mapping from topic suffix to payload bucket and the
-status-labelling logic are tested with a fake; the actual subscribe-and-capture
+status-labelling logic are tested with a fake; MQTT wildcard filter matching is
+covered by a raw transport regression test. The actual subscribe-and-capture
 against a real broker requires on-site validation.
 
 ## 2. MQTT
@@ -57,7 +59,7 @@ remaining-length varint encoding/decoding.
 | Packet framing (remaining-length varint, UTF-8 string fields) | Tested | Encode/decode exercised with a fake socket. |
 | CONNECT + CONNACK return codes | Tested | Codes 1–5 mapped to clear errors (e.g. "bad username or password", "not authorised"). |
 | SUBSCRIBE + SUBACK (incl. failure 0x80) | Tested | Rejected subscription raises. |
-| PUBLISH send / receive, topic filter match | Tested | `read_publish` / `read_publish_any` with a fake socket. |
+| PUBLISH send / receive, topic filter match | Tested | `read_publish` / `read_publish_any` with a fake socket; `#` and `prefix/#` filters match concrete publish topics. |
 | Username / password auth | Tested (framing) | Credentials placed in the CONNECT payload; real broker auth is live-untested. |
 | TLS (CA cert, client cert, private key, SNI) | Live-untested | `_wrap_tls` builds an SSL context and loads cert/key from file paths; not exercised against a real TLS broker here. |
 | Config-publish + wait-for-next-pointset | Tested (flow with fake); live-untested | `publish_config_and_wait_for_pointset`; live broker write requires authorization (`docs/security-posture.md`). |
