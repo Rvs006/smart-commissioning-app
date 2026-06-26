@@ -245,6 +245,24 @@ class ConfigurationService:
         """Resolve a secret:// reference to its decrypted contents."""
         return read_secret_material(secret_ref)
 
+    def mqtt_subscribe_defaults(self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID) -> dict:
+        """Subscribe defaults from saved config so a run inherits them when the
+        operator left them blank: the configured Root Topic becomes the default
+        ``topic_filter`` (normalised to a ``prefix/#`` wildcard) and the QoS field
+        becomes the subscribe ``qos`` (0-2). Addresses "I set the root topic / QoS
+        and the scan ignored it".
+        """
+        values = self.load(project_id, site_id).mqtt.values
+        try:
+            qos = max(0, min(2, int(str(values.get("QoS")).strip().split()[0])))
+        except (ValueError, IndexError):
+            qos = 0
+        defaults: dict = {"qos": qos}
+        root = str(values.get("Root Topic") or "").strip()
+        if root:
+            defaults["topic_filter"] = root if ("#" in root or "+" in root) else root.rstrip("/") + "/#"
+        return defaults
+
     def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))

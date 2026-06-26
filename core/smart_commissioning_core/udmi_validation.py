@@ -423,6 +423,7 @@ def _capture_live_payloads(
             topics=topics,
             timeout_seconds=parse_float(parameters.get("capture_seconds"), default=5.0),
             max_messages=parse_int(parameters.get("max_messages"), default=len(topics)),
+            qos=parse_int(parameters.get("qos"), default=0),
         )
     except (MqttTransportError, OSError, ValueError) as error:
         # Use the coarse status label only; the raw exception text may carry

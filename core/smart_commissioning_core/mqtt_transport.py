@@ -129,9 +129,9 @@ class MqttClient:
         packet = _encode_utf8(topic) + payload_bytes
         self._send_packet(0x30, packet)
 
-    def subscribe(self, topic: str) -> None:
+    def subscribe(self, topic: str, qos: int = 0) -> None:
         packet_id = self._next_packet_id()
-        packet = packet_id.to_bytes(2, "big") + _encode_utf8(topic) + b"\x00"
+        packet = packet_id.to_bytes(2, "big") + _encode_utf8(topic) + bytes([qos & 0x03])
         self._send_packet(0x82, packet)
         packet_type, payload = self._read_packet()
         if packet_type != 0x90:
@@ -352,13 +352,15 @@ def subscribe_and_capture(
     timeout_seconds: float | None,
     max_messages: int,
     cancel_check: Callable[[], bool] | None = None,
+    qos: int = 0,
 ) -> list[MqttMessage]:
     """Subscribe to ``topics`` and collect messages up to ``max_messages``.
 
     ``timeout_seconds`` bounds the capture window; pass ``None`` for an
     indefinite capture that runs until ``cancel_check`` returns True or the
     message cap is reached (mq9nhbzu "run until stopped"). The loop polls in
-    short slices so cancellation is observed promptly in both modes.
+    short slices so cancellation is observed promptly in both modes. ``qos`` is
+    the requested max subscribe QoS (0-2; broker grants min of this and publish).
     """
     messages: list[MqttMessage] = []
     expected_topics = set(topics)
@@ -369,7 +371,7 @@ def subscribe_and_capture(
     last_ping = time.monotonic()
     with MqttClient(settings) as client:
         for topic in topics:
-            client.subscribe(topic)
+            client.subscribe(topic, qos)
         while len(messages) < max_messages:
             if cancel_check is not None and cancel_check():
                 break

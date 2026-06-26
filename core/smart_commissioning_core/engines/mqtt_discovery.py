@@ -352,6 +352,7 @@ def _run_mqtt_discovery(
             timeout_seconds=capture_seconds,
             max_messages=max_messages,
             cancel_check=ctx.is_cancelled,
+            qos=parse_int(ctx.parameters.get("qos"), default=0),
         )
     except (MqttTransportError, OSError, ValueError) as error:
         # NEVER surface raw error text — map to a coarse status only.

@@ -38,6 +38,7 @@ from app.schemas.jobs import (
     RunListResponse,
     RunRecord,
 )
+from app.services.configuration_service import ConfigurationService
 from app.services.engine_dispatch import (
     build_throttle,
     is_dry_run,
@@ -53,6 +54,7 @@ from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
 router = APIRouter()
 service = RunService()
 queue_service = JobQueueService()
+config_service = ConfigurationService()
 
 # RBAC: reading discovery data is viewer+; creating/running a discovery job
 # (which can drive a real network scan) is engineer+. The separate scan
@@ -175,6 +177,29 @@ def _resolve_forbidden_ports(project_id: str, site_id: str, parameters: dict) ->
             return
 
 
+def _resolve_expected_ports(project_id: str, site_id: str, parameters: dict) -> None:
+    """Fill ``expected_ports_by_address`` {expected_ip: spec} from the register's
+    "Expected services/ports" column, so the engine flags any OPEN port that is
+    NOT expected for that host. Operator-supplied value wins. Meaningful only when
+    the sweep covers more than the expected ports (a port range).
+    """
+    if parameters.get("expected_ports_by_address"):
+        return
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="ip_register"
+    )
+    for record in imports:  # newest-first
+        by_address = {
+            address: spec
+            for row in record.get("accepted_rows", [])
+            if (spec := str(row.get("Expected services/ports", "") or "").strip())
+            and (address := str(row.get("Expected IP address", "") or "").strip())
+        }
+        if by_address:
+            parameters["expected_ports_by_address"] = by_address
+            return
+
+
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     # Validate authorization + resolve scan targets BEFORE creating the run, so a
@@ -185,6 +210,7 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     _require_scan_authorization(parameters)
     _ensure_ip_targets(request.project_id, request.site_id, parameters)
     _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
+    _resolve_expected_ports(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
 
     def run_inline() -> RunRecord:
@@ -236,9 +262,15 @@ def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedRespons
 
 @router.post("/mqtt/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_mqtt_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "mqtt_discovery")
-    parameters = dict(run.parameters)
+    parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    # Inherit Root Topic (-> default subscribe filter) and QoS from saved config
+    # when the operator didn't override them on the run.
+    defaults = config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)
+    parameters.setdefault("qos", defaults["qos"])
+    if defaults.get("topic_filter") and not any(parameters.get(k) for k in ("topic_filter", "topic_prefix", "topics")):
+        parameters["topic_filter"] = defaults["topic_filter"]
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_discovery")
 
     def run_inline() -> RunRecord:
         persist = make_topic_persister(_discovery_repository())
