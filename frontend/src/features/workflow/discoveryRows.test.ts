@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { validationMetrics } from "./discoveryRows";
+import { forbiddenOpenPorts, validationMetrics } from "./discoveryRows";
+
+describe("forbiddenOpenPorts", () => {
+  it("extracts the forbidden port list from a flagged IP status_detail", () => {
+    // Mirrors the engine marker: "responsive: ... | FORBIDDEN PORTS OPEN: <ports>".
+    expect(forbiddenOpenPorts("responsive: 80,23,443 | FORBIDDEN PORTS OPEN: 23")).toBe("23");
+    expect(forbiddenOpenPorts("responsive: 23,2323 | FORBIDDEN PORTS OPEN: 23,2323")).toBe(
+      "23,2323",
+    );
+  });
+
+  it("returns empty string for clean hosts and missing status_detail", () => {
+    expect(forbiddenOpenPorts("responsive: 80,443")).toBe("");
+    expect(forbiddenOpenPorts(undefined)).toBe("");
+    expect(forbiddenOpenPorts("—")).toBe("");
+  });
+});
 
 describe("validationMetrics", () => {
   it("derives UDMI payload conformance and blocking issues from a real run", () => {
