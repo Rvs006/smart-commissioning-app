@@ -163,6 +163,7 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
   },
   mqtt: {
     "MQTT Password": { kind: "password" },
+    QoS: { kind: "select", options: ["0 - At most once", "1 - At least once", "2 - Exactly once"] },
   },
   time: {
     Timezone: { kind: "select", options: TIMEZONE_OPTIONS },
@@ -756,6 +757,9 @@ function FieldControl({
       <label className="secret-field" title={FIELD_TOOLTIPS[field]}>
         {field}
         <input readOnly value={maskSecretValue(value)} />
+        {value && !showSecretEditor && (
+          <small className="secret-stored">✓ Uploaded — in use by the tool. Replace to change.</small>
+        )}
         {showSecretEditor ? (
           <>
             <textarea
@@ -777,7 +781,7 @@ function FieldControl({
                 title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
                 type="button"
               >
-                {secretPending ? "Storing..." : "Store masked reference"}
+                {secretPending ? "Saving..." : "Save & use file"}
               </button>
               <button
                 className="secondary-button compact"

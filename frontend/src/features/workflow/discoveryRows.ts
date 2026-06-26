@@ -76,6 +76,13 @@ export function forbiddenOpenPorts(statusDetail: string | undefined | null): str
   return match ? match[1].trim() : "";
 }
 
+// Same idea for "UNEXPECTED PORTS OPEN: <ports>" — ports open that the asset's
+// "Expected services/ports" did not list (a port range turned up extras).
+export function unexpectedOpenPorts(statusDetail: string | undefined | null): string {
+  const match = /UNEXPECTED PORTS OPEN:\s*([^|]+)/.exec(statusDetail ?? "");
+  return match ? match[1].trim() : "";
+}
+
 // IP discovery rows come from discovered_assets (DiscoveryAssetObservation).
 export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<string, string>[] {
   return results.discovered_assets.map((asset: DiscoveryAssetObservation) => ({

@@ -136,8 +136,9 @@ describe("ModulePage discovery wiring", () => {
 
     // Run monitor appears and live discovered hosts render from the results payload.
     expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
-    // hostname is unique to the live results payload (not present in sample rows).
-    expect(await screen.findByText("plant-controller")).toBeInTheDocument();
+    // hostname is unique to the live results payload (not present in sample rows);
+    // it now appears in both the results table and the selected-result detail aside.
+    expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
     // Live banner is shown, not a fabricated "Result" verdict column.
     expect(screen.getByText(/Live discovery observations/i)).toBeInTheDocument();
 

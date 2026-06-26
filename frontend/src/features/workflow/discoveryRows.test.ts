@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forbiddenOpenPorts, validationMetrics } from "./discoveryRows";
+import { forbiddenOpenPorts, unexpectedOpenPorts, validationMetrics } from "./discoveryRows";
 
 describe("forbiddenOpenPorts", () => {
   it("extracts the forbidden port list from a flagged IP status_detail", () => {
@@ -14,6 +14,14 @@ describe("forbiddenOpenPorts", () => {
     expect(forbiddenOpenPorts("responsive: 80,443")).toBe("");
     expect(forbiddenOpenPorts(undefined)).toBe("");
     expect(forbiddenOpenPorts("—")).toBe("");
+  });
+});
+
+describe("unexpectedOpenPorts", () => {
+  it("extracts ports open that were not in the expected list", () => {
+    expect(unexpectedOpenPorts("responsive: 80,8080 | UNEXPECTED PORTS OPEN: 8080")).toBe("8080");
+    expect(unexpectedOpenPorts("responsive: 80,443")).toBe("");
+    expect(unexpectedOpenPorts(undefined)).toBe("");
   });
 });
 

@@ -16,7 +16,6 @@ import {
   getReportDownloadPath,
   ImportBatchSummary,
   ImportErrorReport,
-  ImportProfileSummary,
   ImportType,
   JobStatus,
   listImportProfiles,
@@ -38,6 +37,7 @@ import {
   discoveryViewFor,
   forbiddenOpenPorts,
   matchesTopicFilter,
+  unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
 import { isTerminalStatus } from "./runFormat";
@@ -1924,14 +1924,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Inspector</span>
-              <h3>{module.route === "ip-scanner" ? "Default Template" : "Selected Result Detail"}</h3>
+              <h3>Selected Result Detail</h3>
             </div>
           </div>
 
-          {module.route === "ip-scanner" ? (
-            <DefaultTemplateInspector selectedImportType={selectedImportType || "ip_register"} selectedProfile={selectedProfile} />
-          ) : (
-            <>
+          <>
               <div className="detail-list">
                 {resultDetails.map((item) => (
                   <div className="detail-row" key={item.label}>
@@ -2075,7 +2072,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 ))}
               </div>
             </>
-          )}
         </aside>
       </section>
       </div>
@@ -2274,10 +2270,13 @@ function renderCell(
   }
   if (column === "Detailed Status") {
     const forbidden = forbiddenOpenPorts(row[column]);
-    if (forbidden) {
+    const unexpected = unexpectedOpenPorts(row[column]);
+    if (forbidden || unexpected) {
       return (
         <>
-          {row[column]} <span className="chip red">Forbidden ports open: {forbidden}</span>
+          {row[column]}
+          {forbidden && <span className="chip red"> Forbidden ports open: {forbidden}</span>}
+          {unexpected && <span className="chip amber"> Unexpected ports open: {unexpected}</span>}
         </>
       );
     }
@@ -2393,70 +2392,6 @@ function captureRowsToCsv(rows: CaptureRow[]): string {
   return lines.join("\r\n");
 }
 
-
-function DefaultTemplateInspector({
-  selectedImportType,
-  selectedProfile,
-}: {
-  selectedImportType: ImportType;
-  selectedProfile?: ImportProfileSummary;
-}) {
-  const { download, error, pendingKey } = useFileDownload();
-
-  return (
-    <div className="template-inspector">
-      <p className="section-copy">
-        IP Discovery should start from a default register template, not from network-level issue
-        evidence. Upload this template after filling in the expected devices for the project.
-      </p>
-      <div className="inline-actions">
-        <button
-          className="primary-button compact"
-          disabled={pendingKey !== null}
-          onClick={() =>
-            void download(
-              "inspector-xlsx",
-              getImportTemplatePath(selectedImportType, "xlsx"),
-              `${selectedImportType}_template.xlsx`,
-            )
-          }
-          type="button"
-        >
-          {pendingKey === "inspector-xlsx" ? "Downloading..." : "Download default XLSX"}
-        </button>
-        <button
-          className="secondary-button compact"
-          disabled={pendingKey !== null}
-          onClick={() =>
-            void download(
-              "inspector-csv",
-              getImportTemplatePath(selectedImportType, "csv"),
-              `${selectedImportType}_template.csv`,
-            )
-          }
-          type="button"
-        >
-          {pendingKey === "inspector-csv" ? "Downloading..." : "Download CSV copy"}
-        </button>
-      </div>
-      {error && (
-        <div className="state-panel error">
-          <strong>Template download failed</strong>
-          <span>{error}</span>
-        </div>
-      )}
-      <div className="evidence-list template-fields">
-        <h4>Template columns</h4>
-        {(selectedProfile?.required_columns ?? []).map((column) => (
-          <span key={column}>{column}</span>
-        ))}
-        {(selectedProfile?.optional_columns ?? []).map((column) => (
-          <span key={column} className="optional">{column} (optional)</span>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 /**
  * Drives an authenticated file download. Plain `<a download href>` anchors
