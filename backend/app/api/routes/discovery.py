@@ -140,6 +140,41 @@ def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
     )
 
 
+def _resolve_forbidden_ports(project_id: str, site_id: str, parameters: dict) -> None:
+    """Fill ``forbidden_ports`` from the IP register's "Ports that should not be
+    enabled" column (union across rows of the newest import that lists any), so a
+    flagged-if-open check needs no extra operator input. Operator-supplied
+    ``forbidden_ports`` always wins.
+
+    Additionally builds ``forbidden_ports_by_address`` — a per-asset map
+    ``{expected_ip_address: forbidden_spec}`` from the same rows — so the engine
+    can flag each host against its OWN forbidden set, falling back to the global
+    union for any host not in the map. Operator-supplied global ports still win
+    for the union; the per-asset map is purely additive context for the engine.
+    """
+    has_global = bool(parameters.get("forbidden_ports"))
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="ip_register"
+    )
+    for record in imports:  # newest-first
+        specs: list[str] = []
+        by_address: dict[str, str] = {}
+        for row in record.get("accepted_rows", []):
+            spec = str(row.get("Ports that should not be enabled", "") or "").strip()
+            if not spec:
+                continue
+            specs.append(spec)
+            address = str(row.get("Expected IP address", "") or "").strip()
+            if address:
+                by_address[address] = spec
+        if specs:
+            if not has_global:
+                parameters["forbidden_ports"] = ",".join(specs)
+            if by_address:
+                parameters["forbidden_ports_by_address"] = by_address
+            return
+
+
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     # Validate authorization + resolve scan targets BEFORE creating the run, so a
@@ -149,6 +184,7 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
     _ensure_ip_targets(request.project_id, request.site_id, parameters)
+    _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
 
     def run_inline() -> RunRecord:

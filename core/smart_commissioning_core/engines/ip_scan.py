@@ -67,6 +67,12 @@ DEFAULT_PORTS: tuple[int, ...] = (80, 443, 47808, 1883, 502)
 # connects regardless of request parameters.
 MAX_HOSTS_CEILING = 4096
 
+# Hard ceiling on ports-per-sweep. A "scan all 60,000+ ports" request expands
+# via a range like ``1-65535``; this cap keeps a single sweep from quietly
+# turning into a hosts*65k connect storm on a live OT network.
+# ponytail: global cap. Raise it deliberately if a wide audit genuinely needs it.
+MAX_PORTS_CEILING = 4096
+
 # Best-effort service labels for the observed-port detail (informational only;
 # we do not do protocol fingerprinting — a connect success only proves the TCP
 # port is open, not which service is behind it).
@@ -193,8 +199,39 @@ def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
     return ordered
 
 
+def _parse_port_spec(spec: str) -> list[int]:
+    """Expand an "Expected services/ports" string into TCP port numbers.
+
+    Accepts the same comma-separated form the operator types / the IP register
+    carries: ``"443/tcp, 47808/udp, 1-1024, 8000-8100"``. The protocol suffix is
+    dropped (this engine only does TCP connect) and ``lo-hi`` ranges expand
+    inclusively — this is how "scan the other 60,000+ ports" is expressed.
+    """
+    ports: list[int] = []
+    for token in (part.strip() for part in spec.split(",")):
+        if not token:
+            continue
+        number = token.split("/", 1)[0].strip()  # drop "/tcp" | "/udp"
+        try:
+            if "-" in number:
+                low, high = (int(end.strip()) for end in number.split("-", 1))
+                ports.extend(range(min(low, high), max(low, high) + 1))
+            else:
+                ports.append(int(number))
+        except ValueError as error:
+            raise ValueError(f"Expected services/ports contains an invalid port: {token!r}") from error
+    return ports
+
+
 def _resolve_ports(parameters: dict[str, Any]) -> list[int]:
     raw = parameters.get("ports")
+    # The frontend / IP register supplies ports as a "port_specification" string
+    # (with optional ranges); fall back to it when an explicit int list is absent
+    # so the operator's chosen ports actually reach the sweep.
+    if raw is None:
+        spec = parameters.get("port_specification")
+        if spec:
+            raw = _parse_port_spec(str(spec))
     if raw is None:
         return list(DEFAULT_PORTS)
     if not isinstance(raw, (list, tuple)):
@@ -210,8 +247,46 @@ def _resolve_ports(parameters: dict[str, Any]) -> list[int]:
         if port not in ports:
             ports.append(port)
     if not ports:
-        raise ValueError("ports list must not be empty.")
+        # A spec that parsed to nothing (e.g. only blanks) falls back to defaults
+        # rather than failing the whole run.
+        return list(DEFAULT_PORTS) if parameters.get("port_specification") else _raise_empty_ports()
+    if len(ports) > MAX_PORTS_CEILING:
+        raise ValueError(
+            f"port list expands to {len(ports)} ports, exceeding MAX_PORTS_CEILING="
+            f"{MAX_PORTS_CEILING}; narrow the range."
+        )
     return ports
+
+
+def _raise_empty_ports() -> list[int]:
+    raise ValueError("ports list must not be empty.")
+
+
+def _resolve_forbidden_ports(parameters: dict[str, Any]) -> set[int]:
+    """Ports that must NOT be open (flagged if found). Same spec syntax as ports."""
+    raw = parameters.get("forbidden_ports")
+    if raw is None:
+        return set()
+    if isinstance(raw, str):
+        raw = _parse_port_spec(raw)
+    return {int(value) for value in raw if 0 < int(value) < 65536}
+
+
+def _resolve_forbidden_ports_by_address(parameters: dict[str, Any]) -> dict[str, set[int]]:
+    """Per-host forbidden sets keyed by expected IP address.
+
+    The route fills ``forbidden_ports_by_address`` as ``{address: spec}`` from the
+    IP register rows; we expand each spec via the same ``_resolve_forbidden_ports``
+    helper so parsing stays in one place. A host present here is checked against
+    its OWN set; hosts absent fall back to the global ``forbidden_ports``.
+    """
+    raw = parameters.get("forbidden_ports_by_address")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(address): _resolve_forbidden_ports({"forbidden_ports": spec})
+        for address, spec in raw.items()
+    }
 
 
 def _positive_int(value: Any, *, default: int) -> int:
@@ -313,6 +388,8 @@ async def _run_ip_discovery(
     """The engine body: expand targets, sweep (or plan), build results."""
     hosts = _expand_hosts(ctx.parameters)
     ports = _resolve_ports(ctx.parameters)
+    forbidden_ports = _resolve_forbidden_ports(ctx.parameters)
+    forbidden_by_address = _resolve_forbidden_ports_by_address(ctx.parameters)
     do_reverse = bool(ctx.parameters.get("reverse_dns"))
 
     # DRY RUN: enumerate the (ip, port) target list, perform NO I/O.
@@ -348,6 +425,7 @@ async def _run_ip_discovery(
     site_id = ctx.parameters.get("site_id")
 
     hosts_scanned = 0
+    hosts_with_forbidden = 0
     # Sweep host-by-host so cancellation can stop between hosts (and the
     # throttle stops between port dispatches within a host). Each host's ports
     # are dispatched as throttled units.
@@ -374,6 +452,13 @@ async def _run_ip_discovery(
         # site resolver); run it off the event loop so it does not stall the
         # async sweep.
         hostname = await asyncio.to_thread(reverse_lookup, host) if do_reverse else None
+        # Per-asset forbidden set wins for this host; else the global union.
+        host_forbidden = forbidden_by_address.get(host, forbidden_ports)
+        flagged = [port for port in open_ports if port in host_forbidden]
+        status_detail = "responsive: " + ",".join(str(p) for p in open_ports)
+        if flagged:
+            status_detail += " | FORBIDDEN PORTS OPEN: " + ",".join(str(p) for p in flagged)
+            hosts_with_forbidden += 1
         discovered_assets.append(
             {
                 "asset_id": None,
@@ -381,8 +466,7 @@ async def _run_ip_discovery(
                 "hostname": hostname,
                 "observed_ports": _build_observed_ports(open_ports),
                 "match_basis": "ip",
-                "status_detail": "responsive: "
-                + ",".join(str(p) for p in open_ports),
+                "status_detail": status_detail,
             }
         )
         structured_records.append(
@@ -395,6 +479,7 @@ async def _run_ip_discovery(
                 "attributes": {
                     "open_ports": open_ports,
                     "scanned_ports": list(ports),
+                    "forbidden_open_ports": flagged,
                     "hostname": hostname,
                 },
             }
@@ -407,5 +492,7 @@ async def _run_ip_discovery(
             "hosts_scanned": hosts_scanned,
             "hosts_responsive": len(discovered_assets),
             "ports_scanned": list(ports),
+            "forbidden_ports": sorted(forbidden_ports),
+            "hosts_with_forbidden_open": hosts_with_forbidden,
         },
     )

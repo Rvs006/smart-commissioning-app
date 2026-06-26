@@ -98,6 +98,67 @@ class TargetExpansionTests(unittest.TestCase):
             ip_scan._resolve_ports({"ports": []})
 
 
+class PortSpecAndForbiddenTests(unittest.TestCase):
+    def test_parse_port_spec_handles_ranges_and_protocols(self) -> None:
+        self.assertEqual(ip_scan._parse_port_spec("443/tcp, 47808/udp"), [443, 47808])
+        self.assertEqual(ip_scan._parse_port_spec("1-3, 80"), [1, 2, 3, 80])
+        with self.assertRaises(ValueError):
+            ip_scan._parse_port_spec("not-a-port")
+
+    def test_resolve_ports_from_specification_and_cap(self) -> None:
+        # The operator's port_specification string is honoured (was ignored).
+        self.assertEqual(ip_scan._resolve_ports({"port_specification": "80, 8000-8002"}), [80, 8000, 8001, 8002])
+        # A blank spec falls back to defaults rather than failing the run.
+        self.assertEqual(ip_scan._resolve_ports({"port_specification": " "}), list(ip_scan.DEFAULT_PORTS))
+        # A "scan everything" range is rejected by the per-sweep ceiling.
+        with self.assertRaises(ValueError):
+            ip_scan._resolve_ports({"port_specification": "1-65535"})
+
+    def test_forbidden_open_port_is_flagged(self) -> None:
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return port in (80, 23)  # 23 (telnet) is the forbidden one
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_forbidden",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80, 23], "forbidden_ports": "23/tcp"},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_forbidden_open"], 1)
+        self.assertIn("FORBIDDEN PORTS OPEN: 23", summary["discovered_assets"][0]["status_detail"])
+        self.assertEqual(persisted[0][1][0]["attributes"]["forbidden_open_ports"], [23])
+
+    def test_per_asset_forbidden_ports_flag_only_matching_host(self) -> None:
+        # Both hosts have port 23 open, but only host A forbids it; host B forbids
+        # a different port (8080), so its open 23 must NOT be flagged.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return port == 23  # 23 open on every host
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_per_asset",
+            {
+                **_AUTH,
+                "cidr": "10.0.0.0/30",  # -> 10.0.0.1 (A) and 10.0.0.2 (B)
+                "ports": [23],
+                "forbidden_ports_by_address": {"10.0.0.1": "23/tcp", "10.0.0.2": "8080/tcp"},
+            },
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_forbidden_open"], 1)
+        by_address = {a["ip_address"]: a["status_detail"] for a in summary["discovered_assets"]}
+        self.assertIn("FORBIDDEN PORTS OPEN: 23", by_address["10.0.0.1"])
+        self.assertNotIn("FORBIDDEN", by_address["10.0.0.2"])
+
+
 class DryRunTests(unittest.TestCase):
     def test_dry_run_opens_no_socket_and_returns_plan(self) -> None:
         store = FakeRunStore()
