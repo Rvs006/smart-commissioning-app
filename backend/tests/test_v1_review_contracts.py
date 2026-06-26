@@ -6,7 +6,7 @@ from app.schemas.configuration import SecretMaterialRequest
 from app.schemas.jobs import JobCreateRequest, ReportRequest
 from app.services.configuration_service import DEFAULT_CONFIGURATION, ConfigurationService
 from app.services.discovery_observations import build_observation, parse_port_specification
-from app.services.import_service import ImportService
+from app.services.import_service import PROFILES, ImportService
 from app.services.run_service import RunService
 from smart_commissioning_core.db.base import Base
 from smart_commissioning_core.db.engine import create_engine_from_url, default_sqlite_url
@@ -123,6 +123,59 @@ class ImportTemplateReviewTests(unittest.TestCase):
         self.assertGreater(len(xlsx_template), 1000)
 
 
+class ImportRegisterFlexibilityTests(unittest.TestCase):
+    """Register comments from on-site testing: asset one-of, optional Notes /
+    Payload type, topic wildcards + lists, UDMI metadata columns."""
+
+    _MQTT_BASE = {
+        "Project/site": "Site A",
+        "System": "BMS",
+        "Expected topic": "hv/ems/01/em/EM-1001001/#",
+        "Expected schema version": "1.5.2",
+        "Expected points": "energy_sensor,power_sensor",
+        "Expected units": "kwh,kw",
+        "Expected reporting interval": "60",
+        "Source protocol": "MQTT",
+    }
+
+    def _mqtt(self, **overrides: str) -> list:
+        return PROFILES["mqtt_register"].row_validator({**self._MQTT_BASE, **overrides}, 2)
+
+    def test_asset_id_or_name_is_one_of(self) -> None:
+        self.assertEqual(self._mqtt(**{"Asset name": "Meter 9"}), [])  # name only
+        self.assertEqual(self._mqtt(**{"Asset ID": "MTR-9"}), [])  # id only
+        codes = [e.code for e in self._mqtt()]  # neither
+        self.assertIn("missing_asset_identity", codes)
+
+    def test_notes_and_payload_type_optional(self) -> None:
+        # Blank Notes + blank Payload type must not reject the row.
+        self.assertEqual(self._mqtt(**{"Asset ID": "MTR-9", "Notes": "", "Payload type": ""}), [])
+
+    def test_topic_accepts_wildcard_and_comma_list(self) -> None:
+        ok_list = self._mqtt(**{"Asset ID": "MTR-9", "Expected topic": "a/b/metadata,a/b/state,a/b/events/pointset"})
+        self.assertEqual(ok_list, [])
+        bad = self._mqtt(**{"Asset ID": "MTR-9", "Expected topic": "has a space/x"})
+        self.assertIn("invalid_topic", [e.code for e in bad])
+
+    def test_mqtt_template_exposes_metadata_columns(self) -> None:
+        columns = PROFILES["mqtt_register"].template_columns
+        for column in ("Site", "Serial number", "Room", "GUID", "Make", "Model", "Firmware"):
+            self.assertIn(column, columns)
+
+    def test_ip_register_asset_one_of(self) -> None:
+        ip_base = {
+            "Project/site": "Site A",
+            "System": "BMS",
+            "Expected IP address": "10.10.25.117",
+            "Expected services/ports": "443/tcp",
+        }
+        self.assertEqual(PROFILES["ip_register"].row_validator({**ip_base, "Asset name": "AHU"}, 2), [])
+        self.assertIn(
+            "missing_asset_identity",
+            [e.code for e in PROFILES["ip_register"].row_validator(ip_base, 2)],
+        )
+
+
 class ReportReviewTests(unittest.TestCase):
     def test_report_requests_preserve_docx_and_xlsx_formats(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -153,6 +206,43 @@ class ReportReviewTests(unittest.TestCase):
                 self.assertEqual(word_report.output_format, "docx")
             finally:
                 engine.dispose()
+
+
+class UdmiRegisterScheduleTests(unittest.TestCase):
+    def test_expected_schedule_built_from_register_row(self) -> None:
+        from app.api.routes.validation import _expected_schedule_from_register_row
+
+        schedule = _expected_schedule_from_register_row(
+            {
+                "Asset ID": "EM-9",
+                "Make": "Acme",
+                "Model": "M1",
+                "GUID": "ifc://g",
+                "Serial number": "SN1",
+                "Firmware": "1.2",
+                "Site": "B",
+                "Room": "L3",
+                "Expected points": "energy_sensor,power_sensor",
+                "Expected units": "kwh,kw",
+            }
+        )
+
+        self.assertEqual(schedule["manufacturer"], "Acme")
+        self.assertEqual(schedule["serial"], "SN1")
+        self.assertEqual(schedule["units"], {"energy_sensor": "kwh", "power_sensor": "kw"})
+        # Blank register fields are dropped so the matcher only checks what's set.
+        self.assertNotIn("model", _expected_schedule_from_register_row({"Asset ID": "x"}))
+
+    def test_asset_entry_derives_capture_topics_from_wildcard(self) -> None:
+        from app.api.routes.validation import _asset_entry_from_row
+
+        entry = _asset_entry_from_row(
+            {"Asset ID": "EM-9", "Make": "Acme", "Expected topic": "hv/ems/01/em/EM-1001001/#"}
+        )
+        self.assertEqual(entry["expected_schedule"]["manufacturer"], "Acme")
+        self.assertEqual(entry["state_topic"], "hv/ems/01/em/EM-1001001/state")
+        self.assertEqual(entry["metadata_topic"], "hv/ems/01/em/EM-1001001/metadata")
+        self.assertEqual(entry["pointset_topic"], "hv/ems/01/em/EM-1001001/events/pointset")
 
 
 class UdmiReviewTests(unittest.TestCase):
@@ -191,6 +281,52 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertEqual(result.result_summary["message_count"], 3)
         self.assertEqual(result.result_summary["payload_last_seen"], "2026-04-01T10:48:56.312+01:00")
         self.assertEqual(result.result_summary["source"], "schedule_payload_inputs")
+
+    def test_review_flags_serial_firmware_site_and_room(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": {
+                    "asset_id": "EM-1",
+                    "serial": "SN-AAA",
+                    "firmware": "1.0.0",
+                    "site": "Block B",
+                    "room": "L3",
+                },
+                "state_payload": {"system": {"serial_no": "SN-BBB", "software": {"firmware": "2.0.0"}}},
+                "metadata_payload": {"system": {"location": {"site": "Block C", "section": "L4"}}},
+            }
+        )
+
+        descriptions = " ".join(issue.description for issue in result.issues)
+        self.assertIn("serial number does not match", descriptions)
+        self.assertIn("firmware version does not match", descriptions)
+        self.assertIn("site does not match", descriptions)
+        self.assertIn("room/section does not match", descriptions)
+
+    def test_assets_list_captures_and_reviews_per_asset(self) -> None:
+        # Live capture runs per asset (each entry's own state topic), and the
+        # matcher fans out so a mismatch is flagged for EACH asset in one run.
+        def fake_capture(_settings: object, *, topics: list[str], **_kwargs: object) -> list[MqttMessage]:
+            state = next((topic for topic in topics if topic.endswith("/state")), None)
+            return (
+                [MqttMessage(topic=state, payload=b'{"system":{"hardware":{"make":"WrongCo"}}}')]
+                if state
+                else []
+            )
+
+        result = validate_udmi_full_report(
+            {
+                "use_live_broker": True,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1", "manufacturer": "Acme"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2", "manufacturer": "Globex"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=fake_capture,
+        )
+
+        manufacturer_issues = [i for i in result.issues if "manufacturer does not match" in i.description]
+        self.assertEqual({i.asset_id for i in manufacturer_issues}, {"A1", "A2"})
 
     def test_live_udmi_capture_populates_payload_inputs(self) -> None:
         def fake_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
@@ -317,6 +453,33 @@ class UdmiReviewTests(unittest.TestCase):
         views = result.result_summary["payload_views"]
         self.assertEqual({view["asset_id"] for view in views}, {"AHU-1", "AHU-2"})
         self.assertEqual(result.result_summary["payload_view_source"], "direct_inputs")
+
+    def test_review_issues_fan_out_across_assets_list(self) -> None:
+        # Multi-asset run: issue generation runs once per `assets` entry and
+        # aggregates, so both assets surface their own mismatches in one run.
+        result = validate_udmi_full_report(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "AHU-1", "manufacturer": "ExpectedCo"},
+                        "state_payload": {"system": {"hardware": {"make": "ObservedCo"}}},
+                    },
+                    {
+                        "expected_schedule": {
+                            "asset_id": "AHU-2",
+                            "units": {"co2": "parts_per_million"},
+                        },
+                        "pointset_payload": {"points": {"co2": {"present_value": "high"}}},
+                    },
+                ]
+            }
+        )
+        flagged_assets = {issue.asset_id for issue in result.issues}
+        self.assertIn("AHU-1", flagged_assets)
+        self.assertIn("AHU-2", flagged_assets)
+        descriptions = " ".join(issue.description for issue in result.issues)
+        self.assertIn("manufacturer does not match", descriptions)
+        self.assertIn("should be numeric", descriptions)
 
 
 class MqttConfigPublishReviewTests(unittest.TestCase):
