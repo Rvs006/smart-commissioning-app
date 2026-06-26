@@ -35,6 +35,7 @@ from app.schemas.jobs import (
     ValidationIssueRecord,
     ValidationIssuesResponse,
 )
+from app.services.configuration_service import ConfigurationService
 from app.services.engine_dispatch import (
     make_cancel_checker,
     make_discovery_loader,
@@ -47,6 +48,7 @@ from app.services.run_service import VALIDATION_JOB_TYPES, RunService
 router = APIRouter()
 service = RunService()
 queue_service = JobQueueService()
+config_service = ConfigurationService()
 settings = get_settings()
 
 # RBAC: reading validation results/issues is viewer+; creating a validation run,
@@ -187,6 +189,7 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     # expected_schedule; a multi-row register with no asset_id -> an `assets` list
     # so the matcher fans out over every asset (and live capture runs per asset).
     parameters = dict(request.parameters)
+    parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     if not parameters.get("expected_schedule") and not parameters.get("assets"):
         asset_id = parameters.get("asset_id")
         if asset_id:

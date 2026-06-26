@@ -158,6 +158,24 @@ class PortSpecAndForbiddenTests(unittest.TestCase):
         self.assertIn("FORBIDDEN PORTS OPEN: 23", by_address["10.0.0.1"])
         self.assertNotIn("FORBIDDEN", by_address["10.0.0.2"])
 
+    def test_unexpected_open_port_is_flagged(self) -> None:
+        # 8080 is open but not in the host's "Expected services/ports" -> flagged.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return port in (80, 8080)
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_unexpected",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80, 8080],
+             "expected_ports_by_address": {"10.0.0.1": "80/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_unexpected_open"], 1)
+        self.assertIn("UNEXPECTED PORTS OPEN: 8080", summary["discovered_assets"][0]["status_detail"])
+
 
 class DryRunTests(unittest.TestCase):
     def test_dry_run_opens_no_socket_and_returns_plan(self) -> None:

@@ -73,10 +73,10 @@ class FakeCapture:
 
     def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
                  timeout_seconds: float | None, max_messages: int,
-                 cancel_check: Any = None) -> list[MqttMessage]:
+                 cancel_check: Any = None, qos: int = 0) -> list[MqttMessage]:
         self.calls.append({"settings": settings, "topics": list(topics),
                            "timeout_seconds": timeout_seconds, "max_messages": max_messages,
-                           "cancel_check": cancel_check})
+                           "cancel_check": cancel_check, "qos": qos})
         # Honour the max_messages cap the way the real capture would.
         return list(self._messages[:max_messages])
 
@@ -248,7 +248,7 @@ class CancelDuringCaptureTests(unittest.TestCase):
         class CancellingCapture:
             def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
                          timeout_seconds: float | None, max_messages: int,
-                         cancel_check: Any = None) -> list[MqttMessage]:
+                         cancel_check: Any = None, qos: int = 0) -> list[MqttMessage]:
                 captured: list[MqttMessage] = []
                 for index in range(max_messages):
                     captured.append(_json_msg(f"t/{index}", {"i": index}))
