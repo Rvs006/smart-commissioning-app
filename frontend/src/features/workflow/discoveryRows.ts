@@ -67,21 +67,19 @@ function formatPorts(ports: ObservedPort[] | undefined): string {
     .join(", ");
 }
 
-// The IP engine appends "FORBIDDEN PORTS OPEN: <ports>" to an asset's
-// status_detail when a host exposes a port the site forbids (see core
-// engines/ip_scan.py). Pull just that port list back out so the results table
-// can flag the host; returns "" for clean hosts (and any non-IP status_detail).
-export function forbiddenOpenPorts(statusDetail: string | undefined | null): string {
-  const match = /FORBIDDEN PORTS OPEN:\s*([^|]+)/.exec(statusDetail ?? "");
+// The IP engine appends "<MARKER> PORTS OPEN: <ports>" to an asset's status_detail
+// — FORBIDDEN (a port the site disallows) or UNEXPECTED (open but not in the
+// asset's "Expected services/ports"). Pull the port list back out so the results
+// table can flag the host; "" for clean hosts (and any non-IP status_detail).
+function portsFromDetail(statusDetail: string | undefined | null, marker: string): string {
+  const match = new RegExp(`${marker} PORTS OPEN:\\s*([^|]+)`).exec(statusDetail ?? "");
   return match ? match[1].trim() : "";
 }
 
-// Same idea for "UNEXPECTED PORTS OPEN: <ports>" — ports open that the asset's
-// "Expected services/ports" did not list (a port range turned up extras).
-export function unexpectedOpenPorts(statusDetail: string | undefined | null): string {
-  const match = /UNEXPECTED PORTS OPEN:\s*([^|]+)/.exec(statusDetail ?? "");
-  return match ? match[1].trim() : "";
-}
+export const forbiddenOpenPorts = (statusDetail: string | undefined | null): string =>
+  portsFromDetail(statusDetail, "FORBIDDEN");
+export const unexpectedOpenPorts = (statusDetail: string | undefined | null): string =>
+  portsFromDetail(statusDetail, "UNEXPECTED");
 
 // IP discovery rows come from discovered_assets (DiscoveryAssetObservation).
 export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<string, string>[] {

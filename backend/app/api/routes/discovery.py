@@ -142,62 +142,46 @@ def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
     )
 
 
-def _resolve_forbidden_ports(project_id: str, site_id: str, parameters: dict) -> None:
-    """Fill ``forbidden_ports`` from the IP register's "Ports that should not be
-    enabled" column (union across rows of the newest import that lists any), so a
-    flagged-if-open check needs no extra operator input. Operator-supplied
-    ``forbidden_ports`` always wins.
-
-    Additionally builds ``forbidden_ports_by_address`` — a per-asset map
-    ``{expected_ip_address: forbidden_spec}`` from the same rows — so the engine
-    can flag each host against its OWN forbidden set, falling back to the global
-    union for any host not in the map. Operator-supplied global ports still win
-    for the union; the per-asset map is purely additive context for the engine.
-    """
-    has_global = bool(parameters.get("forbidden_ports"))
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="ip_register"
-    )
-    for record in imports:  # newest-first
-        specs: list[str] = []
-        by_address: dict[str, str] = {}
-        for row in record.get("accepted_rows", []):
-            spec = str(row.get("Ports that should not be enabled", "") or "").strip()
-            if not spec:
-                continue
-            specs.append(spec)
-            address = str(row.get("Expected IP address", "") or "").strip()
-            if address:
-                by_address[address] = spec
-        if specs:
-            if not has_global:
-                parameters["forbidden_ports"] = ",".join(specs)
-            if by_address:
-                parameters["forbidden_ports_by_address"] = by_address
-            return
-
-
-def _resolve_expected_ports(project_id: str, site_id: str, parameters: dict) -> None:
-    """Fill ``expected_ports_by_address`` {expected_ip: spec} from the register's
-    "Expected services/ports" column, so the engine flags any OPEN port that is
-    NOT expected for that host. Operator-supplied value wins. Meaningful only when
-    the sweep covers more than the expected ports (a port range).
-    """
-    if parameters.get("expected_ports_by_address"):
-        return
+def _ip_register_by_address(project_id: str, site_id: str, column: str) -> dict[str, str]:
+    """``{Expected IP address: <column>}`` from the newest ip_register import that
+    has any non-empty value in ``column`` (every accepted row has an IP address)."""
     imports = ImportRepository(service.engine).list(
         project_id=project_id, site_id=site_id, import_type="ip_register"
     )
     for record in imports:  # newest-first
         by_address = {
-            address: spec
+            address: value
             for row in record.get("accepted_rows", [])
-            if (spec := str(row.get("Expected services/ports", "") or "").strip())
+            if (value := str(row.get(column, "") or "").strip())
             and (address := str(row.get("Expected IP address", "") or "").strip())
         }
         if by_address:
+            return by_address
+    return {}
+
+
+def _resolve_forbidden_ports(project_id: str, site_id: str, parameters: dict) -> None:
+    """Forbidden ports from the register's "Ports that should not be enabled": a
+    per-asset ``forbidden_ports_by_address`` map (engine flags each host against its
+    own set) plus a global ``forbidden_ports`` union for hosts not in the map.
+    Operator-supplied values win.
+    """
+    by_address = _ip_register_by_address(project_id, site_id, "Ports that should not be enabled")
+    if not by_address:
+        return
+    if not parameters.get("forbidden_ports"):
+        parameters["forbidden_ports"] = ",".join(by_address.values())
+    parameters.setdefault("forbidden_ports_by_address", by_address)
+
+
+def _resolve_expected_ports(project_id: str, site_id: str, parameters: dict) -> None:
+    """Fill ``expected_ports_by_address`` from the register's "Expected services/ports"
+    so the engine flags any OPEN port NOT expected for that host (needs a port range
+    to be meaningful). Operator-supplied value wins.
+    """
+    if not parameters.get("expected_ports_by_address"):
+        if by_address := _ip_register_by_address(project_id, site_id, "Expected services/ports"):
             parameters["expected_ports_by_address"] = by_address
-            return
 
 
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
