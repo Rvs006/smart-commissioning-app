@@ -117,28 +117,6 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
     return schedule
 
 
-def _mqtt_register_schedule(project_id: str, site_id: str, asset_id: object) -> dict | None:
-    """expected_schedule from the newest mqtt_register import for this asset.
-
-    Picks the row matching ``asset_id`` (by Asset ID or Asset name) when given,
-    else the first row. ponytail: single asset — one run validates one asset's
-    payloads, matching today's matcher. Multi-asset fan-out is a separate change.
-    """
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="mqtt_register"
-    )
-    asset = str(asset_id).strip() if asset_id else ""
-    for record in imports:  # newest-first
-        rows = record.get("accepted_rows", [])
-        if not rows:
-            continue
-        chosen = None
-        if asset:
-            chosen = next((r for r in rows if asset in (r.get("Asset ID"), r.get("Asset name"))), None)
-        return _expected_schedule_from_register_row(chosen or rows[0])
-    return None
-
-
 def _capture_topics_from_expected(expected_topic: object) -> dict:
     """Derive state/metadata/pointset capture topics from a register Expected topic.
 
@@ -191,17 +169,15 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     parameters = dict(request.parameters)
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     if not parameters.get("expected_schedule") and not parameters.get("assets"):
-        asset_id = parameters.get("asset_id")
-        if asset_id:
-            schedule = _mqtt_register_schedule(request.project_id, request.site_id, asset_id)
-            if schedule:
-                parameters["expected_schedule"] = schedule
-        else:
-            assets = _expected_assets_from_register(request.project_id, request.site_id)
-            if len(assets) > 1:
-                parameters["assets"] = assets
-            elif assets:
-                parameters["expected_schedule"] = assets[0]["expected_schedule"]
+        assets = _expected_assets_from_register(request.project_id, request.site_id)
+        asset_id = str(parameters.get("asset_id") or "").strip()
+        if asset_id and assets:
+            chosen = next((a for a in assets if asset_id == a["expected_schedule"].get("asset_id")), assets[0])
+            parameters["expected_schedule"] = chosen["expected_schedule"]
+        elif len(assets) > 1:
+            parameters["assets"] = assets
+        elif assets:
+            parameters["expected_schedule"] = assets[0]["expected_schedule"]
     run = _create_run(request.model_copy(update={"parameters": parameters}), "udmi_validation")
 
     def run_inline() -> RunRecord:

@@ -38,9 +38,9 @@ manual, error-prone checklist into a repeatable five-stage workflow:
 | Stage | What happens | Pages |
 | --- | --- | --- |
 | **1. Configure** | Capture the site's network, BACnet, MQTT broker (with TLS certs), time/NTP and backup settings. Export/import per-project config so the same engineer can jump between projects. | Configuration |
-| **2. Import** | Upload the *expected* register (CSV/XLSX) — the devices and points the design says should exist. Every module ships a downloadable template. | each module |
-| **3. Discover** | Scan the live network: IP sweep, BACnet device/object discovery, and MQTT topic capture (MQTT-Explorer-style wildcard subscription with latest-payload export). | IP Scanner, BACnet Discovery, MQTT Discovery |
-| **4. Validate** | Check observed data against the design: UDMI payload validation (pointset / metadata / state, expected-vs-observed) and BACnet ↔ MQTT comparison within tolerances. Result is a clear **Pass / Fail** with reasons. | UDMI Validation, BACnet to MQTT Validation |
+| **2. Import** | Upload the *expected* register (CSV/XLSX) — the devices and points the design says should exist. Every module ships a downloadable template. Registers are flexible: asset ID *or* name, optional Notes/payload-type, `prefix/#` topic wildcards, multiple points per row, and UDMI metadata columns (make/model/GUID/serial/firmware/site/room). | each module |
+| **3. Discover** | Scan the live network: IP sweep, BACnet device/object discovery, and MQTT topic capture (MQTT-Explorer-style wildcard subscription with latest-payload export). The IP sweep honours operator port ranges and flags **forbidden** and **unexpected-open** ports; the MQTT subscribe inherits the configured Root Topic and QoS. | IP Scanner, BACnet Discovery, MQTT Discovery |
+| **4. Validate** | Check observed data against the design: UDMI payload validation (pointset / metadata / state, expected-vs-observed) and BACnet ↔ MQTT comparison within tolerances. UDMI validates **every asset in the register in one run** and matches make/model/GUID/serial/firmware/site/room. Result is a clear **Pass / Fail** with reasons. | UDMI Validation, BACnet to MQTT Validation |
 | **5. Report** | Export a commissioning evidence pack (XLSX / DOCX / ZIP) scoped to the runs you choose, carrying the actual findings and stamped with an integrity signature. | Reports |
 
 A controlled **MQTT config publish** path (multi-point write + read-back confirm, with rollback)
@@ -238,6 +238,7 @@ Smart Commissioning Tool Specification.pdf
 | Document | Covers |
 | --- | --- |
 | [docs/what-is-this.md](docs/what-is-this.md) | Plain-English onboarding: what the app is, what it does, how to explain it |
+| [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) | Agent/contributor quick-reference: setup, the `unittest` test commands CI runs, lint, local run, conventions, gotchas (identical files) |
 | [docs/review-guide.md](docs/review-guide.md) | How to review this build: run it, what to look at, scope for this round |
 | [docs/production-architecture.md](docs/production-architecture.md) | System model mapping the specification to the production build |
 | [docs/runbook.md](docs/runbook.md) | Deploy, operate, and recover (hosted compose + edge/portable profiles) |

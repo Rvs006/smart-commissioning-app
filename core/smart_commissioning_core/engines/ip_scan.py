@@ -249,17 +249,15 @@ def _resolve_ports(parameters: dict[str, Any]) -> list[int]:
     if not ports:
         # A spec that parsed to nothing (e.g. only blanks) falls back to defaults
         # rather than failing the whole run.
-        return list(DEFAULT_PORTS) if parameters.get("port_specification") else _raise_empty_ports()
+        if parameters.get("port_specification"):
+            return list(DEFAULT_PORTS)
+        raise ValueError("ports list must not be empty.")
     if len(ports) > MAX_PORTS_CEILING:
         raise ValueError(
             f"port list expands to {len(ports)} ports, exceeding MAX_PORTS_CEILING="
             f"{MAX_PORTS_CEILING}; narrow the range."
         )
     return ports
-
-
-def _raise_empty_ports() -> list[int]:
-    raise ValueError("ports list must not be empty.")
 
 
 def _resolve_forbidden_ports(parameters: dict[str, Any]) -> set[int]:
@@ -269,37 +267,17 @@ def _resolve_forbidden_ports(parameters: dict[str, Any]) -> set[int]:
         return set()
     if isinstance(raw, str):
         raw = _parse_port_spec(raw)
-    return {int(value) for value in raw if 0 < int(value) < 65536}
+    return {p for value in raw if 0 < (p := int(value)) < 65536}
 
 
-def _resolve_forbidden_ports_by_address(parameters: dict[str, Any]) -> dict[str, set[int]]:
-    """Per-host forbidden sets keyed by expected IP address.
-
-    The route fills ``forbidden_ports_by_address`` as ``{address: spec}`` from the
-    IP register rows; we expand each spec via the same ``_resolve_forbidden_ports``
-    helper so parsing stays in one place. A host present here is checked against
-    its OWN set; hosts absent fall back to the global ``forbidden_ports``.
+def _resolve_spec_map(parameters: dict[str, Any], key: str) -> dict[str, set[int]]:
+    """Per-host port sets keyed by IP, expanded from a ``{address: spec}`` map the
+    route fills from the register. Used for both ``forbidden_ports_by_address``
+    (flag if open) and ``expected_ports_by_address`` (flag if open AND not listed).
+    A host present here is checked against its OWN set; absent hosts fall back to
+    the global forbidden set.
     """
-    raw = parameters.get("forbidden_ports_by_address")
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(address): _resolve_forbidden_ports({"forbidden_ports": spec})
-        for address, spec in raw.items()
-    }
-
-
-def _resolve_expected_ports_by_address(parameters: dict[str, Any]) -> dict[str, set[int]]:
-    """Per-host EXPECTED port sets keyed by IP (register "Expected services/ports").
-
-    When a host has an expected set, any OPEN port NOT in it is flagged as
-    unexpected — the inverse of forbidden. Reuses the same spec parser.
-
-    ponytail: only meaningful when the sweep covers more than the expected ports.
-    Scan just the expected ports and nothing unexpected can ever surface — pair
-    this with a port range (port_specification "1-1024,...").
-    """
-    raw = parameters.get("expected_ports_by_address")
+    raw = parameters.get(key)
     if not isinstance(raw, dict):
         return {}
     return {
@@ -408,8 +386,8 @@ async def _run_ip_discovery(
     hosts = _expand_hosts(ctx.parameters)
     ports = _resolve_ports(ctx.parameters)
     forbidden_ports = _resolve_forbidden_ports(ctx.parameters)
-    forbidden_by_address = _resolve_forbidden_ports_by_address(ctx.parameters)
-    expected_by_address = _resolve_expected_ports_by_address(ctx.parameters)
+    forbidden_by_address = _resolve_spec_map(ctx.parameters, "forbidden_ports_by_address")
+    expected_by_address = _resolve_spec_map(ctx.parameters, "expected_ports_by_address")
     do_reverse = bool(ctx.parameters.get("reverse_dns"))
 
     # DRY RUN: enumerate the (ip, port) target list, perform NO I/O.
