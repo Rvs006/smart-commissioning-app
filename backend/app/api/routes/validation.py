@@ -89,9 +89,117 @@ def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAccepted
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
+def _expected_schedule_from_register_row(row: dict) -> dict:
+    """Map an mqtt_register row to the UDMI matcher's expected_schedule.
+
+    Make/Model/GUID/Serial/Firmware/Site/Room feed the metadata/state identity
+    checks; comma-separated Expected points + Expected units become the per-point
+    units map. Blank fields are dropped so the matcher only checks what's set.
+    """
+    points = [p.strip() for p in str(row.get("Expected points", "")).split(",") if p.strip()]
+    units = [u.strip() for u in str(row.get("Expected units", "")).split(",") if u.strip()]
+    fields = {
+        "asset_id": row.get("Asset ID") or row.get("Asset name"),
+        "manufacturer": row.get("Make"),
+        "model": row.get("Model"),
+        "serial": row.get("Serial number"),
+        "firmware": row.get("Firmware"),
+        "guid": row.get("GUID"),
+        "site": row.get("Site"),
+        "room": row.get("Room"),
+    }
+    schedule = {key: value for key, value in fields.items() if value}
+    units_map = {point: (units[index] if index < len(units) else "") for index, point in enumerate(points)}
+    if units_map:
+        schedule["units"] = units_map
+    return schedule
+
+
+def _mqtt_register_schedule(project_id: str, site_id: str, asset_id: object) -> dict | None:
+    """expected_schedule from the newest mqtt_register import for this asset.
+
+    Picks the row matching ``asset_id`` (by Asset ID or Asset name) when given,
+    else the first row. ponytail: single asset — one run validates one asset's
+    payloads, matching today's matcher. Multi-asset fan-out is a separate change.
+    """
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="mqtt_register"
+    )
+    asset = str(asset_id).strip() if asset_id else ""
+    for record in imports:  # newest-first
+        rows = record.get("accepted_rows", [])
+        if not rows:
+            continue
+        chosen = None
+        if asset:
+            chosen = next((r for r in rows if asset in (r.get("Asset ID"), r.get("Asset name"))), None)
+        return _expected_schedule_from_register_row(chosen or rows[0])
+    return None
+
+
+def _capture_topics_from_expected(expected_topic: object) -> dict:
+    """Derive state/metadata/pointset capture topics from a register Expected topic.
+
+    Accepts a ``prefix/#`` wildcard (covers all three), an explicit per-type topic,
+    or a comma-separated list of those — matching the register's topic conventions.
+    """
+    topics: dict[str, str] = {}
+    for part in str(expected_topic or "").split(","):
+        topic = part.strip()
+        if not topic:
+            continue
+        if topic.endswith("/#") or topic.endswith("/+"):
+            prefix = topic[:-2].rstrip("/")
+            topics.setdefault("state_topic", prefix + "/state")
+            topics.setdefault("metadata_topic", prefix + "/metadata")
+            topics.setdefault("pointset_topic", prefix + "/events/pointset")
+        elif topic.endswith("/state"):
+            topics["state_topic"] = topic
+        elif topic.endswith("/metadata"):
+            topics["metadata_topic"] = topic
+        elif topic.endswith("/pointset"):
+            topics["pointset_topic"] = topic
+    return topics
+
+
+def _asset_entry_from_row(row: dict) -> dict:
+    """One UDMI `assets` fan-out entry: expected_schedule + per-asset capture topics."""
+    return {"expected_schedule": _expected_schedule_from_register_row(row), **_capture_topics_from_expected(row.get("Expected topic"))}
+
+
+def _expected_assets_from_register(project_id: str, site_id: str) -> list[dict]:
+    """One fan-out entry per row of the newest mqtt_register import (empty if none)."""
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="mqtt_register"
+    )
+    for record in imports:  # newest-first
+        rows = record.get("accepted_rows", [])
+        if rows:
+            return [_asset_entry_from_row(row) for row in rows]
+    return []
+
+
 @router.post("/udmi/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "udmi_validation")
+    # When the operator hasn't pasted expected values, fill them from the imported
+    # MQTT register so the workbench validates against Make/Model/GUID/points/units
+    # without re-typing. One asset (asset_id given, or a single-row register) ->
+    # expected_schedule; a multi-row register with no asset_id -> an `assets` list
+    # so the matcher fans out over every asset (and live capture runs per asset).
+    parameters = dict(request.parameters)
+    if not parameters.get("expected_schedule") and not parameters.get("assets"):
+        asset_id = parameters.get("asset_id")
+        if asset_id:
+            schedule = _mqtt_register_schedule(request.project_id, request.site_id, asset_id)
+            if schedule:
+                parameters["expected_schedule"] = schedule
+        else:
+            assets = _expected_assets_from_register(request.project_id, request.site_id)
+            if len(assets) > 1:
+                parameters["assets"] = assets
+            elif assets:
+                parameters["expected_schedule"] = assets[0]["expected_schedule"]
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "udmi_validation")
 
     def run_inline() -> RunRecord:
         return process_udmi_validation_run(

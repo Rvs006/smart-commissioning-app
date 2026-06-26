@@ -67,6 +67,15 @@ function formatPorts(ports: ObservedPort[] | undefined): string {
     .join(", ");
 }
 
+// The IP engine appends "FORBIDDEN PORTS OPEN: <ports>" to an asset's
+// status_detail when a host exposes a port the site forbids (see core
+// engines/ip_scan.py). Pull just that port list back out so the results table
+// can flag the host; returns "" for clean hosts (and any non-IP status_detail).
+export function forbiddenOpenPorts(statusDetail: string | undefined | null): string {
+  const match = /FORBIDDEN PORTS OPEN:\s*([^|]+)/.exec(statusDetail ?? "");
+  return match ? match[1].trim() : "";
+}
+
 // IP discovery rows come from discovered_assets (DiscoveryAssetObservation).
 export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<string, string>[] {
   return results.discovered_assets.map((asset: DiscoveryAssetObservation) => ({

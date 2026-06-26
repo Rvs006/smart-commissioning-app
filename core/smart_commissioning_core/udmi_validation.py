@@ -74,7 +74,7 @@ def validate_udmi_full_report(
 
     issues = _normalise_issues(full_report)
     issues.extend(capture_issues)
-    issues.extend(_review_payload_issues(parameters or {}, issues))
+    issues.extend(_review_all_payload_issues(parameters or {}, issues))
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
     latest_payload = _latest_payload_timestamp(parameters or {})
@@ -193,6 +193,72 @@ def _normalise_issues(full_report: dict[str, Any]) -> list[ValidationIssueRecord
     return issues
 
 
+def _nested(payload: object, *keys: str) -> object:
+    """Walk nested dict keys, tolerating missing/non-dict nodes (returns None)."""
+    node: object = payload
+    for key in keys:
+        node = _dict_or_empty(node).get(key)
+    return node
+
+
+# Register field -> (observed UDMI location, issue type, severity, description,
+# action). manufacturer/model/serial/firmware read the STATE payload; guid/site/
+# room read METADATA. Paths follow UDMI conventions (system.hardware.*,
+# system.serial_no, system.software.firmware, system.physical_tag.asset.guid,
+# system.location.{site,section}); confirm on a real device if one never matches.
+_IDENTITY_CHECKS: tuple[tuple[str, Callable[[dict, dict], object], str, str, str, str], ...] = (
+    ("manufacturer", lambda state, metadata: _nested(state, "system", "hardware", "make"),
+     "state_validation", "high",
+     "State payload manufacturer does not match the asset register.",
+     "Confirm the manufacturer in the MSI schedule and the UDMI state payload."),
+    ("model", lambda state, metadata: _nested(state, "system", "hardware", "model"),
+     "state_validation", "medium",
+     "State payload model does not match the asset register.",
+     "Check device metadata or update the asset register if the installed model changed."),
+    ("serial", lambda state, metadata: _nested(state, "system", "serial_no"),
+     "state_validation", "medium",
+     "State payload serial number does not match the asset register.",
+     "Confirm the device serial number in the schedule and the UDMI state payload."),
+    ("firmware", lambda state, metadata: _nested(state, "system", "software", "firmware"),
+     "state_validation", "low",
+     "State payload firmware version does not match the asset register.",
+     "Confirm the expected firmware version or update the device firmware."),
+    ("guid", lambda state, metadata: _nested(metadata, "system", "physical_tag", "asset", "guid"),
+     "metadata_validation", "high",
+     "Metadata GUID does not match the asset register.",
+     "Correct the UDMI metadata asset GUID or the imported register."),
+    ("site", lambda state, metadata: _nested(metadata, "system", "location", "site"),
+     "metadata_validation", "low",
+     "Metadata site does not match the asset register.",
+     "Confirm the site in the schedule and the UDMI metadata location."),
+    ("room", lambda state, metadata: _nested(metadata, "system", "location", "section"),
+     "metadata_validation", "low",
+     "Metadata room/section does not match the asset register.",
+     "Confirm the room/section in the schedule and the UDMI metadata location."),
+)
+
+
+def _review_all_payload_issues(
+    parameters: dict[str, object],
+    existing_issues: list[ValidationIssueRecord],
+) -> list[ValidationIssueRecord]:
+    """Fan _review_payload_issues out across a multi-asset ``assets`` list.
+
+    When ``parameters["assets"]`` is a non-empty list, each entry carries its
+    own ``expected_schedule``/``*_payload`` keys; run the single-asset reviewer
+    once per entry and aggregate. The single top-level path stays back-compatible.
+    """
+    assets = parameters.get("assets")
+    if isinstance(assets, list) and assets:
+        issues: list[ValidationIssueRecord] = []
+        for entry in assets:
+            if not isinstance(entry, dict):
+                continue
+            issues.extend(_review_payload_issues(entry, [*existing_issues, *issues]))
+        return issues
+    return _review_payload_issues(parameters, existing_issues)
+
+
 def _review_payload_issues(
     parameters: dict[str, object],
     existing_issues: list[ValidationIssueRecord],
@@ -208,63 +274,25 @@ def _review_payload_issues(
     pointset_payload = _dict_or_empty(parameters.get("pointset_payload"))
     raw_evidence_uri = str(parameters.get("raw_evidence_uri") or "runtime://udmi-validation/review-payloads")
 
-    expected_make = expected.get("manufacturer")
-    observed_make = state_payload.get("system", {}).get("hardware", {}).get("make") if state_payload else None
-    if expected_make and observed_make and expected_make != observed_make:
-        issues.append(
-            _issue(
-                [*existing_issues, *issues],
-                asset_id=asset_id,
-                issue_type="state_validation",
-                severity="high",
-                description="State payload manufacturer does not match the asset register.",
-                expected_value=str(expected_make),
-                observed_value=str(observed_make),
-                suggested_action="Confirm the manufacturer in the MSI schedule and the UDMI state payload.",
-                raw_evidence_uri=raw_evidence_uri,
+    # manufacturer/model/serial/firmware/guid/site/room: flag any expected value
+    # that is present in both register and payload but differs (see _IDENTITY_CHECKS).
+    for expected_key, observed_getter, issue_type, severity, description, action in _IDENTITY_CHECKS:
+        expected_value = expected.get(expected_key)
+        observed_value = observed_getter(state_payload, metadata_payload)
+        if expected_value and observed_value and expected_value != observed_value:
+            issues.append(
+                _issue(
+                    [*existing_issues, *issues],
+                    asset_id=asset_id,
+                    issue_type=issue_type,
+                    severity=severity,
+                    description=description,
+                    expected_value=str(expected_value),
+                    observed_value=str(observed_value),
+                    suggested_action=action,
+                    raw_evidence_uri=raw_evidence_uri,
+                )
             )
-        )
-
-    expected_model = expected.get("model")
-    observed_model = state_payload.get("system", {}).get("hardware", {}).get("model") if state_payload else None
-    if expected_model and observed_model and expected_model != observed_model:
-        issues.append(
-            _issue(
-                [*existing_issues, *issues],
-                asset_id=asset_id,
-                issue_type="state_validation",
-                severity="medium",
-                description="State payload model does not match the asset register.",
-                expected_value=str(expected_model),
-                observed_value=str(observed_model),
-                suggested_action="Check device metadata or update the asset register if the installed model changed.",
-                raw_evidence_uri=raw_evidence_uri,
-            )
-        )
-
-    expected_guid = expected.get("guid")
-    observed_guid = (
-        metadata_payload.get("system", {})
-        .get("physical_tag", {})
-        .get("asset", {})
-        .get("guid")
-        if metadata_payload
-        else None
-    )
-    if expected_guid and observed_guid and expected_guid != observed_guid:
-        issues.append(
-            _issue(
-                [*existing_issues, *issues],
-                asset_id=asset_id,
-                issue_type="metadata_validation",
-                severity="high",
-                description="Metadata GUID does not match the asset register.",
-                expected_value=str(expected_guid),
-                observed_value=str(observed_guid),
-                suggested_action="Correct the UDMI metadata asset GUID or the imported register.",
-                raw_evidence_uri=raw_evidence_uri,
-            )
-        )
 
     metadata_points = metadata_payload.get("pointset", {}).get("points", {}) if metadata_payload else {}
     pointset_points = pointset_payload.get("points", {}) or pointset_payload.get("pointset", {}).get("points", {})
@@ -354,6 +382,10 @@ def _capture_live_payloads(
             "issue": None,
         }
 
+    assets = parameters.get("assets")
+    if isinstance(assets, list) and assets:
+        return _capture_live_payloads_per_asset(parameters, assets, live_capture=live_capture)
+
     if live_capture is None:
         return {
             "attempted": True,
@@ -436,6 +468,57 @@ def _capture_live_payloads(
             description="No UDMI payloads were captured from the live broker during the capture window.",
             suggested_action="Confirm the device is publishing and widen the capture window if needed.",
         ),
+    }
+
+
+def _capture_live_payloads_per_asset(
+    parameters: dict[str, object],
+    assets: list,
+    *,
+    live_capture: LiveCapture | None,
+) -> dict[str, object]:
+    """Capture live payloads for each asset entry into that entry's *_payload keys.
+
+    Each entry carries its own state/metadata/pointset topics + expected_schedule;
+    the broker connection settings are shared (top level). Reuses the single-asset
+    capture per entry so routing/parsing stays in one place.
+
+    ponytail: sequential, one short window per asset. Fine when each asset
+    publishes within the window; concurrent capture / long (COV, daily) windows —
+    Dhilen's "run 2-3 validations at once" — are a separate change.
+    """
+    if live_capture is None:
+        return {
+            "attempted": True,
+            "status_detail": "live_capture_unavailable",
+            "captured_topics": [],
+            "issue": _issue(
+                [],
+                asset_id="UDMI assets",
+                issue_type="payload_error",
+                severity="high",
+                description="Live MQTT capture is not available in this execution context.",
+                suggested_action="Run live UDMI validation from a service with broker access, or supply captured payloads directly.",
+            ),
+        }
+
+    connection = {key: value for key, value in parameters.items() if key != "assets"}
+    captured_topics: list[str] = []
+    for entry in assets:
+        if not isinstance(entry, dict):
+            continue
+        merged = {**connection, **entry}
+        summary = _capture_live_payloads(merged, live_capture=live_capture)
+        # Copy the captured payloads back so the per-asset reviewer sees them.
+        for key in ("messages", "state_payload", "metadata_payload", "pointset_payload"):
+            if key in merged:
+                entry[key] = merged[key]
+        captured_topics.extend(summary.get("captured_topics") or [])
+    return {
+        "attempted": True,
+        "status_detail": "live_payloads_captured" if captured_topics else "live_capture_timeout",
+        "captured_topics": captured_topics,
+        "issue": None,
     }
 
 

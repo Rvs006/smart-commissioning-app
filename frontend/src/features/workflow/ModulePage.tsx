@@ -36,6 +36,7 @@ import { groupIssuesByAsset, mergeAssetGroups, moduleWorkspaces, type IssueRow }
 import {
   discoveryMetrics,
   discoveryViewFor,
+  forbiddenOpenPorts,
   matchesTopicFilter,
   validationMetrics,
 } from "./discoveryRows";
@@ -2270,6 +2271,16 @@ function renderCell(
         Copy payload
       </button>
     );
+  }
+  if (column === "Detailed Status") {
+    const forbidden = forbiddenOpenPorts(row[column]);
+    if (forbidden) {
+      return (
+        <>
+          {row[column]} <span className="chip red">Forbidden ports open: {forbidden}</span>
+        </>
+      );
+    }
   }
   return row[column];
 }
