@@ -289,6 +289,25 @@ def _resolve_forbidden_ports_by_address(parameters: dict[str, Any]) -> dict[str,
     }
 
 
+def _resolve_expected_ports_by_address(parameters: dict[str, Any]) -> dict[str, set[int]]:
+    """Per-host EXPECTED port sets keyed by IP (register "Expected services/ports").
+
+    When a host has an expected set, any OPEN port NOT in it is flagged as
+    unexpected — the inverse of forbidden. Reuses the same spec parser.
+
+    ponytail: only meaningful when the sweep covers more than the expected ports.
+    Scan just the expected ports and nothing unexpected can ever surface — pair
+    this with a port range (port_specification "1-1024,...").
+    """
+    raw = parameters.get("expected_ports_by_address")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(address): _resolve_forbidden_ports({"forbidden_ports": spec})
+        for address, spec in raw.items()
+    }
+
+
 def _positive_int(value: Any, *, default: int) -> int:
     try:
         parsed = int(value)
@@ -390,6 +409,7 @@ async def _run_ip_discovery(
     ports = _resolve_ports(ctx.parameters)
     forbidden_ports = _resolve_forbidden_ports(ctx.parameters)
     forbidden_by_address = _resolve_forbidden_ports_by_address(ctx.parameters)
+    expected_by_address = _resolve_expected_ports_by_address(ctx.parameters)
     do_reverse = bool(ctx.parameters.get("reverse_dns"))
 
     # DRY RUN: enumerate the (ip, port) target list, perform NO I/O.
@@ -426,6 +446,7 @@ async def _run_ip_discovery(
 
     hosts_scanned = 0
     hosts_with_forbidden = 0
+    hosts_with_unexpected = 0
     # Sweep host-by-host so cancellation can stop between hosts (and the
     # throttle stops between port dispatches within a host). Each host's ports
     # are dispatched as throttled units.
@@ -455,10 +476,17 @@ async def _run_ip_discovery(
         # Per-asset forbidden set wins for this host; else the global union.
         host_forbidden = forbidden_by_address.get(host, forbidden_ports)
         flagged = [port for port in open_ports if port in host_forbidden]
+        # Open ports the asset's "Expected services/ports" did not list. Only
+        # checked when the host has a registered expected set.
+        host_expected = expected_by_address.get(host)
+        unexpected = [port for port in open_ports if port not in host_expected] if host_expected is not None else []
         status_detail = "responsive: " + ",".join(str(p) for p in open_ports)
         if flagged:
             status_detail += " | FORBIDDEN PORTS OPEN: " + ",".join(str(p) for p in flagged)
             hosts_with_forbidden += 1
+        if unexpected:
+            status_detail += " | UNEXPECTED PORTS OPEN: " + ",".join(str(p) for p in unexpected)
+            hosts_with_unexpected += 1
         discovered_assets.append(
             {
                 "asset_id": None,
@@ -480,6 +508,7 @@ async def _run_ip_discovery(
                     "open_ports": open_ports,
                     "scanned_ports": list(ports),
                     "forbidden_open_ports": flagged,
+                    "unexpected_open_ports": unexpected,
                     "hostname": hostname,
                 },
             }
@@ -494,5 +523,6 @@ async def _run_ip_discovery(
             "ports_scanned": list(ports),
             "forbidden_ports": sorted(forbidden_ports),
             "hosts_with_forbidden_open": hosts_with_forbidden,
+            "hosts_with_unexpected_open": hosts_with_unexpected,
         },
     )
