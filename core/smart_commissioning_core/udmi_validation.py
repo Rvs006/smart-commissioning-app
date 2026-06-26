@@ -5,7 +5,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from smart_commissioning_core.mqtt_settings import build_mqtt_connection_settings, parse_bool, parse_float, parse_int
+from smart_commissioning_core.mqtt_settings import (
+    _broker_error_status,
+    _string,
+    build_mqtt_connection_settings,
+    parse_bool,
+    parse_float,
+    parse_int,
+)
 from smart_commissioning_core.mqtt_transport import MqttMessage, MqttTransportError, subscribe_and_capture
 from smart_commissioning_core.records import ValidationIssueRecord
 
@@ -562,21 +569,6 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
         "DevicesPointsetValid": [],
         "DevicesStateValid": [],
     }
-
-
-def _string(value: object) -> str:
-    return str(value or "").strip()
-
-
-def _broker_error_status(error: Exception) -> str:
-    text = str(error).casefold()
-    if "tls" in text or "certificate" in text or "ssl" in text:
-        return "tls_error"
-    if "username" in text or "password" in text or "authorised" in text or "authorized" in text:
-        return "authentication_error"
-    if "timed out" in text or "timeout" in text:
-        return "broker_timeout"
-    return "broker_unreachable"
 
 
 def _issue(

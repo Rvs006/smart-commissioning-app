@@ -77,6 +77,18 @@ def _string(value: object) -> str:
     return str(value or "").strip()
 
 
+def _broker_error_status(error: Exception) -> str:
+    """Coarse status label for an MQTT error — never the raw text (may carry creds)."""
+    text = str(error).casefold()
+    if "tls" in text or "certificate" in text or "ssl" in text:
+        return "tls_error"
+    if "username" in text or "password" in text or "authorised" in text or "authorized" in text:
+        return "authentication_error"
+    if "timed out" in text or "timeout" in text:
+        return "broker_timeout"
+    return "broker_unreachable"
+
+
 def _bool(value: object) -> bool:
     if isinstance(value, bool):
         return value

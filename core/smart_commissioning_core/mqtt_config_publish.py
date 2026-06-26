@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 
 from smart_commissioning_core.engines.safety import require_scan_authorization
 from smart_commissioning_core.mqtt_settings import (
+    _broker_error_status,
+    _string,
     build_mqtt_connection_settings,
     parse_bool,
     parse_float,
@@ -417,10 +419,6 @@ def rollback_config(
     return MqttConfigPublishResult(result_summary=summary, issues=result.issues)
 
 
-def _string(value: object) -> str:
-    return str(value or "").strip()
-
-
 def _resolve_expected_points(
     parameters: dict[str, object],
     *,
@@ -526,17 +524,6 @@ def _pointset_topic_from_config(topic: str) -> str | None:
     if not topic:
         return None
     return topic.removesuffix("/config") + "/events/pointset"
-
-
-def _broker_error_status(error: Exception) -> str:
-    text = str(error).casefold()
-    if "tls" in text or "certificate" in text or "ssl" in text:
-        return "tls_error"
-    if "username" in text or "password" in text or "authorised" in text or "authorized" in text:
-        return "authentication_error"
-    if "timed out" in text or "timeout" in text:
-        return "broker_timeout"
-    return "broker_unreachable"
 
 
 def _summary_status_detail(*, status: str, broker_attempted: bool, broker_status_detail: str) -> str:
