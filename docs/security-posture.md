@@ -1,5 +1,7 @@
 # Security Posture
 
+Last reviewed: Monday, 2026-06-29.
+
 The security model of the Smart Commissioning App: threat model summary, auth
 model, secret handling, scan-safety controls, and an honest IEC 62443
 **alignment** note (alignment, not certification). Accurate to
@@ -171,7 +173,7 @@ assessed it. Framed as "what the app addresses vs what is open / out of scope".
 
 | IEC 62443 area (FR) | Addressed in this app | Open / depends on deployment |
 | --- | --- | --- |
-| FR1 Identification & authentication control | API auth (`local` loopback / `api_key`, fail-closed); constant-time key compare. | No per-user identities / roles yet (single shared key). RBAC is "later scope" in the architecture. |
+| FR1 Identification & authentication control | API auth (`local` loopback / `api_key`, fail-closed); constant-time key compare; app-level user/role model. | Enterprise SSO / external IdP integration is not implemented; pair API keys and app roles with deployment-level access controls. |
 | FR2 Use control (authorization) | Active-scan + config-publish **authorization gate** with an auditable `authorized_by`; 403 at the boundary. | Authorization is per-run parameter, not tied to an authenticated identity; pair with deployment-level access control. |
 | FR3 System integrity | Evidence signing/hash verification (parallel-phase evidence/verify path); migrations owned by the API; in-memory report generation. | TLS termination is delegated to a reverse proxy (not in-app); signing-key custody is operational. |
 | FR4 Data confidentiality | Fernet encryption of secret material at rest; `secret://` indirection; masking in API responses; credential-free errors/logs; TLS for MQTT supported. | Disk/volume encryption is the deployer's responsibility (esp. the edge laptop). No field-level DB encryption beyond secrets. |

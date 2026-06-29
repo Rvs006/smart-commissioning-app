@@ -10,6 +10,11 @@
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
+> **Repo status - last verified Monday, 2026-06-29:** local Python/frontend
+> gates passed in this audit, and engineers can clone and run the documented
+> local workflows. Live IP/BACnet/MQTT hardware validation remains Phase 5 work
+> before production rollout.
+
 Branded **ELECTRACOM "Smart Commissioning Tool"**, this is the web platform our engineers use to
 commission smart buildings: bring up a project's network/BACnet/MQTT/certificate settings, import
 the expected register, scan the live building network, confirm every device is publishing

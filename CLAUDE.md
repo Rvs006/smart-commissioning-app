@@ -19,7 +19,7 @@ commissioning building IP / BACnet / MQTT / UDMI devices. Pre-1.0.
 - `frontend/` — Vite app; dev server on :5173, proxies `/api` → :8000.
 - `infra/` — Docker Compose stack. `docs/` — reference + review guides.
 
-## Setup (Python 3.12, Node 22 / npm 10)
+## Setup (Python 3.12, Node 22)
 
 ```bash
 pip install -e ./core -e ./backend -e ./worker
@@ -79,8 +79,9 @@ collection order is alphabetical — keep it so.
   package, not the worktree's `core/`. To exercise worktree `core/` changes,
   run with `PYTHONPATH=<worktree>/core` prepended (or reinstall core from the
   worktree).
-- **npm lockfile**: regenerate `frontend/package-lock.json` with **npm 10**;
-  npm 11's optional-dependency format breaks `npm ci` in the frontend CI job.
+- **npm lockfile**: use the npm bundled with Node 22 in this repo/toolchain.
+  After regenerating `frontend/package-lock.json`, run `npm ci`, lint,
+  typecheck, tests, and build before committing.
 - **Real scans need authorization**: discovery/publish engines require
   `parameters.authorized = true` (or `scan_authorization`); a `dry_run` previews
   with no I/O and needs none.
