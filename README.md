@@ -10,7 +10,7 @@
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
-> **Repo status - last verified Monday, 2026-06-29:** local Python/frontend
+> **Repo status - last verified Tuesday, 2026-06-30:** local Python/frontend
 > gates passed in this audit, and engineers can clone and run the documented
 > local workflows. Live IP/BACnet/MQTT hardware validation remains Phase 5 work
 > before production rollout.
@@ -26,6 +26,10 @@ UDMI-compliant data that matches the design, and hand the client a tamper-eviden
 
 > 👀 **Here to review the app?** Read **[docs/review-guide.md](docs/review-guide.md)** — how to run
 > it (frontend-only or full-stack Docker), what to look at, and what is in scope for this round.
+
+> 🪟 **Checking Windows support?** See
+> **[docs/windows-compatibility.md](docs/windows-compatibility.md)** — Windows 11 Pro and Windows
+> Server 2022 support paths, CI coverage, and the local smoke command.
 
 > ⬇️ **On Windows and just want to run it?** Download the prebuilt app from the
 > **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**

@@ -1,0 +1,59 @@
+name: Windows Compatibility
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  windows-server-2022-smoke:
+    name: Windows Server 2022 smoke
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Python packages and tooling
+        run: python -m pip install -e ./core -e ./backend -e ./worker ruff
+
+      - name: Ruff lint
+        run: ruff check backend worker core
+
+      - name: Core unit tests
+        run: python -m unittest discover -s core/tests
+
+      - name: Backend unit tests
+        working-directory: backend
+        run: python -m unittest discover -s tests
+
+      - name: Worker unit tests
+        working-directory: worker
+        run: python -m unittest discover -s tests
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Frontend tests
+        working-directory: frontend
+        run: npm test -- --run
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
