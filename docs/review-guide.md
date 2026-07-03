@@ -28,8 +28,8 @@ cd smart-commissioning-app
 > `SmartCommissioningApp_Windows_Portable.zip` from the
 > **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**,
 > unzip it, and double-click `SmartCommissioningApp.exe` — it serves the whole app at
-> <http://127.0.0.1:8000/>. No clone, Node, Python, Docker, or key needed. To enable the action
-> buttons, run once in the browser console (F12): `localStorage.setItem('sc.apiKey','local-dev')`.
+> <http://127.0.0.1:8000/>. No clone, Node, Python, Docker, or key needed — the action
+> buttons (Run / Publish / Export) enable automatically because the app trusts the loopback admin.
 > The source run paths below are for Mac/Linux or if you want to run from the code.
 
 Three run paths below — pick one. For a review, **Run path 3 (full app locally,
@@ -43,11 +43,13 @@ UI.
 
 > **Do you need an API key?** No shared/secret key is committed to this repo (by
 > design). For **local review you need no real key** — the backend trusts
-> loopback (`127.0.0.1`) as admin; to enable the Run / Publish / Export buttons
-> in local mode, set a harmless placeholder in the browser console once:
-> `localStorage.setItem('sc.apiKey','local-dev')` (the value is ignored on
-> loopback). Only the **Docker path (Run path 2)** needs a real key, which you
-> generate yourself — see its sign-in step.
+> loopback (`127.0.0.1`) as admin, and the Run / Publish / Export buttons now
+> enable automatically once the backend is running (Run path 3, or the portable
+> exe). Only the **frontend-only preview (Run path 1)** has no backend, so there
+> the buttons stay disabled unless you set a harmless placeholder in the browser
+> console once: `localStorage.setItem('sc.apiKey','local-dev')` (the value is
+> ignored on loopback). The **Docker path (Run path 2)** needs a real key, which
+> you generate yourself — see its sign-in step.
 
 ### Run path 1 — Frontend only (quickest UI look, no backend)
 
@@ -126,16 +128,13 @@ python scripts/seed_demo.py --base-url http://127.0.0.1:8000
 npm --prefix frontend run dev      # http://localhost:5173 (proxies /api -> 8000)
 ```
 
-Then enable the action buttons once in the browser console (F12). The value is a
-**non-secret placeholder** — it works only because loopback is already trusted,
-so it is safe to share and is not a real credential:
+The action buttons enable automatically: with the backend on loopback, the app
+recognises the trusted `127.0.0.1` admin, so Run / Publish / Export / Generate all
+work with no key and no console step. (Older builds needed a
+`localStorage.setItem('sc.apiKey', 'local-dev')` placeholder here; it is no longer
+required now that the loopback admin is recognised.)
 
-```js
-localStorage.setItem('sc.apiKey', 'local-dev');
-location.reload();
-```
-
-Now Run / Publish / Export / Generate all work. This is full functional testing
+This is full functional testing
 of the safe paths (configure, import, fixture/dry-run validation, reports) with
 nothing secret committed to the repo. One-command offline smoke test:
 `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
