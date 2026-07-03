@@ -9,8 +9,9 @@ context manager so the startup lifespan applies the Alembic migrations.
 The enumerator ``interface_service.list_usable_interfaces`` is patched so the
 tests do not depend on the CI host's real NICs. Covered here: the endpoint
 returns the mocked list, requires auth (401 without a key), is allowed for a
-viewer, and every returned object carries EXACTLY the five allowed fields (no
-MAC/gateway/DNS leak — guards section 5.3 of the proposal).
+viewer, and every returned object carries EXACTLY the allowed fields — gateway is
+now deliberately included (operator-requested; section 5.3), but MAC / DNS /
+driver strings are still never exposed.
 """
 
 import atexit
@@ -29,14 +30,31 @@ _ENV_OVERRIDES = {
     "API_KEY": _SHARED_KEY,
 }
 
-_ALLOWED_KEYS = {"name", "ipv4", "prefix_length", "cidr", "is_up"}
+_ALLOWED_KEYS = {"name", "ipv4", "prefix_length", "subnet_mask", "cidr", "gateway", "is_up"}
 
 # Two fixed interfaces returned by the patched enumerator (is_up first, as the
 # service sorts). Shaped exactly like SystemInterface; dicts serialize identically
-# under the list[SystemInterface] response_model.
+# under the list[SystemInterface] response_model. The down Wi-Fi NIC has no
+# resolvable gateway (None), exercising the nullable field.
 _FIXED_INTERFACES = [
-    {"name": "Ethernet 3", "ipv4": "192.168.1.10", "prefix_length": 24, "cidr": "192.168.1.10/24", "is_up": True},
-    {"name": "Wi-Fi", "ipv4": "10.0.0.5", "prefix_length": 16, "cidr": "10.0.0.5/16", "is_up": False},
+    {
+        "name": "Ethernet 3",
+        "ipv4": "192.168.1.10",
+        "prefix_length": 24,
+        "subnet_mask": "255.255.255.0",
+        "cidr": "192.168.1.10/24",
+        "gateway": "192.168.1.1",
+        "is_up": True,
+    },
+    {
+        "name": "Wi-Fi",
+        "ipv4": "10.0.0.5",
+        "prefix_length": 16,
+        "subnet_mask": "255.255.0.0",
+        "cidr": "10.0.0.5/16",
+        "gateway": None,
+        "is_up": False,
+    },
 ]
 
 
@@ -152,7 +170,8 @@ class SystemInterfacesApiTests(unittest.TestCase):
             self.assertEqual(
                 set(interface),
                 _ALLOWED_KEYS,
-                "endpoint must expose EXACTLY name/ipv4/prefix_length/cidr/is_up (no MAC/gateway/DNS leak)",
+                "endpoint must expose EXACTLY name/ipv4/prefix_length/subnet_mask/cidr/gateway/is_up "
+                "(gateway is intentional; still no MAC/DNS/driver leak)",
             )
 
 

@@ -263,9 +263,21 @@ class SystemInterface(BaseModel):
     name: str            # OS adapter name, e.g. "Ethernet 3"
     ipv4: str            # "192.168.1.10"
     prefix_length: int   # 24
+    subnet_mask: str     # "255.255.255.0"  (dotted form of prefix_length)
     cidr: str            # "192.168.1.10/24"  (what the dropdown stores)
+    gateway: str | None  # "192.168.1.1"  (default IPv4 gateway, or None)
     is_up: bool
 ```
+
+> **Phase 3 update (richer confirmation UI):** `subnet_mask` and `gateway` were
+> added so the Configuration page can, on interface selection, show read-only
+> IP / Subnet Mask / Gateway fields — letting the engineer confirm they picked
+> the OT/Ethernet adapter, not Wi-Fi. `subnet_mask` is derived from
+> `prefix_length` (no cost). `gateway` is an **operator-requested reversal** of
+> this section's original gateway omission (see below); because `psutil` does not
+> expose gateways, it comes from a guarded Windows routing-table lookup
+> (`Get-CimInstance Win32_NetworkAdapterConfiguration` via subprocess, mapped to
+> each NIC by IP), which degrades to `None` on any non-Windows / locked-down host.
 
 ### 5.3 Auth / RBAC / information-leak notes
 
@@ -276,10 +288,17 @@ class SystemInterface(BaseModel):
   engineer-gated (choosing the value and saving config already is, via
   `configuration.router` PUT at `configuration.py:31`).
 - **Do not leak beyond need:** return **only** `name / ipv4 / prefix_length /
-  cidr / is_up`. Deliberately omit MAC addresses, gateway, DNS, adapter
-  descriptions/driver strings, and any non-IPv4 addressing — none are needed to
-  pick an egress NIC and each widens the host-fingerprint surface exposed over
-  the API. Exclude loopback and APIPA from the list (section 4.3).
+  subnet_mask / cidr / gateway / is_up`. Deliberately still omit MAC addresses,
+  DNS, adapter descriptions/driver strings, and any non-IPv4 addressing — none
+  are needed to pick or confirm an egress NIC and each widens the
+  host-fingerprint surface exposed over the API. Exclude loopback and APIPA from
+  the list (section 4.3). `gateway` was **originally** omitted here for the same
+  reason; it is now included as a deliberate, operator-requested trade-off (Phase
+  3 update above) because confirming the NIC's gateway materially helps the
+  engineer verify the adapter is on the expected OT segment. The added surface is
+  a single default-route IP per NIC, and the endpoint stays viewer-gated and
+  auth-required (5.3 above). The no-gateway-leak assertion in
+  `test_system_interfaces_api.py` was updated accordingly.
 
 ## 6. Per-engine source binding — exact edits
 
