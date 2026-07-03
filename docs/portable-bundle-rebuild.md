@@ -36,11 +36,21 @@ rebuild must make one of those two locations exist in the bundle.
 
 ---
 
-## 1. Prerequisites (verifiable offline, this dev box)
+## 1. Prerequisites (pinned / supported build tooling)
 
-- Python 3.12 (dev box: 3.12.10), `pip` (26.1.x), `setuptools>=68` (dev box:
-  82.0.1 — required: data-files **glob** expansion needs `setuptools>=62`),
-  PyInstaller (dev box: 6.20.0).
+These are the canonical, pinned versions the shipped bundle was built with and
+the supported build set. Verified offline on this dev box.
+
+| Tool | Supported / pinned version |
+| --- | --- |
+| OS | Windows 11 Pro / Windows Server 2022 |
+| Shell | PowerShell 7+ (`pwsh`) — **not** Windows PowerShell 5.1 |
+| Python | 3.12.10 |
+| pip | 26.1.x |
+| setuptools | >=62 (built with 82.0.1) — data-files **glob** expansion needs `setuptools>=62` |
+| PyInstaller | 6.20.0 |
+| Node + npm | 22 |
+
 - Node + npm for the frontend (frontend already builds: `frontend/dist/index.html`
   and `frontend/dist/assets/` are present; build script is `tsc && vite build`).
 - All runtime deps the launcher pins in `_bundle_dependency_imports()` installed
@@ -118,6 +128,9 @@ Alembic-shipping options works — pick one.
 > `pwsh packaging/windows_portable/build.ps1` (or `-SkipFrontend` to reuse an
 > existing `frontend/dist`). The freeze + clean-box launch are still build-box /
 > on-site steps (see §6). The raw commands below document what the script does.
+>
+> **Requires PowerShell 7 (the `pwsh` command).** Windows PowerShell 5.1 does not
+> provide `pwsh`; running `build.ps1` under 5.1 is unsupported.
 
 **Option A (recommended — mirrors backend/ and frontend/): ship the `core/`
 source tree next to the exe.** `migrate.py::_SOURCE_TREE_ROOT` then resolves

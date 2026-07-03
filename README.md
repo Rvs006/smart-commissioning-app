@@ -181,6 +181,25 @@ Build a self-contained directory bundle (exe + backend + core + frontend) with
 `packaging/windows_portable/build.ps1`; double-click `SmartCommissioningApp.exe`. See
 [docs/portable-bundle-rebuild.md](docs/portable-bundle-rebuild.md).
 
+> **Building requires PowerShell 7 (the `pwsh` command).** Stock Windows
+> PowerShell 5.1 does not provide `pwsh`, and running `build.ps1` under 5.1 is
+> unsupported.
+
+#### Build prerequisites (pinned tooling)
+
+These are the versions the shipped bundle was built with and the supported build
+set (see [docs/portable-bundle-rebuild.md](docs/portable-bundle-rebuild.md)):
+
+| Tool | Supported / pinned version |
+| --- | --- |
+| OS | Windows 11 Pro / Windows Server 2022 |
+| Shell | PowerShell 7+ (`pwsh`) — **not** Windows PowerShell 5.1 |
+| Python | 3.12.10 |
+| pip | 26.1.x |
+| setuptools | >=62 (built with 82.0.1) |
+| PyInstaller | 6.20.0 |
+| Node | 22 |
+
 ---
 
 ## Signing in (API key)
