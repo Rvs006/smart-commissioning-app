@@ -1,8 +1,8 @@
 """Request/response schemas for the identity + RBAC endpoints (/api/v1/users, /me).
 
 The role is the lowercase Role.value (viewer|reviewer|engineer|admin). User
-responses NEVER carry the api_key_hash; the one-time plaintext key is returned
-only by the create endpoint, exactly once.
+responses NEVER carry the api_key_hash; the plaintext key is returned exactly
+once per issuance — by the create endpoint and by the key re-issue endpoint.
 """
 
 from datetime import datetime
@@ -36,7 +36,11 @@ class CreateUserRequest(BaseModel):
 
 
 class CreateUserResponse(BaseModel):
-    """The created user PLUS the one-time plaintext API key (shown exactly once)."""
+    """A user PLUS their plaintext API key, shown exactly once per issuance.
+
+    Returned by POST /users (create) and POST /users/{id}/key (re-issue). The
+    key is displayed only in this response; it does not expire by itself.
+    """
 
     user: UserResponse
     api_key: str

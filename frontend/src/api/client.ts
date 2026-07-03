@@ -39,7 +39,8 @@ export type UserRecord = {
   last_used_at: string | null;
 };
 
-// POST /api/v1/users returns the created user PLUS the one-time plaintext key.
+// POST /api/v1/users (create) and POST /api/v1/users/{id}/key (re-issue) return
+// the user PLUS the plaintext key, displayed exactly once per issuance.
 export type CreateUserResponse = {
   user: UserRecord;
   api_key: string;
@@ -321,6 +322,15 @@ export class ApiError extends Error {
   }
 }
 
+// True when the server itself REJECTED the credentials (401/403): the presented
+// key is bad, inactive, or under-privileged. Network failures, timeouts, and
+// 5xx are NOT auth rejections — the key may be perfectly valid while the server
+// is unreachable or restarting, so callers must never treat those as a bad key
+// (e.g. by prompting the operator to clear a key that is shown only once).
+export function isAuthRejection(error: unknown): error is ApiError {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
 function readStoredApiKey(): string | null {
   try {
     return window.localStorage.getItem(API_KEY_STORAGE_KEY);
@@ -465,16 +475,27 @@ export function getBlueprint(): Promise<Blueprint> {
   return request<Blueprint>("/blueprint");
 }
 
+// Best-effort adapter classification from the backend. "virtual" is never
+// returned by the server (virtual adapters are filtered out like loopback and
+// APIPA), but it stays in the union so the frontend can defensively filter.
+export type AdapterType = "ethernet" | "wifi" | "usb_ethernet" | "virtual" | "unknown";
+
 // A usable local network interface as enumerated by GET /system/interfaces.
 // `cidr` ("192.168.1.10/24") is what the Source Interface selector stores; the
 // bare `ipv4` and `prefix_length` are carried so the backend can bind sockets
-// (IP/MQTT want the bare IP; BACnet wants ip/prefix).
+// (IP/MQTT want the bare IP; BACnet wants ip/prefix). Gateway and DNS are shown
+// read-only by product decision so engineers can confirm the tool reads the
+// NIC correctly; MAC/driver strings remain deliberately omitted.
 export interface SystemInterface {
   name: string;
   ipv4: string;
   prefix_length: number;
   cidr: string;
   is_up: boolean;
+  adapter_type: AdapterType;
+  subnet_mask: string;
+  gateway: string | null;
+  dns_servers: string[];
 }
 
 // GET /api/v1/system/interfaces — enumerates the host's usable NICs so the
@@ -509,6 +530,15 @@ export function createUser(input: { username: string; role: Role }): Promise<Cre
 
 export function deactivateUser(userId: string): Promise<UserRecord> {
   return request<UserRecord>(`/users/${encodeURIComponent(userId)}/deactivate`, {
+    method: "POST",
+  });
+}
+
+// Admin-only lost-key recovery: invalidates the user's current key immediately
+// and returns a fresh plaintext key, displayed exactly once (same shape as
+// createUser). The backend refuses (409) for deactivated users.
+export function reissueUserKey(userId: string): Promise<CreateUserResponse> {
+  return request<CreateUserResponse>(`/users/${encodeURIComponent(userId)}/key`, {
     method: "POST",
   });
 }

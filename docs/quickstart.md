@@ -1,8 +1,14 @@
 # Quickstart — validate a running stack in 5 minutes
 
+> **Just want to use the app?** Follow **Get it running** in the
+> [README](../README.md#get-it-running-pick-one-path) — you do not need anything
+> on this page. This page is for verifying a deployment (smoke test) and for
+> developers running from source.
+
 This is the fast path to a **running** Smart Commissioning App plus a one-command
 **smoke test** that proves the stack works end-to-end before you go on-site. It
-covers both deployment profiles:
+covers both deployment profiles (plus a [developer run-from-source
+profile](#c-developer-profile--run-from-source)):
 
 - **Hosted (Docker Compose)** — `infra/docker-compose.yml`: nginx frontend,
   FastAPI API, Dramatiq worker, Postgres, password-protected Redis.
@@ -57,6 +63,8 @@ at <http://127.0.0.1:8080>.
 
 ### 3. Smoke-test it
 
+> Optional — proves a deployment works; not needed for day-to-day use.
+
 Use the **same `API_KEY`** you put in `infra/.env`.
 
 Linux / macOS / CI (bash):
@@ -100,15 +108,20 @@ to `AUTH_MODE=local` — so **no API key** is needed for loopback clients.
 
 ### 1. Start the app
 
-Run the portable launcher (it picks a free port starting at 8000, applies
-migrations on startup, and opens a browser):
+**Shipped portable app (engineers):** download
+`SmartCommissioningApp_Windows_Portable.zip` from the
+[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest),
+right-click → Extract All, and double-click `SmartCommissioningApp.exe`. It picks
+a free port starting at 8000, applies migrations on startup, opens a browser,
+and prints the chosen URL in the console, e.g. `http://127.0.0.1:8000/` — always
+use the printed URL.
+
+**From source (developers):** run the same launcher directly (identical
+behaviour to the packaged `.exe`):
 
 ```sh
 python packaging/windows_portable/run_smart_commissioning_app.py
 ```
-
-The console prints the chosen URL, e.g. `http://127.0.0.1:8000/`. (The packaged
-`.exe` built from `packaging/windows_portable/` does the same.)
 
 Alternatively, run the API directly with uvicorn in local mode against a temp
 SQLite DB:
@@ -121,6 +134,8 @@ AUTH_MODE=local JOB_EXECUTION_MODE=inline \
 (Run from the `backend/` directory, or with `backend/` on `PYTHONPATH`.)
 
 ### 2. Smoke-test it — no key
+
+> Optional — proves a deployment works; not needed for day-to-day use.
 
 Leave `SC_API_KEY` **unset** so the script sends no header (loopback is trusted
 in local mode). Use whatever port the launcher reported.
@@ -147,7 +162,39 @@ No `--api-key` needed in local mode.
 
 ---
 
+## C. Developer profile — run from source
+
+Single-user loopback profile: SQLite, jobs inline, auth bypassed for
+`127.0.0.1`. Requires **Python 3.12** and **Node 22**. (This is the old README
+"Option B"; it now lives here.)
+
+```bash
+# 1) install the three editable Python packages + the frontend
+pip install -e ./core -e ./backend -e ./worker
+cd frontend && npm ci && cd ..
+
+# 2) backend API (terminal 1)
+cd backend
+AUTH_MODE=local JOB_EXECUTION_MODE=inline DEPLOYMENT_ROLE=hub \
+  python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 3) seed demo data + frontend (terminal 2)
+python scripts/seed_demo.py --base-url http://127.0.0.1:8000
+npm --prefix frontend run dev      # http://localhost:5173, proxies /api -> 8000
+```
+
+> **Engineer action buttons work automatically here.** With the backend running on
+> loopback, the app recognises the trusted `127.0.0.1` admin, so Run / Publish /
+> Export are enabled with no key and no console step. (The old
+> `localStorage.setItem('sc.apiKey','local-dev')` trick is now only needed for the
+> *backend-less* frontend-only preview, where there is no `/me` to grant admin.)
+> One-command offline smoke: `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
+
+---
+
 ## What the smoke test checks
+
+> Optional — proves a deployment works; not needed for day-to-day use.
 
 `scripts/smoke_local.sh` and `scripts/smoke_local.ps1` are equivalent and run
 the same checks against `BASE_URL` (default `http://127.0.0.1:8000`):

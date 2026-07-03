@@ -10,11 +10,14 @@ the users table).
 What is covered here:
   * the legacy shared key acts as an ADMIN principal (bootstrap), and can create
     the first user (POST /users) — backward compatibility preserved;
-  * a created user's ONE-TIME plaintext key is returned and authenticates;
+  * a created user's plaintext key (returned exactly once) authenticates;
   * /me reflects the authenticating principal's username/role/source for the
     shared key and for each created role;
   * require_role: a non-admin user key gets 403 on POST /users; admin gets 201;
   * an inactive user's key -> 401; an unknown key -> 401 (fail-closed);
+  * key re-issue (POST /users/{id}/key): admin-only, invalidates the old key
+    immediately, the new key authenticates as the same user, 404 for unknown
+    users, 409 for deactivated users;
   * the api_key_hash is stored, never the plaintext, and never leaked in any
     response (list, create, /me);
   * the Role total-order helper.
@@ -268,6 +271,69 @@ class RbacApiTests(unittest.TestCase):
         # The user now passes an engineer-gated check via /me showing the new role.
         me = self.client.get("/api/v1/me", headers={"X-API-Key": created["api_key"]})
         self.assertEqual(me.json()["role"], "engineer")
+
+    # -- key re-issue (lost-key recovery) --------------------------------------
+
+    def test_reissue_key_rotates_old_key_out_and_new_key_in(self) -> None:
+        created = self._create_user("reissue-rob", "engineer")
+        old_key = created["api_key"]
+        user_id = created["user"]["id"]
+        response = self.client.post(
+            f"/api/v1/users/{user_id}/key", headers=self._admin_headers()
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        new_key = body["api_key"]
+        self.assertNotEqual(new_key, old_key)
+        self.assertGreaterEqual(len(new_key), 20)
+        # Same user row, no key material beyond the one-time plaintext.
+        self.assertEqual(body["user"]["id"], user_id)
+        self.assertEqual(body["user"]["username"], "reissue-rob")
+        self.assertNotIn("api_key_hash", response.text)
+        # The old key stops authenticating the moment the new one is issued...
+        old_me = self.client.get("/api/v1/me", headers={"X-API-Key": old_key})
+        self.assertEqual(old_me.status_code, 401, old_me.text)
+        # ...and the new key authenticates as the same user with the same role.
+        new_me = self.client.get("/api/v1/me", headers={"X-API-Key": new_key})
+        self.assertEqual(new_me.status_code, 200, new_me.text)
+        self.assertEqual(new_me.json()["username"], "reissue-rob")
+        self.assertEqual(new_me.json()["role"], "engineer")
+        self.assertEqual(new_me.json()["source"], "user_key")
+
+    def test_reissue_key_requires_admin(self) -> None:
+        actor = self._create_user("reissue-nonadmin", "engineer")
+        target = self._create_user("reissue-target", "viewer")
+        response = self.client.post(
+            f"/api/v1/users/{target['user']['id']}/key",
+            headers={"X-API-Key": actor["api_key"]},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        # Nothing was rotated: the target's original key still authenticates.
+        me = self.client.get(
+            "/api/v1/me", headers={"X-API-Key": target["api_key"]}
+        )
+        self.assertEqual(me.status_code, 200, me.text)
+
+    def test_reissue_key_unknown_user_is_404(self) -> None:
+        response = self.client.post(
+            "/api/v1/users/00000000-0000-0000-0000-000000000000/key",
+            headers=self._admin_headers(),
+        )
+        self.assertEqual(response.status_code, 404, response.text)
+
+    def test_reissue_key_for_inactive_user_is_409(self) -> None:
+        created = self._create_user("reissue-inactive", "viewer")
+        user_id = created["user"]["id"]
+        deactivate = self.client.post(
+            f"/api/v1/users/{user_id}/deactivate", headers=self._admin_headers()
+        )
+        self.assertEqual(deactivate.status_code, 200, deactivate.text)
+        # A key for a deactivated user could never authenticate; refusing is the
+        # honest answer (reactivation is the missing step, not a new key).
+        response = self.client.post(
+            f"/api/v1/users/{user_id}/key", headers=self._admin_headers()
+        )
+        self.assertEqual(response.status_code, 409, response.text)
 
     # -- last-admin self-lockout guard ----------------------------------------
 

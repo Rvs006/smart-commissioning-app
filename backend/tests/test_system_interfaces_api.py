@@ -9,8 +9,10 @@ context manager so the startup lifespan applies the Alembic migrations.
 The enumerator ``interface_service.list_usable_interfaces`` is patched so the
 tests do not depend on the CI host's real NICs. Covered here: the endpoint
 returns the mocked list, requires auth (401 without a key), is allowed for a
-viewer, and every returned object carries EXACTLY the five allowed fields (no
-MAC/gateway/DNS leak — guards section 5.3 of the proposal).
+viewer, and every returned object carries EXACTLY the nine allowed fields.
+Gateway/DNS are deliberately exposed (product-owner reversal of the proposal's
+section-5.3 omission, 2026-07-03 meeting); the leak guard still proves MAC /
+driver / InterfaceDescription strings never cross the API.
 """
 
 import atexit
@@ -29,14 +31,44 @@ _ENV_OVERRIDES = {
     "API_KEY": _SHARED_KEY,
 }
 
-_ALLOWED_KEYS = {"name", "ipv4", "prefix_length", "cidr", "is_up"}
+_ALLOWED_KEYS = {
+    "name",
+    "ipv4",
+    "prefix_length",
+    "cidr",
+    "is_up",
+    "adapter_type",
+    "subnet_mask",
+    "gateway",
+    "dns_servers",
+}
 
 # Two fixed interfaces returned by the patched enumerator (is_up first, as the
 # service sorts). Shaped exactly like SystemInterface; dicts serialize identically
 # under the list[SystemInterface] response_model.
 _FIXED_INTERFACES = [
-    {"name": "Ethernet 3", "ipv4": "192.168.1.10", "prefix_length": 24, "cidr": "192.168.1.10/24", "is_up": True},
-    {"name": "Wi-Fi", "ipv4": "10.0.0.5", "prefix_length": 16, "cidr": "10.0.0.5/16", "is_up": False},
+    {
+        "name": "Ethernet 3",
+        "ipv4": "192.168.1.10",
+        "prefix_length": 24,
+        "cidr": "192.168.1.10/24",
+        "is_up": True,
+        "adapter_type": "ethernet",
+        "subnet_mask": "255.255.255.0",
+        "gateway": "192.168.1.1",
+        "dns_servers": ["192.168.1.53", "8.8.8.8"],
+    },
+    {
+        "name": "Wi-Fi",
+        "ipv4": "10.0.0.5",
+        "prefix_length": 16,
+        "cidr": "10.0.0.5/16",
+        "is_up": False,
+        "adapter_type": "wifi",
+        "subnet_mask": "255.255.0.0",
+        "gateway": None,
+        "dns_servers": [],
+    },
 ]
 
 
@@ -152,7 +184,9 @@ class SystemInterfacesApiTests(unittest.TestCase):
             self.assertEqual(
                 set(interface),
                 _ALLOWED_KEYS,
-                "endpoint must expose EXACTLY name/ipv4/prefix_length/cidr/is_up (no MAC/gateway/DNS leak)",
+                "endpoint must expose EXACTLY the nine contract fields — gateway/DNS are "
+                "deliberately included (product-owner reversal of section 5.3) while "
+                "MAC / driver / InterfaceDescription strings must never leak",
             )
 
 

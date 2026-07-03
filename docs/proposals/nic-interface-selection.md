@@ -1,6 +1,7 @@
 # Proposal: Source-NIC / network-interface selection for active scans
 
 Status: Implemented (Phases 0-2) — see CHANGELOG. On-real-hardware egress verification pending (section 8.3).
+Update (NIC UX v2, 2026-07-03): the product owner REVERSED the section-5.3 gateway/DNS omission — the endpoint now also returns `adapter_type` / `subnet_mask` / `gateway` / `dns_servers` (nine fields total) so engineers can confirm the tool reads the NIC correctly. MAC addresses and adapter description/driver strings stay omitted. See the 5.3 update note.
 Author: (fill in)
 Date: 2026-07-03
 Scope: `smart-commissioning-app` — core engines, backend API, worker, frontend Configuration page
@@ -267,6 +268,11 @@ class SystemInterface(BaseModel):
     is_up: bool
 ```
 
+> **Update (NIC UX v2, 2026-07-03):** the shipped schema also carries
+> `adapter_type` ("ethernet" | "wifi" | "usb_ethernet" | "virtual" |
+> "unknown"), `subnet_mask`, `gateway` and `dns_servers` — see the 5.3 update
+> note for the product-owner decision that added them.
+
 ### 5.3 Auth / RBAC / information-leak notes
 
 - **Auth:** mounted under `protected_router`, so `require_auth` applies (no
@@ -275,11 +281,23 @@ class SystemInterface(BaseModel):
   field a viewer can already see, and it is read-only. It does **not** need to be
   engineer-gated (choosing the value and saving config already is, via
   `configuration.router` PUT at `configuration.py:31`).
-- **Do not leak beyond need:** return **only** `name / ipv4 / prefix_length /
-  cidr / is_up`. Deliberately omit MAC addresses, gateway, DNS, adapter
-  descriptions/driver strings, and any non-IPv4 addressing — none are needed to
-  pick an egress NIC and each widens the host-fingerprint surface exposed over
-  the API. Exclude loopback and APIPA from the list (section 4.3).
+- **Do not leak beyond need** *(v1 decision — partially REVERSED, see update
+  below)*: return **only** `name / ipv4 / prefix_length / cidr / is_up`.
+  Deliberately omit MAC addresses, gateway, DNS, adapter descriptions/driver
+  strings, and any non-IPv4 addressing — none are needed to pick an egress NIC
+  and each widens the host-fingerprint surface exposed over the API. Exclude
+  loopback and APIPA from the list (section 4.3).
+
+  > **Update (NIC UX v2, 2026-07-03 meeting — product-owner decision):** Pete
+  > explicitly reversed the gateway/DNS omission: field engineers need the
+  > selected adapter's default gateway and DNS visible (read-only) to confirm
+  > the tool reads the NIC correctly. The shipped contract is therefore **nine
+  > fields**: `name / ipv4 / prefix_length / cidr / is_up / adapter_type /
+  > subnet_mask / gateway / dns_servers`. Exposing gateway/DNS over the
+  > authenticated, viewer-gated endpoint is an accepted trade-off, NOT a leak
+  > regression — do not "fix" the endpoint back to five fields. MAC addresses
+  > and adapter description/driver strings remain deliberately omitted, and
+  > virtual adapters are excluded from the response entirely.
 
 ## 6. Per-engine source binding — exact edits
 
@@ -522,8 +540,10 @@ Backend (`backend/tests/`):
 - `test_system_interfaces_api.py`: mock the enumerator (so tests don't depend on
   the CI host's real NICs) and assert `GET /api/v1/system/interfaces` returns the
   mocked list, requires auth (401 without key), is viewer-allowed, and the
-  response contains **only** the five allowed fields (no MAC/gateway/DNS leak —
-  guards section 5.3).
+  response contains **only** the nine allowed fields — `name / ipv4 /
+  prefix_length / cidr / is_up / adapter_type / subnet_mask / gateway /
+  dns_servers` per the NIC UX v2 update in section 5.3 (still no MAC or
+  adapter-description/driver-string leak).
 - Extend a discovery route test to assert a configured `Source Interface`
   results in `source_ip` / `local_address` landing in the persisted
   `run.parameters` (covers the inline→worker hand-off, section 7.3).

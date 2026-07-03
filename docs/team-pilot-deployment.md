@@ -120,11 +120,17 @@ and the shared key is bootstrap-only:
 curl -sX POST https://<host>/api/v1/users -H "X-API-Key: $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"username":"alice","role":"engineer"}'
-# -> returns a ONE-TIME plaintext key; hand it to that user, it is never shown again.
+# -> returns the plaintext key; hand it to that user. It is DISPLAYED only this
+#    once (only a hash is stored) — but the key itself does NOT expire: it keeps
+#    working until the user is deactivated or an admin re-issues it.
 ```
 Roles: `viewer` < `reviewer` < `engineer` < `admin`. Discovery/validation/publish
 runs require **engineer+**.
 
+- **Lost key?** Keys can never be retrieved, only replaced: an admin can
+  re-issue one via `POST /api/v1/users/<id>/key` (or the Users page "Re-issue
+  key" button). The old key stops working immediately and the new plaintext is
+  shown once, exactly like at creation.
 - **Last-admin guard**: you cannot deactivate/demote the last active admin user
   (returns 409). Recovery if you ever lock out all admin rows: drop to
   `AUTH_MODE=local` (loopback) or the shared bootstrap key.

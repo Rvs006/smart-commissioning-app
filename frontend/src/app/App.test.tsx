@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import { createMemoryRouter, RouterProvider } from "react-router-dom";
-import { clearApiKey } from "../api/client";
+import { clearApiKey, getApiKey, setApiKey } from "../api/client";
 import { DashboardPage } from "../features/workflow/DashboardPage";
 import { App } from "./App";
 import { SessionProvider } from "./session";
@@ -97,17 +97,23 @@ function renderApp() {
 }
 
 // Routes the dashboard's on-mount queries. `runsResponse` lets a test choose
-// between a populated runs list and the empty-state payload.
-function stubDashboardFetch(runsResponse: unknown = runsPayload) {
+// between a populated runs list and the empty-state payload; `meHandler` lets a
+// test choose how /me answers (defaults to a 401, mirroring hosted api_key mode
+// with no key configured).
+function stubDashboardFetch(
+  runsResponse: unknown = runsPayload,
+  meHandler?: () => Response | Promise<Response>,
+) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.endsWith("/api/v1/me")) {
-        // These App-shell tests run with no key configured. The SessionProvider
-        // now always calls /me; keyless, hosted api_key mode answers 401, which
-        // the provider resolves to a null principal (badge shows "Set API key").
-        return unauthorizedResponse();
+        // By default these App-shell tests run with no key configured. The
+        // SessionProvider always calls /me; keyless, hosted api_key mode
+        // answers 401, which the provider resolves to a null principal (badge
+        // shows "Set API key").
+        return meHandler ? meHandler() : unauthorizedResponse();
       }
       if (url.endsWith("/api/v1/health")) {
         return jsonResponse(healthPayload);
@@ -171,5 +177,31 @@ describe("App shell", () => {
     renderApp();
 
     expect(await screen.findByText("No runs yet")).toBeInTheDocument();
+  });
+
+  it("offers to clear the key only when the server rejects it (401)", async () => {
+    setApiKey("a-key-the-server-rejects");
+    stubDashboardFetch(); // /me answers 401 by default
+    renderApp();
+
+    expect(await screen.findByText("Key not recognised")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear key" })).toBeInTheDocument();
+  });
+
+  it("keeps the key and never offers to clear it when /me fails in transit", async () => {
+    // Field regression guard: a backend restart / network blip used to render
+    // "Key not recognised" + "Clear key", and clearing destroyed a key that is
+    // displayed only once. A transport failure says nothing about the key.
+    setApiKey("a-perfectly-valid-key");
+    stubDashboardFetch(runsPayload, () =>
+      Promise.reject(new TypeError("Failed to fetch")),
+    );
+    renderApp();
+
+    expect(await screen.findByText(/Server unreachable/)).toBeInTheDocument();
+    expect(screen.queryByText("Key not recognised")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Clear key" })).not.toBeInTheDocument();
+    // The stored key survives the outage untouched.
+    expect(getApiKey()).toBe("a-perfectly-valid-key");
   });
 });

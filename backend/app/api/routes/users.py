@@ -3,18 +3,25 @@
 Routes:
   * GET  /api/v1/me                       — the current principal (any caller).
   * POST /api/v1/users                    — create a user (admin only); returns
-                                            the user + the ONE-TIME plaintext key.
+                                            the user + the plaintext key
+                                            (displayed exactly once).
   * GET  /api/v1/users                    — list users (admin only); no key hashes.
   * POST /api/v1/users/{id}/deactivate    — soft-disable a user (admin only).
   * POST /api/v1/users/{id}/role          — change a user's role (admin only).
+  * POST /api/v1/users/{id}/key           — re-issue a user's API key (admin
+                                            only); invalidates the old key and
+                                            returns a NEW plaintext key
+                                            (displayed exactly once).
 
 All routes already sit behind require_auth (the parent protected router). The
 admin-only routes additionally depend on require_role(Role.ADMIN), which 403s a
 non-admin principal. Bootstrap: until the first user exists, the shared/local
 principal is ADMIN, so an operator can create the first named user.
 
-The raw per-user key is generated here, returned exactly ONCE by the create
-endpoint, and never stored — only its SHA-256 hash lands in the users table.
+The raw per-user key is generated here, returned exactly ONCE per issuance (by
+create and by key re-issue), and never stored — only its SHA-256 hash lands in
+the users table. Keys do not expire on their own: a key keeps authenticating
+until the user is deactivated or the key is re-issued.
 """
 
 from __future__ import annotations
@@ -114,6 +121,38 @@ def deactivate_user(user_id: str) -> UserResponse:
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return UserResponse(**updated)
+
+
+@router.post(
+    "/users/{user_id}/key",
+    response_model=CreateUserResponse,
+    dependencies=[Depends(require_role(Role.ADMIN))],
+)
+def reissue_user_key(user_id: str) -> CreateUserResponse:
+    """Re-issue a user's API key (admin only); the old key stops working at once.
+
+    The recovery path for a lost key (keys are shown once and can never be
+    retrieved): a fresh key is generated, only its hash replaces the stored
+    hash, and the plaintext is returned here exactly once — the same contract
+    as create. Refused with 409 for a deactivated user: their key would not
+    authenticate anyway, so issuing one would fake a success (reactivation is
+    the missing step, not a new key).
+    """
+    repository = _repository()
+    existing = repository.get(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not existing["is_active"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot re-issue a key for a deactivated user.",
+        )
+    raw_key = secrets.token_urlsafe(_KEY_ENTROPY_BYTES)
+    updated = repository.update_api_key_hash(user_id, api_key_hash=hash_api_key(raw_key))
+    if updated is None:
+        # The row vanished between the check and the update (concurrent delete).
+        raise HTTPException(status_code=404, detail="User not found.")
+    return CreateUserResponse(user=UserResponse(**updated), api_key=raw_key)
 
 
 @router.post(
