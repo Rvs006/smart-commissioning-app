@@ -16,8 +16,8 @@ from unittest.mock import MagicMock, patch
 
 from app.services import interface_service
 from app.services.interface_service import (
-    _NetFacts,
     _classify_windows,
+    _NetFacts,
     _parse_windows_net_facts,
     ensure_source_ip_available,
     list_usable_interfaces,
