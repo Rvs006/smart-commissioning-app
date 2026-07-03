@@ -180,13 +180,30 @@ describe("ConfigurationPage", () => {
     expect(optionValues).toContain("America/New_York");
   });
 
-  it("renders Source Interface as a select of enumerated NICs plus Auto, keeping a stored non-enumerated value", async () => {
+  it("renders Source Interface as a by-name NIC dropdown that auto-fills read-only IP/mask/gateway", async () => {
     interfacesPayload = [
-      { name: "Ethernet 3", ipv4: "192.168.1.10", prefix_length: 24, cidr: "192.168.1.10/24", is_up: true },
-      { name: "Wi-Fi", ipv4: "10.0.0.5", prefix_length: 8, cidr: "10.0.0.5/8", is_up: true },
+      {
+        name: "Ethernet 3",
+        ipv4: "192.168.1.10",
+        prefix_length: 24,
+        subnet_mask: "255.255.255.0",
+        cidr: "192.168.1.10/24",
+        gateway: "192.168.1.1",
+        is_up: true,
+      },
+      {
+        name: "Wi-Fi",
+        ipv4: "10.0.0.5",
+        prefix_length: 8,
+        subnet_mask: "255.0.0.0",
+        cidr: "10.0.0.5/8",
+        gateway: "10.0.0.1",
+        is_up: true,
+      },
     ];
     // The stored value is deliberately NOT one of the enumerated CIDRs, so the
-    // FieldControl !options.includes(value) escape hatch must still surface it.
+    // escape-hatch option must still surface it and the read-only fields must
+    // derive ip/mask from the CIDR string (gateway is unknowable off-host).
     const base = configurationPayload();
     const payload = {
       ...base,
@@ -204,19 +221,40 @@ describe("ConfigurationPage", () => {
 
     renderPage();
 
-    // Wait for the interfaces query to resolve so the enumerated options land
-    // (the config query and interfaces query resolve independently).
-    await screen.findByRole("option", { name: "192.168.1.10/24" });
-    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
-    expect(sourceLabel).not.toBeNull();
-    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
-    // The stored non-enumerated value stays selected and rendered.
+    // Wait for the interfaces query to resolve so the by-name options land (the
+    // config and interfaces queries resolve independently). Options are labelled
+    // by adapter name, not the bare CIDR.
+    await screen.findByRole("option", { name: /Ethernet 3.*192\.168\.1\.10\/24/ });
+    const control = (await screen.findByText("Source Interface")).closest(
+      ".source-interface-control",
+    ) as HTMLElement;
+    expect(control).not.toBeNull();
+    const select = within(control).getByRole("combobox") as HTMLSelectElement;
+
+    // The stored non-enumerated value stays selected, with Auto + both NICs offered.
     expect(select.value).toBe("172.16.0.9/24");
     const optionValues = Array.from(select.options).map((option) => option.value);
-    expect(optionValues).toContain("Auto (OS default route)");
-    expect(optionValues).toContain("192.168.1.10/24");
-    expect(optionValues).toContain("10.0.0.5/8");
-    expect(optionValues).toContain("172.16.0.9/24");
+    expect(optionValues).toEqual(
+      expect.arrayContaining(["172.16.0.9/24", "Auto (OS default route)", "192.168.1.10/24", "10.0.0.5/8"]),
+    );
+
+    const readField = (label: string): HTMLInputElement => {
+      const fieldLabel = within(control).getByText(label).closest("label") as HTMLElement;
+      return within(fieldLabel).getByRole("textbox") as HTMLInputElement;
+    };
+
+    // Read-only confirmation for the non-enumerated value: ip + mask derived from
+    // the CIDR, gateway reported as unknown on this host.
+    expect(readField("IP Address").value).toBe("172.16.0.9");
+    expect(readField("Subnet Mask").value).toBe("255.255.255.0");
+    expect(readField("Gateway").value).toMatch(/unknown/i);
+
+    // Selecting an enumerated NIC by name auto-fills its real ip/mask/gateway.
+    fireEvent.change(select, { target: { value: "192.168.1.10/24" } });
+    expect(select.value).toBe("192.168.1.10/24");
+    expect(readField("IP Address").value).toBe("192.168.1.10");
+    expect(readField("Subnet Mask").value).toBe("255.255.255.0");
+    expect(readField("Gateway").value).toBe("192.168.1.1");
   });
 
   it("flags an expired certificate-expiry field in red", async () => {

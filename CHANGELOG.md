@@ -72,6 +72,17 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Changed
 
+- **Source Interface — richer NIC confirmation** — the Configuration page's
+  Source Interface control is now a by-name adapter dropdown that, on selection,
+  populates read-only **IP Address / Subnet Mask / Gateway** fields so the
+  engineer can confirm they picked the OT/Ethernet adapter (not Wi-Fi).
+  `GET /api/v1/system/interfaces` gained `subnet_mask` (derived from the prefix,
+  no new cost) and `gateway` (from a guarded, best-effort Windows routing-table
+  lookup — `Get-CimInstance`, mapped per NIC by IP; `None` off Windows or on
+  locked-down hosts). MAC/DNS/driver strings remain unexposed. "Auto (OS default
+  route)" stays the default and the free-text fallback for non-enumerated hosts
+  is preserved. Adding `gateway` deliberately reverses the original API omission
+  in proposal §5.3 (operator-requested).
 - Refactored the standalone UDMI payload validator into the shared core package
   with an app-level API, a shared issue model, and persistent run history.
 - Aligned the frontend CI Node version to the lockfile's npm and raised the test

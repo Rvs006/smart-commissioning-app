@@ -9,6 +9,7 @@ import {
   getSystemInterfaces,
   importConfiguration,
   storeSecretMaterial,
+  SystemInterface,
   updateConfiguration,
   validateConfiguration,
 } from "../../api/client";
@@ -254,10 +255,7 @@ export function ConfigurationPage() {
     queryFn: getSystemInterfaces,
     queryKey: ["system-interfaces"],
   });
-  const sourceInterfaceOptions = [
-    SOURCE_INTERFACE_AUTO,
-    ...(systemInterfacesQuery.data ?? []).map((iface) => iface.cidr),
-  ];
+  const systemInterfaces = systemInterfacesQuery.data ?? [];
 
   useEffect(() => {
     if (configurationQuery.data) {
@@ -625,10 +623,22 @@ export function ConfigurationPage() {
                   )}
                   <div className="field-grid">
                     {Object.entries(draft[section].values).map(([field, value]) => {
-                      // The device Source Interface field is a select whose options
-                      // come from the live NIC enumeration query rather than the
-                      // static fieldDefinitions map (proposal 3.4).
-                      const isSourceInterface = section === "device" && field === SOURCE_INTERFACE_FIELD;
+                      // The device Source Interface field is a richer control: a
+                      // by-name NIC dropdown (from the live enumeration query) that
+                      // populates read-only IP/mask/gateway confirmation fields so the
+                      // operator can verify they picked the OT/Ethernet adapter, not
+                      // Wi-Fi (proposal 3). It stores the chosen NIC's CIDR, so the
+                      // existing backend resolver is unchanged.
+                      if (section === "device" && field === SOURCE_INTERFACE_FIELD) {
+                        return (
+                          <SourceInterfaceControl
+                            interfaces={systemInterfaces}
+                            key={field}
+                            onValueChange={(nextValue) => changeValue(section, field, nextValue)}
+                            value={value}
+                          />
+                        );
+                      }
                       return (
                       <FieldControl
                         canEngineer={canEngineer}
@@ -636,13 +646,13 @@ export function ConfigurationPage() {
                         expired={field === CERT_EXPIRY_FIELD && isExpired(value)}
                         field={field}
                         hint={fieldHint(section, field, draft)}
-                        kind={isSourceInterface ? "select" : (fieldDefinitions[section]?.[field]?.kind ?? "text")}
+                        kind={fieldDefinitions[section]?.[field]?.kind ?? "text"}
                         key={field}
                         onFileSelect={(file) => handleSecretFile(field, file)}
                         onSecretChange={(content) => setSecretDrafts((current) => ({ ...current, [field]: content }))}
                         onSecretStore={() => handleSecretStore(field)}
                         onValueChange={(nextValue) => changeValue(section, field, nextValue)}
-                        options={isSourceInterface ? sourceInterfaceOptions : fieldDefinitions[section]?.[field]?.options}
+                        options={fieldDefinitions[section]?.[field]?.options}
                         secretContent={secretDrafts[field] ?? ""}
                         secretFileName={secretFiles[field] ?? null}
                         secretPending={secretMutation.isPending}
@@ -740,6 +750,99 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "Syslog Port": "Port of the remote syslog target.",
   "Diagnostics Mode": "Extra diagnostic logging toggle.",
 };
+
+// Converts an IPv4 prefix length (0-32) to its dotted subnet mask, or null when
+// out of range. Used only for the free-text fallback: an enumerated interface
+// already carries subnet_mask from the API, but a stored value the host can't
+// enumerate has its mask derived from the "/prefix" so the field still shows one.
+function prefixToMask(prefix: number): string | null {
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
+    return null;
+  }
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+  return [24, 16, 8, 0].map((shift) => (mask >>> shift) & 0xff).join(".");
+}
+
+// Splits a stored "ip/prefix" (or bare "ip") Source Interface value into display
+// parts for the read-only confirmation fields when the interface is NOT in the
+// live enumeration (browser on another host, or the NIC is momentarily down).
+// Returns null when the value isn't an IP so the fields fall back to a dash.
+function deriveFromCidr(value: string): { ipv4: string; subnetMask: string | null } | null {
+  const [ip, prefixText] = value.trim().split("/");
+  if (!ip) {
+    return null;
+  }
+  const prefix = prefixText !== undefined ? Number(prefixText) : NaN;
+  return { ipv4: ip, subnetMask: Number.isNaN(prefix) ? null : prefixToMask(prefix) };
+}
+
+type SourceInterfaceControlProps = {
+  interfaces: SystemInterface[];
+  onValueChange: (value: string) => void;
+  value: string;
+};
+
+// The device Source Interface control (proposal section 3): a NIC dropdown
+// labelled by adapter name, with read-only IP Address / Subnet Mask / Gateway
+// confirmation fields that update on selection so the operator can verify they
+// picked the OT/Ethernet adapter, not Wi-Fi. The stored value is the chosen
+// NIC's CIDR (e.g. "192.168.1.10/24"), so the backend resolver is unchanged;
+// "Auto (OS default route)" (the default) binds nothing. A stored value the host
+// can't enumerate is preserved as its own option and its ip/mask derived from the
+// CIDR string — the same fallback as the FieldControl !options.includes hatch.
+function SourceInterfaceControl({ interfaces, onValueChange, value }: SourceInterfaceControlProps) {
+  const enumeratedCidrs = interfaces.map((iface) => iface.cidr);
+  const selected = interfaces.find((iface) => iface.cidr === value) ?? null;
+  const isAuto = value.trim() === "" || value === SOURCE_INTERFACE_AUTO;
+  const showStoredOption = !isAuto && !enumeratedCidrs.includes(value);
+  const derived = !selected && !isAuto ? deriveFromCidr(value) : null;
+
+  const ipAddress = isAuto ? "—" : selected?.ipv4 ?? derived?.ipv4 ?? "—";
+  const subnetMask = isAuto ? "—" : selected?.subnet_mask ?? derived?.subnetMask ?? "—";
+  const gateway = isAuto
+    ? "—"
+    : selected
+      ? selected.gateway ?? "Not detected"
+      : "Unknown (interface not on this host)";
+
+  return (
+    <div className="source-interface-control">
+      <label title={FIELD_TOOLTIPS[SOURCE_INTERFACE_FIELD]}>
+        {SOURCE_INTERFACE_FIELD}
+        <select onChange={(event) => onValueChange(event.target.value)} value={value}>
+          {showStoredOption && <option value={value}>{`${value} (not on this host)`}</option>}
+          <option value={SOURCE_INTERFACE_AUTO}>{SOURCE_INTERFACE_AUTO}</option>
+          {interfaces.map((iface) => (
+            <option key={iface.cidr} value={iface.cidr}>
+              {`${iface.name} — ${iface.cidr}${iface.is_up ? "" : " (down)"}`}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="source-interface-details">
+        <span className="source-interface-details-title">Selected interface</span>
+        <div className="field-grid">
+          <label>
+            IP Address
+            <input readOnly tabIndex={-1} value={ipAddress} />
+          </label>
+          <label>
+            Subnet Mask
+            <input readOnly tabIndex={-1} value={subnetMask} />
+          </label>
+          <label>
+            Gateway
+            <input readOnly tabIndex={-1} value={gateway} />
+          </label>
+        </div>
+        <small>
+          Read-only — confirm this is the OT/Ethernet adapter the scan should egress from, not Wi-Fi.
+          Auto uses the OS default route.
+        </small>
+      </div>
+    </div>
+  );
+}
 
 type FieldControlProps = {
   canEngineer: boolean;
