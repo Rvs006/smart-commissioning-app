@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Build the Smart Commissioning App Windows portable bundle (Option A).
@@ -116,7 +117,11 @@ function Remove-PythonCaches([string]$Root) {
         Where-Object { $_.Name -in @("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist") -or $_.Name -like "*.egg-info" } |
         Sort-Object { $_.FullName.Length } -Descending |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-    Get-ChildItem -LiteralPath $Root -Recurse -Force -File -Include "*.pyc", "*.pyo" -ErrorAction SilentlyContinue |
+    # -Include is silently dropped when combined with -LiteralPath on Windows PowerShell 5.1
+    # (it then returns ALL files, so the following Remove-Item would delete non-cache files).
+    # Post-filter by extension instead - version-independent and matches the directory block above.
+    Get-ChildItem -LiteralPath $Root -Recurse -Force -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -in @(".pyc", ".pyo") } |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
 }
 
@@ -174,6 +179,9 @@ if ($SkipFreeze) {
         "--clean",
         "--name", $AppName,
         "--console",
+        # cryptography ships native extension modules + dynamic imports (e.g.
+        # cryptography.fernet) PyInstaller misses by default -> bundle all of it.
+        "--collect-all", "cryptography",
         "--distpath", (Join-Path $RepoRoot "dist"),
         "--workpath", (Join-Path $RepoRoot "build\pyinstaller"),
         "--specpath", (Join-Path $RepoRoot "build\pyinstaller")

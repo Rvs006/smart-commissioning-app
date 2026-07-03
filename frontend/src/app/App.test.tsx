@@ -58,6 +58,17 @@ function jsonResponse(payload: unknown): Response {
   } as unknown as Response;
 }
 
+// A 401 the client turns into an ApiError; the keyless SessionProvider resolves
+// it to a null principal (mirrors hosted api_key mode with no key set).
+function unauthorizedResponse(): Response {
+  return {
+    ok: false,
+    status: 401,
+    statusText: "Unauthorized",
+    json: async () => ({ detail: "Missing or invalid API key." }),
+  } as unknown as Response;
+}
+
 function renderApp() {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -92,6 +103,12 @@ function stubDashboardFetch(runsResponse: unknown = runsPayload) {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.endsWith("/api/v1/me")) {
+        // These App-shell tests run with no key configured. The SessionProvider
+        // now always calls /me; keyless, hosted api_key mode answers 401, which
+        // the provider resolves to a null principal (badge shows "Set API key").
+        return unauthorizedResponse();
+      }
       if (url.endsWith("/api/v1/health")) {
         return jsonResponse(healthPayload);
       }

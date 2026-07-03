@@ -72,6 +72,10 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 - Restyled the whole operator console via a design-token override (warm cream +
   teal Electracom palette) with a dark mode, and ran a dark-mode legibility pass
   (review-comments launcher, badge, and card elevation on the dark page).
+- Pinned the portable-build toolchain (PowerShell 7, Python 3.12.10,
+  pip 26.1.x, setuptools >=62, PyInstaller 6.20.0, Node 22) in the README and
+  build docs, with explicit notes that the portable build requires
+  PowerShell 7 (`pwsh`), not Windows PowerShell 5.1.
 
 ### Security
 
@@ -127,6 +131,20 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 - Certificates & Keys is compact by default — each secret (CA cert, client cert,
   private key) shows its masked value with a **Replace…** action; the paste box
   and file picker only appear when replacing.
+- **Windows portable build repaired under PowerShell 5.1 and now bundles
+  cryptography.** `Remove-PythonCaches` relied on `Get-ChildItem -Include` with
+  `-LiteralPath`, which Windows PowerShell 5.1 silently drops — so it matched
+  every file and deleted non-cache files from the bundled `backend/` and `core/`
+  trees; it now post-filters by extension. The default PyInstaller args add
+  `--collect-all cryptography` so a bare build produces a working exe (fixes
+  "No module named cryptography.fernet"), and `build.ps1` / `smoke_local.ps1`
+  now carry `#Requires -Version 7.0` to fail fast under 5.1.
+- **Keyless loopback admin is recognised in local mode.** The frontend now
+  always fetches `GET /me` and resolves a keyless 401/403 to a null principal,
+  driving the session principal from `/me` in both local and hosted modes. This
+  enables the Certificates & Keys Replace/Save actions on the portable/local
+  profile without a manual `localStorage` key; hosted `api_key` mode is
+  unchanged (a bad key still surfaces "Key not recognised").
 
 ### Removed
 

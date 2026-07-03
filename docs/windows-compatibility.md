@@ -16,6 +16,8 @@ Last reviewed: Tuesday, 2026-06-30.
   typecheck, tests, and build.
 - Windows 11 Pro must be checked on a real laptop or self-hosted runner because
   GitHub-hosted Actions does not provide a Windows 11 Pro runner.
+- Building the portable bundle requires PowerShell 7 (`pwsh`); Windows PowerShell
+  5.1 does not provide it.
 - For either Windows target, after the app is running locally:
 
 ```powershell
