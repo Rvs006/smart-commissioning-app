@@ -6,6 +6,7 @@ import {
   ConfigurationSnapshot,
   exportConfiguration,
   getConfiguration,
+  getSystemInterfaces,
   importConfiguration,
   storeSecretMaterial,
   updateConfiguration,
@@ -172,6 +173,13 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
 
 const secretFields = new Set(["CA Certificate", "Client Certificate", "Private Key"]);
 
+// The device-section field whose options come from the live NIC enumeration
+// (GET /system/interfaces) rather than the static fieldDefinitions map. The
+// first option is the OS-default-route sentinel the backend treats as "bind
+// nothing"; the rest are the enumerated interface CIDRs.
+const SOURCE_INTERFACE_FIELD = "Source Interface";
+const SOURCE_INTERFACE_AUTO = "Auto (OS default route)";
+
 // The single certificate-expiry indicator field. It is engine/backend-derived
 // (store_secret currently returns expiry:null, so real PEM parsing is on-site),
 // surfaced here as a read-only status: we compare the displayed date to today
@@ -236,6 +244,20 @@ export function ConfigurationPage() {
     queryFn: getConfiguration,
     queryKey: ["configuration"],
   });
+
+  // Live NIC enumeration for the Source Interface selector. Kept independent of
+  // the configuration query so a failed/slow enumeration never blocks the page:
+  // on loading or error the options fall back to just the Auto sentinel, and the
+  // FieldControl !options.includes(value) escape hatch still surfaces a stored
+  // non-enumerated value (e.g. an interface that is down or on another host).
+  const systemInterfacesQuery = useQuery({
+    queryFn: getSystemInterfaces,
+    queryKey: ["system-interfaces"],
+  });
+  const sourceInterfaceOptions = [
+    SOURCE_INTERFACE_AUTO,
+    ...(systemInterfacesQuery.data ?? []).map((iface) => iface.cidr),
+  ];
 
   useEffect(() => {
     if (configurationQuery.data) {
@@ -602,26 +624,32 @@ export function ConfigurationPage() {
                     </p>
                   )}
                   <div className="field-grid">
-                    {Object.entries(draft[section].values).map(([field, value]) => (
+                    {Object.entries(draft[section].values).map(([field, value]) => {
+                      // The device Source Interface field is a select whose options
+                      // come from the live NIC enumeration query rather than the
+                      // static fieldDefinitions map (proposal 3.4).
+                      const isSourceInterface = section === "device" && field === SOURCE_INTERFACE_FIELD;
+                      return (
                       <FieldControl
                         canEngineer={canEngineer}
                         disabled={section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)}
                         expired={field === CERT_EXPIRY_FIELD && isExpired(value)}
                         field={field}
                         hint={fieldHint(section, field, draft)}
-                        kind={fieldDefinitions[section]?.[field]?.kind ?? "text"}
+                        kind={isSourceInterface ? "select" : (fieldDefinitions[section]?.[field]?.kind ?? "text")}
                         key={field}
                         onFileSelect={(file) => handleSecretFile(field, file)}
                         onSecretChange={(content) => setSecretDrafts((current) => ({ ...current, [field]: content }))}
                         onSecretStore={() => handleSecretStore(field)}
                         onValueChange={(nextValue) => changeValue(section, field, nextValue)}
-                        options={fieldDefinitions[section]?.[field]?.options}
+                        options={isSourceInterface ? sourceInterfaceOptions : fieldDefinitions[section]?.[field]?.options}
                         secretContent={secretDrafts[field] ?? ""}
                         secretFileName={secretFiles[field] ?? null}
                         secretPending={secretMutation.isPending}
                         value={value}
                       />
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -661,6 +689,8 @@ function fieldHint(
 const FIELD_TOOLTIPS: Record<string, string> = {
   // Network Basics
   Hostname: "Gateway hostname that identifies this device on the network.",
+  "Source Interface":
+    "Which local network interface active scans send from. Leave on Auto to use the OS default route; pick a NIC on a multi-homed laptop to force IP/BACnet/MQTT scans out the right adapter.",
   "IP Assignment": "How the gateway gets its address — Static IP or DHCP.",
   "IP Address": "The gateway's IPv4 address on the site network.",
   "Subnet Mask": "Mask defining the size of the local subnet.",

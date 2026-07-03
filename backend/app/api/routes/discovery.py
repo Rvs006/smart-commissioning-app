@@ -46,6 +46,7 @@ from app.services.engine_dispatch import (
     make_device_persister,
     make_device_point_persister,
     make_topic_persister,
+    resolve_source_interface,
 )
 from app.services.job_queue import JobQueueService, JobQueueUnavailable
 from app.services.run_dispatch import dispatch_run
@@ -101,6 +102,29 @@ def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRec
 
 def _discovery_repository() -> DiscoveryRepository:
     return DiscoveryRepository(service.engine)
+
+
+def _configured_source_interface(project_id: str, site_id: str) -> str | None:
+    """The saved device."Source Interface" value (source-NIC selection), or None.
+
+    Reads the same saved config snapshot the MQTT defaults use; an empty / absent
+    value means "Auto (OS default route)" and is normalised to None so the
+    resolver treats it as a no-op (OS picks the egress interface).
+    """
+    values = config_service.load(project_id, site_id).device.values
+    return str(values.get("Source Interface") or "").strip() or None
+
+
+def _resolve_source_interface(project_id: str, site_id: str, parameters: dict) -> None:
+    """Inject the configured source NIC (source_ip / local_address) into the run
+    parameters BEFORE the run is persisted, so the inline and worker paths both
+    bind their active-scan sockets to it. A malformed configured value surfaces as
+    a 400 at run creation, matching the other validation failures on these routes.
+    """
+    try:
+        resolve_source_interface(parameters, _configured_source_interface(project_id, site_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 # Explicit target keys an operator may set to scope an IP sweep. When none are
@@ -195,6 +219,7 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     _ensure_ip_targets(request.project_id, request.site_id, parameters)
     _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
     _resolve_expected_ports(request.project_id, request.site_id, parameters)
+    _resolve_source_interface(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
 
     def run_inline() -> RunRecord:
@@ -219,9 +244,14 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
 
 @router.post("/bacnet/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "bacnet_discovery")
-    parameters = dict(run.parameters)
+    # Resolve parameters (auth check + source-NIC injection) BEFORE creating the
+    # run, so the injected source_ip / local_address are persisted into
+    # run.parameters for the worker path — matching the IP / MQTT routes. (BACnet
+    # binds via parameters["local_address"], already consumed by the engine.)
+    parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    _resolve_source_interface(request.project_id, request.site_id, parameters)
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_discovery")
 
     def run_inline() -> RunRecord:
         persist = make_device_point_persister(_discovery_repository())
@@ -254,6 +284,7 @@ def create_mqtt_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     parameters.setdefault("qos", defaults["qos"])
     if defaults.get("topic_filter") and not any(parameters.get(k) for k in ("topic_filter", "topic_prefix", "topics")):
         parameters["topic_filter"] = defaults["topic_filter"]
+    _resolve_source_interface(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_discovery")
 
     def run_inline() -> RunRecord:

@@ -46,6 +46,9 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
     port = _int(parameters.get("broker_port") or mqtt_values.get("Port"), default=8883)
     use_tls = _bool(parameters.get("use_tls")) or port == 8883
 
+    source_ip = _string(parameters.get("source_ip"))
+    source_address = (source_ip, 0) if source_ip else None
+
     return MqttConnectionSettings(
         host=host,
         port=port,
@@ -58,6 +61,7 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
         client_certificate=_optional_secret(certificate_values.get("Client Certificate")),
         private_key=_optional_secret(certificate_values.get("Private Key")),
         timeout_seconds=_float(parameters.get("connect_timeout_seconds"), default=5.0),
+        source_address=source_address,
     )
 
 

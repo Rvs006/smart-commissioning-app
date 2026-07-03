@@ -12,6 +12,7 @@ from app.api.routes import (
     imports,
     reports,
     runs,
+    system,
     users,
     validation,
 )
@@ -66,6 +67,10 @@ protected_router.include_router(evidence.router, prefix="/evidence", tags=["evid
 protected_router.include_router(
     hub.router, prefix="/hub", tags=["hub"], dependencies=[Depends(require_role(Role.ADMIN))]
 )
+# Read-only NIC enumeration for the Configuration page Source Interface picker.
+# Viewer-gated inside the route (require_role(Role.VIEWER)); behind the same auth
+# as every other /api/v1 route.
+protected_router.include_router(system.router, prefix="/system", tags=["system"])
 # Identity + RBAC: GET /me for any authenticated caller, /users management for
 # admins (require_role(Role.ADMIN) inside the route). Behind the same auth as
 # every other /api/v1 route.
