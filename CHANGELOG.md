@@ -146,6 +146,13 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   profile without a manual `localStorage` key; hosted `api_key` mode is
   unchanged (a bad key still surfaces "Key not recognised").
 
+### Proposed
+
+- **Source-interface (NIC) selection** — `docs/proposals/nic-interface-selection.md`:
+  a code-grounded, phased plan to let operators choose which network interface
+  active scans (IP sweep, BACnet, MQTT) egress, for multi-NIC laptops. Design
+  only; not yet implemented.
+
 ### Removed
 
 - Removed the dead UI prototypes and the zip-inspector dev tool (still available

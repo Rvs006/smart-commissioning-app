@@ -1,6 +1,6 @@
 # Windows Compatibility
 
-Last reviewed: Tuesday, 2026-06-30.
+Last reviewed: Friday, 2026-07-03.
 
 ## Supported targets
 
@@ -17,7 +17,11 @@ Last reviewed: Tuesday, 2026-06-30.
 - Windows 11 Pro must be checked on a real laptop or self-hosted runner because
   GitHub-hosted Actions does not provide a Windows 11 Pro runner.
 - Building the portable bundle requires PowerShell 7 (`pwsh`); Windows PowerShell
-  5.1 does not provide it.
+  5.1 does not provide it. `build.ps1` and `smoke_local.ps1` now carry
+  `#Requires -Version 7.0` so running them under 5.1 fails fast.
+- `build.ps1` was repaired for Windows PowerShell 5.1 (a `-Include`/`-LiteralPath`
+  file-cleanup bug that could strip non-cache files) and now bundles
+  `cryptography` by default, so a bare build produces a working exe. See the CHANGELOG.
 - For either Windows target, after the app is running locally:
 
 ```powershell

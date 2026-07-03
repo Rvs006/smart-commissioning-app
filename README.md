@@ -10,10 +10,12 @@
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
-> **Repo status - last verified Tuesday, 2026-06-30:** local Python/frontend
-> gates passed in this audit, and engineers can clone and run the documented
-> local workflows. Live IP/BACnet/MQTT hardware validation remains Phase 5 work
-> before production rollout.
+> **Repo status - last verified Friday, 2026-07-03:** local Python/frontend gates
+> passed and the CI `python`/`frontend` jobs are green. The Windows portable build
+> was repaired (a PowerShell 5.1 file-cleanup bug, default `cryptography` bundling,
+> and an explicit PowerShell 7 requirement), and engineer actions now auto-enable
+> on the local/portable loopback profile. Live IP/BACnet/MQTT hardware validation
+> remains Phase 5 work before production rollout.
 
 Branded **ELECTRACOM "Smart Commissioning Tool"**, this is the web platform our engineers use to
 commission smart buildings: bring up a project's network/BACnet/MQTT/certificate settings, import
@@ -170,10 +172,12 @@ python scripts/seed_demo.py --base-url http://127.0.0.1:8000
 npm --prefix frontend run dev      # http://localhost:5173, proxies /api -> 8000
 ```
 
-> **Enable the engineer action buttons.** Run / Publish / Export are gated on an API key even in
-> local mode. Open the app, press **F12 → Console**, run once:
-> `localStorage.setItem('sc.apiKey','local-dev')`, then reload. One-command offline smoke:
-> `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
+> **Engineer action buttons work automatically here.** With the backend running on
+> loopback, the app recognises the trusted `127.0.0.1` admin, so Run / Publish /
+> Export are enabled with no key and no console step. (The old
+> `localStorage.setItem('sc.apiKey','local-dev')` trick is now only needed for the
+> *backend-less* frontend-only preview, where there is no `/me` to grant admin.)
+> One-command offline smoke: `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
 
 ### Option C — Windows portable bundle
 
@@ -231,8 +235,10 @@ headers plus one example row, no project data — so an engineer can prepare a
 register before they have a key.
 
 > **Local dev (Option B) and the portable bundle (Option C)** auto-trust
-> `127.0.0.1`, so no key is needed there. To enable the engineer action buttons
-> in local dev, see the note under Option B.
+> `127.0.0.1`, so no key is needed there — and the engineer action buttons
+> (Run / Publish / Export) now enable automatically for the loopback admin, with
+> no console step. (A backend must be running; the backend-less frontend-only
+> preview still needs the `localStorage` placeholder.)
 
 ---
 
@@ -279,6 +285,7 @@ Smart Commissioning Tool Specification.pdf
 | [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) | On-site validation checklist for live-network/infra paths |
 | [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | Safe controlled-pilot boundary + hosted setup for the team |
 | [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory |
+| [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md) | Proposed enhancement: choosing the source interface (NIC) for active scans |
 
 ---
 
@@ -310,6 +317,11 @@ developed without that infrastructure and must be validated on site. A controlle
 (config / import / fixture-validation / dry-run / reports) is safe today; see
 [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) and
 [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
+
+**Planned enhancement (design drafted, not yet built):** source-interface (NIC)
+selection — let an operator choose which network interface active scans egress,
+for multi-NIC commissioning laptops. See
+[docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md).
 
 ---
 
