@@ -21,6 +21,7 @@ only assembles their inputs and persists their output. The MQTT/BACnet real
 transports remain on-site-validation surface (see each engine's docstring).
 """
 
+import ipaddress
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -91,6 +92,35 @@ def is_dry_run(parameters: dict[str, Any]) -> bool:
     if isinstance(value, str):
         return value.strip().casefold() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+# The literal dropdown value meaning "use the OS default route" (bind nothing).
+# Compared case-insensitively; empty / absent is treated the same way.
+_AUTO_SOURCE_INTERFACE = "Auto (OS default route)"
+
+
+def resolve_source_interface(parameters: dict[str, Any], source_interface: str | None) -> None:
+    """Inject source_ip (+ local_address for BACnet) into run parameters, in place.
+
+    ``source_interface`` is the configured device."Source Interface" value:
+
+    * falsy / ``"Auto (OS default route)"`` (case-insensitive) -> no-op (OS
+      default route; nothing is bound, the backward-compatible path).
+    * ``"192.168.1.10/24"`` or bare ``"192.168.1.10"`` ->
+      ``parameters["source_ip"] = "192.168.1.10"`` (bare IP, used by the IP sweep
+      and MQTT) and ``parameters["local_address"] = "192.168.1.10/24"`` (ip/prefix,
+      consumed by BACnet). A bare IP defaults BACnet to ``/32``.
+
+    An operator-supplied ``parameters["source_ip"]`` / ``["local_address"]`` wins
+    (``setdefault`` never clobbers an explicit run-level override). Raises
+    ``ValueError`` on a malformed value so the route can return a clean 400.
+    """
+    value = (source_interface or "").strip()
+    if not value or value.casefold() == _AUTO_SOURCE_INTERFACE.casefold():
+        return
+    interface = ipaddress.ip_interface(value)
+    parameters.setdefault("source_ip", str(interface.ip))
+    parameters.setdefault("local_address", interface.with_prefixlen)
 
 
 # -- structured-record persisters ------------------------------------------

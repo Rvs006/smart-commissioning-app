@@ -7,6 +7,11 @@ import { ConfigurationPage } from "./ConfigurationPage";
 // An engineer principal so Save/Import are not gated by role in these tests.
 const mePayload = { username: "engineer-1", role: "engineer", source: "user_key" };
 
+// Interfaces returned by GET /system/interfaces for the Source Interface
+// selector. Defaults to an empty list so existing tests never depend on the
+// enumeration; a test can set it before rendering to exercise the dropdown.
+let interfacesPayload: unknown[] = [];
+
 // A configuration snapshot with a deliberately EXPIRED certificate expiry so the
 // red-highlight indicator can be asserted, plus a long fault string in one
 // status so the single-pill rendering with room for long faults is exercised.
@@ -74,6 +79,9 @@ function stubFetch(handler: FetchHandler) {
       if (url.endsWith("/api/v1/me")) {
         return jsonResponse(mePayload);
       }
+      if (url.endsWith("/api/v1/system/interfaces")) {
+        return jsonResponse(interfacesPayload);
+      }
       return handler(url, init);
     }),
   );
@@ -106,6 +114,7 @@ describe("ConfigurationPage", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     clearApiKey();
+    interfacesPayload = [];
   });
 
   it("renders one descriptive status pill per section with room for a long fault string", async () => {
@@ -169,6 +178,45 @@ describe("ConfigurationPage", () => {
     expect(optionValues).toContain("UTC");
     expect(optionValues).toContain("Asia/Tokyo");
     expect(optionValues).toContain("America/New_York");
+  });
+
+  it("renders Source Interface as a select of enumerated NICs plus Auto, keeping a stored non-enumerated value", async () => {
+    interfacesPayload = [
+      { name: "Ethernet 3", ipv4: "192.168.1.10", prefix_length: 24, cidr: "192.168.1.10/24", is_up: true },
+      { name: "Wi-Fi", ipv4: "10.0.0.5", prefix_length: 8, cidr: "10.0.0.5/8", is_up: true },
+    ];
+    // The stored value is deliberately NOT one of the enumerated CIDRs, so the
+    // FieldControl !options.includes(value) escape hatch must still surface it.
+    const base = configurationPayload();
+    const payload = {
+      ...base,
+      device: {
+        ...base.device,
+        values: { ...base.device.values, "Source Interface": "172.16.0.9/24" },
+      },
+    };
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payload);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    // Wait for the interfaces query to resolve so the enumerated options land
+    // (the config query and interfaces query resolve independently).
+    await screen.findByRole("option", { name: "192.168.1.10/24" });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    expect(sourceLabel).not.toBeNull();
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    // The stored non-enumerated value stays selected and rendered.
+    expect(select.value).toBe("172.16.0.9/24");
+    const optionValues = Array.from(select.options).map((option) => option.value);
+    expect(optionValues).toContain("Auto (OS default route)");
+    expect(optionValues).toContain("192.168.1.10/24");
+    expect(optionValues).toContain("10.0.0.5/8");
+    expect(optionValues).toContain("172.16.0.9/24");
   });
 
   it("flags an expired certificate-expiry field in red", async () => {

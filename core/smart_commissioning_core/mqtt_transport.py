@@ -75,6 +75,9 @@ class MqttConnectionSettings:
     client_certificate: str | None = None
     private_key: str | None = None
     timeout_seconds: float = 5.0
+    # Local (source) address to bind the outbound socket to, forcing egress out a
+    # chosen NIC. ``None`` (default) = OS default route, backward compatible.
+    source_address: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,29 @@ class MqttMessage:
             return None
 
 
+def _resolve_socket_factory(
+    socket_factory: Callable[[tuple[str, int], float], socket.socket] | None,
+    source_address: tuple[str, int] | None,
+) -> Callable[[tuple[str, int], float], socket.socket]:
+    """Pick the socket factory, binding the default one to a source interface.
+
+    An injected ``socket_factory`` is returned untouched (callers / tests that
+    supply their own factory are never wrapped). Only when no factory is injected
+    AND a ``source_address`` is configured do we wrap ``socket.create_connection``
+    so the outbound socket binds to that local address. With neither, this is
+    exactly today's ``socket.create_connection`` default (backward compatible).
+    """
+    if socket_factory is not None:
+        return socket_factory
+    if source_address is None:
+        return socket.create_connection
+
+    def _bound_create_connection(address: tuple[str, int], timeout: float) -> socket.socket:
+        return socket.create_connection(address, timeout, source_address=source_address)
+
+    return _bound_create_connection
+
+
 class MqttClient:
     def __init__(
         self,
@@ -97,7 +123,7 @@ class MqttClient:
         socket_factory: Callable[[tuple[str, int], float], socket.socket] | None = None,
     ) -> None:
         self.settings = settings
-        self.socket_factory = socket_factory or socket.create_connection
+        self.socket_factory = _resolve_socket_factory(socket_factory, settings.source_address)
         self._socket: socket.socket | None = None
         self._packet_id = 1
         # Temp files materialized from secret:// cert material; removed on exit.

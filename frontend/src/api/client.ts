@@ -465,6 +465,24 @@ export function getBlueprint(): Promise<Blueprint> {
   return request<Blueprint>("/blueprint");
 }
 
+// A usable local network interface as enumerated by GET /system/interfaces.
+// `cidr` ("192.168.1.10/24") is what the Source Interface selector stores; the
+// bare `ipv4` and `prefix_length` are carried so the backend can bind sockets
+// (IP/MQTT want the bare IP; BACnet wants ip/prefix).
+export interface SystemInterface {
+  name: string;
+  ipv4: string;
+  prefix_length: number;
+  cidr: string;
+  is_up: boolean;
+}
+
+// GET /api/v1/system/interfaces — enumerates the host's usable NICs so the
+// Source Interface selector can offer them. Viewer-gated and read-only.
+export function getSystemInterfaces(): Promise<SystemInterface[]> {
+  return request<SystemInterface[]>("/system/interfaces");
+}
+
 // ---------------------------------------------------------------------------
 // Identity + RBAC (Phase 4b).
 //

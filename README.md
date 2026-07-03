@@ -285,7 +285,7 @@ Smart Commissioning Tool Specification.pdf
 | [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) | On-site validation checklist for live-network/infra paths |
 | [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | Safe controlled-pilot boundary + hosted setup for the team |
 | [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory |
-| [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md) | Proposed enhancement: choosing the source interface (NIC) for active scans |
+| [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md) | Design doc for source-interface (NIC) selection for active scans (implemented) |
 
 ---
 
@@ -318,10 +318,11 @@ developed without that infrastructure and must be validated on site. A controlle
 [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) and
 [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
 
-**Planned enhancement (design drafted, not yet built):** source-interface (NIC)
-selection — let an operator choose which network interface active scans egress,
-for multi-NIC commissioning laptops. See
-[docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md).
+**Implemented:** source-interface (NIC) selection — an operator can choose which
+network interface active scans egress from, via a **"Source Interface"** field on
+the Configuration page backed by `GET /api/v1/system/interfaces`, for multi-NIC
+commissioning laptops. Real multi-NIC egress is still verified on site. Design
+doc: [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md).
 
 ---
 

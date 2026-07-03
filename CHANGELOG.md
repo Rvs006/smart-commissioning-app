@@ -62,6 +62,13 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   hover tooltip describing what it is (MQTT broker/port/QoS/keep-alive, BACnet,
   certificates, NTP, backup, logging), keeping the "no inline info-icons"
   decision (hover only).
+- **Source-interface (NIC) selection** — implemented source-interface (NIC)
+  selection: a device **"Source Interface"** configuration field (default
+  **"Auto (OS default route)"**), a viewer-gated `GET /api/v1/system/interfaces`
+  enumeration endpoint (psutil-backed, import-guarded), and per-engine socket
+  source-binding for IP sweep / MQTT / BACnet; "Auto" preserves today's
+  OS-default-route behaviour. Real multi-NIC egress verification remains an
+  on-site step.
 
 ### Changed
 
@@ -145,13 +152,6 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   enables the Certificates & Keys Replace/Save actions on the portable/local
   profile without a manual `localStorage` key; hosted `api_key` mode is
   unchanged (a bad key still surfaces "Key not recognised").
-
-### Proposed
-
-- **Source-interface (NIC) selection** — `docs/proposals/nic-interface-selection.md`:
-  a code-grounded, phased plan to let operators choose which network interface
-  active scans (IP sweep, BACnet, MQTT) egress, for multi-NIC laptops. Design
-  only; not yet implemented.
 
 ### Removed
 

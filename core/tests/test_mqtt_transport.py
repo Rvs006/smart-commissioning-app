@@ -8,6 +8,7 @@ remaining-length), so a long/indefinite capture is no longer dropped after
 is exercised on-site against a real broker (see docs/phase5-onsite-validation.md).
 """
 
+import socket
 import unittest
 from typing import Any
 from unittest import mock
@@ -64,6 +65,49 @@ class PublishFilterTests(unittest.TestCase):
                     )
                 self.assertIsNotNone(message)
                 self.assertEqual(message.topic, topic)
+
+
+class SourceAddressTests(unittest.TestCase):
+    def test_source_address_binds_default_socket_factory(self) -> None:
+        # With source_address set and NO injected factory, the client must wrap
+        # socket.create_connection to pass that source_address. Capture the call
+        # by patching create_connection on the transport module's socket.
+        captured: dict[str, Any] = {}
+        recording = RecordingSocket()
+
+        def fake_create_connection(address: tuple[str, int], timeout: float, *,
+                                   source_address: tuple[str, int] | None = None) -> RecordingSocket:
+            captured["address"] = address
+            captured["timeout"] = timeout
+            captured["source_address"] = source_address
+            return recording
+
+        settings = _settings(source_address=("192.168.1.10", 0))
+        client = MqttClient(settings)  # no socket_factory -> default is wrapped
+        with mock.patch.object(socket, "create_connection", fake_create_connection):
+            with mock.patch.object(MqttClient, "_connect", lambda _self: None):
+                with client:
+                    pass
+        self.assertEqual(captured["address"], ("broker.test", 1883))
+        self.assertEqual(captured["source_address"], ("192.168.1.10", 0))
+
+    def test_injected_factory_ignores_source_address(self) -> None:
+        # An injected socket_factory must NEVER be wrapped, even when
+        # source_address is set: the caller's factory wins unchanged.
+        sock = RecordingSocket()
+        captured: dict[str, Any] = {}
+
+        def factory(addr: tuple[str, int], timeout: float) -> RecordingSocket:
+            captured["addr"] = addr
+            return sock
+
+        settings = _settings(source_address=("192.168.1.10", 0))
+        client = MqttClient(settings, socket_factory=factory)
+        with mock.patch.object(MqttClient, "_connect", lambda _self: None):
+            with client:
+                pass
+        self.assertEqual(captured["addr"], ("broker.test", 1883))
+        self.assertIs(client._socket, sock)
 
 
 if __name__ == "__main__":

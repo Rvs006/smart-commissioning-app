@@ -37,7 +37,12 @@ dependencies = [
   "redis==5.3.1",
   "python-multipart==0.0.26",
   "openpyxl==3.1.5",
-  "prometheus-client==0.25.0"
+  "prometheus-client==0.25.0",
+  # ponytail: deliberate stdlib-before-deps exception. psutil is the only
+  # cross-platform way to enumerate NIC (name, ipv4, prefix, up/down) without
+  # locale-fragile ipconfig/WMI parsing; the import is guarded so it degrades to
+  # Auto-only if absent. Range-pinned (not ==) as an optional, guarded dep.
+  "psutil>=5.9"
 ]
 
 [project.optional-dependencies]

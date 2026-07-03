@@ -11,6 +11,7 @@ the task's ``live_untested`` output and requires on-site validation.
 import socket
 import unittest
 from typing import Any
+from unittest import mock
 
 from smart_commissioning_core.engines import ip_scan
 from smart_commissioning_core.engines.base import ThrottleConfig
@@ -62,6 +63,63 @@ class FakeRunStore:
 
 
 _AUTH = {"authorized": True}
+
+
+class SourceInterfaceTests(unittest.TestCase):
+    """Source-NIC binding: the default probe must pass local_addr, and an
+    unavailable source_ip must fail the run honestly (not scan empty)."""
+
+    def test_default_probe_binds_local_addr_from_source_ip(self) -> None:
+        # No connect injection: the module builds its default probe from
+        # parameters["source_ip"]. Capture the kwargs the probe hands to
+        # asyncio.open_connection by monkeypatching it on the ip_scan module.
+        import asyncio
+
+        captured: dict[str, Any] = {}
+
+        class _FakeWriter:
+            def close(self) -> None:
+                pass
+
+            async def wait_closed(self) -> None:
+                pass
+
+        async def fake_open_connection(host: str, port: int, **kwargs: Any) -> tuple[Any, Any]:
+            captured["local_addr"] = kwargs.get("local_addr")
+            return object(), _FakeWriter()
+
+        store = FakeRunStore()
+        with mock.patch.object(asyncio, "open_connection", fake_open_connection):
+            result = ip_scan.process_ip_discovery_run(
+                "run_srcbind",
+                {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80], "source_ip": "127.0.0.1"},
+                run_store=store,
+                execution_mode="x",
+                # NO connect injection: exercises _make_default_connect.
+            )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(captured["local_addr"], ("127.0.0.1", 0))
+
+    def test_unavailable_source_ip_fails_run_not_empty_success(self) -> None:
+        # 203.0.113.1 (TEST-NET-3, RFC 5737) is not assigned to this host, so the
+        # bind pre-check raises and run_engine records a terminal failure — NOT a
+        # silent empty sweep.
+        store = FakeRunStore()
+        contacted: list[tuple[str, int]] = []
+
+        async def spy_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.append((host, port))  # pragma: no cover - must never run
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_badsrc",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "source_ip": "203.0.113.1"},
+            run_store=store,
+            execution_mode="x",
+            connect=spy_connect,
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [], "an unavailable source interface must not scan any host")
 
 
 class TargetExpansionTests(unittest.TestCase):

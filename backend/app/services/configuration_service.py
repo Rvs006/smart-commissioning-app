@@ -34,6 +34,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Gateway": "10.10.25.1",
             "DNS Servers": "10.10.25.10, 8.8.8.8",
             "VLAN ID": "25",
+            "Source Interface": "Auto (OS default route)",
         },
         status="Healthy",
     ),
@@ -313,6 +314,7 @@ class ConfigurationService:
         self._validate_ip_field(errors, "Device Gateway", configuration.device.values.get("Gateway", ""))
         self._validate_subnet_mask(errors, configuration.device.values.get("Subnet Mask", ""))
         self._validate_dns_servers(errors, configuration.device.values.get("DNS Servers", ""))
+        self._validate_source_interface(errors, configuration.device.values.get("Source Interface", ""))
         self._validate_port(errors, "BACnet UDP Port", configuration.bacnet.values.get("UDP Port", ""))
         self._validate_port(errors, "BBMD UDP Port", configuration.bacnet.values.get("BBMD UDP Port", ""))
         self._validate_enabled_disabled(errors, "BACnet Foreign Device", configuration.bacnet.values.get("Foreign Device", ""))
@@ -443,6 +445,21 @@ class ConfigurationService:
                 ipaddress.ip_address(server)
             except ValueError:
                 errors.append(f"DNS server '{server}' must be a valid IPv4 or IPv6 address.")
+
+    def _validate_source_interface(self, errors: list[str], value: str) -> None:
+        """Accept empty / "Auto (OS default route)" (OS default route, bind
+        nothing) or a parseable interface IP with an optional prefix
+        (e.g. 192.168.1.10/24 or a bare 192.168.1.10)."""
+        value = value.strip()
+        if not value or value.casefold() == "auto (os default route)":
+            return
+        try:
+            ipaddress.ip_interface(value)
+        except ValueError:
+            errors.append(
+                "Source Interface must be 'Auto (OS default route)' or a valid "
+                "interface IP (optionally with prefix, e.g. 192.168.1.10/24)."
+            )
 
     def _validate_port(self, errors: list[str], label: str, value: str) -> None:
         if not value.isdigit():

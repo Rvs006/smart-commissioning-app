@@ -1,6 +1,6 @@
 # Proposal: Source-NIC / network-interface selection for active scans
 
-Status: Draft (design only — no code changed by this document)
+Status: Implemented (Phases 0-2) — see CHANGELOG. On-real-hardware egress verification pending (section 8.3).
 Author: (fill in)
 Date: 2026-07-03
 Scope: `smart-commissioning-app` — core engines, backend API, worker, frontend Configuration page

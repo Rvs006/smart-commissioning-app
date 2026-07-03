@@ -91,31 +91,44 @@ ENGINE_NAME = "ip_discovery"
 ConnectProbe = Callable[[str, int, float], Awaitable[bool]]
 
 
-async def _default_connect(host: str, port: int, timeout: float) -> bool:
-    """Real connect probe: True iff a TCP connection to (host, port) succeeds.
+def _make_default_connect(source_ip: str | None) -> ConnectProbe:
+    """Build the real connect probe, optionally bound to a source interface.
 
-    Uses ``asyncio.open_connection`` and immediately closes the connection.
-    Never raises: any connection error (refused, timeout, unreachable, OS
-    error) is treated as "port closed / host not responding on this port".
-
-    NOTE: only the loopback path of this function is unit-tested; behaviour
-    against real remote hosts / firewalls requires on-site validation.
+    When ``source_ip`` is truthy the probe binds every connect to
+    ``local_addr=(source_ip, 0)`` (port 0 = OS picks the ephemeral source
+    port), forcing egress out that NIC. When it is falsy the probe passes
+    ``local_addr=None``, which is byte-for-byte today's OS-default-route
+    behaviour (the ``Auto`` path is a no-op).
     """
-    writer = None
-    try:
-        connect = asyncio.open_connection(host, port)
-        _reader, writer = await asyncio.wait_for(connect, timeout=timeout)
-        return True
-    except (OSError, TimeoutError, ValueError):
-        return False
-    finally:
-        if writer is not None:
-            try:
-                writer.close()
-                # wait_closed can itself raise on a half-open socket; ignore.
-                await asyncio.wait_for(writer.wait_closed(), timeout=timeout)
-            except (OSError, TimeoutError, ValueError):
-                pass
+    local_addr = (source_ip, 0) if source_ip else None
+
+    async def _default_connect(host: str, port: int, timeout: float) -> bool:
+        """Real connect probe: True iff a TCP connection to (host, port) succeeds.
+
+        Uses ``asyncio.open_connection`` and immediately closes the connection.
+        Never raises: any connection error (refused, timeout, unreachable, OS
+        error) is treated as "port closed / host not responding on this port".
+
+        NOTE: only the loopback path of this function is unit-tested; behaviour
+        against real remote hosts / firewalls requires on-site validation.
+        """
+        writer = None
+        try:
+            connect = asyncio.open_connection(host, port, local_addr=local_addr)
+            _reader, writer = await asyncio.wait_for(connect, timeout=timeout)
+            return True
+        except (OSError, TimeoutError, ValueError):
+            return False
+        finally:
+            if writer is not None:
+                try:
+                    writer.close()
+                    # wait_closed can itself raise on a half-open socket; ignore.
+                    await asyncio.wait_for(writer.wait_closed(), timeout=timeout)
+                except (OSError, TimeoutError, ValueError):
+                    pass
+
+    return _default_connect
 
 
 def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
@@ -365,7 +378,8 @@ def process_ip_discovery_run(
         _is_cancelled=is_cancelled,
     )
 
-    probe = connect or _default_connect
+    source_ip = (parameters or {}).get("source_ip") or None
+    probe = connect or _make_default_connect(source_ip)
 
     async def engine(engine_ctx: EngineContext) -> EngineResult:
         return await _run_ip_discovery(engine_ctx, probe=probe, reverse_lookup=reverse_lookup)
@@ -413,6 +427,22 @@ async def _run_ip_discovery(
 
     # REAL SWEEP: authorization gates any actual socket I/O.
     require_scan_authorization(ctx.parameters)
+
+    # Source-interface bind pre-check: if a source_ip was chosen, prove it can be
+    # bound ONCE here rather than letting every per-host connect fail with an
+    # OSError that _default_connect swallows as "port closed" — which would turn a
+    # down/invalid NIC into a silent all-negative sweep (the worst failure mode).
+    # A bind failure raises ValueError so run_engine records an honest terminal
+    # failure instead of a bogus empty result.
+    source_ip = ctx.parameters.get("source_ip") or None
+    if source_ip:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_socket:
+                probe_socket.bind((source_ip, 0))
+        except OSError as error:
+            raise ValueError(
+                f"source interface {source_ip} is not available on this host"
+            ) from error
 
     throttle = Throttle(ctx.throttle)
     timeout = ctx.throttle.connect_timeout_s
