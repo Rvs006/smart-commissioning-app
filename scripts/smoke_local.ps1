@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Local smoke-test harness for the Smart Commissioning App (Windows/PowerShell).
