@@ -104,6 +104,15 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Changed
 
+- **Source Interface — richer NIC confirmation** *(interim step, superseded in
+  the same release by **NIC UX v2** under Added)* — first made the Source
+  Interface control an adapter dropdown with read-only **IP / Subnet Mask /
+  Gateway** confirmation fields, sourcing `gateway` from a guarded
+  `Get-CimInstance` routing-table lookup. NIC UX v2 replaced that lookup with a
+  single cached `Get-NetAdapter`/`Get-NetRoute`/`Get-DnsClientServerAddress`
+  facts call and extended the contract with `adapter_type` and `dns_servers`.
+  "Auto (OS default route)" stays the default and the free-text fallback for
+  non-enumerated hosts is preserved throughout.
 - Refactored the standalone UDMI payload validator into the shared core package
   with an app-level API, a shared issue model, and persistent run history.
 - Aligned the frontend CI Node version to the lockfile's npm and raised the test

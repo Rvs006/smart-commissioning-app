@@ -264,14 +264,22 @@ class SystemInterface(BaseModel):
     name: str            # OS adapter name, e.g. "Ethernet 3"
     ipv4: str            # "192.168.1.10"
     prefix_length: int   # 24
+    subnet_mask: str     # "255.255.255.0"  (dotted form of prefix_length)
     cidr: str            # "192.168.1.10/24"  (what the dropdown stores)
+    gateway: str | None  # "192.168.1.1"  (default IPv4 gateway, or None)
     is_up: bool
 ```
 
 > **Update (NIC UX v2, 2026-07-03):** the shipped schema also carries
 > `adapter_type` ("ethernet" | "wifi" | "usb_ethernet" | "virtual" |
 > "unknown"), `subnet_mask`, `gateway` and `dns_servers` — see the 5.3 update
-> note for the product-owner decision that added them.
+> note for the product-owner decision that added them. An interim
+> "richer confirmation UI" step (PR #48) first added `subnet_mask` + `gateway`
+> via a `Get-CimInstance Win32_NetworkAdapterConfiguration` lookup; NIC UX v2
+> superseded that with a single cached `Get-NetAdapter` / `Get-NetRoute` /
+> `Get-DnsClientServerAddress` facts call that also feeds adapter
+> classification and DNS. Both approaches degrade to `None`/empty on any
+> non-Windows or locked-down host.
 
 ### 5.3 Auth / RBAC / information-leak notes
 
@@ -291,13 +299,17 @@ class SystemInterface(BaseModel):
   > **Update (NIC UX v2, 2026-07-03 meeting — product-owner decision):** Pete
   > explicitly reversed the gateway/DNS omission: field engineers need the
   > selected adapter's default gateway and DNS visible (read-only) to confirm
-  > the tool reads the NIC correctly. The shipped contract is therefore **nine
-  > fields**: `name / ipv4 / prefix_length / cidr / is_up / adapter_type /
-  > subnet_mask / gateway / dns_servers`. Exposing gateway/DNS over the
-  > authenticated, viewer-gated endpoint is an accepted trade-off, NOT a leak
-  > regression — do not "fix" the endpoint back to five fields. MAC addresses
-  > and adapter description/driver strings remain deliberately omitted, and
-  > virtual adapters are excluded from the response entirely.
+  > the tool reads the NIC correctly, and confirming the NIC's gateway
+  > materially helps verify the adapter is on the expected OT segment. The
+  > shipped contract is therefore **nine fields**: `name / ipv4 /
+  > prefix_length / cidr / is_up / adapter_type / subnet_mask / gateway /
+  > dns_servers`. The added surface is small (default route + resolvers per
+  > NIC) and the endpoint stays viewer-gated and auth-required, so this is an
+  > accepted trade-off, NOT a leak regression — do not "fix" the endpoint back
+  > to five fields. MAC addresses and adapter description/driver strings
+  > remain deliberately omitted, virtual adapters are excluded from the
+  > response entirely, and the no-gateway-leak assertion in
+  > `test_system_interfaces_api.py` was updated accordingly.
 
 ## 6. Per-engine source binding — exact edits
 

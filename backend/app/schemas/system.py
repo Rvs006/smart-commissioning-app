@@ -13,10 +13,10 @@ class SystemInterface(BaseModel):
     name: str  # OS adapter name, e.g. "Ethernet 3"
     ipv4: str  # "192.168.1.10"
     prefix_length: int  # 24
+    subnet_mask: str  # dotted quad derived from prefix_length, e.g. "255.255.255.0"
     cidr: str  # "192.168.1.10/24" (what the Source Interface dropdown stores)
     is_up: bool
     adapter_type: AdapterType = "unknown"
-    subnet_mask: str  # dotted quad derived from prefix_length, e.g. "255.255.255.0"
     # Gateway/DNS exposure is a deliberate product-owner reversal (2026-07-03
     # meeting) of the section-5.3 omission in the NIC proposal: engineers need
     # them to confirm the tool reads the NIC correctly. MAC / driver /
