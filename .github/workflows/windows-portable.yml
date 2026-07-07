@@ -1,0 +1,158 @@
+# Builds the Windows portable bundle via packaging/windows_portable/build.ps1
+# on a real windows-2022 runner, then BOOTS the produced exe and proves it
+# serves HTTP before tearing it down. windows-compat.yml only runs source-level
+# gates (pip install + ruff + unittest + npm) and never invokes build.ps1 or
+# launches anything — a gap that let two real build bugs ship to field
+# engineers: a PowerShell 5.1 -Include/-LiteralPath hazard that deleted
+# non-cache files from the bundle, and a missing --collect-all cryptography in
+# the PyInstaller freeze. Either class kills `import app.main`, so the
+# health-200 boot smoke below catches both.
+#
+# Separate workflow (not a job in windows-compat.yml) because path filters are
+# workflow-level: windows-compat.yml deliberately runs unfiltered on every
+# push/PR, and this 15-20 min job should only run when bundle inputs change.
+name: Windows Portable Bundle
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "backend/**"
+      - "core/**"
+      - "frontend/**"
+      - ".github/workflows/windows-portable.yml"
+  push:
+    branches: [main]
+    paths:
+      - "packaging/**"
+      - "backend/**"
+      - "core/**"
+      - "frontend/**"
+      - ".github/workflows/windows-portable.yml"
+
+# One live run per ref: follow-up pushes to a PR cancel the now-obsolete
+# 15-20 min build+boot instead of stacking windows-2022 runs.
+concurrency:
+  group: windows-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-boot:
+    name: Build + boot Windows portable exe
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # NON-editable install on purpose: PyInstaller does not follow PEP 660
+      # editable finders reliably, and a regular install also lands core's
+      # data files in sys.prefix. Pins match the build box
+      # (docs/portable-bundle-rebuild.md section 1).
+      - name: Install Python packages + PyInstaller
+        run: python -m pip install ./core ./backend pyinstaller==6.20.0
+
+      # build.ps1 is `#Requires -Version 7.0`; pwsh is the runner default.
+      - name: Build portable bundle (frontend + freeze + assemble)
+        run: pwsh packaging/windows_portable/build.ps1
+
+      # Upload BEFORE booting: the boot writes runtime\ state (SQLite, logs)
+      # beside the exe, and uploading first keeps the artifact pristine and
+      # available for debugging even when the boot smoke fails.
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartCommissioningApp-windows-portable
+          path: build/Smart_Commissioning_App_Windows_Portable
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Boot smoke - exe answers /api/v1/health
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
+          $exe    = Join-Path $bundle 'SmartCommissioningApp.exe'
+          $out    = Join-Path $env:RUNNER_TEMP 'app-stdout.log'
+          $err    = Join-Path $env:RUNNER_TEMP 'app-stderr.log'
+          $stdin  = Join-Path $env:RUNNER_TEMP 'app-stdin.txt'
+          # Empty stdin: on startup failure the launcher calls input(); EOF makes
+          # it exit nonzero instead of blocking the job until timeout.
+          Set-Content -LiteralPath $stdin -Value '' -NoNewline
+
+          $proc = Start-Process -FilePath $exe -WorkingDirectory $bundle -PassThru -NoNewWindow `
+            -RedirectStandardOutput $out -RedirectStandardError $err -RedirectStandardInput $stdin
+
+          $deadline  = [DateTime]::UtcNow.AddSeconds(150)
+          $healthUrl = $null
+          $ok        = $false
+          try {
+            while ([DateTime]::UtcNow -lt $deadline) {
+              if ($proc.HasExited) {
+                Write-Host "exe exited early with code $($proc.ExitCode)"
+                break
+              }
+              if (-not $healthUrl) {
+                # reserve_port picks the first free port in 8000-8049, so parse
+                # the real URL from the logs instead of hardcoding 8000. The
+                # launcher prints "App URL: http://127.0.0.1:<port>/" to stdout,
+                # but that print is block-buffered while stdout is redirected
+                # (frozen exe, no flush, uvicorn.run blocks) and may not reach
+                # the file until exit — so also scan stderr, where uvicorn's
+                # logging emits "Uvicorn running on http://127.0.0.1:<port>"
+                # flushed per record once the app is actually serving.
+                $m = Select-String -LiteralPath $out, $err -Pattern 'http://127\.0\.0\.1:\d+' -ErrorAction SilentlyContinue |
+                     Select-Object -First 1
+                if ($m) {
+                  $base = $m.Matches[0].Value
+                  $healthUrl = "$base/api/v1/health"
+                  Write-Host "Polling $healthUrl"
+                }
+              }
+              if ($healthUrl) {
+                try {
+                  $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
+                  if ($resp.StatusCode -eq 200) {
+                    Write-Host "HEALTH OK: $healthUrl -> 200"
+                    Write-Host $resp.Content
+                    $ok = $true
+                    break
+                  }
+                } catch {
+                  # Server not accepting connections yet (Alembic migrations run
+                  # on the fresh SQLite before serving); keep polling.
+                }
+              }
+              Start-Sleep -Seconds 2
+            }
+          }
+          finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            Write-Host '--- exe stdout ---'
+            Get-Content -LiteralPath $out -ErrorAction SilentlyContinue
+            Write-Host '--- exe stderr ---'
+            Get-Content -LiteralPath $err -ErrorAction SilentlyContinue
+            Write-Host '--- crash logs (runtime\logs), if any ---'
+            Get-ChildItem -Path (Join-Path $bundle 'runtime\logs') -Filter '*.log' -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
+          }
+          if (-not $ok) {
+            Write-Error 'Portable exe never answered /api/v1/health with 200 within the deadline.'
+            exit 1
+          }
+
+      # Belt and braces: the finally block above kills by PID, but a cancelled
+      # step can skip it — sweep by process name so the runner is left clean.
+      - name: Kill leftover exe
+        if: always()
+        shell: pwsh
+        run: Stop-Process -Name SmartCommissioningApp -Force -ErrorAction SilentlyContinue

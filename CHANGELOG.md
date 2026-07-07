@@ -102,6 +102,15 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   **Installation & Setup** guide covering both install paths and first run
   (set API key, pick Source Interface, dry-run first scan).
 
+- **Windows portable build+boot CI** — new `windows-portable.yml` workflow:
+  on changes to bundle inputs (`packaging/`, `backend/`, `core/`, `frontend/`)
+  a windows-2022 runner builds the portable bundle via `build.ps1`, uploads it
+  as a downloadable artifact (14-day retention), then boots the produced exe
+  and requires `/api/v1/health` to answer 200 before teardown — closing the
+  gap where source-level CI let two real portable-build bugs (the PS 5.1
+  `-Include`/`-LiteralPath` deletion hazard and the missing
+  `--collect-all cryptography`) reach field engineers undetected.
+
 ### Changed
 
 - **Source Interface — richer NIC confirmation** *(interim step, superseded in
