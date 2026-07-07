@@ -69,20 +69,50 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   source-binding for IP sweep / MQTT / BACnet; "Auto" preserves today's
   OS-default-route behaviour. Real multi-NIC egress verification remains an
   on-site step.
+- **NIC UX v2 (field feedback, 2026-07-03)** — the interfaces endpoint now
+  classifies each adapter (`ethernet` / `wifi` / `usb_ethernet` / `unknown`;
+  virtual adapters — Hyper-V, WSL, VPN, VM — are filtered out like loopback)
+  and returns `subnet_mask`, `gateway`, and `dns_servers` per adapter (a
+  deliberate product reversal of the earlier gateway/DNS omission; MAC/driver
+  strings stay omitted). On Windows the extra facts come from one cached,
+  locale-safe PowerShell `ConvertTo-Json` call (absolute System32 path, 5 s
+  timeout, UTF-8, degrades to `unknown`/nulls — never 500s). The dropdown
+  orders wired Ethernet first and tags Wi-Fi "not recommended for
+  commissioning traffic"; a read-only **"Selected adapter — this laptop"**
+  panel shows IP / subnet / gateway / primary+secondary DNS with explicit
+  "Windows manages these settings" copy (the app never writes NIC config);
+  an advisory hint suggests the wired adapter when Auto is selected on a
+  multi-adapter laptop; and discovery runs now fail fast with an actionable
+  400 when the configured source interface is missing or down (dry runs
+  exempt) instead of scanning out the wrong NIC.
+- **API-key re-issue + honest key lifecycle** — admin-only
+  `POST /api/v1/users/{id}/key` regenerates a user's API key (old key stops
+  working, plaintext shown once), with a **Re-issue key** button on the Users
+  page — a lost key is no longer a dead end. The session badge now
+  distinguishes a *rejected* key (401/403 → "Key not recognised" + Clear key)
+  from an *unreachable server* (network/5xx → non-destructive "Server
+  unreachable" state), so a backend restart or Wi-Fi blip can no longer trick
+  an engineer into clearing a healthy key — the root cause of the field
+  report that keys "expire after one use". Issued-key copy now says the key
+  is *displayed* once but never expires.
+- **Install-first onboarding** — README restructured around
+  "Get it running (pick one path)" (Windows portable app vs Docker Desktop)
+  with copy-paste steps, a prerequisites table, and a 3-step first run;
+  `docs/quickstart.md` aligned; and the in-app **Learning** page gained an
+  **Installation & Setup** guide covering both install paths and first run
+  (set API key, pick Source Interface, dry-run first scan).
 
 ### Changed
 
-- **Source Interface — richer NIC confirmation** — the Configuration page's
-  Source Interface control is now a by-name adapter dropdown that, on selection,
-  populates read-only **IP Address / Subnet Mask / Gateway** fields so the
-  engineer can confirm they picked the OT/Ethernet adapter (not Wi-Fi).
-  `GET /api/v1/system/interfaces` gained `subnet_mask` (derived from the prefix,
-  no new cost) and `gateway` (from a guarded, best-effort Windows routing-table
-  lookup — `Get-CimInstance`, mapped per NIC by IP; `None` off Windows or on
-  locked-down hosts). MAC/DNS/driver strings remain unexposed. "Auto (OS default
-  route)" stays the default and the free-text fallback for non-enumerated hosts
-  is preserved. Adding `gateway` deliberately reverses the original API omission
-  in proposal §5.3 (operator-requested).
+- **Source Interface — richer NIC confirmation** *(interim step, superseded in
+  the same release by **NIC UX v2** under Added)* — first made the Source
+  Interface control an adapter dropdown with read-only **IP / Subnet Mask /
+  Gateway** confirmation fields, sourcing `gateway` from a guarded
+  `Get-CimInstance` routing-table lookup. NIC UX v2 replaced that lookup with a
+  single cached `Get-NetAdapter`/`Get-NetRoute`/`Get-DnsClientServerAddress`
+  facts call and extended the contract with `adapter_type` and `dns_servers`.
+  "Auto (OS default route)" stays the default and the free-text fallback for
+  non-enumerated hosts is preserved throughout.
 - Refactored the standalone UDMI payload validator into the shared core package
   with an app-level API, a shared issue model, and persistent run history.
 - Aligned the frontend CI Node version to the lockfile's npm and raised the test
@@ -105,6 +135,12 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **Inactive users' API keys no longer grant local-mode admin.** In `local`
+  auth mode, a key matching a deactivated (or corrupt-role) user row used to
+  fall through to the keyless-loopback admin path, contradicting the
+  documented contract that an inactive key is rejected; it now 401s. 401
+  details are also uniform per client location, so a rejected key no longer
+  reveals whether a user row exists.
 - **MQTT wildcard capture now accepts real publish topics.** The raw MQTT
   transport now matches subscribed filters such as `#` and `prefix/#` against
   concrete broker publish topics, so MQTT discovery / live UDMI capture no

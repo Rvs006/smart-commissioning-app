@@ -38,6 +38,7 @@ from app.schemas.jobs import (
     RunListResponse,
     RunRecord,
 )
+from app.services import interface_service
 from app.services.configuration_service import ConfigurationService
 from app.services.engine_dispatch import (
     build_throttle,
@@ -118,11 +119,21 @@ def _configured_source_interface(project_id: str, site_id: str) -> str | None:
 def _resolve_source_interface(project_id: str, site_id: str, parameters: dict) -> None:
     """Inject the configured source NIC (source_ip / local_address) into the run
     parameters BEFORE the run is persisted, so the inline and worker paths both
-    bind their active-scan sockets to it. A malformed configured value surfaces as
-    a 400 at run creation, matching the other validation failures on these routes.
+    bind their active-scan sockets to it, then guard that the EFFECTIVE source_ip
+    (configured value or an operator run-parameter override) is still present and
+    up on this host. A malformed or unavailable value surfaces as a 400 at run
+    creation, matching the other validation failures on these routes — no
+    orphaned run is persisted and the run NEVER silently falls back to another NIC.
+
+    Dry runs skip the availability guard deliberately (side-effect-free preview
+    convention). A NIC dropping between run creation and worker pickup is still
+    caught by the engine-level honesty checks (ip_scan bind pre-check, MQTT
+    OSError -> the broker_unreachable family, BACnet _ensure_app RuntimeError).
     """
     try:
         resolve_source_interface(parameters, _configured_source_interface(project_id, site_id))
+        if not is_dry_run(parameters) and parameters.get("source_ip"):
+            interface_service.ensure_source_ip_available(str(parameters["source_ip"]))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 

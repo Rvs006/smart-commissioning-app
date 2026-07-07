@@ -9,11 +9,11 @@ import {
   getSystemInterfaces,
   importConfiguration,
   storeSecretMaterial,
-  SystemInterface,
   updateConfiguration,
   validateConfiguration,
 } from "../../api/client";
 import { isSecretSentinel, maskSecretValue } from "./secretField";
+import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
 type FieldKind = "text" | "password" | "select" | "textarea" | "secret" | "readonly";
@@ -60,7 +60,8 @@ const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
   backups: "Backup schedule, retention, encryption, storage location, and restore readiness.",
   bacnet: "BACnet/IP discovery settings including BBMD, foreign device mode, UDP ports, and TTL.",
   certificates: "TLS trust and client authentication material. Paste content or select local files; only masked server references are saved.",
-  device: "Gateway network identity used by discovery and validation services.",
+  device:
+    "Planned network identity of the gateway device being commissioned — reference values used by validation, not this laptop's settings. The adapter this laptop scans from is chosen under Source Interface.",
   logging: "Runtime diagnostics, log retention, syslog, and current logging health.",
   mqtt: "Broker, client identity, topic, QoS, keep-alive, and optional Mosquitto-style credentials.",
   time: "Timezone and NTP settings used to timestamp evidence and validate stale data.",
@@ -181,6 +182,31 @@ const secretFields = new Set(["CA Certificate", "Client Certificate", "Private K
 const SOURCE_INTERFACE_FIELD = "Source Interface";
 const SOURCE_INTERFACE_AUTO = "Auto (OS default route)";
 
+// The Auto sentinel is case-insensitive (with trimming) everywhere else in the
+// stack — backend validation and dispatch both casefold it, and the sibling
+// SourceInterfaceDetails lowercases it — so this page must treat a stored
+// case-variant (e.g. from an imported configuration JSON) as Auto too.
+function isAutoSourceInterface(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed === "" || trimmed.toLowerCase() === SOURCE_INTERFACE_AUTO.toLowerCase();
+}
+
+// Human-readable adapter-type tag appended to a Source Interface option label.
+// Wi-Fi carries an explicit warning (commissioning traffic belongs on the
+// wired adapter); "unknown" gets no tag rather than a guessed one.
+const ADAPTER_TYPE_SUFFIX: Record<string, string> = {
+  ethernet: "Ethernet",
+  unknown: "",
+  usb_ethernet: "USB Ethernet",
+  wifi: "Wi-Fi — not recommended for commissioning traffic",
+};
+
+// Advisory hint shown while Source Interface is on Auto and more than one
+// eligible adapter is up. Purely informational: the app never auto-selects a
+// concrete NIC on Auto's behalf (minimize hidden behavior).
+const AUTO_MULTI_ADAPTER_HINT =
+  "Multiple active adapters detected. Auto follows the Windows default route — often the internet adapter, not the site network. Pick your wired adapter to make sure scans use it.";
+
 // The single certificate-expiry indicator field. It is engine/backend-derived
 // (store_secret currently returns expiry:null, so real PEM parsing is on-site),
 // surfaced here as a read-only status: we compare the displayed date to today
@@ -255,7 +281,33 @@ export function ConfigurationPage() {
     queryFn: getSystemInterfaces,
     queryKey: ["system-interfaces"],
   });
-  const systemInterfaces = systemInterfacesQuery.data ?? [];
+  // Virtual adapters (Hyper-V vEthernet, VPN/TAP, docker bridges, ...) are
+  // never offered as scan sources. The backend already filters them out; this
+  // is a defensive re-filter that also tolerates an older backend where
+  // adapter_type is undefined. API order is preserved verbatim (the server
+  // sorts up-first, then ethernet -> usb_ethernet -> unknown -> wifi).
+  const eligibleInterfaces = (systemInterfacesQuery.data ?? []).filter(
+    (iface) => iface.adapter_type !== "virtual",
+  );
+  const sourceInterfaceOptions = [
+    SOURCE_INTERFACE_AUTO,
+    ...eligibleInterfaces.map((iface) => iface.cidr),
+  ];
+  // Option labels carry the adapter name and type tag; option VALUES stay the
+  // bare cidr so the stored config value remains parseable by the backend
+  // source-interface resolver.
+  const sourceInterfaceOptionLabels: Record<string, string> = {};
+  for (const iface of eligibleInterfaces) {
+    const suffix = ADAPTER_TYPE_SUFFIX[iface.adapter_type] ?? "";
+    sourceInterfaceOptionLabels[iface.cidr] =
+      `${iface.cidr} — ${iface.name}${suffix ? ` (${suffix})` : ""}`;
+  }
+  // Distinct up adapters by NAME, not per-IPv4 entries: the backend emits one
+  // SystemInterface per AF_INET address, so a single NIC carrying a secondary
+  // static IPv4 (a common field pattern) must not trigger the Auto hint.
+  const upAdapterCount = new Set(
+    eligibleInterfaces.filter((iface) => iface.is_up).map((iface) => iface.name),
+  ).size;
 
   useEffect(() => {
     if (configurationQuery.data) {
@@ -623,44 +675,54 @@ export function ConfigurationPage() {
                   )}
                   <div className="field-grid">
                     {Object.entries(draft[section].values).map(([field, value]) => {
-                      // The device Source Interface field is a richer control: a
-                      // by-name NIC dropdown (from the live enumeration query) that
-                      // populates read-only IP/mask/gateway confirmation fields so the
-                      // operator can verify they picked the OT/Ethernet adapter, not
-                      // Wi-Fi (proposal 3). It stores the chosen NIC's CIDR, so the
-                      // existing backend resolver is unchanged.
-                      if (section === "device" && field === SOURCE_INTERFACE_FIELD) {
-                        return (
-                          <SourceInterfaceControl
-                            interfaces={systemInterfaces}
-                            key={field}
-                            onValueChange={(nextValue) => changeValue(section, field, nextValue)}
-                            value={value}
-                          />
-                        );
-                      }
+                      // The device Source Interface field is a select whose options
+                      // come from the live NIC enumeration query rather than the
+                      // static fieldDefinitions map (proposal 3.4).
+                      const isSourceInterface = section === "device" && field === SOURCE_INTERFACE_FIELD;
+                      // On Auto (or unset) with several adapters up, nudge the
+                      // engineer to pick the wired adapter explicitly — Auto
+                      // itself is never silently rebound.
+                      const showAutoHint =
+                        isSourceInterface && isAutoSourceInterface(value) && upAdapterCount > 1;
+                      // A stored case-variant of the Auto sentinel selects the
+                      // canonical Auto option instead of rendering as a stray
+                      // escape-hatch option (display only; the draft value is
+                      // untouched until the engineer changes the select).
+                      const displayValue =
+                        isSourceInterface && value.trim() !== "" && isAutoSourceInterface(value)
+                          ? SOURCE_INTERFACE_AUTO
+                          : value;
                       return (
                       <FieldControl
                         canEngineer={canEngineer}
                         disabled={section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)}
                         expired={field === CERT_EXPIRY_FIELD && isExpired(value)}
                         field={field}
-                        hint={fieldHint(section, field, draft)}
-                        kind={fieldDefinitions[section]?.[field]?.kind ?? "text"}
+                        hint={showAutoHint ? AUTO_MULTI_ADAPTER_HINT : fieldHint(section, field, draft)}
+                        kind={isSourceInterface ? "select" : (fieldDefinitions[section]?.[field]?.kind ?? "text")}
                         key={field}
                         onFileSelect={(file) => handleSecretFile(field, file)}
                         onSecretChange={(content) => setSecretDrafts((current) => ({ ...current, [field]: content }))}
                         onSecretStore={() => handleSecretStore(field)}
                         onValueChange={(nextValue) => changeValue(section, field, nextValue)}
-                        options={fieldDefinitions[section]?.[field]?.options}
+                        optionLabels={isSourceInterface ? sourceInterfaceOptionLabels : undefined}
+                        options={isSourceInterface ? sourceInterfaceOptions : fieldDefinitions[section]?.[field]?.options}
                         secretContent={secretDrafts[field] ?? ""}
                         secretFileName={secretFiles[field] ?? null}
                         secretPending={secretMutation.isPending}
-                        value={value}
+                        value={displayValue}
                       />
                       );
                     })}
                   </div>
+                  {section === "device" && (
+                    <SourceInterfaceDetails
+                      enumerationFailed={systemInterfacesQuery.isError}
+                      enumerationPending={systemInterfacesQuery.isLoading}
+                      interfaces={eligibleInterfaces}
+                      value={draft.device.values[SOURCE_INTERFACE_FIELD] ?? ""}
+                    />
+                  )}
                 </div>
               )}
             </article>
@@ -700,12 +762,14 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   // Network Basics
   Hostname: "Gateway hostname that identifies this device on the network.",
   "Source Interface":
-    "Which local network interface active scans send from. Leave on Auto to use the OS default route; pick a NIC on a multi-homed laptop to force IP/BACnet/MQTT scans out the right adapter.",
+    "Which local network interface active scans send from. Leave on Auto to use the OS default route; pick a NIC on a multi-homed laptop to force IP/BACnet/MQTT scans out the right adapter. Windows manages adapter IP settings; the app never changes them.",
   "IP Assignment": "How the gateway gets its address — Static IP or DHCP.",
-  "IP Address": "The gateway's IPv4 address on the site network.",
-  "Subnet Mask": "Mask defining the size of the local subnet.",
-  Gateway: "Default gateway (router) IP for traffic leaving the subnet.",
-  "DNS Servers": "DNS resolver IPs, comma-separated.",
+  "IP Address":
+    "The gateway device's planned IPv4 address on the site network (reference for validation — not this laptop's address).",
+  "Subnet Mask": "Planned subnet mask of the gateway device's network (reference — not this laptop's mask).",
+  Gateway:
+    "Planned default gateway for the gateway device (reference — this laptop's own gateway is shown read-only under Source Interface).",
+  "DNS Servers": "Planned DNS resolvers for the gateway device, comma-separated (reference values).",
   "VLAN ID": "802.1Q VLAN tag for the gateway's network, if used.",
   // BACnet Discovery
   "BACnet Network Number": "Logical BACnet network this gateway lives on.",
@@ -751,99 +815,6 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "Diagnostics Mode": "Extra diagnostic logging toggle.",
 };
 
-// Converts an IPv4 prefix length (0-32) to its dotted subnet mask, or null when
-// out of range. Used only for the free-text fallback: an enumerated interface
-// already carries subnet_mask from the API, but a stored value the host can't
-// enumerate has its mask derived from the "/prefix" so the field still shows one.
-function prefixToMask(prefix: number): string | null {
-  if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) {
-    return null;
-  }
-  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
-  return [24, 16, 8, 0].map((shift) => (mask >>> shift) & 0xff).join(".");
-}
-
-// Splits a stored "ip/prefix" (or bare "ip") Source Interface value into display
-// parts for the read-only confirmation fields when the interface is NOT in the
-// live enumeration (browser on another host, or the NIC is momentarily down).
-// Returns null when the value isn't an IP so the fields fall back to a dash.
-function deriveFromCidr(value: string): { ipv4: string; subnetMask: string | null } | null {
-  const [ip, prefixText] = value.trim().split("/");
-  if (!ip) {
-    return null;
-  }
-  const prefix = prefixText !== undefined ? Number(prefixText) : NaN;
-  return { ipv4: ip, subnetMask: Number.isNaN(prefix) ? null : prefixToMask(prefix) };
-}
-
-type SourceInterfaceControlProps = {
-  interfaces: SystemInterface[];
-  onValueChange: (value: string) => void;
-  value: string;
-};
-
-// The device Source Interface control (proposal section 3): a NIC dropdown
-// labelled by adapter name, with read-only IP Address / Subnet Mask / Gateway
-// confirmation fields that update on selection so the operator can verify they
-// picked the OT/Ethernet adapter, not Wi-Fi. The stored value is the chosen
-// NIC's CIDR (e.g. "192.168.1.10/24"), so the backend resolver is unchanged;
-// "Auto (OS default route)" (the default) binds nothing. A stored value the host
-// can't enumerate is preserved as its own option and its ip/mask derived from the
-// CIDR string — the same fallback as the FieldControl !options.includes hatch.
-function SourceInterfaceControl({ interfaces, onValueChange, value }: SourceInterfaceControlProps) {
-  const enumeratedCidrs = interfaces.map((iface) => iface.cidr);
-  const selected = interfaces.find((iface) => iface.cidr === value) ?? null;
-  const isAuto = value.trim() === "" || value === SOURCE_INTERFACE_AUTO;
-  const showStoredOption = !isAuto && !enumeratedCidrs.includes(value);
-  const derived = !selected && !isAuto ? deriveFromCidr(value) : null;
-
-  const ipAddress = isAuto ? "—" : selected?.ipv4 ?? derived?.ipv4 ?? "—";
-  const subnetMask = isAuto ? "—" : selected?.subnet_mask ?? derived?.subnetMask ?? "—";
-  const gateway = isAuto
-    ? "—"
-    : selected
-      ? selected.gateway ?? "Not detected"
-      : "Unknown (interface not on this host)";
-
-  return (
-    <div className="source-interface-control">
-      <label title={FIELD_TOOLTIPS[SOURCE_INTERFACE_FIELD]}>
-        {SOURCE_INTERFACE_FIELD}
-        <select onChange={(event) => onValueChange(event.target.value)} value={value}>
-          {showStoredOption && <option value={value}>{`${value} (not on this host)`}</option>}
-          <option value={SOURCE_INTERFACE_AUTO}>{SOURCE_INTERFACE_AUTO}</option>
-          {interfaces.map((iface) => (
-            <option key={iface.cidr} value={iface.cidr}>
-              {`${iface.name} — ${iface.cidr}${iface.is_up ? "" : " (down)"}`}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="source-interface-details">
-        <span className="source-interface-details-title">Selected interface</span>
-        <div className="field-grid">
-          <label>
-            IP Address
-            <input readOnly tabIndex={-1} value={ipAddress} />
-          </label>
-          <label>
-            Subnet Mask
-            <input readOnly tabIndex={-1} value={subnetMask} />
-          </label>
-          <label>
-            Gateway
-            <input readOnly tabIndex={-1} value={gateway} />
-          </label>
-        </div>
-        <small>
-          Read-only — confirm this is the OT/Ethernet adapter the scan should egress from, not Wi-Fi.
-          Auto uses the OS default route.
-        </small>
-      </div>
-    </div>
-  );
-}
-
 type FieldControlProps = {
   canEngineer: boolean;
   disabled?: boolean;
@@ -855,6 +826,9 @@ type FieldControlProps = {
   onSecretChange: (content: string) => void;
   onSecretStore: () => void;
   onValueChange: (value: string) => void;
+  // Optional display label per option VALUE (select kind only). The option
+  // value stays the raw string; only the visible text differs.
+  optionLabels?: Record<string, string>;
   options?: string[];
   secretContent: string;
   secretFileName: string | null;
@@ -873,6 +847,7 @@ function FieldControl({
   onSecretChange,
   onSecretStore,
   onValueChange,
+  optionLabels,
   options = [],
   secretContent,
   secretFileName,
@@ -950,7 +925,7 @@ function FieldControl({
           {!options.includes(value) && value !== "" && <option value={value}>{value}</option>}
           {options.map((option) => (
             <option key={option} value={option}>
-              {option}
+              {optionLabels?.[option] ?? option}
             </option>
           ))}
         </select>

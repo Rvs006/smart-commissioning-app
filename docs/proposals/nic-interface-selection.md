@@ -1,6 +1,7 @@
 # Proposal: Source-NIC / network-interface selection for active scans
 
 Status: Implemented (Phases 0-2) — see CHANGELOG. On-real-hardware egress verification pending (section 8.3).
+Update (NIC UX v2, 2026-07-03): the product owner REVERSED the section-5.3 gateway/DNS omission — the endpoint now also returns `adapter_type` / `subnet_mask` / `gateway` / `dns_servers` (nine fields total) so engineers can confirm the tool reads the NIC correctly. MAC addresses and adapter description/driver strings stay omitted. See the 5.3 update note.
 Author: (fill in)
 Date: 2026-07-03
 Scope: `smart-commissioning-app` — core engines, backend API, worker, frontend Configuration page
@@ -269,15 +270,16 @@ class SystemInterface(BaseModel):
     is_up: bool
 ```
 
-> **Phase 3 update (richer confirmation UI):** `subnet_mask` and `gateway` were
-> added so the Configuration page can, on interface selection, show read-only
-> IP / Subnet Mask / Gateway fields — letting the engineer confirm they picked
-> the OT/Ethernet adapter, not Wi-Fi. `subnet_mask` is derived from
-> `prefix_length` (no cost). `gateway` is an **operator-requested reversal** of
-> this section's original gateway omission (see below); because `psutil` does not
-> expose gateways, it comes from a guarded Windows routing-table lookup
-> (`Get-CimInstance Win32_NetworkAdapterConfiguration` via subprocess, mapped to
-> each NIC by IP), which degrades to `None` on any non-Windows / locked-down host.
+> **Update (NIC UX v2, 2026-07-03):** the shipped schema also carries
+> `adapter_type` ("ethernet" | "wifi" | "usb_ethernet" | "virtual" |
+> "unknown"), `subnet_mask`, `gateway` and `dns_servers` — see the 5.3 update
+> note for the product-owner decision that added them. An interim
+> "richer confirmation UI" step (PR #48) first added `subnet_mask` + `gateway`
+> via a `Get-CimInstance Win32_NetworkAdapterConfiguration` lookup; NIC UX v2
+> superseded that with a single cached `Get-NetAdapter` / `Get-NetRoute` /
+> `Get-DnsClientServerAddress` facts call that also feeds adapter
+> classification and DNS. Both approaches degrade to `None`/empty on any
+> non-Windows or locked-down host.
 
 ### 5.3 Auth / RBAC / information-leak notes
 
@@ -287,18 +289,27 @@ class SystemInterface(BaseModel):
   field a viewer can already see, and it is read-only. It does **not** need to be
   engineer-gated (choosing the value and saving config already is, via
   `configuration.router` PUT at `configuration.py:31`).
-- **Do not leak beyond need:** return **only** `name / ipv4 / prefix_length /
-  subnet_mask / cidr / gateway / is_up`. Deliberately still omit MAC addresses,
-  DNS, adapter descriptions/driver strings, and any non-IPv4 addressing — none
-  are needed to pick or confirm an egress NIC and each widens the
-  host-fingerprint surface exposed over the API. Exclude loopback and APIPA from
-  the list (section 4.3). `gateway` was **originally** omitted here for the same
-  reason; it is now included as a deliberate, operator-requested trade-off (Phase
-  3 update above) because confirming the NIC's gateway materially helps the
-  engineer verify the adapter is on the expected OT segment. The added surface is
-  a single default-route IP per NIC, and the endpoint stays viewer-gated and
-  auth-required (5.3 above). The no-gateway-leak assertion in
-  `test_system_interfaces_api.py` was updated accordingly.
+- **Do not leak beyond need** *(v1 decision — partially REVERSED, see update
+  below)*: return **only** `name / ipv4 / prefix_length / cidr / is_up`.
+  Deliberately omit MAC addresses, gateway, DNS, adapter descriptions/driver
+  strings, and any non-IPv4 addressing — none are needed to pick an egress NIC
+  and each widens the host-fingerprint surface exposed over the API. Exclude
+  loopback and APIPA from the list (section 4.3).
+
+  > **Update (NIC UX v2, 2026-07-03 meeting — product-owner decision):** Pete
+  > explicitly reversed the gateway/DNS omission: field engineers need the
+  > selected adapter's default gateway and DNS visible (read-only) to confirm
+  > the tool reads the NIC correctly, and confirming the NIC's gateway
+  > materially helps verify the adapter is on the expected OT segment. The
+  > shipped contract is therefore **nine fields**: `name / ipv4 /
+  > prefix_length / cidr / is_up / adapter_type / subnet_mask / gateway /
+  > dns_servers`. The added surface is small (default route + resolvers per
+  > NIC) and the endpoint stays viewer-gated and auth-required, so this is an
+  > accepted trade-off, NOT a leak regression — do not "fix" the endpoint back
+  > to five fields. MAC addresses and adapter description/driver strings
+  > remain deliberately omitted, virtual adapters are excluded from the
+  > response entirely, and the no-gateway-leak assertion in
+  > `test_system_interfaces_api.py` was updated accordingly.
 
 ## 6. Per-engine source binding — exact edits
 
@@ -541,8 +552,10 @@ Backend (`backend/tests/`):
 - `test_system_interfaces_api.py`: mock the enumerator (so tests don't depend on
   the CI host's real NICs) and assert `GET /api/v1/system/interfaces` returns the
   mocked list, requires auth (401 without key), is viewer-allowed, and the
-  response contains **only** the five allowed fields (no MAC/gateway/DNS leak —
-  guards section 5.3).
+  response contains **only** the nine allowed fields — `name / ipv4 /
+  prefix_length / cidr / is_up / adapter_type / subnet_mask / gateway /
+  dns_servers` per the NIC UX v2 update in section 5.3 (still no MAC or
+  adapter-description/driver-string leak).
 - Extend a discovery route test to assert a configured `Source Interface`
   results in `source_ip` / `local_address` landing in the persisted
   `run.parameters` (covers the inline→worker hand-off, section 7.3).

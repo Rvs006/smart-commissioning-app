@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
+import { isAuthRejection } from "../api/client";
 import { ReviewFeedback } from "../features/workflow/ReviewFeedback";
 import { useSession } from "./sessionContext";
 import { getTheme, toggleTheme, type ThemeMode } from "./theme";
@@ -213,15 +214,30 @@ function SessionBadge() {
     return <span className="site-pill subtle">Identifying...</span>;
   }
 
-  // A key is set but /me failed (e.g. invalid/inactive key -> 401). Offer to
-  // clear it and re-enter, rather than leaving the operator stuck.
+  // A key is set but /me failed. Only a real auth REJECTION (401/403) means
+  // the key itself was refused — offer to clear it and re-enter rather than
+  // leaving the operator stuck. Every other failure (server restarting, Wi-Fi
+  // blip on a multi-homed laptop, 5xx) says nothing about the key: keys are
+  // displayed once and cannot be retrieved, so never offer to destroy one on a
+  // transport error. The session provider re-checks /me on an interval, so the
+  // transient state clears itself once the server is reachable again.
   if (hasApiKey && error) {
+    if (isAuthRejection(error)) {
+      return (
+        <span className="session-badge">
+          <span className="session-badge-id error-text">Key not recognised</span>
+          <button className="link-button" onClick={signOut} type="button">
+            Clear key
+          </button>
+        </span>
+      );
+    }
     return (
-      <span className="session-badge">
-        <span className="session-badge-id error-text">Key not recognised</span>
-        <button className="link-button" onClick={signOut} type="button">
-          Clear key
-        </button>
+      <span
+        className="session-badge"
+        title="The server could not be reached to verify your API key. The key is kept and will be re-checked automatically."
+      >
+        <span className="session-badge-id">Server unreachable — retrying</span>
       </span>
     );
   }

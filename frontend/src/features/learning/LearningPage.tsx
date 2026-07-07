@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { getTheme, toggleTheme } from "../../app/theme";
 
@@ -6,8 +7,10 @@ import { getTheme, toggleTheme } from "../../app/theme";
 // Mirrors the Electracom reference course: pick a role, get a goal + a guided
 // walkthrough of the real modules (Configuration, IP Discovery, BACnet/MQTT/UDMI
 // discovery, Data Validation, Reports, Hub) grounded in that role's site job.
+// An "Installation & Setup" panel sits above the role paths: pick an install
+// path (Windows portable / Docker), then the shared first-run steps.
 
-type WalkRow = { lab: string; text: string };
+type WalkRow = { lab: string; text: ReactNode };
 type Lesson = { num: string; title: string; rows: WalkRow[] };
 type Role = {
   id: string;
@@ -502,11 +505,262 @@ const ROLES: Role[] = [
   },
 ];
 
+// Installation & Setup: the two supported ways to get the tool running, in the
+// same declarative Lesson shape as the role paths above.
+type SetupPath = {
+  id: string;
+  label: string;
+  icon: string;
+  blurb: string;
+  note?: { kind: "ok" | "warn"; title: string; text: string };
+  lessons: Lesson[];
+};
+
+const SETUP_PATHS: SetupPath[] = [
+  {
+    id: "windows-portable",
+    label: "Windows portable app",
+    icon: "🪟",
+    blurb: "One zip, one double-click. Nothing to install — recommended for field laptops.",
+    note: {
+      kind: "warn",
+      title: "Locked-down company laptop?",
+      text: "If your laptop uses application allow-listing (for example ThreatLocker), the unsigned exe may be blocked from running at all. Ask IT to approve it, or use the Docker path instead.",
+    },
+    lessons: [
+      {
+        num: "1",
+        title: "Download and unzip",
+        rows: [
+          {
+            lab: "Get",
+            text: (
+              <>
+                <code>SmartCommissioningApp_Windows_Portable.zip</code> from the latest GitHub
+                release — ask your project lead if you don&apos;t have the link.
+              </>
+            ),
+          },
+          {
+            lab: "Do",
+            text: "Right-click the zip and choose Extract All, into a normal folder — Desktop is fine.",
+          },
+          {
+            lab: "See",
+            text: (
+              <>
+                A folder containing <code>SmartCommissioningApp.exe</code>.
+              </>
+            ),
+          },
+          {
+            lab: "Why",
+            text: "The zip is the whole app — no Python, Node, Docker or admin install needed.",
+          },
+        ],
+      },
+      {
+        num: "2",
+        title: "Launch it",
+        rows: [
+          {
+            lab: "Do",
+            text: (
+              <>
+                Double-click <code>SmartCommissioningApp.exe</code> and keep the black console
+                window open while you work.
+              </>
+            ),
+          },
+          {
+            lab: "See",
+            text: (
+              <>
+                Your browser opens at the printed URL, usually <code>http://127.0.0.1:8000/</code>.
+                If port 8000 is busy the launcher picks the next free port — always use the URL
+                from the console.
+              </>
+            ),
+          },
+          {
+            lab: "Why",
+            text: "Everything runs only on your laptop (it binds to 127.0.0.1). Windows SmartScreen may warn because this is an internal unsigned build — choose More info, then Run anyway, only if the zip came from the project owner or the official releases page.",
+          },
+        ],
+      },
+      {
+        num: "3",
+        title: "You are already signed in",
+        rows: [
+          {
+            lab: "See",
+            text: "Run / Publish / Export and the certificate and key Replace buttons enabled, with no key asked for.",
+          },
+          {
+            lab: "Why",
+            text: "The portable app trusts your own machine (loopback), so no API key or sign-in is needed. When you are done, stop the app with Ctrl+C in the console or close the console window.",
+          },
+        ],
+      },
+    ],
+  },
+  {
+    id: "docker",
+    label: "Docker Desktop (shared / team)",
+    icon: "🐳",
+    blurb: "One command brings up the identical full stack for everyone.",
+    note: {
+      kind: "warn",
+      title: "Before you start",
+      text: "Docker Desktop must be installed and running; a machine with around 32 GB RAM is recommended for the full stack; and you need the repository cloned — it is private, so ask your project lead for access.",
+    },
+    lessons: [
+      {
+        num: "1",
+        title: "Generate a key and start the stack",
+        rows: [
+          {
+            lab: "Do",
+            text: (
+              <>
+                In PowerShell, from the repository folder:{" "}
+                <code>
+                  $env:API_KEY = (openssl rand -hex 32); docker compose -f
+                  infra/docker-compose.yml --env-file infra/.env.example up --build
+                </code>{" "}
+                — any long random string works as the API_KEY. Keep a copy: it is your sign-in
+                key.
+              </>
+            ),
+          },
+          {
+            lab: "See",
+            text: "The containers build, start, and report healthy in the console.",
+          },
+          {
+            lab: "Why",
+            text: "UI, API, worker, database and queue start together — identically on every machine, which is why this path is recommended for shared team servers.",
+          },
+        ],
+      },
+      {
+        num: "2",
+        title: "Open and sign in",
+        rows: [
+          {
+            lab: "Go to",
+            text: <code>http://127.0.0.1:8080</code>,
+          },
+          {
+            lab: "Do",
+            text: (
+              <>
+                Click <strong>Set API key</strong> at the top-right of the header, paste the
+                API_KEY value you generated, and save.
+              </>
+            ),
+          },
+          { lab: "See", text: "The page reloads and shows your role." },
+          {
+            lab: "Why",
+            text: "Hosted deployments require a key for every action — without one, Run / Upload / Export stay disabled by design.",
+          },
+        ],
+      },
+    ],
+  },
+];
+
+const CLOUD_NOTE =
+  "Cloud / hosted-server deployment is set up centrally, not by field engineers — ask your project lead for the server address and your personal API key.";
+
+// Shared first-run steps, shown after whichever install path is selected.
+const FIRST_RUN: Lesson[] = [
+  {
+    num: "1",
+    title: "Point scans at the right network",
+    rows: [
+      { lab: "Go to", text: "Configuration" },
+      {
+        lab: "Do",
+        text: (
+          <>
+            Set <strong>Source Interface</strong> to the network adapter that is plugged into the
+            building/BMS network — on a typical field laptop that is the wired Ethernet (or
+            USB-Ethernet dongle), not the Wi-Fi you use for internet. Leave it on Auto only if the
+            laptop has a single network connection.
+          </>
+        ),
+      },
+      {
+        lab: "See",
+        text: "A list of your machine's real network adapters to choose from, read live from the system.",
+      },
+      {
+        lab: "Why",
+        text: "On a two-network laptop, a scan that leaves via Wi-Fi will never find the BACnet controllers on the wired side.",
+      },
+    ],
+  },
+  {
+    num: "2",
+    title: "Run your first scan — safely",
+    rows: [
+      { lab: "Go to", text: "IP Scanner" },
+      {
+        lab: "Do",
+        text: (
+          <>
+            Upload the project&apos;s IP register under <strong>Register Import</strong> — scan
+            targets come from its Expected IP address column (blank XLSX/CSV templates are
+            downloadable in the same panel). Then tick <strong>Dry run</strong> in Run Controls (it
+            is off by default) and start the scan.
+          </>
+        ),
+      },
+      {
+        lab: "See",
+        text: "A plan of the scan targets from your register — no packets are sent and no authorization is needed.",
+      },
+      {
+        lab: "Why",
+        text: 'A dry-run proves the whole workflow end to end without touching a live BMS network. Real scans stay locked behind the explicit "I am authorized" tick.',
+      },
+    ],
+  },
+];
+
+// One guided walkthrough block; used by both the setup paths and the role paths.
+function WalkSteps({ lessons }: { lessons: Lesson[] }) {
+  return (
+    <div className="dc-walk">
+      {lessons.map((lesson) => (
+        <div className="dc-walk-step" key={lesson.num}>
+          <div className="dc-walk-head">
+            <div className="dc-walk-num">{lesson.num}</div>
+            <div className="dc-walk-title">{lesson.title}</div>
+          </div>
+          <div className="dc-walk-body">
+            {lesson.rows.map((row) => (
+              <div className="dc-walk-row" key={row.lab}>
+                <span className="dc-walk-lab">{row.lab}</span>
+                <span>{row.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function LearningPage() {
   const [activeRoleId, setActiveRoleId] = useState<string>(ROLES[0].id);
+  const [setupPathId, setSetupPathId] = useState<string>(SETUP_PATHS[0].id);
   const [themeMode, setThemeMode] = useState<"light" | "dark">(getTheme());
 
   const role = ROLES.find((r) => r.id === activeRoleId) ?? ROLES[0];
+  const setupPath = SETUP_PATHS.find((p) => p.id === setupPathId) ?? SETUP_PATHS[0];
 
   return (
     <div className="demo-shell">
@@ -539,6 +793,81 @@ export function LearningPage() {
       </header>
 
       <main className="dc-panels">
+        <section className="dc-panel" id="installation-setup">
+          <div className="dc-intro">
+            <div className="dc-kicker">Installation &amp; Setup</div>
+            <h1 className="dc-h1">Get the tool running first.</h1>
+            <p className="dc-lead">
+              Two ways to run it — pick the one that matches how you work, then do the two
+              first-run steps below.
+            </p>
+          </div>
+
+          <div className="dc-role-picker">
+            <div className="dc-role-picker-label">
+              Install using…
+              <small>Pick the way you will run the tool.</small>
+            </div>
+            <div className="dc-role-pills">
+              {SETUP_PATHS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  aria-pressed={p.id === setupPathId}
+                  className={`dc-role-pill${p.id === setupPathId ? " active" : ""}`}
+                  onClick={() => setSetupPathId(p.id)}
+                >
+                  <span className="dc-role-pill-icon">{p.icon}</span>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="dc-hero">
+            <div className="dc-hero-kicker">This path</div>
+            <div className="dc-hero-text">{setupPath.blurb}</div>
+          </div>
+
+          {setupPath.note && (
+            <div className={`dc-callout ${setupPath.note.kind}`}>
+              <span className="dc-callout-icon">
+                {setupPath.note.kind === "ok" ? "✓" : "⚠"}
+              </span>
+              <div>
+                <strong>{setupPath.note.title}</strong>
+                <p>{setupPath.note.text}</p>
+              </div>
+            </div>
+          )}
+
+          <WalkSteps lessons={setupPath.lessons} />
+
+          <div className="dc-callout">
+            <span className="dc-callout-icon">☁</span>
+            <div>
+              <strong>Looking for the cloud / hosted server?</strong>
+              <p>{CLOUD_NOTE}</p>
+            </div>
+          </div>
+
+          <div className="dc-body">
+            <h2>First run — from blank app to first scan</h2>
+          </div>
+          <WalkSteps lessons={FIRST_RUN} />
+
+          <div className="dc-callout ok">
+            <span className="dc-callout-icon">✓</span>
+            <div>
+              <strong>You are set up.</strong>
+              <p>
+                You have installed the tool, pointed it at the right network, and proven a scan
+                runs. Now pick your role below and learn the modules you&apos;ll use on site.
+              </p>
+            </div>
+          </div>
+        </section>
+
         <section className="dc-panel">
           <div className="dc-intro">
             <div className="dc-kicker">Learning path</div>
@@ -547,7 +876,8 @@ export function LearningPage() {
               Commissioning means something different to an engineer on the wire, a designer
               checking intent, a manager tracking risk, and an integrator proving the data path.
               Pick your role and follow a guided walkthrough of the exact modules you will touch on
-              site, in the order you will touch them.
+              site, in the order you will touch them. Tool not running yet? Start with
+              Installation &amp; Setup above.
             </p>
           </div>
 
@@ -561,6 +891,7 @@ export function LearningPage() {
                 <button
                   key={r.id}
                   type="button"
+                  aria-pressed={r.id === activeRoleId}
                   className={`dc-role-pill${r.id === activeRoleId ? " active" : ""}`}
                   onClick={() => setActiveRoleId(r.id)}
                 >
@@ -576,24 +907,7 @@ export function LearningPage() {
             <div className="dc-hero-text">{role.goal}</div>
           </div>
 
-          <div className="dc-walk">
-            {role.lessons.map((lesson) => (
-              <div className="dc-walk-step" key={lesson.num}>
-                <div className="dc-walk-head">
-                  <div className="dc-walk-num">{lesson.num}</div>
-                  <div className="dc-walk-title">{lesson.title}</div>
-                </div>
-                <div className="dc-walk-body">
-                  {lesson.rows.map((row) => (
-                    <div className="dc-walk-row" key={row.lab}>
-                      <span className="dc-walk-lab">{row.lab}</span>
-                      <span>{row.text}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
+          <WalkSteps lessons={role.lessons} />
 
           <div className="dc-callout ok">
             <span className="dc-callout-icon">✓</span>

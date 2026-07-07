@@ -4,6 +4,7 @@ import {
   createUser,
   deactivateUser,
   listUsers,
+  reissueUserKey,
   ROLE_ORDER,
   updateUserRole,
   type Role,
@@ -46,6 +47,17 @@ export function UsersPage() {
   const deactivateMutation = useMutation({
     mutationFn: (userId: string) => deactivateUser(userId),
     onSuccess: refresh,
+  });
+
+  // Lost-key recovery: keys are displayed once and can never be retrieved, so
+  // the only way back is a fresh key. Re-issuing invalidates the old key
+  // immediately; the new plaintext lands in the same issued-key panel as create.
+  const reissueMutation = useMutation({
+    mutationFn: (userId: string) => reissueUserKey(userId),
+    onSuccess: (result) => {
+      setIssuedKey({ apiKey: result.api_key, username: result.user.username });
+      refresh();
+    },
   });
 
   const roleMutation = useMutation({
@@ -127,9 +139,11 @@ export function UsersPage() {
 
         {issuedKey && (
           <div className="state-panel success">
-            <strong>One-time API key for {issuedKey.username}</strong>
+            <strong>API key for {issuedKey.username}</strong>
             <span>
-              Copy this now — it is shown only once and cannot be retrieved again:
+              Copy it now — it is displayed only this once and cannot be retrieved
+              later. The key itself does not expire: it keeps working until this
+              user is deactivated or an admin re-issues their key.
             </span>
             <code className="issued-key">{issuedKey.apiKey}</code>
             <button
@@ -150,6 +164,13 @@ export function UsersPage() {
             <h3>Users</h3>
           </div>
         </div>
+
+        {reissueMutation.isError && (
+          <div className="state-panel error">
+            <strong>Could not re-issue key</strong>
+            <span>{reissueMutation.error.message}</span>
+          </div>
+        )}
 
         <div className="data-table-wrap">
           {usersQuery.isError ? (
@@ -183,7 +204,11 @@ export function UsersPage() {
                       deactivateMutation.isPending && deactivateMutation.variables === user.id
                     }
                     onDeactivate={() => deactivateMutation.mutate(user.id)}
+                    onReissueKey={() => reissueMutation.mutate(user.id)}
                     onRoleChange={(role) => roleMutation.mutate({ role, userId: user.id })}
+                    reissuing={
+                      reissueMutation.isPending && reissueMutation.variables === user.id
+                    }
                     user={user}
                   />
                 ))}
@@ -205,12 +230,16 @@ function UserRow({
   user,
   onRoleChange,
   onDeactivate,
+  onReissueKey,
   deactivating,
+  reissuing,
 }: {
   user: UserRecord;
   onRoleChange: (role: Role) => void;
   onDeactivate: () => void;
+  onReissueKey: () => void;
   deactivating: boolean;
+  reissuing: boolean;
 }) {
   return (
     <tr>
@@ -233,14 +262,25 @@ function UserRow({
       <td>{user.last_used_at ? formatRelativeTime(user.last_used_at) : "Never"}</td>
       <td>
         {user.is_active ? (
-          <button
-            className="secondary-button compact"
-            disabled={deactivating}
-            onClick={onDeactivate}
-            type="button"
-          >
-            {deactivating ? "Deactivating..." : "Deactivate"}
-          </button>
+          <>
+            <button
+              className="secondary-button compact"
+              disabled={reissuing}
+              onClick={onReissueKey}
+              title={`Replace ${user.username}'s lost key: the current key stops working immediately and the new one is displayed once.`}
+              type="button"
+            >
+              {reissuing ? "Re-issuing..." : "Re-issue key"}
+            </button>{" "}
+            <button
+              className="secondary-button compact"
+              disabled={deactivating}
+              onClick={onDeactivate}
+              type="button"
+            >
+              {deactivating ? "Deactivating..." : "Deactivate"}
+            </button>
+          </>
         ) : (
           <span className="muted">—</span>
         )}

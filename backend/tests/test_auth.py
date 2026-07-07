@@ -20,6 +20,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 _API_KEY = "test-auth-secret-key"
@@ -219,6 +220,88 @@ class LocalModeTests(_AuthClientTestCase):
         response = self.client.get("/openapi.json")
         self.assertEqual(response.status_code, 200)
         self.assertIn("paths", response.json())
+
+
+class LocalModeInactiveUserKeyTests(_AuthClientTestCase):
+    """local mode: a key matching a DEACTIVATED user is rejected outright (401).
+
+    Regression guard for the loopback fall-through bug: _resolve_user_principal
+    used to return None for an inactive user's key, so on the portable (local)
+    profile the request fell through to the keyless-loopback trust and a
+    deactivated user's key kept granting synthetic ADMIN from the laptop. The
+    module contract (app.core.auth docstring) has always said an inactive key
+    is rejected and never falls through; these tests pin the code to it while
+    proving the keyless-loopback bootstrap path is unchanged.
+    """
+
+    auth_env = {"AUTH_MODE": "local", "API_KEY": None}
+
+    def _create_user(self, role: str) -> dict:
+        """Create a user via the keyless-loopback admin; return the JSON body.
+
+        Usernames are unique per call: the SQLite database is shared across the
+        whole test process, so a fixed name would 409 on a re-run in-process.
+        """
+        response = self.client.post(
+            "/api/v1/users",
+            json={"username": f"local-{role}-{uuid.uuid4().hex[:8]}", "role": role},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()
+
+    def test_active_user_key_from_loopback_resolves_to_that_user(self) -> None:
+        created = self._create_user("viewer")
+        me = self.client.get(
+            "/api/v1/me", headers={"X-API-Key": created["api_key"]}
+        )
+        self.assertEqual(me.status_code, 200, me.text)
+        self.assertEqual(me.json()["username"], created["user"]["username"])
+        self.assertEqual(me.json()["source"], "user_key")
+
+    def test_inactive_user_key_from_loopback_is_401_not_local_admin(self) -> None:
+        created = self._create_user("engineer")
+        deactivated = self.client.post(
+            f"/api/v1/users/{created['user']['id']}/deactivate"
+        )
+        self.assertEqual(deactivated.status_code, 200, deactivated.text)
+        # The deactivated user's key must NOT fall through to loopback admin.
+        for path in (_PROTECTED_PATH, "/api/v1/me"):
+            response = self.client.get(path, headers={"X-API-Key": created["api_key"]})
+            self.assertEqual(response.status_code, 401, f"{path}: {response.text}")
+
+    def test_keyless_loopback_admin_is_preserved(self) -> None:
+        # The bootstrap path is untouched: a loopback client with NO key is
+        # still the synthetic local admin.
+        response = self.client.get("/api/v1/me")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["role"], "admin")
+        self.assertEqual(response.json()["source"], "local")
+
+    def test_remote_deactivated_key_indistinguishable_from_unknown_key(self) -> None:
+        # No key-validity oracle: from a NON-loopback client in local mode, a
+        # key matching a deactivated user row must be indistinguishable from a
+        # key matching no row — same status AND the same generic detail.
+        created = self._create_user("viewer")
+        deactivated = self.client.post(
+            f"/api/v1/users/{created['user']['id']}/deactivate"
+        )
+        self.assertEqual(deactivated.status_code, 200, deactivated.text)
+        remote = self._client_for(_NON_LOOPBACK)
+        deactivated_key = remote.get(_PROTECTED_PATH, headers={"X-API-Key": created["api_key"]})
+        unknown_key = remote.get(_PROTECTED_PATH, headers={"X-API-Key": "matches-no-user-row"})
+        self.assertEqual(deactivated_key.status_code, 401)
+        self.assertEqual(unknown_key.status_code, 401)
+        self.assertEqual(deactivated_key.json()["detail"], unknown_key.json()["detail"])
+
+    def test_unknown_key_from_loopback_still_falls_through_to_local_admin(self) -> None:
+        # Existing (deliberate) behaviour, preserved: a key matching NO user row
+        # does not block the loopback trust in local mode. Only a key that
+        # matches a real user row must resolve as that user or be rejected.
+        response = self.client.get(
+            "/api/v1/me", headers={"X-API-Key": "matches-no-user-row"}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["source"], "local")
 
 
 class LocalModeWithApiKeyTests(_AuthClientTestCase):

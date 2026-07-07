@@ -11,6 +11,9 @@ const mePayload = { username: "engineer-1", role: "engineer", source: "user_key"
 // selector. Defaults to an empty list so existing tests never depend on the
 // enumeration; a test can set it before rendering to exercise the dropdown.
 let interfacesPayload: unknown[] = [];
+// When true, GET /system/interfaces fails (500) so the enumerationFailed
+// branch of the details panel can be exercised.
+let interfacesFailure = false;
 
 // A configuration snapshot with a deliberately EXPIRED certificate expiry so the
 // red-highlight indicator can be asserted, plus a long fault string in one
@@ -56,6 +59,36 @@ function configurationPayload() {
   };
 }
 
+// A full SystemInterface fixture (all nine contract fields) with overridable
+// parts, so each test only spells out what it exercises.
+function interfaceFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    name: "Ethernet 3",
+    ipv4: "192.168.1.10",
+    prefix_length: 24,
+    cidr: "192.168.1.10/24",
+    is_up: true,
+    adapter_type: "ethernet",
+    subnet_mask: "255.255.255.0",
+    gateway: "192.168.1.1",
+    dns_servers: ["192.168.1.53", "8.8.8.8"],
+    ...overrides,
+  };
+}
+
+// The base configuration payload with a Source Interface value stored in the
+// device section, so the NIC selector and its details panel render.
+function payloadWithSourceInterface(value: string) {
+  const base = configurationPayload();
+  return {
+    ...base,
+    device: {
+      ...base.device,
+      values: { ...base.device.values, "Source Interface": value },
+    },
+  };
+}
+
 function jsonResponse(payload: unknown): Response {
   return { ok: true, status: 200, statusText: "OK", json: async () => payload } as unknown as Response;
 }
@@ -80,7 +113,9 @@ function stubFetch(handler: FetchHandler) {
         return jsonResponse(mePayload);
       }
       if (url.endsWith("/api/v1/system/interfaces")) {
-        return jsonResponse(interfacesPayload);
+        return interfacesFailure
+          ? errorResponse(500, "interface enumeration failed")
+          : jsonResponse(interfacesPayload);
       }
       return handler(url, init);
     }),
@@ -115,6 +150,7 @@ describe("ConfigurationPage", () => {
     vi.unstubAllGlobals();
     clearApiKey();
     interfacesPayload = [];
+    interfacesFailure = false;
   });
 
   it("renders one descriptive status pill per section with room for a long fault string", async () => {
@@ -180,81 +216,331 @@ describe("ConfigurationPage", () => {
     expect(optionValues).toContain("America/New_York");
   });
 
-  it("renders Source Interface as a by-name NIC dropdown that auto-fills read-only IP/mask/gateway", async () => {
+  it("renders Source Interface as a select of enumerated NICs plus Auto, keeping a stored non-enumerated value", async () => {
     interfacesPayload = [
-      {
-        name: "Ethernet 3",
-        ipv4: "192.168.1.10",
-        prefix_length: 24,
-        subnet_mask: "255.255.255.0",
-        cidr: "192.168.1.10/24",
-        gateway: "192.168.1.1",
-        is_up: true,
-      },
-      {
-        name: "Wi-Fi",
+      interfaceFixture(),
+      interfaceFixture({
+        adapter_type: "wifi",
+        cidr: "10.0.0.5/8",
+        dns_servers: [],
+        gateway: "10.0.0.1",
         ipv4: "10.0.0.5",
+        name: "Wi-Fi",
         prefix_length: 8,
         subnet_mask: "255.0.0.0",
-        cidr: "10.0.0.5/8",
-        gateway: "10.0.0.1",
-        is_up: true,
-      },
+      }),
     ];
     // The stored value is deliberately NOT one of the enumerated CIDRs, so the
-    // escape-hatch option must still surface it and the read-only fields must
-    // derive ip/mask from the CIDR string (gateway is unknowable off-host).
-    const base = configurationPayload();
-    const payload = {
-      ...base,
-      device: {
-        ...base.device,
-        values: { ...base.device.values, "Source Interface": "172.16.0.9/24" },
-      },
-    };
+    // FieldControl !options.includes(value) escape hatch must still surface it.
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
-        return jsonResponse(payload);
+        return jsonResponse(payloadWithSourceInterface("172.16.0.9/24"));
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
     renderPage();
 
-    // Wait for the interfaces query to resolve so the by-name options land (the
-    // config and interfaces queries resolve independently). Options are labelled
-    // by adapter name, not the bare CIDR.
-    await screen.findByRole("option", { name: /Ethernet 3.*192\.168\.1\.10\/24/ });
-    const control = (await screen.findByText("Source Interface")).closest(
-      ".source-interface-control",
-    ) as HTMLElement;
-    expect(control).not.toBeNull();
-    const select = within(control).getByRole("combobox") as HTMLSelectElement;
-
-    // The stored non-enumerated value stays selected, with Auto + both NICs offered.
+    // Wait for the interfaces query to resolve so the enumerated options land
+    // (the config query and interfaces query resolve independently). Labels
+    // now carry the adapter name and type tag; VALUES stay the bare cidr.
+    await screen.findByRole("option", { name: /192\.168\.1\.10\/24 — Ethernet 3/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    expect(sourceLabel).not.toBeNull();
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    // The stored non-enumerated value stays selected and rendered.
     expect(select.value).toBe("172.16.0.9/24");
     const optionValues = Array.from(select.options).map((option) => option.value);
-    expect(optionValues).toEqual(
-      expect.arrayContaining(["172.16.0.9/24", "Auto (OS default route)", "192.168.1.10/24", "10.0.0.5/8"]),
-    );
+    expect(optionValues).toContain("Auto (OS default route)");
+    expect(optionValues).toContain("192.168.1.10/24");
+    expect(optionValues).toContain("10.0.0.5/8");
+    expect(optionValues).toContain("172.16.0.9/24");
+  });
 
-    const readField = (label: string): HTMLInputElement => {
-      const fieldLabel = within(control).getByText(label).closest("label") as HTMLElement;
-      return within(fieldLabel).getByRole("textbox") as HTMLInputElement;
-    };
+  it("excludes virtual adapters from the Source Interface options", async () => {
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({
+        adapter_type: "virtual",
+        cidr: "172.28.0.1/20",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "172.28.0.1",
+        name: "vEthernet (WSL)",
+        prefix_length: 20,
+        subnet_mask: "255.255.240.0",
+      }),
+      interfaceFixture({
+        adapter_type: "wifi",
+        cidr: "10.0.0.5/8",
+        dns_servers: [],
+        gateway: "10.0.0.1",
+        ipv4: "10.0.0.5",
+        name: "Wi-Fi",
+        prefix_length: 8,
+        subnet_mask: "255.0.0.0",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("Auto (OS default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
 
-    // Read-only confirmation for the non-enumerated value: ip + mask derived from
-    // the CIDR, gateway reported as unknown on this host.
-    expect(readField("IP Address").value).toBe("172.16.0.9");
-    expect(readField("Subnet Mask").value).toBe("255.255.255.0");
-    expect(readField("Gateway").value).toMatch(/unknown/i);
+    renderPage();
 
-    // Selecting an enumerated NIC by name auto-fills its real ip/mask/gateway.
-    fireEvent.change(select, { target: { value: "192.168.1.10/24" } });
-    expect(select.value).toBe("192.168.1.10/24");
-    expect(readField("IP Address").value).toBe("192.168.1.10");
-    expect(readField("Subnet Mask").value).toBe("255.255.255.0");
-    expect(readField("Gateway").value).toBe("192.168.1.1");
+    await screen.findByRole("option", { name: /192\.168\.1\.10\/24 — Ethernet 3/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((option) => option.value);
+    expect(optionValues).toContain("192.168.1.10/24");
+    expect(optionValues).toContain("10.0.0.5/8");
+    expect(optionValues).not.toContain("172.28.0.1/20");
+  });
+
+  it("tags the Wi-Fi option as not recommended for commissioning traffic", async () => {
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({
+        adapter_type: "wifi",
+        cidr: "10.0.0.5/8",
+        dns_servers: [],
+        gateway: "10.0.0.1",
+        ipv4: "10.0.0.5",
+        name: "Wi-Fi",
+        prefix_length: 8,
+        subnet_mask: "255.0.0.0",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("Auto (OS default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const wifiOption = await screen.findByRole("option", {
+      name: /not recommended for commissioning traffic/,
+    });
+    expect((wifiOption as HTMLOptionElement).value).toBe("10.0.0.5/8");
+  });
+
+  it("shows read-only OS details for the selected source interface", async () => {
+    interfacesPayload = [interfaceFixture()];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("192.168.1.10/24"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const subnetMask = await screen.findByDisplayValue("255.255.255.0");
+    expect(subnetMask).toHaveAttribute("readonly");
+    for (const detail of ["Ethernet 3 (Ethernet)", "192.168.1.1", "192.168.1.53", "8.8.8.8"]) {
+      const input = screen.getByDisplayValue(detail);
+      expect(input).toHaveAttribute("readonly");
+    }
+    expect(screen.getByText(/Windows manages these adapter settings/i)).toBeInTheDocument();
+    // The read-only laptop values are visibly and programmatically grouped so
+    // they cannot be confused with the editable planned-device fields above.
+    expect(screen.getByText(/Selected adapter — this laptop, read-only/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("group", { name: /Selected adapter \(this laptop, read-only\)/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders an em-dash for a null gateway and a missing secondary DNS", async () => {
+    interfacesPayload = [interfaceFixture({ dns_servers: ["192.168.1.53"], gateway: null })];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("192.168.1.10/24"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByDisplayValue("192.168.1.53");
+    // Default gateway (null) and Secondary DNS (absent) both render as "—".
+    expect(screen.getAllByDisplayValue("—")).toHaveLength(2);
+  });
+
+  it("shows the Auto multi-adapter hint when more than one eligible adapter is up", async () => {
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({
+        adapter_type: "usb_ethernet",
+        cidr: "10.20.30.7/24",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "10.20.30.7",
+        name: "Ethernet 4",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("Auto (OS default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Multiple active adapters detected/i)).toBeInTheDocument();
+  });
+
+  it("does not show the Auto hint when only one eligible adapter is up", async () => {
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({
+        cidr: "192.168.99.4/24",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "192.168.99.4",
+        is_up: false,
+        name: "Ethernet 2",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("Auto (OS default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /192\.168\.1\.10\/24 — Ethernet 3/ });
+    expect(screen.queryByText(/Multiple active adapters detected/i)).not.toBeInTheDocument();
+  });
+
+  it("does not show the Auto hint for one adapter carrying two IPv4 addresses", async () => {
+    // The backend emits one SystemInterface entry per AF_INET address of the
+    // SAME adapter (secondary static IP — a common field pattern). One
+    // physical adapter is up, so the multi-adapter hint must stay hidden.
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({ cidr: "10.0.50.2/24", ipv4: "10.0.50.2" }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("Auto (OS default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /192\.168\.1\.10\/24 — Ethernet 3/ });
+    expect(screen.queryByText(/Multiple active adapters detected/i)).not.toBeInTheDocument();
+  });
+
+  it("treats a stored case-variant of Auto as Auto: hint shows and no stray option renders", async () => {
+    // Backend validation and dispatch casefold the sentinel, so an imported
+    // "auto (os default route)" is a saved, valid Auto value. The hint must
+    // fire and the select must show the canonical Auto option, not an extra
+    // lowercase escape-hatch option.
+    interfacesPayload = [
+      interfaceFixture(),
+      interfaceFixture({
+        adapter_type: "usb_ethernet",
+        cidr: "10.20.30.7/24",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "10.20.30.7",
+        name: "Ethernet 4",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("auto (os default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Multiple active adapters detected/i)).toBeInTheDocument();
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe("Auto (OS default route)");
+    const optionValues = Array.from(select.options).map((option) => option.value);
+    expect(optionValues).not.toContain("auto (os default route)");
+  });
+
+  it("always renders the Windows-manages copy in the device section", async () => {
+    // No Source Interface value stored and no enumerated interfaces: the
+    // details panel still states that Windows owns adapter settings.
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Windows manages these adapter settings/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Auto: Windows picks the sending adapter via its default route/i),
+    ).toBeInTheDocument();
+  });
+
+  it("flags a stored source interface that is not in the eligible list without promising a scan failure", async () => {
+    // The panel cannot tell "genuinely gone" (dispatch fails clearly) from
+    // "present but ineligible/virtual" (dispatch would still pass), so the
+    // copy must state both possibilities and promise neither outcome.
+    interfacesPayload = [interfaceFixture()];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("172.16.0.9/24"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    expect(
+      await screen.findByText(/not in the list of eligible adapters on this machine/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Scans will fail/i)).not.toBeInTheDocument();
+  });
+
+  it("shows the enumeration-failed message when GET /system/interfaces errors", async () => {
+    interfacesFailure = true;
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("192.168.1.10/24"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    expect(
+      await screen.findByText(/Adapter details unavailable \(interface enumeration failed/i),
+    ).toBeInTheDocument();
+  });
+
+  it("warns when the selected source interface adapter is down", async () => {
+    interfacesPayload = [interfaceFixture({ is_up: false })];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("192.168.1.10/24"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    expect(
+      await screen.findByText(/This adapter is currently down — scans from it will fail/i),
+    ).toBeInTheDocument();
   });
 
   it("flags an expired certificate-expiry field in red", async () => {

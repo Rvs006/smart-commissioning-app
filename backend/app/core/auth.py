@@ -128,28 +128,36 @@ def _is_loopback_client(request: Request) -> bool:
     return is_loopback_host(request.client.host)
 
 
-def _resolve_user_principal(presented: str | None) -> AuthPrincipal | None:
+def _resolve_user_principal(presented: str | None, rejection_detail: str) -> AuthPrincipal | None:
     """Resolve a presented key to an active user's principal, or None.
 
-    Returns None when no key is presented, the key matches no user, the user's
-    stored role is invalid, OR the user is inactive — in every "not a valid
-    active user" case so the caller can fall through to the shared-key path.
-    Touches last_used_at on success (best-effort; a touch failure never blocks
-    the request).
+    Returns None only when no key is presented or the key matches NO user row,
+    so the caller can fall through to the shared-key / loopback paths. A key
+    that DOES match a user row but must not authenticate — the user is
+    inactive, or their stored role value is corrupt — raises 401 immediately:
+    a real user's key never falls through to the synthetic shared/local admin
+    (falling through would quietly grant a deactivated user loopback ADMIN on
+    the portable/local profile). The 401 detail is ``rejection_detail`` — the
+    caller passes the exact message a key matching NO row would produce for
+    the same mode and client location, so the response never discloses that
+    the key matched a row (no key-validity oracle). Touches last_used_at on
+    success (best-effort; a touch failure never blocks the request).
     """
     if not presented:
         return None
     repository = UserRepository(get_engine())
     user = repository.get_by_api_key_hash(hash_api_key(presented))
-    if user is None or not user["is_active"]:
+    if user is None:
         return None
+    if not user["is_active"]:
+        raise HTTPException(status_code=401, detail=rejection_detail)
     try:
         role = Role.from_value(str(user["role"]))
-    except ValueError:
+    except ValueError as error:
         # A corrupt/unknown role value must not authenticate at some accidental
-        # privilege; treat the user as unresolved (-> 401 in api_key mode).
+        # privilege — and, like an inactive user, must not fall through either.
         logger.warning("User %s has an unknown role value; rejecting.", user["id"])
-        return None
+        raise HTTPException(status_code=401, detail=rejection_detail) from error
     try:
         repository.touch_last_used(str(user["id"]))
     except Exception:  # noqa: BLE001 (a last_used touch must never fail a request)
@@ -172,8 +180,17 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
     configured_key = (settings.api_key or "").strip()
     presented = _presented_key(request)
 
+    # ONE generic 401 detail per (mode, client location), shared by every
+    # rejection this request can produce — a key matching a deactivated user
+    # must be indistinguishable from a key matching no row (no key-validity
+    # oracle for remote clients in local mode).
+    if settings.auth_mode == "api_key" or _is_loopback_client(request):
+        rejection_detail = "Missing or invalid API key."
+    else:
+        rejection_detail = "Requests from non-local clients require an API key."
+
     # (1) Per-user key wins.
-    user_principal = _resolve_user_principal(presented)
+    user_principal = _resolve_user_principal(presented, rejection_detail)
     if user_principal is not None:
         return user_principal
 
@@ -181,7 +198,7 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
         # Fail closed: with no shared key configured, only users can authenticate.
         if configured_key and _key_matches(presented, configured_key):
             return AuthPrincipal(None, "shared-key", Role.ADMIN, "shared_key")
-        raise HTTPException(status_code=401, detail="Missing or invalid API key.")
+        raise HTTPException(status_code=401, detail=rejection_detail)
 
     # local mode: a configured shared key is accepted from anywhere; otherwise
     # only loopback clients are trusted.
@@ -189,7 +206,7 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
         return AuthPrincipal(None, "shared-key", Role.ADMIN, "shared_key")
     if _is_loopback_client(request):
         return AuthPrincipal(None, "local", Role.ADMIN, "local")
-    raise HTTPException(status_code=401, detail="Requests from non-local clients require an API key.")
+    raise HTTPException(status_code=401, detail=rejection_detail)
 
 
 def require_auth(request: Request) -> AuthPrincipal:

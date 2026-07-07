@@ -10,37 +10,108 @@
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
-> **Repo status - last verified Friday, 2026-07-03:** local Python/frontend gates
-> passed and the CI `python`/`frontend` jobs are green. The Windows portable build
-> was repaired (a PowerShell 5.1 file-cleanup bug, default `cryptography` bundling,
-> and an explicit PowerShell 7 requirement), and engineer actions now auto-enable
-> on the local/portable loopback profile. Live IP/BACnet/MQTT hardware validation
-> remains Phase 5 work before production rollout.
+## Get it running (pick one path)
+
+| You are… | Use | Time | You need |
+| --- | --- | --- | --- |
+| A field engineer on a Windows laptop | **Path 1 — Portable app** (no install) | ~2 min | Nothing installed; just the zip |
+| Setting up a shared team server, or want the identical-everywhere stack | **Path 2 — Docker Desktop** | ~10 min | Docker Desktop; ~32 GB RAM recommended; repo access |
+| Looking for the cloud/hosted deployment | Not an engineer task — see [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | — | — |
+
+### Path 1 — Windows portable app (nothing to install)
+
+1. Download `SmartCommissioningApp_Windows_Portable.zip` from the
+   **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**.
+2. Right-click the zip → **Extract All** to a normal folder (Desktop is fine).
+3. Double-click `SmartCommissioningApp.exe`. Keep the black console window open.
+4. Your browser opens automatically — usually <http://127.0.0.1:8000/>. If port 8000 is busy the
+   launcher picks the next free port and prints the correct URL in the console; use that URL.
+5. That's it — no API key, no sign-in. The app trusts your own laptop (loopback), so
+   Run / Publish / Export and the certificate/key **Replace** buttons are enabled automatically.
+
+> ⚠️ **Windows SmartScreen may warn** — this is an internal unsigned build. Choose
+> **More info → Run anyway**, only if you got the zip from the project owner or the releases page
+> above. On a locked-down company laptop with application allow-listing (e.g. ThreatLocker), ask
+> IT to approve the exe first.
+
+> **Stop the app:** press `Ctrl+C` in the console window, or just close the window.
+
+### Path 2 — Docker Desktop (recommended for team consistency)
+
+**Prerequisites:** Docker Desktop installed and running; ~32 GB RAM recommended for the full
+stack; the repository cloned. The repository is **private** — your engineer needs to be added as
+a collaborator (GitHub → repo → **Settings → Collaborators**) before they can clone it.
+
+```bash
+git clone https://github.com/Rvs006/smart-commissioning-app.git
+cd smart-commissioning-app
+```
+
+One command brings up frontend + API + worker + Postgres + Redis. `API_KEY` is required in this
+profile — generate one, then start the stack. **Use the block for your shell** (the `export` form
+is bash/macOS/Linux only; on Windows PowerShell `export` fails with `'export' is not
+recognized`):
+
+```powershell
+# Windows PowerShell
+$env:API_KEY = (openssl rand -hex 32)
+docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+```
+
+```bash
+# bash / macOS / Linux
+export API_KEY=$(openssl rand -hex 32)
+docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+```
+
+Then sign in — hosted deployments require an API key to view real data and take any action
+(without one, pages show **"Authentication required — set an API key"** and Run / Upload /
+Generate / Export stay disabled; that is expected):
+
+1. Open **<http://127.0.0.1:8080>** (nginx serves the UI and proxies `/api` → the API).
+2. Click **"Set API key"** at the **top-right** of the header.
+3. Paste the `API_KEY` value you generated and click **Save**. The page reloads and shows your
+   role — Reports, runs, results, uploads, and network scans now work.
+
+**Better than sharing the admin key — give each engineer their own:** sign in with the `API_KEY`
+(it acts as **admin**), open the **Users** tab, create a user with the right role (e.g.
+`engineer`), and hand them the **one-time key** shown. They set it the same way. See
+[docs/team-pilot-deployment.md](docs/team-pilot-deployment.md).
+
+**What works without any key:** the blank import **templates** (Download XLSX/CSV) and the
+**import-profile list** are public format helpers — column headers plus one example row, no
+project data — so an engineer can prepare a register before they have a key. See
+[infra/README.md](infra/README.md) for the full hosted runbook.
+
+### First run (both paths) — 3 steps
+
+1. **Hosted only:** click **Set API key** (top-right) and paste your key — the portable app skips
+   this step entirely.
+2. Open **Configuration** and set **Source Interface** — on a multi-NIC laptop (Wi-Fi for
+   internet + wired Ethernet to the BMS network) choose the wired adapter so scans egress on the
+   building network.
+3. In **IP Scanner**, upload the project's IP register under **Register Import** (blank XLSX/CSV
+   templates are downloadable in the same panel — scan targets come from the register's
+   "Expected IP address" column), then tick **Dry run** and start the scan — it produces a plan
+   of scan targets, sends no packets, and needs no authorization.
+
+The same guide lives in the app: **Learning → Installation & Setup** (`/#/learning`).
+
+### Prerequisites at a glance
+
+| Path | OS | Installed software | RAM | Network |
+| --- | --- | --- | --- | --- |
+| Portable app | Windows 11 Pro / Server 2022 | Nothing | Any | Loopback only (`127.0.0.1`) |
+| Docker Desktop | Windows / macOS / Linux with Docker Desktop | Docker Desktop | ~32 GB recommended | Ports 8080/8000 on loopback |
+
+---
+
+## What it does
 
 Branded **ELECTRACOM "Smart Commissioning Tool"**, this is the web platform our engineers use to
 commission smart buildings: bring up a project's network/BACnet/MQTT/certificate settings, import
 the expected register, scan the live building network, confirm every device is publishing
 UDMI-compliant data that matches the design, and hand the client a tamper-evident evidence pack.
-
-> 🆕 **New to the project?** Start with **[docs/what-is-this.md](docs/what-is-this.md)** — a
-> one-page plain-English explanation of what the app is, what it does, and how to explain it to an
-> engineer (both the human "why" and the technical "how").
-
-> 👀 **Here to review the app?** Read **[docs/review-guide.md](docs/review-guide.md)** — how to run
-> it (frontend-only or full-stack Docker), what to look at, and what is in scope for this round.
-
-> 🪟 **Checking Windows support?** See
-> **[docs/windows-compatibility.md](docs/windows-compatibility.md)** — Windows 11 Pro and Windows
-> Server 2022 support paths, CI coverage, and the local smoke command.
-
-> ⬇️ **On Windows and just want to run it?** Download the prebuilt app from the
-> **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**
-> (`SmartCommissioningApp_Windows_Portable.zip`) — unzip, double-click
-> `SmartCommissioningApp.exe`, open <http://127.0.0.1:8000/>. No install, no Docker, no key.
-
----
-
-## What it does
 
 Commissioning a smart building means proving that hundreds of field devices were installed,
 addressed, and configured to match the design — and producing evidence of it. This tool turns that
@@ -64,8 +135,9 @@ ships two standalone onboarding surfaces (linked from the header, or reachable d
 
 - **Product Brief** — `/#/brief` — what the tool is and how it works, in four tabs: Basics, Key
   Features, Section Reference, and a role-based **Guided Tour**.
-- **Learning** — `/#/learning` — pick-your-role walkthroughs of the exact modules each role
-  (Commissioning Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
+- **Learning** — `/#/learning` — an **Installation & Setup** guide (both install paths plus
+  first-run steps) and pick-your-role walkthroughs of the exact modules each role (Commissioning
+  Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
 
 The module tabs are grouped by workflow stage — **Configure → Discover → Validate → Report →
 Operate** — so the navigation mirrors the order of the job rather than presenting a flat row of equal
@@ -75,7 +147,12 @@ every control at once. The step advances automatically as a run is queued and co
 
 ---
 
-## Architecture
+## For developers
+
+Everything below is for contributors and reviewers — a field engineer running the app does not
+need any of it.
+
+### Architecture
 
 One codebase, three deployment profiles. The core scan/validation logic lives in a shared Python
 package (`smart_commissioning_core`) used identically by the API and the background worker, so an
@@ -106,9 +183,7 @@ flowchart LR
 - **`hub`** — a central, multi-project instance (Postgres, company SSO/RBAC) that ingests edge runs
   fail-closed (trusted-edge allowlist, signature + per-run hash verification, immutable upsert).
 
----
-
-## Tech stack
+### Tech stack
 
 | Layer | Tech |
 | --- | --- |
@@ -119,67 +194,14 @@ flowchart LR
 | Persistence | SQLAlchemy 2 + Alembic — SQLite (local) / PostgreSQL (hosted) |
 | Packaging | PyInstaller Windows portable bundle; Docker Compose hosted stack |
 
----
-
-## Quickstart
-
-> The repository is **private** — your engineer needs to be added as a collaborator
-> (GitHub → repo → **Settings → Collaborators**) before they can clone it.
-
-```bash
-git clone https://github.com/Rvs006/smart-commissioning-app.git
-cd smart-commissioning-app
-```
-
-### Option A — Hosted stack (Docker, one command)
-
-Brings up frontend + API + worker + Postgres + Redis. Requires Docker.
-
-`API_KEY` is required in this profile — generate one, then start the stack. **Use the block for your shell** (the `export` form is bash/macOS/Linux only; on Windows PowerShell `export` fails with `'export' is not recognized`):
-
-```bash
-# bash / macOS / Linux
-export API_KEY=$(openssl rand -hex 32)
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
-```
-
-```powershell
-# Windows PowerShell
-$env:API_KEY = (openssl rand -hex 32)
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
-```
-
-Then open **http://127.0.0.1:8080** (nginx serves the UI and proxies `/api` → the API). See
-[infra/README.md](infra/README.md) for the full hosted runbook.
-
-### Option B — Local dev profile (no broker / Postgres / Redis)
+### Run from source (developer profile)
 
 Single-user loopback profile: SQLite, jobs inline, auth bypassed for `127.0.0.1`. Requires
-**Python 3.12** and **Node 22**.
+**Python 3.12** and **Node 22**. The full copy-paste steps (editable installs, uvicorn, demo seed,
+Vite dev server, smoke one-liner) live in
+**[docs/quickstart.md §C](docs/quickstart.md#c-developer-profile--run-from-source)**.
 
-```bash
-# 1) install the three editable Python packages + the frontend
-pip install -e ./core -e ./backend -e ./worker
-cd frontend && npm ci && cd ..
-
-# 2) backend API (terminal 1)
-cd backend
-AUTH_MODE=local JOB_EXECUTION_MODE=inline DEPLOYMENT_ROLE=hub \
-  python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-
-# 3) seed demo data + frontend (terminal 2)
-python scripts/seed_demo.py --base-url http://127.0.0.1:8000
-npm --prefix frontend run dev      # http://localhost:5173, proxies /api -> 8000
-```
-
-> **Engineer action buttons work automatically here.** With the backend running on
-> loopback, the app recognises the trusted `127.0.0.1` admin, so Run / Publish /
-> Export are enabled with no key and no console step. (The old
-> `localStorage.setItem('sc.apiKey','local-dev')` trick is now only needed for the
-> *backend-less* frontend-only preview, where there is no `/me` to grant admin.)
-> One-command offline smoke: `scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000`.
-
-### Option C — Windows portable bundle
+### Build the Windows portable bundle
 
 Build a self-contained directory bundle (exe + backend + core + frontend) with
 `packaging/windows_portable/build.ps1`; double-click `SmartCommissioningApp.exe`. See
@@ -204,53 +226,7 @@ set (see [docs/portable-bundle-rebuild.md](docs/portable-bundle-rebuild.md)):
 | PyInstaller | 6.20.0 |
 | Node | 22 |
 
----
-
-## Signing in (API key)
-
-On a **hosted deployment** (Option A) the app requires an API key to view real
-data and to take any action. Without one you will see **"Authentication required
-— set an API key"** on pages like Reports, and Run / Upload / Generate / Export
-stay disabled. This is expected — set your key once and it is remembered in the
-browser.
-
-> **The key is the `API_KEY` value used to start the stack** — the same value you
-> generated for [Option A](#option-a--hosted-stack-docker-one-command). On the
-> host you can read it with `grep API_KEY infra/.env`.
-
-**Set it in the app (the only step your engineer needs):**
-
-1. Open the app and click **"Set API key"** at the **top-right** of the header.
-2. Paste the key and click **Save**. The page reloads and shows your role.
-3. Done — Reports, runs, results, uploads, and network scans now work.
-
-**Better than sharing the admin key — give each engineer their own:** sign in
-with the `API_KEY` (it acts as **admin**), open the **Users** tab, create a user
-with the right role (e.g. `engineer`), and hand them the **one-time key** shown.
-They set it the same way. See [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md).
-
-**What works without any key:** the blank import **templates** (Download
-XLSX/CSV) and the **import-profile list** are public format helpers — column
-headers plus one example row, no project data — so an engineer can prepare a
-register before they have a key.
-
-> **Local dev (Option B) and the portable bundle (Option C)** auto-trust
-> `127.0.0.1`, so no key is needed there — and the engineer action buttons
-> (Run / Publish / Export) now enable automatically for the loopback admin, with
-> no console step. (A backend must be running; the backend-less frontend-only
-> preview still needs the `localStorage` placeholder.)
-
----
-
-## Reviewing the V1 design feedback?
-
-[docs/review-comments-verification.md](docs/review-comments-verification.md) maps all **24 design
-review comments → ✅ implemented**, each with `file:line` evidence and the exact localhost route to
-see it in the running app.
-
----
-
-## Repository layout
+### Repository layout
 
 ```text
 frontend/    React + TypeScript operator UI
@@ -265,15 +241,15 @@ device_udmi_payload_validation/   standalone reference UDMI validator
 Smart Commissioning Tool Specification.pdf
 ```
 
----
-
-## Documentation
+### Documentation
 
 | Document | Covers |
 | --- | --- |
 | [docs/what-is-this.md](docs/what-is-this.md) | Plain-English onboarding: what the app is, what it does, how to explain it |
 | [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) | Agent/contributor quick-reference: setup, the `unittest` test commands CI runs, lint, local run, conventions, gotchas (identical files) |
 | [docs/review-guide.md](docs/review-guide.md) | How to review this build: run it, what to look at, scope for this round |
+| [docs/windows-compatibility.md](docs/windows-compatibility.md) | Windows 11 Pro / Server 2022 support paths, CI coverage, local smoke command |
+| [docs/quickstart.md](docs/quickstart.md) | Validate a running stack in 5 minutes (smoke test) + developer run-from-source |
 | [docs/production-architecture.md](docs/production-architecture.md) | System model mapping the specification to the production build |
 | [docs/runbook.md](docs/runbook.md) | Deploy, operate, and recover (hosted compose + edge/portable profiles) |
 | [docs/security-posture.md](docs/security-posture.md) | Threat model, auth, secret handling, scan-safety, IEC 62443 alignment |
@@ -287,9 +263,7 @@ Smart Commissioning Tool Specification.pdf
 | [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory |
 | [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md) | Design doc for source-interface (NIC) selection for active scans (implemented) |
 
----
-
-## Security & safety
+### Security & safety
 
 - **Auth** — `local` (loopback-only, portable default) or `api_key` mode; per-user **RBAC**
   (`viewer < reviewer < engineer < admin`) gates every route, with a race-safe last-admin guard.
@@ -302,9 +276,14 @@ Smart Commissioning Tool Specification.pdf
 - **Honest status** — live-infrastructure paths that have not been run against real hardware are
   marked as such, never faked. See the honesty rule in [CONTRIBUTING.md](CONTRIBUTING.md).
 
----
+### Project status & roadmap
 
-## Project status & roadmap
+> **Repo status - last verified Friday, 2026-07-03:** local Python/frontend gates
+> passed and the CI `python`/`frontend` jobs are green. The Windows portable build
+> was repaired (a PowerShell 5.1 file-cleanup bug, default `cryptography` bundling,
+> and an explicit PowerShell 7 requirement), and engineer actions now auto-enable
+> on the local/portable loopback profile. Live IP/BACnet/MQTT hardware validation
+> remains Phase 5 work before production rollout.
 
 **Code-complete and hardened, pending on-site sign-off.** Phases 0–4b are built and merged:
 persistence, auth + secret encryption, real discovery/validation engines with scan-safety,
@@ -324,9 +303,13 @@ the Configuration page backed by `GET /api/v1/system/interfaces`, for multi-NIC
 commissioning laptops. Real multi-NIC egress is still verified on site. Design
 doc: [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md).
 
----
+### Reviewing the V1 design feedback?
 
-## Contributing
+[docs/review-comments-verification.md](docs/review-comments-verification.md) maps all **24 design
+review comments → ✅ implemented**, each with `file:line` evidence and the exact localhost route to
+see it in the running app.
+
+### Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the exact commands CI runs (tests, lint, type
 checks), the npm-lockfile lesson, and branch/PR conventions. Change history is in

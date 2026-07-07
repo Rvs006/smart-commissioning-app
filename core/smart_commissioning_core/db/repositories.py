@@ -221,6 +221,24 @@ class UserRepository:
             session.flush()
             return _user_to_dict(user)
 
+    def update_api_key_hash(self, user_id: str, *, api_key_hash: str) -> dict[str, object] | None:
+        """Replace a user's stored key hash (key re-issue); return the dict or None.
+
+        Authentication looks users up BY hash, so the moment the new hash is
+        stored the old key stops authenticating. As everywhere else, only the
+        hash lands here — the new plaintext is the caller's to show exactly
+        once. Returns None when the user id does not exist. Raises
+        IntegrityError on a hash collision (unique column; practically
+        unreachable for 32 random bytes).
+        """
+        with self._session_factory.begin() as session:
+            user = session.get(User, user_id)
+            if user is None:
+                return None
+            user.api_key_hash = api_key_hash
+            session.flush()
+            return _user_to_dict(user)
+
     def touch_last_used(self, user_id: str, *, now: datetime | None = None) -> None:
         """Stamp last_used_at on successful auth; missing ids are ignored.
 
