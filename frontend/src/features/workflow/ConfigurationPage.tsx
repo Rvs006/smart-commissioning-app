@@ -202,8 +202,9 @@ const ADAPTER_TYPE_SUFFIX: Record<string, string> = {
 };
 
 // Advisory hint shown while Source Interface is on Auto and more than one
-// eligible adapter is up. Purely informational: the app never auto-selects a
-// concrete NIC on Auto's behalf (minimize hidden behavior).
+// eligible adapter is up. A saved Auto is respected — the wired-first default
+// below only fills a never-chosen (absent/empty) value — so this hint remains
+// the nudge for engineers who explicitly stay on Auto.
 const AUTO_MULTI_ADAPTER_HINT =
   "Multiple active adapters detected. Auto follows the Windows default route — often the internet adapter, not the site network. Pick your wired adapter to make sure scans use it.";
 
@@ -289,6 +290,13 @@ export function ConfigurationPage() {
   const eligibleInterfaces = (systemInterfacesQuery.data ?? []).filter(
     (iface) => iface.adapter_type !== "virtual",
   );
+  // Wired-first default (2026-07 product decision, reversing the earlier
+  // "keep Auto, hint only" call): the first up wired adapter in API order.
+  // Applied by the effect below only when Source Interface was never chosen.
+  const defaultWiredCidr = eligibleInterfaces.find(
+    (iface) =>
+      iface.is_up && (iface.adapter_type === "ethernet" || iface.adapter_type === "usb_ethernet"),
+  )?.cidr;
   const sourceInterfaceOptions = [
     SOURCE_INTERFACE_AUTO,
     ...eligibleInterfaces.map((iface) => iface.cidr),
@@ -315,6 +323,37 @@ export function ConfigurationPage() {
       setValidationErrors([]);
     }
   }, [configurationQuery.data]);
+
+  // Default a never-chosen Source Interface to the first up wired adapter so
+  // scans on multi-homed laptops don't silently egress via Wi-Fi. "Never
+  // chosen" means the SAVED value is absent or empty — the backend seeds and
+  // backfills the empty string and the Auto sentinel is stored only when it
+  // was picked in the dropdown, so a stored Auto is explicit and never
+  // overridden. The default is ordinary select state on the draft — visible
+  // in the dropdown and saved like a manual pick. With no wired adapter up,
+  // the field stays on Auto exactly as before.
+  useEffect(() => {
+    if (!configurationQuery.data || !defaultWiredCidr) {
+      return;
+    }
+    if ((configurationQuery.data.device.values[SOURCE_INTERFACE_FIELD] ?? "").trim() !== "") {
+      return;
+    }
+    setDraft((current) => {
+      // Re-check the live draft so an edit made before the NIC enumeration
+      // resolved (e.g. explicitly picking Auto) is never clobbered.
+      if (!current || (current.device.values[SOURCE_INTERFACE_FIELD] ?? "").trim() !== "") {
+        return current;
+      }
+      return {
+        ...current,
+        device: {
+          ...current.device,
+          values: { ...current.device.values, [SOURCE_INTERFACE_FIELD]: defaultWiredCidr },
+        },
+      };
+    });
+  }, [configurationQuery.data, defaultWiredCidr]);
 
   const validationMutation = useMutation({
     mutationFn: validateConfiguration,

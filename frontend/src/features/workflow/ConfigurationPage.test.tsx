@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { SessionProvider } from "../../app/session";
 import { ConfigurationPage } from "./ConfigurationPage";
@@ -471,6 +471,109 @@ describe("ConfigurationPage", () => {
     expect(select.value).toBe("Auto (OS default route)");
     const optionValues = Array.from(select.options).map((option) => option.value);
     expect(optionValues).not.toContain("auto (os default route)");
+  });
+
+  it("defaults an unset Source Interface to the first up wired adapter", async () => {
+    // Stored value is empty (never chosen). The down Ethernet is skipped and
+    // Wi-Fi is never a default, so the up USB-Ethernet adapter is pre-selected
+    // in the dropdown as ordinary draft state (saved like a manual pick).
+    interfacesPayload = [
+      interfaceFixture({
+        cidr: "192.168.99.4/24",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "192.168.99.4",
+        is_up: false,
+        name: "Ethernet 2",
+      }),
+      interfaceFixture({
+        adapter_type: "usb_ethernet",
+        cidr: "10.20.30.7/24",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "10.20.30.7",
+        name: "Ethernet 4",
+      }),
+      interfaceFixture({
+        adapter_type: "wifi",
+        cidr: "10.0.0.5/8",
+        dns_servers: [],
+        gateway: "10.0.0.1",
+        ipv4: "10.0.0.5",
+        name: "Wi-Fi",
+        prefix_length: 8,
+        subnet_mask: "255.0.0.0",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface(""));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /10\.20\.30\.7\/24 — Ethernet 4/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("10.20.30.7/24"));
+  });
+
+  it("keeps Auto when no wired adapter is up for an unset Source Interface", async () => {
+    // Only Wi-Fi is up: the wired-first default must NOT fire, so the empty
+    // value stays and continues to behave as Auto, exactly as before.
+    interfacesPayload = [
+      interfaceFixture({ is_up: false }),
+      interfaceFixture({
+        adapter_type: "wifi",
+        cidr: "10.0.0.5/8",
+        dns_servers: [],
+        gateway: "10.0.0.1",
+        ipv4: "10.0.0.5",
+        name: "Wi-Fi",
+        prefix_length: 8,
+        subnet_mask: "255.0.0.0",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface(""));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /10\.0\.0\.5\/8 — Wi-Fi/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    // The draft value stays empty, and an empty value has no matching option,
+    // so the DOM select falls back to the first option — the Auto sentinel.
+    expect(select.value).toBe("Auto (OS default route)");
+    expect(
+      screen.getByText(/Auto: Windows picks the sending adapter via its default route/i),
+    ).toBeInTheDocument();
+  });
+
+  it("never overrides a saved explicit Auto with the wired default", async () => {
+    // An up Ethernet adapter is available, but the SAVED value is the Auto
+    // sentinel, so it must stay selected. (A saved concrete NIC staying
+    // selected is covered by the non-enumerated-value test above.)
+    interfacesPayload = [interfaceFixture()];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface("Auto (OS default route)"));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /192\.168\.1\.10\/24 — Ethernet 3/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe("Auto (OS default route)");
   });
 
   it("always renders the Windows-manages copy in the device section", async () => {

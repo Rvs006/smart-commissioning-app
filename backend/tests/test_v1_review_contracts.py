@@ -42,6 +42,21 @@ class ConfigurationReviewTests(unittest.TestCase):
         self.assertNotIn("Certificate Validity", configuration.certificates.values)
         self.assertEqual(configuration.bacnet.values["Foreign Device"], "Disabled")
 
+    def test_source_interface_seeds_empty_meaning_never_chosen(self) -> None:
+        # Empty means "never chosen": the frontend seeds its wired-first
+        # default only for this value, so the seed and the merge backfill for
+        # legacy snapshots must both stay empty (the Auto sentinel is stored
+        # only on an explicit dropdown pick) and empty must validate cleanly.
+        self.assertEqual(DEFAULT_CONFIGURATION.device.values["Source Interface"], "")
+
+        legacy = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        del legacy.device.values["Source Interface"]
+        merged = ConfigurationService()._merge_with_defaults(legacy)
+        self.assertEqual(merged.device.values["Source Interface"], "")
+
+        result = ConfigurationService().validate(DEFAULT_CONFIGURATION.model_copy(deep=True))
+        self.assertNotIn("Source Interface", " ".join(result.errors))
+
     def test_validation_rejects_bad_network_and_backup_values(self) -> None:
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.device.values["Subnet Mask"] = "bad-mask"
