@@ -117,7 +117,8 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   `CHANGE_ME` placeholder with a cryptographically random 32-byte hex secret
   and printing the generated `API_KEY` plus the compose command to run next.
   Both refuse to overwrite an existing `infra/.env` (exit nonzero) so a
-  deployed config is never destroyed. Replaces the error-prone "edit every
+  deployed config is never destroyed, and the sh script writes the file with
+  owner-only permissions (`umask 077`) since it holds live credentials. Replaces the error-prone "edit every
   `CHANGE_ME` in Notepad" step in the hosted quickstart; the manual path
   remains as a one-line fallback.
 
@@ -129,11 +130,14 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   Source Interface was never chosen (value absent or empty) now defaults to the
   first **up** wired adapter (Ethernet before USB-Ethernet, per the
   already-sorted enumeration), visibly pre-selected in the dropdown and saved
-  like a manual pick. A saved value is never overridden — including an explicit
-  saved "Auto (OS default route)": the persisted snapshot cannot distinguish a
-  seeded Auto from a user-picked one, so any stored Auto stays Auto. With no
-  wired adapter up the field falls back to Auto exactly as before, and the
-  multi-adapter hint still nudges explicit-Auto users toward the wired NIC.
+  like a manual pick. To make "never chosen" detectable, the backend now seeds
+  and backfills an empty Source Interface (empty already validates and behaves
+  as Auto) instead of the literal Auto sentinel, which is stored only when
+  picked in the dropdown — so fresh databases and legacy snapshots get the
+  wired default, while an explicitly saved "Auto (OS default route)" (or any
+  other saved value) is never overridden. With no wired adapter up the field
+  falls back to Auto exactly as before, and the multi-adapter hint still
+  nudges explicit-Auto users toward the wired NIC.
 
 - **Source Interface — richer NIC confirmation** *(interim step, superseded in
   the same release by **NIC UX v2** under Added)* — first made the Source

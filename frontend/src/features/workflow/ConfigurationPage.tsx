@@ -326,12 +326,12 @@ export function ConfigurationPage() {
 
   // Default a never-chosen Source Interface to the first up wired adapter so
   // scans on multi-homed laptops don't silently egress via Wi-Fi. "Never
-  // chosen" means the SAVED value is absent or empty: the persisted snapshot
-  // cannot distinguish an unset field from an explicitly saved Auto (the
-  // backend seeds and backfills the Auto sentinel), so a stored Auto is
-  // treated as explicit and never overridden. The default is ordinary select
-  // state on the draft — visible in the dropdown and saved like a manual pick.
-  // With no wired adapter up, the field stays on Auto exactly as before.
+  // chosen" means the SAVED value is absent or empty — the backend seeds and
+  // backfills the empty string and the Auto sentinel is stored only when it
+  // was picked in the dropdown, so a stored Auto is explicit and never
+  // overridden. The default is ordinary select state on the draft — visible
+  // in the dropdown and saved like a manual pick. With no wired adapter up,
+  // the field stays on Auto exactly as before.
   useEffect(() => {
     if (!configurationQuery.data || !defaultWiredCidr) {
       return;

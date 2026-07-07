@@ -34,7 +34,12 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Gateway": "10.10.25.1",
             "DNS Servers": "10.10.25.10, 8.8.8.8",
             "VLAN ID": "25",
-            "Source Interface": "Auto (OS default route)",
+            # Empty means "never chosen" (behaves as Auto everywhere: validation
+            # accepts it, engine dispatch binds nothing). The UI seeds its
+            # wired-first default only for this empty value; the literal
+            # "Auto (OS default route)" sentinel is stored only when picked in
+            # the dropdown, so a stored sentinel is an explicit choice.
+            "Source Interface": "",
         },
         status="Healthy",
     ),
