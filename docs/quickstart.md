@@ -31,19 +31,25 @@ Real ports: API on `127.0.0.1:8000`, frontend + `/api` proxy on
 
 ### 1. Configure secrets
 
+One command generates `infra/.env` from `infra/.env.example` with fresh
+cryptographically random secrets (`POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and
+the `API_KEY` clients send as `X-API-Key`) and prints the `API_KEY` you sign
+in with. It refuses to overwrite an existing `infra/.env`.
+
+Linux / macOS:
+
 ```sh
-cd infra
-cp .env.example .env
+scripts/bootstrap-env.sh
 ```
 
-Edit `infra/.env` and replace every `CHANGE_ME` placeholder. Generate each
-secret with `openssl rand -hex 32`:
+Windows (PowerShell 7):
 
-| Variable | Purpose |
-| --- | --- |
-| `POSTGRES_PASSWORD` | Postgres password. |
-| `REDIS_PASSWORD` | Redis `requirepass` password. |
-| `API_KEY` | Shared key clients send as `X-API-Key` (because `AUTH_MODE=api_key`). |
+```powershell
+pwsh scripts/bootstrap-env.ps1
+```
+
+Manual fallback: `cp infra/.env.example infra/.env`, then replace every
+`CHANGE_ME` placeholder yourself (e.g. with `openssl rand -hex 32`).
 
 `POSTGRES_DB` / `POSTGRES_USER` already have sane defaults; `DATABASE_URL` and
 `REDIS_URL` are assembled inside `docker-compose.yml` — do not set them
@@ -65,7 +71,8 @@ at <http://127.0.0.1:8080>.
 
 > Optional — proves a deployment works; not needed for day-to-day use.
 
-Use the **same `API_KEY`** you put in `infra/.env`.
+Use the **same `API_KEY`** the bootstrap script printed (it lives in
+`infra/.env`).
 
 Linux / macOS / CI (bash):
 

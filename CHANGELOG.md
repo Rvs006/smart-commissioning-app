@@ -111,7 +111,29 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   `-Include`/`-LiteralPath` deletion hazard and the missing
   `--collect-all cryptography`) reach field engineers undetected.
 
+- **One-command hosted-secrets bootstrap (field feedback, 2026-07-03)** —
+  `scripts/bootstrap-env.ps1` (PowerShell 7) and `scripts/bootstrap-env.sh`
+  (POSIX sh) generate `infra/.env` from `infra/.env.example`, filling every
+  `CHANGE_ME` placeholder with a cryptographically random 32-byte hex secret
+  and printing the generated `API_KEY` plus the compose command to run next.
+  Both refuse to overwrite an existing `infra/.env` (exit nonzero) so a
+  deployed config is never destroyed. Replaces the error-prone "edit every
+  `CHANGE_ME` in Notepad" step in the hosted quickstart; the manual path
+  remains as a one-line fallback.
+
 ### Changed
+
+- **Source Interface — wired-first default (field feedback, 2026-07-03)**
+  *(reverses the earlier "Auto stays the default, advisory hint only" decision
+  after engineers' scans on Auto egressed via Wi-Fi)* — a configuration whose
+  Source Interface was never chosen (value absent or empty) now defaults to the
+  first **up** wired adapter (Ethernet before USB-Ethernet, per the
+  already-sorted enumeration), visibly pre-selected in the dropdown and saved
+  like a manual pick. A saved value is never overridden — including an explicit
+  saved "Auto (OS default route)": the persisted snapshot cannot distinguish a
+  seeded Auto from a user-picked one, so any stored Auto stays Auto. With no
+  wired adapter up the field falls back to Auto exactly as before, and the
+  multi-adapter hint still nudges explicit-Auto users toward the wired NIC.
 
 - **Source Interface — richer NIC confirmation** *(interim step, superseded in
   the same release by **NIC UX v2** under Added)* — first made the Source
