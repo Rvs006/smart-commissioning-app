@@ -60,7 +60,7 @@ Compose **fails fast** if any required secret is missing.
 ### 2. Bring the stack up
 
 ```sh
-docker compose -f infra/docker-compose.yml up -d --build
+docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 ```
 
 Startup order is handled by healthchecks: Postgres and Redis become healthy, the

@@ -124,6 +124,12 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Changed
 
+- **Docs install sweep (2026-07)** — install/setup docs now lead with the
+  `scripts/bootstrap-env.*` scripts as the canonical way to create `infra/.env`
+  (manual `CHANGE_ME` editing stays as a fallback), and the NIC-selection
+  proposal was updated for the wired-first Source Interface default (empty
+  seed = never chosen; the Auto sentinel stored only on an explicit pick).
+
 - **Source Interface — wired-first default (field feedback, 2026-07-03)**
   *(reverses the earlier "Auto stays the default, advisory hint only" decision
   after engineers' scans on Auto egressed via Wi-Fi)* — a configuration whose

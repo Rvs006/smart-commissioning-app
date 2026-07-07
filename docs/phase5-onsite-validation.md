@@ -24,7 +24,7 @@ Legend: ☐ = to verify · **STOP** = a failure here blocks production rollout.
 - ☐ `docker compose -f infra/docker-compose.yml config` renders with real `.env`; `${VAR:?}` guards fail fast when a required secret is missing.
 - ☐ CI is green on the branch (push to the company remote first — see the PR). Confirm the `python`, `frontend`, and `sbom` jobs all run.
 - ☐ Rebuild the Windows portable bundle from the **current** source (`packaging/windows_portable/`); confirm it ships `backend/`, `core/`, `frontend/dist/index.html`, **and the Alembic env** (`alembic.ini` + `alembic/versions/*.py`) so first launch migrates the bundled SQLite DB to head `d1f2a3b4c5d6` with no network. Alembic now ships via `core/pyproject.toml` `[tool.setuptools.data-files]` (a `versions/*.py` glob) — see the full rebuild + offline-smoke steps in [portable-bundle-rebuild.md](portable-bundle-rebuild.md) (the wheel build + wheel-only migrate are verified; the PyInstaller freeze is the on-site/release step). Code-sign the `.exe` to avoid SmartScreen/AV friction.
-- ☐ Generate a fresh API key (`openssl rand -hex 32`) and Redis/Postgres passwords; never use the `.env.example` placeholders.
+- ☐ Generate a fresh API key and Redis/Postgres passwords — run `sh scripts/bootstrap-env.sh` (Windows: `pwsh scripts/bootstrap-env.ps1`) to create `infra/.env` with crypto-random secrets (or fill each by hand with `openssl rand -hex 32`); never use the `.env.example` placeholders.
 
 ---
 

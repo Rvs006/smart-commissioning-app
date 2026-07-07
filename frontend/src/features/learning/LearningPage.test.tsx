@@ -26,13 +26,14 @@ describe("LearningPage — Installation & Setup", () => {
     expect(screen.getByText("You are already signed in")).toBeInTheDocument();
   });
 
-  it("switches to the Docker path: compose command and Set API key appear, exe steps go", () => {
+  it("switches to the Docker path: bootstrap script, compose command and Set API key appear, exe steps go", () => {
     renderLearning();
 
     fireEvent.click(screen.getByRole("button", { name: /Docker Desktop/ }));
 
+    expect(screen.getByText("./scripts/bootstrap-env.ps1")).toBeInTheDocument();
     expect(
-      screen.getByText(/docker compose -f infra\/docker-compose\.yml/),
+      screen.getByText(/docker compose -f infra\/docker-compose\.yml --env-file infra\/\.env up/),
     ).toBeInTheDocument();
     expect(screen.getByText("Set API key")).toBeInTheDocument();
     expect(screen.queryByText("SmartCommissioningApp.exe")).not.toBeInTheDocument();

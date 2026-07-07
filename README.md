@@ -48,20 +48,21 @@ cd smart-commissioning-app
 ```
 
 One command brings up frontend + API + worker + Postgres + Redis. `API_KEY` is required in this
-profile — generate one, then start the stack. **Use the block for your shell** (the `export` form
-is bash/macOS/Linux only; on Windows PowerShell `export` fails with `'export' is not
-recognized`):
+profile — the bootstrap script writes `infra/.env` from `infra/.env.example` with fresh random
+secrets and prints the `API_KEY` to paste into **Set API key** (it refuses to overwrite an
+existing `infra/.env`). **Use the block for your shell** (`bootstrap-env.ps1` needs
+PowerShell 7 / `pwsh`):
 
 ```powershell
-# Windows PowerShell
-$env:API_KEY = (openssl rand -hex 32)
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+# Windows (PowerShell 7 / pwsh)
+./scripts/bootstrap-env.ps1
+docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 ```
 
 ```bash
-# bash / macOS / Linux
-export API_KEY=$(openssl rand -hex 32)
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+# Linux / macOS
+./scripts/bootstrap-env.sh
+docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 ```
 
 Then sign in — hosted deployments require an API key to view real data and take any action
@@ -70,8 +71,8 @@ Generate / Export stay disabled; that is expected):
 
 1. Open **<http://127.0.0.1:8080>** (nginx serves the UI and proxies `/api` → the API).
 2. Click **"Set API key"** at the **top-right** of the header.
-3. Paste the `API_KEY` value you generated and click **Save**. The page reloads and shows your
-   role — Reports, runs, results, uploads, and network scans now work.
+3. Paste the `API_KEY` value the bootstrap script printed and click **Save**. The page reloads
+   and shows your role — Reports, runs, results, uploads, and network scans now work.
 
 **Better than sharing the admin key — give each engineer their own:** sign in with the `API_KEY`
 (it acts as **admin**), open the **Users** tab, create a user with the right role (e.g.
@@ -87,9 +88,10 @@ project data — so an engineer can prepare a register before they have a key. S
 
 1. **Hosted only:** click **Set API key** (top-right) and paste your key — the portable app skips
    this step entirely.
-2. Open **Configuration** and set **Source Interface** — on a multi-NIC laptop (Wi-Fi for
-   internet + wired Ethernet to the BMS network) choose the wired adapter so scans egress on the
-   building network.
+2. Open **Configuration** and confirm **Source Interface** — when never chosen, the tool
+   pre-selects the first up wired adapter (Ethernet/USB-Ethernet). On a multi-NIC laptop (Wi-Fi
+   for internet + wired Ethernet to the BMS network) confirm the wired adapter is selected so
+   scans egress on the building network.
 3. In **IP Scanner**, upload the project's IP register under **Register Import** (blank XLSX/CSV
    templates are downloadable in the same panel — scan targets come from the register's
    "Expected IP address" column), then tick **Dry run** and start the scan — it produces a plan
@@ -102,7 +104,7 @@ The same guide lives in the app: **Learning → Installation & Setup** (`/#/lear
 | Path | OS | Installed software | RAM | Network |
 | --- | --- | --- | --- | --- |
 | Portable app | Windows 11 Pro / Server 2022 | Nothing | Any | Loopback only (`127.0.0.1`) |
-| Docker Desktop | Windows / macOS / Linux with Docker Desktop | Docker Desktop | ~32 GB recommended | Ports 8080/8000 on loopback |
+| Docker Desktop | Windows / macOS / Linux with Docker Desktop | Docker Desktop (+ PowerShell 7 on Windows for the bootstrap script) | ~32 GB recommended | Ports 8080/8000 on loopback |
 
 ---
 

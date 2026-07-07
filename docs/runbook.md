@@ -19,10 +19,14 @@ See `infra/README.md` for the compose quickstart this runbook builds on, and
 ### Hosted (Docker Compose)
 
 ```sh
-cd infra
-cp .env.example .env          # then fill in every CHANGE_ME (see env table below)
-docker compose -f docker-compose.yml up -d --build
+# from the repo root — fills every CHANGE_ME with a crypto-random secret,
+# prints the API_KEY, refuses to overwrite an existing infra/.env
+sh scripts/bootstrap-env.sh        # Windows: pwsh scripts/bootstrap-env.ps1
+docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 ```
+
+Manual fallback: `cp infra/.env.example infra/.env` and fill every `CHANGE_ME`
+with `openssl rand -hex 32` (see the env table below).
 
 Startup is ordered by healthchecks: Postgres and Redis must report healthy
 before the API starts; the **API applies Alembic migrations on startup** (it
@@ -170,6 +174,9 @@ data.
   docker compose -f infra/docker-compose.yml up -d api
   ```
   Clients (the frontend stores the key in the browser) must re-enter the new key.
+  To rotate **all** compose secrets at once, move `infra/.env` aside and re-run
+  `scripts/bootstrap-env.sh` / `.ps1` (it refuses to overwrite an existing
+  `.env`) — the Postgres in-place caveat below still applies.
 - **Redis password** (`REDIS_PASSWORD`): update `.env`, recreate redis, api, and
   worker together (all three embed the password):
   ```sh

@@ -2,6 +2,7 @@
 
 Status: Implemented (Phases 0-2) — see CHANGELOG. On-real-hardware egress verification pending (section 8.3).
 Update (NIC UX v2, 2026-07-03): the product owner REVERSED the section-5.3 gateway/DNS omission — the endpoint now also returns `adapter_type` / `subnet_mask` / `gateway` / `dns_servers` (nine fields total) so engineers can confirm the tool reads the NIC correctly. MAC addresses and adapter description/driver strings stay omitted. See the 5.3 update note.
+Update (wired-first default, 2026-07): `DEFAULT_CONFIGURATION` now seeds `Source Interface` **empty** (= never chosen) and, while the value is empty, the UI pre-selects the first up wired adapter (Ethernet/USB-Ethernet); the `Auto (OS default route)` sentinel is stored only on an explicit pick, and saved values are never overridden. See the 3.3 and 7.4 update notes.
 Author: (fill in)
 Date: 2026-07-03
 Scope: `smart-commissioning-app` — core engines, backend API, worker, frontend Configuration page
@@ -135,9 +136,12 @@ combobox". Two ways to ship the hybrid:
 
 ### 3.3 Default and label
 
-- Default value: the field is **absent** from `DEFAULT_CONFIGURATION` (section 5),
-  which the resolver treats as `Auto`. The dropdown shows `Auto (OS default route)`
-  as the first option and as the effective selection when empty.
+- Default value: `DEFAULT_CONFIGURATION` seeds the field **empty** (= never
+  chosen), which the resolver treats as `Auto`. The dropdown shows
+  `Auto (OS default route)` as the first option. *(Update, wired-first default
+  2026-07: while the value is empty the UI pre-selects the first up wired
+  adapter — Ethernet/USB-Ethernet — rather than `Auto`; the sentinel is stored
+  only on an explicit pick, and saved values are never overridden.)*
 - Label copy / tooltip (add to `FIELD_TOOLTIPS`, `ConfigurationPage.tsx:661-712`):
   > `Source Interface`: "Which local network interface active scans send from.
   > Leave on Auto to use the OS default route; pick a NIC on a multi-homed laptop
@@ -508,9 +512,12 @@ identically": one resolver, run once at creation, persisted once.
   `ConfigurationSection.values` is a free `dict[str, str]` (`:5`), so
   `"Source Interface"` is just a new key. (If we want it to appear even on a
   fresh install, seed it in `DEFAULT_CONFIGURATION`.)
-- `backend/app/services/configuration_service.py`: add
-  `"Source Interface": "Auto (OS default route)"` to `DEFAULT_CONFIGURATION.device.values`
-  (`:28-39`). Because `_merge_with_defaults` (`:399-407`) unions defaults under
+- `backend/app/services/configuration_service.py`: seed
+  `"Source Interface": ""` (empty = never chosen) in `DEFAULT_CONFIGURATION.device.values`
+  (`:28-39`). *(Update, wired-first default 2026-07: the UI pre-selects the
+  first up wired adapter while the value is empty; the `Auto (OS default
+  route)` sentinel is stored only on an explicit pick.)*
+  Because `_merge_with_defaults` (`:399-407`) unions defaults under
   loaded values, existing saved snapshots gain the key on next load without a
   migration. Add a validation rule in `ConfigurationService.validate` (near the
   device-field checks at `:312-315`): accept empty / `Auto...` / a parseable

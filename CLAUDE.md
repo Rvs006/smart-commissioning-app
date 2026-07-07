@@ -50,7 +50,8 @@ cd frontend && npm run lint && npm run typecheck && npm run build
 
 ```bash
 # Full stack (Postgres, Redis, API, worker, frontend):
-docker compose -f infra/docker-compose.yml --env-file infra/.env.example up --build
+sh scripts/bootstrap-env.sh   # once: writes infra/.env with random secrets (Windows: pwsh scripts/bootstrap-env.ps1)
+docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 
 # Or split: backend then frontend
 cd backend && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
