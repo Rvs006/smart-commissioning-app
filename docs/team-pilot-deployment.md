@@ -70,9 +70,12 @@ docker compose -f infra/docker-compose.yml config   # renders with your .env
 
 ### 3.2 Secrets
 ```sh
-cd infra && cp .env.example .env
+# from the repo root — fills every CHANGE_ME with a crypto-random secret and prints the API_KEY
+sh scripts/bootstrap-env.sh        # Windows: pwsh scripts/bootstrap-env.ps1
 ```
-Generate each `CHANGE_ME` with `openssl rand -hex 32` and set in `infra/.env`:
+(Manual fallback: `cp infra/.env.example infra/.env`, then generate each
+`CHANGE_ME` with `openssl rand -hex 32`.) The script covers the three secrets;
+still set `CORS_ORIGINS` in `infra/.env` by hand:
 
 | Variable | Purpose |
 | --- | --- |

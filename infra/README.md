@@ -9,13 +9,18 @@ when several users share a server; use the portable exe on a technician laptop.
 
 ## Required environment
 
-Copy the template and fill in real values — compose fails fast (via
-`${VAR:?}`) when any of these are missing:
+Generate `.env` from the template with the bootstrap script — it fills every
+`CHANGE_ME` with a fresh crypto-random secret, prints the `API_KEY`, and
+refuses to overwrite an existing `.env`:
 
 ```sh
-cd infra
-cp .env.example .env
+# from the repo root
+sh scripts/bootstrap-env.sh        # Windows: pwsh scripts/bootstrap-env.ps1
 ```
+
+Manual fallback: `cp infra/.env.example infra/.env`, then fill each
+`CHANGE_ME` yourself. Compose fails fast (via `${VAR:?}`) when any of these
+are missing:
 
 | Variable | Purpose |
 | --- | --- |
@@ -76,6 +81,10 @@ docker compose -f infra/docker-compose.yml up -d api
 
 Clients (the frontend stores the key locally in the browser) must re-enter the
 new key. No data is affected.
+
+To rotate **all** secrets at once, move `infra/.env` aside and re-run
+`scripts/bootstrap-env.sh` / `.ps1` (it refuses to overwrite an existing
+`.env`) — note the `POSTGRES_PASSWORD` in-place caveat below still applies.
 
 **REDIS_PASSWORD** — update `.env`, then recreate redis, api, and worker
 together (all three embed the password in their environment):

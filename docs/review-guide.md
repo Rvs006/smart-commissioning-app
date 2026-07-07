@@ -69,24 +69,22 @@ page). Calls to `/api` will show errors because no backend is running — that i
 
 Brings up frontend + API + worker + Postgres + Redis. Requires **Docker**.
 
-First create a real env file from the template and fill in `API_KEY` and
-`POSTGRES_PASSWORD` with generated secrets. **Do not run with `--env-file
-infra/.env.example`** — its placeholder `POSTGRES_PASSWORD` would be baked into
-the Postgres data volume on first start, so a later switch to real secrets
-breaks DB auth until the volume is recreated.
+First generate a real env file with the bootstrap script — it fills every
+placeholder with a crypto-random secret and prints the `API_KEY` you paste at
+the sign-in step. **Do not run with `--env-file infra/.env.example`** — its
+placeholder `POSTGRES_PASSWORD` would be baked into the Postgres data volume on
+first start, so a later switch to real secrets breaks DB auth until the volume
+is recreated.
 
 ```bash
 # from the repo root
-cp infra/.env.example infra/.env
-# set real secrets in infra/.env (edit the file, or use sed):
-#   API_KEY=...           (openssl rand -hex 32)
-#   POSTGRES_PASSWORD=... (openssl rand -hex 32)
+sh scripts/bootstrap-env.sh        # Windows: pwsh scripts/bootstrap-env.ps1
 
-docker compose -f infra/docker-compose.yml --env-file infra/.env up --build
+docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 ```
 
-> On Windows, edit `infra/.env` in an editor and paste the output of
-> `openssl rand -hex 32` into `API_KEY` and `POSTGRES_PASSWORD`.
+> Manual fallback: `cp infra/.env.example infra/.env` and fill every
+> `CHANGE_ME` with `openssl rand -hex 32`.
 
 Then open **http://127.0.0.1:8080** (nginx serves the UI and proxies `/api`).
 Full hosted runbook: [infra/README.md](../infra/README.md).
@@ -99,7 +97,8 @@ docker compose -f infra/docker-compose.yml down -v
 ```
 
 **Sign in:** click **"Set API key"** at the top-right of the header, paste your
-`API_KEY` (read it back with `grep API_KEY infra/.env`), and Save. The page
+`API_KEY` (the bootstrap script printed it; read it back with
+`grep API_KEY infra/.env`), and Save. The page
 reloads and shows your role. To give each engineer their own key instead of
 sharing the admin key, see [docs/team-pilot-deployment.md](team-pilot-deployment.md).
 

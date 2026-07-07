@@ -623,19 +623,18 @@ const SETUP_PATHS: SetupPath[] = [
             lab: "Do",
             text: (
               <>
-                In PowerShell, from the repository folder:{" "}
+                From the repository folder run <code>./scripts/bootstrap-env.ps1</code> (Windows,
+                PowerShell 7) or <code>./scripts/bootstrap-env.sh</code> (Linux/macOS), then{" "}
                 <code>
-                  $env:API_KEY = (openssl rand -hex 32); docker compose -f
-                  infra/docker-compose.yml --env-file infra/.env.example up --build
-                </code>{" "}
-                — any long random string works as the API_KEY. Keep a copy: it is your sign-in
-                key.
+                  docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
+                </code>
+                .
               </>
             ),
           },
           {
             lab: "See",
-            text: "The containers build, start, and report healthy in the console.",
+            text: "The script writes infra/.env with fresh random secrets and prints your API_KEY — keep a copy: it is your sign-in key. Then the containers build, start, and report healthy.",
           },
           {
             lab: "Why",
@@ -685,10 +684,10 @@ const FIRST_RUN: Lesson[] = [
         lab: "Do",
         text: (
           <>
-            Set <strong>Source Interface</strong> to the network adapter that is plugged into the
-            building/BMS network — on a typical field laptop that is the wired Ethernet (or
-            USB-Ethernet dongle), not the Wi-Fi you use for internet. Leave it on Auto only if the
-            laptop has a single network connection.
+            Confirm <strong>Source Interface</strong> — when never chosen, the tool pre-selects
+            the first wired adapter (Ethernet or USB-Ethernet dongle), which is usually right on a
+            field laptop. If it picked the wrong one, choose the adapter that is plugged into the
+            building/BMS network, not the Wi-Fi you use for internet.
           </>
         ),
       },
