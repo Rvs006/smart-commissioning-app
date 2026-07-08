@@ -29,7 +29,13 @@ const NAV_GROUPS: NavGroup[] = [
     ],
   },
   { stage: "Report", items: [{ label: "Reports", to: "/reports" }] },
-  { stage: "Operate", items: [{ label: "Hub", to: "/hub" }] },
+  {
+    stage: "Operate",
+    items: [
+      { label: "Hub", to: "/hub" },
+      { label: "Run History", to: "/run-history" },
+    ],
+  },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -41,6 +47,7 @@ const pageTitles: Record<string, string> = {
   "/ip-scanner": "IP Scanner",
   "/mqtt-discovery": "MQTT Discovery",
   "/reports": "Reports",
+  "/run-history": "Run History",
   "/udmi-validation": "UDMI Payload Workbench",
   "/users": "User Management",
 };
@@ -54,6 +61,7 @@ const pageSubtitles: Record<string, string> = {
   "/ip-scanner": "Find reachable, missing and unexpected hosts.",
   "/mqtt-discovery": "Inspect broker topics, payloads and extracted points.",
   "/reports": "Generate evidence packs and issue reports.",
+  "/run-history": "Browse, sort, filter, and export every recorded run.",
   "/udmi-validation": "Inspect state, metadata, pointset, and controlled publish evidence in detail.",
   "/users": "Create, list, and manage operator API keys and roles.",
 };

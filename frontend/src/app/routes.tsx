@@ -4,6 +4,7 @@ import { ConfigurationPage } from "../features/workflow/ConfigurationPage";
 import { DashboardPage } from "../features/workflow/DashboardPage";
 import { HubPage } from "../features/workflow/HubPage";
 import { ModulePage } from "../features/workflow/ModulePage";
+import { RunHistoryPage } from "../features/workflow/RunHistoryPage";
 import { UsersPage } from "../features/workflow/UsersPage";
 import { BriefPage } from "../features/brief/BriefPage";
 import { LearningPage } from "../features/learning/LearningPage";
@@ -27,6 +28,7 @@ export const router = createHashRouter([
       { path: "data-validation", element: <ModulePage moduleRoute="data-validation" /> },
       { path: "reports", element: <ModulePage moduleRoute="reports" /> },
       { path: "hub", element: <HubPage /> },
+      { path: "run-history", element: <RunHistoryPage /> },
       { path: "users", element: <UsersPage /> }
     ]
   }
