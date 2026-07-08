@@ -10,6 +10,7 @@ adapters or on PowerShell being runnable.
 
 import json
 import socket
+import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -259,6 +260,46 @@ class EnsureSourceIpAvailableTests(unittest.TestCase):
         ):
             self.assertIsNone(ensure_source_ip_available("192.168.10.20"))
         fake_socket_module.socket.return_value.close.assert_called_once()
+
+
+class RunPowershellNetFactsTests(unittest.TestCase):
+    """The frozen exe measured the net-facts call at ~9.5s; a 5s timeout made it
+    always time out and silently degrade the NIC picker. Guard the timeout floor
+    and that failures are logged (not swallowed) so it can't regress unseen."""
+
+    def test_timeout_is_above_realistic_floor(self) -> None:
+        # The measured worst case was ~9.5s; keep comfortable headroom.
+        self.assertGreaterEqual(interface_service._POWERSHELL_TIMEOUT_S, 15.0)
+
+    def test_ttl_not_shorter_than_timeout(self) -> None:
+        # A slow-but-successful call must be cached, not re-forked each window.
+        self.assertGreaterEqual(
+            interface_service._NET_FACTS_TTL_S, interface_service._POWERSHELL_TIMEOUT_S
+        )
+
+    def test_timeout_returns_none_and_logs(self) -> None:
+        with patch.object(
+            interface_service.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="powershell", timeout=20.0),
+        ):
+            with self.assertLogs(interface_service._logger, level="WARNING") as logs:
+                self.assertIsNone(interface_service._run_powershell_net_facts())
+        self.assertTrue(any("timed out" in m for m in logs.output))
+
+    def test_nonzero_exit_returns_none_and_logs_stderr(self) -> None:
+        completed = SimpleNamespace(returncode=1, stdout="", stderr="access denied")
+        with patch.object(interface_service.subprocess, "run", return_value=completed):
+            with self.assertLogs(interface_service._logger, level="WARNING") as logs:
+                self.assertIsNone(interface_service._run_powershell_net_facts())
+        self.assertTrue(any("access denied" in m for m in logs.output))
+
+    def test_success_returns_stdout(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout='{"adapters":[]}', stderr="")
+        with patch.object(interface_service.subprocess, "run", return_value=completed):
+            self.assertEqual(
+                interface_service._run_powershell_net_facts(), '{"adapters":[]}'
+            )
 
 
 if __name__ == "__main__":
