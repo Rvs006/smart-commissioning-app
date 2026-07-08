@@ -76,6 +76,10 @@ def _bundle_dependency_imports() -> None:
     import multipart  # noqa: F401
     import openpyxl  # noqa: F401
     import prometheus_client  # noqa: F401
+    # psutil is import-guarded in backend/app (degrades to an Auto-only NIC
+    # list when absent), so a missing module here breaks the Source Interface
+    # picker silently instead of crashing boot — keep it frozen explicitly.
+    import psutil  # noqa: F401
     import psycopg  # noqa: F401
     import pydantic  # noqa: F401
     import pydantic_core  # noqa: F401

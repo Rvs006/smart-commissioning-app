@@ -179,6 +179,29 @@ describe("App shell", () => {
     expect(await screen.findByText("No runs yet")).toBeInTheDocument();
   });
 
+  it("hides Set API key and shows the local identity on the keyless local profile", async () => {
+    // Portable exe profile (AUTH_MODE=local): a keyless loopback client is
+    // already admin server-side. Offering "Set API key" here misled a field
+    // user into thinking a key was required — the badge must state the
+    // signed-in fact instead, with no key affordances at all.
+    stubDashboardFetch(runsPayload, () =>
+      jsonResponse({ username: "local", role: "admin", source: "local" }),
+    );
+    renderApp();
+
+    expect(await screen.findByText("Signed in as local admin")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Set API key" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign out" })).not.toBeInTheDocument();
+  });
+
+  it("still offers Set API key when a keyless /me is unauthorized (hosted mode)", async () => {
+    stubDashboardFetch(); // /me answers 401 by default, mirroring hosted api_key mode
+    renderApp();
+
+    expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
+    expect(screen.queryByText(/Signed in as local/)).not.toBeInTheDocument();
+  });
+
   it("offers to clear the key only when the server rejects it (401)", async () => {
     setApiKey("a-key-the-server-rejects");
     stubDashboardFetch(); // /me answers 401 by default
