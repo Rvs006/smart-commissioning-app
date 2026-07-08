@@ -181,8 +181,10 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   to an Auto-only Source Interface list instead of erroring), so the packaged
   exe silently shipped without NIC enumeration — the health-only boot smoke
   could not see it. The launcher now freezes `psutil` explicitly and the
-  `windows-portable` CI boot smoke additionally requires
-  `/api/v1/system/interfaces` to return a non-empty list on the runner.
+  `windows-portable` CI boot smoke additionally asserts `psutil` exists inside
+  the frozen bundle and that `/api/v1/system/interfaces` answers 200 (an empty
+  list is correct on the CI runner, whose only adapter is Hyper-V-virtual and
+  deliberately filtered).
 - **Inactive users' API keys no longer grant local-mode admin.** In `local`
   auth mode, a key matching a deactivated (or corrupt-role) user row used to
   fall through to the keyless-loopback admin path, contradicting the

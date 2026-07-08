@@ -9,8 +9,11 @@
 # health-200 boot smoke below catches both. A third shipped bug class is
 # subtler: backend/app import-guards optional deps (psutil), so a module
 # missing from the freeze degrades a feature (NIC picker -> Auto-only) while
-# health stays 200 — hence the smoke also requires /api/v1/system/interfaces
-# to return a non-empty list (the runner always has at least one IPv4 NIC).
+# health stays 200 — hence the smoke also asserts psutil exists inside the
+# frozen bundle and that /api/v1/system/interfaces answers 200. It must NOT
+# require a non-empty NIC list: the runner's only adapter is "Microsoft
+# Hyper-V Network Adapter", which the app deliberately classifies as virtual
+# and filters out, so [] is the CORRECT answer on this runner.
 #
 # Separate workflow (not a job in windows-compat.yml) because path filters are
 # workflow-level: windows-compat.yml deliberately runs unfiltered on every
@@ -139,21 +142,26 @@ jobs:
               Start-Sleep -Seconds 2
             }
 
-            # Health proves the app serves; this proves the freeze carried
-            # psutil. /system/interfaces answers 200 with [] (not an error)
-            # when psutil is missing from the bundle — an exe-only NIC-picker
-            # regression that shipped once, invisible to the health probe.
+            # Health proves the app serves; these prove the freeze carried
+            # psutil, the NIC-enumeration dependency. backend/app import-guards
+            # psutil, so a bundle without it serves /system/interfaces as []
+            # while health stays 200 — an exe-only NIC-picker regression that
+            # shipped once. Assert the frozen artifact directly; the endpoint
+            # itself only has to answer 200, because on this runner [] is the
+            # CORRECT body (the sole adapter is Hyper-V => filtered as virtual).
             if ($ok) {
+              $frozenPsutil = Join-Path $bundle '_internal\psutil'
+              if (Test-Path $frozenPsutil) {
+                Write-Host "PSUTIL FROZEN OK: $frozenPsutil"
+              } else {
+                Write-Host "PSUTIL SMOKE FAILED: $frozenPsutil missing - the freeze lost the NIC-enumeration dependency (launcher must import psutil)."
+                $ok = $false
+              }
               $ifUrl = $healthUrl -replace '/health$', '/system/interfaces'
               try {
                 $ifResp = Invoke-WebRequest -Uri $ifUrl -UseBasicParsing -TimeoutSec 10
-                if ($ifResp.Content.Trim() -in @('', '[]')) {
-                  Write-Host "NIC SMOKE FAILED: $ifUrl returned an empty interface list (psutil missing from the frozen bundle?)"
-                  $ok = $false
-                } else {
-                  $preview = $ifResp.Content.Substring(0, [Math]::Min(300, $ifResp.Content.Length))
-                  Write-Host "INTERFACES OK: $ifUrl -> $preview"
-                }
+                $preview = $ifResp.Content.Substring(0, [Math]::Min(300, $ifResp.Content.Length))
+                Write-Host "INTERFACES ANSWERED: $ifUrl -> $preview ([] is expected on this runner)"
               } catch {
                 Write-Host "NIC SMOKE FAILED: $ifUrl -> $_"
                 $ok = $false
@@ -171,7 +179,7 @@ jobs:
               ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
           }
           if (-not $ok) {
-            Write-Error 'Boot smoke failed: no /api/v1/health 200 within the deadline, or /api/v1/system/interfaces returned an empty NIC list.'
+            Write-Error 'Boot smoke failed: no /api/v1/health 200 within the deadline, psutil missing from the frozen bundle, or /api/v1/system/interfaces did not answer.'
             exit 1
           }
 
