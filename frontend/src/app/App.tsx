@@ -210,6 +210,23 @@ function SessionBadge() {
     );
   }
 
+  // Keyless local/portable profile: the backend already granted this loopback
+  // client a role with no key involved, so offering "Set API key" reads as a
+  // bogus requirement (a field user hit exactly this). State the signed-in
+  // fact instead — there is no key to set, clear, or sign out of in this mode.
+  if (!hasApiKey && me?.source === "local") {
+    return (
+      <span
+        className="session-badge"
+        title="Local mode: the app trusts this laptop's own browser. No API key exists or is needed."
+      >
+        <span className="session-badge-id">
+          <strong>Signed in as local {role}</strong>
+        </span>
+      </span>
+    );
+  }
+
   if (hasApiKey && isLoading) {
     return <span className="site-pill subtle">Identifying...</span>;
   }
