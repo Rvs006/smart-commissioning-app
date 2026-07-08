@@ -248,7 +248,7 @@ class SyncRoundTripTests(unittest.TestCase):
             self.hub_store.get_run(self.run_a)["result_summary"]["integrity"],
             _integrity_block(),
         )
-        self.assertEqual(self.hub_discovery.count_devices(self.run_a), 1)
+        self.assertEqual(len(self.hub_discovery.list_devices(self.run_a)), 1)
         self.assertEqual(self.hub_discovery.list_devices(self.run_a)[0]["attributes"], {"mac": "aa:bb"})
         self.assertEqual(self.hub_discovery.list_points(self.run_a)[0]["point_name"], "co2")
         self.assertEqual(self.hub_discovery.list_topics(self.run_b)[0]["message_count"], 3)
@@ -266,7 +266,7 @@ class SyncRoundTripTests(unittest.TestCase):
         self.assertEqual(second.rejected_immutable, 0)
         # No duplicate rows.
         self.assertEqual(len(self.hub_store.list_runs("demo-project", "demo-site")), 3)
-        self.assertEqual(self.hub_discovery.count_devices(self.run_a), 1)
+        self.assertEqual(len(self.hub_discovery.list_devices(self.run_a)), 1)
 
     def test_tampered_member_bytes_rejected_nothing_written(self) -> None:
         bundle = self._build(run_ids=[self.run_a])

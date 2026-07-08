@@ -1,0 +1,9 @@
+# Local-only override (do not commit): a native Windows PostgreSQL service
+# (postgresql-x64-16) occupies host port 5432 and needs admin rights to stop.
+# Remap the host-side psql debug port to 5433; containers keep internal 5432.
+# Usage:
+#   docker compose -f infra/docker-compose.yml -f infra/docker-compose.local.yml --env-file infra/.env up -d
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:5433:5432"

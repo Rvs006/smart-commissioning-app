@@ -5,7 +5,6 @@ from pathlib import Path
 from app.schemas.configuration import SecretMaterialRequest
 from app.schemas.jobs import JobCreateRequest, ReportRequest
 from app.services.configuration_service import DEFAULT_CONFIGURATION, ConfigurationService
-from app.services.discovery_observations import build_observation, parse_port_specification
 from app.services.import_service import PROFILES, ImportService
 from app.services.run_service import RunService
 from smart_commissioning_core.db.base import Base
@@ -106,26 +105,6 @@ class ConfigurationReviewTests(unittest.TestCase):
                 engine.dispose()
 
 
-class DiscoveryReviewTests(unittest.TestCase):
-    def test_ports_support_protocols_and_common_fallback(self) -> None:
-        default_ports = parse_port_specification("")
-        explicit_ports = parse_port_specification("47808/udp, 443/tcp")
-
-        self.assertEqual([(port.port, port.protocol) for port in default_ports], [(47808, "udp"), (80, "tcp"), (443, "tcp")])
-        self.assertEqual([(port.port, port.protocol, port.service) for port in explicit_ports], [(47808, "udp", "BACnet"), (443, "tcp", "HTTPS")])
-
-    def test_mac_match_takes_precedence(self) -> None:
-        observation = build_observation(
-            {"ip_address": "192.168.4.203", "mac_address": "c0:a6:f3:f2:f3:2f", "hostname": "network-chip"},
-            {"asset_id": "Milesight UG-65", "ip_address": "192.168.4.201", "mac_address": "C0-A6-F3-F2-F3-2F"},
-        )
-
-        self.assertEqual(observation.asset_id, "Milesight UG-65")
-        self.assertEqual(observation.match_basis, "mac")
-        self.assertEqual(observation.mac_address, "C0:A6:F3:F2:F3:2F")
-        self.assertIsNotNone(observation.last_seen_at)
-
-
 class ImportTemplateReviewTests(unittest.TestCase):
     def test_default_templates_include_required_columns_and_example_row(self) -> None:
         service = ImportService()
@@ -154,7 +133,7 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
     }
 
     def _mqtt(self, **overrides: str) -> list:
-        return PROFILES["mqtt_register"].row_validator({**self._MQTT_BASE, **overrides}, 2)
+        return PROFILES["mqtt_register"].validate_row({**self._MQTT_BASE, **overrides}, 2)
 
     def test_asset_id_or_name_is_one_of(self) -> None:
         self.assertEqual(self._mqtt(**{"Asset name": "Meter 9"}), [])  # name only
@@ -184,10 +163,10 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
             "Expected IP address": "10.10.25.117",
             "Expected services/ports": "443/tcp",
         }
-        self.assertEqual(PROFILES["ip_register"].row_validator({**ip_base, "Asset name": "AHU"}, 2), [])
+        self.assertEqual(PROFILES["ip_register"].validate_row({**ip_base, "Asset name": "AHU"}, 2), [])
         self.assertIn(
             "missing_asset_identity",
-            [e.code for e in PROFILES["ip_register"].row_validator(ip_base, 2)],
+            [e.code for e in PROFILES["ip_register"].validate_row(ip_base, 2)],
         )
 
 

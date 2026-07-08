@@ -28,6 +28,7 @@ MQTT observed-value rows. Any of these may instead be supplied inline through
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 from smart_commissioning_core.engines.base import (
@@ -40,9 +41,12 @@ from smart_commissioning_core.engines.comparison_common import (
     DiscoveryLoader,
     ImportLoader,
     Tolerance,
+    _is_required,
+    _stringify,
     build_tolerance_index,
     coerce_number,
     extract_observed_scalar,
+    make_issue,
     normalise_unit,
     parse_tolerance,
     within_tolerance,
@@ -54,33 +58,8 @@ _CANCEL_CHECK_CHUNK = 200
 _ISSUE_PREFIX = "MAP"  # mapping comparison
 
 
-def _issue(
-    issues: Sequence[ValidationIssueRecord],
-    *,
-    asset_id: str | None,
-    issue_type: str,
-    severity: str,
-    description: str,
-    point_name: str | None = None,
-    topic: str | None = None,
-    expected_value: str | None = None,
-    observed_value: str | None = None,
-    match_basis: str | None = None,
-    suggested_action: str | None = None,
-) -> ValidationIssueRecord:
-    return ValidationIssueRecord(
-        issue_id=f"{_ISSUE_PREFIX}-{len(issues) + 1:04d}",
-        asset_id=asset_id,
-        issue_type=issue_type,
-        severity=severity,
-        description=description,
-        point_name=point_name,
-        topic=topic,
-        expected_value=expected_value,
-        observed_value=observed_value,
-        match_basis=match_basis,
-        suggested_action=suggested_action,
-    )
+# Sequential "MAP-0001"-style issue builder (shared numbering helper).
+_issue = partial(make_issue, prefix=_ISSUE_PREFIX)
 
 
 def _bacnet_observed_key(row: Mapping[str, Any]) -> str:
@@ -395,21 +374,6 @@ def _resolve_tolerance(
         if by_point is not None:
             return by_point
     return None
-
-
-def _is_required(flag: Any) -> bool:
-    text = str(flag or "").strip().casefold()
-    return text in {"required", "req", "mandatory", "true", "yes", "1"}
-
-
-def _stringify(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float):
-        return repr(value)
-    return str(value)
 
 
 # -- engine + processor wiring ---------------------------------------------

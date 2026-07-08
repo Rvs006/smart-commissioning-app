@@ -14,13 +14,10 @@ comparison/mqtt-config tests use inline parameters / fakes. No assertion in this
 file depends on real hardware.
 """
 
-import atexit
-import os
-import shutil
 import socket
-import tempfile
 import unittest
-from pathlib import Path
+
+from harness import ApiTestCase
 
 _API_KEY = "test-engines-api-key"
 
@@ -33,51 +30,9 @@ _ENV_OVERRIDES = {
 _AUTH = {"authorized": True}
 
 
-def _shared_test_database_url() -> str:
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
-
-
-class _EngineApiTestCase(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._previous_env = {}
-        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls._client_context = TestClient(app, headers={"X-API-Key": _API_KEY})
-        cls.client = cls._client_context.__enter__()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
+class _EngineApiTestCase(ApiTestCase):
+    env = _ENV_OVERRIDES
+    client_headers = {"X-API-Key": _API_KEY}
 
     def _post(self, path: str, parameters: dict, job_type: str) -> dict:
         response = self.client.post(

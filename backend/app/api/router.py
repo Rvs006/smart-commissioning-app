@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends
 from smart_commissioning_core.rbac import Role
 
 from app.api.routes import (
-    blueprint,
     configuration,
     discovery,
     events,
@@ -34,13 +33,9 @@ api_router.include_router(imports.public_router, prefix="/imports", tags=["impor
 
 # Every other /api/v1 route requires authentication (app.core.auth). RBAC is
 # then layered per-route inside each router (require_role on the data/mutation
-# routes); two single-tier routers (blueprint, events) are gated here at the
-# include level, and the hub ingest router is admin-only.
+# routes); one single-tier router (events) is gated here at the include level,
+# and the hub ingest router is admin-only.
 protected_router = APIRouter(dependencies=[Depends(require_auth)])
-# Blueprint is a static read-only capability map: any authenticated viewer+.
-protected_router.include_router(
-    blueprint.router, tags=["blueprint"], dependencies=[Depends(require_role(Role.VIEWER))]
-)
 protected_router.include_router(configuration.router, prefix="/configuration", tags=["configuration"])
 protected_router.include_router(imports.router, prefix="/imports", tags=["imports"])
 protected_router.include_router(runs.router, prefix="/runs", tags=["runs"])

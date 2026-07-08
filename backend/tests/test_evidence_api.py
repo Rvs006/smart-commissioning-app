@@ -19,6 +19,8 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from harness import ApiTestCase
+
 _API_KEY = "test-evidence-api-key"
 
 _ENV_OVERRIDES = {
@@ -28,38 +30,19 @@ _ENV_OVERRIDES = {
 }
 
 
-def _shared_test_database_url() -> str:
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
+class EvidenceVerifyApiTests(ApiTestCase):
+    env = _ENV_OVERRIDES
+    client_headers = {"X-API-Key": _API_KEY}
 
-
-class EvidenceVerifyApiTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
+    def before_client(cls) -> None:
         from unittest import mock
-
-        cls._previous_env = {}
-        cls._temp_runtime = tempfile.mkdtemp(prefix="sct-evidence-runtime-")
-        atexit.register(shutil.rmtree, cls._temp_runtime, ignore_errors=True)
-        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
 
         # Point the signing key + backup sources at the temp runtime via patching
         # (SECRETS_ROOT is bound by value at import; patching where it is used is
         # robust and matches test_secret_storage.py). Patches live for the class.
+        cls._temp_runtime = tempfile.mkdtemp(prefix="sct-evidence-runtime-")
+        atexit.register(shutil.rmtree, cls._temp_runtime, ignore_errors=True)
         secrets_root = Path(cls._temp_runtime) / "secrets"
         imports_files = Path(cls._temp_runtime) / "imports" / "files"
         secrets_root.mkdir(parents=True, exist_ok=True)
@@ -76,28 +59,11 @@ class EvidenceVerifyApiTests(unittest.TestCase):
         for patcher in cls._patchers:
             patcher.start()
 
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls._client_context = TestClient(app, headers={"X-API-Key": _API_KEY})
-        cls.client = cls._client_context.__enter__()
-
     @classmethod
     def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
+        super().tearDownClass()
         for patcher in cls._patchers:
             patcher.stop()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
 
     def _create_report(self, output_format: str = "zip") -> str:
         response = self.client.post(

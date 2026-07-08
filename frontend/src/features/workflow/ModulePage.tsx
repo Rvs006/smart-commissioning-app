@@ -11,13 +11,10 @@ import {
   getDiscoveryTopicsXlsxPath,
   getValidationIssues,
   getValidationRun,
-  getImportErrors,
   getImportTemplatePath,
   getReportDownloadPath,
   ImportBatchSummary,
-  ImportErrorReport,
   ImportType,
-  JobStatus,
   listImportProfiles,
   listReports,
   rollbackMqttConfigPublish,
@@ -40,17 +37,12 @@ import {
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
-import { isTerminalStatus } from "./runFormat";
+import { isTerminalStatus, toHealthState } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
 type ModulePageProps = {
   moduleRoute: string;
-};
-
-type ImportOutcome = {
-  summary: ImportBatchSummary;
-  errors: ImportErrorReport | null;
 };
 
 type CopyFeedback = {
@@ -190,7 +182,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const [selectedImportType, setSelectedImportType] = useState<ImportType | "">("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [importOutcome, setImportOutcome] = useState<ImportOutcome | null>(null);
+  const [importOutcome, setImportOutcome] = useState<ImportBatchSummary | null>(null);
   const [runOutcome, setRunOutcome] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
@@ -412,20 +404,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [activeRunTerminal, activeRunStatus]);
 
   const importMutation = useMutation({
-    mutationFn: async (input: { importType: ImportType; file: File }) => {
-      const summary = await createImport({
+    mutationFn: (input: { importType: ImportType; file: File }) =>
+      createImport({
         file: input.file,
         importType: input.importType,
-      });
-      const errors =
-        summary.status !== "accepted" || summary.rejected_rows > 0
-          ? await getImportErrors(summary.import_id)
-          : null;
-
-      return { errors, summary };
-    },
-    onSuccess: (outcome) => {
-      setImportOutcome(outcome);
+      }),
+    onSuccess: (summary) => {
+      setImportOutcome(summary);
     },
   });
 
@@ -681,7 +666,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return null;
   }, [liveMetrics, module.route, validationRunQuery.data, reportsQuery.isLoading, reportsQuery.data]);
 
-  const activeStatusClass = activeRunStatus ? toStatusClass(activeRunStatus) : "queued";
+  const activeStatusClass = activeRunStatus ? toHealthState(activeRunStatus) : "queued";
   // Cancel is an engineer+ mutation; hide it entirely for lower roles so a
   // viewer/reviewer monitoring a run never sees a button that would 403.
   const canCancel =
@@ -1018,11 +1003,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               )}
 
               {importOutcome && (
-                <div className={`state-panel ${importOutcome.summary.status}`}>
-                  <strong>{importOutcome.summary.status.toUpperCase()}</strong>
+                <div className={`state-panel ${importOutcome.status}`}>
+                  <strong>{importOutcome.status.toUpperCase()}</strong>
                   <span>
-                    {importOutcome.summary.accepted_rows} accepted ·{" "}
-                    {importOutcome.summary.rejected_rows} rejected
+                    {importOutcome.accepted_rows} accepted ·{" "}
+                    {importOutcome.rejected_rows} rejected
                   </span>
                 </div>
               )}
@@ -1809,7 +1794,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         <td>{report.report_type}</td>
                         <td>{report.output_format.toUpperCase()}</td>
                         <td>
-                          <span className={`status-token ${toStatusClass(report.status)}`}>
+                          <span className={`status-token ${toHealthState(report.status)}`}>
                             {report.status}
                           </span>
                         </td>
@@ -2224,7 +2209,6 @@ function toIssueRow(issue: ValidationIssueRecord): IssueRow {
     assetId: issue.asset_id ?? "Unknown asset",
     id: issue.issue_id,
     message: details,
-    owner: "Commissioning team",
     severity: toIssueSeverity(issue.severity),
   };
 }
@@ -2237,16 +2221,6 @@ function toIssueSeverity(severity: ValidationIssueRecord["severity"]): IssueRow[
     return "major";
   }
   return "minor";
-}
-
-function toStatusClass(status: JobStatus): string {
-  if (status === "succeeded") {
-    return "ready";
-  }
-  if (status === "cancelled") {
-    return "warning";
-  }
-  return status;
 }
 
 function formatSummaryValue(value: unknown): string {

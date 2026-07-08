@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-__all__ = ["Role", "role_at_least", "ROLE_ORDER"]
+__all__ = ["Role", "ROLE_ORDER"]
 
 
 class Role(StrEnum):
@@ -66,14 +66,3 @@ class Role(StrEnum):
 
 # Declaration order IS the privilege order (ascending). Used by Role.rank.
 ROLE_ORDER: tuple[Role, ...] = (Role.VIEWER, Role.REVIEWER, Role.ENGINEER, Role.ADMIN)
-
-
-def role_at_least(role: Role | str, minimum: Role | str) -> bool:
-    """Total-order helper: is ``role`` >= ``minimum``?
-
-    Accepts either Role instances or their string values, so callers holding a
-    persisted role string don't have to convert first.
-    """
-    role_obj = role if isinstance(role, Role) else Role.from_value(role)
-    minimum_obj = minimum if isinstance(minimum, Role) else Role.from_value(minimum)
-    return role_obj.at_least(minimum_obj)

@@ -16,13 +16,10 @@ first app.main import points at the same file across modules.
 """
 
 import asyncio
-import atexit
 import json
-import os
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
+
+from harness import ApiTestCase
 
 _API_KEY = "test-sse-api-key"
 
@@ -31,18 +28,6 @@ _ENV_OVERRIDES = {
     "AUTH_MODE": "api_key",
     "API_KEY": _API_KEY,
 }
-
-
-def _shared_test_database_url() -> str:
-    """Process-wide temporary SQLite database shared by all API test modules."""
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
 
 
 def _parse_sse(body: str) -> list[dict]:
@@ -69,41 +54,9 @@ def _parse_sse(body: str) -> list[dict]:
     return frames
 
 
-class SseEventsApiTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._previous_env = {}
-        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls.app = app
-        cls._client_context = TestClient(app, headers={"X-API-Key": _API_KEY})
-        cls.client = cls._client_context.__enter__()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
+class SseEventsApiTests(ApiTestCase):
+    env = _ENV_OVERRIDES
+    client_headers = {"X-API-Key": _API_KEY}
 
     def _seed_terminal_run(self) -> dict:
         """Create a UDMI validation run (terminal synchronously in inline mode)."""

@@ -251,12 +251,6 @@ def compare_bacnet_mqtt(run_id: str, parameters: dict) -> None:
         logger.info("Finished BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})
 
 
-@dramatiq.actor(queue_name="reports")
-def generate_report(run_id: str, parameters: dict) -> None:
-    with run_id_context(run_id):
-        logger.info("Queued placeholder execution for generate_report", extra={"actor": "generate_report"})
-
-
 def _positive_int(value, default: int) -> int:
     try:
         parsed = int(value)

@@ -149,9 +149,6 @@ class RunLifecycleTests(SqliteTestCase):
             "delete+reinsert must preserve the caller's ordering",
         )
 
-        record = self.store.append_issue(run_id, _issue("iss-appended", "appended last"))
-        self.assertEqual(record["issues"][-1]["issue_id"], "iss-appended")
-
     def test_replace_issues_accepts_validation_issue_records(self) -> None:
         run_id = self.store.create_run(
             project_id="demo-project", site_id="demo-site", job_type="udmi_validation"
@@ -282,7 +279,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
             project_id="demo-project", site_id="demo-site", job_type="ip_discovery"
         )["run_id"]
 
-    def test_replace_list_count_devices_roundtrip(self) -> None:
+    def test_replace_list_devices_roundtrip(self) -> None:
         devices = [
             {
                 "address": "10.10.25.117",
@@ -299,7 +296,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
 
         written = self.repository.replace_devices(self.run_id, devices)
         self.assertEqual(written, 2)
-        self.assertEqual(self.repository.count_devices(self.run_id), 2)
+        self.assertEqual(len(self.repository.list_devices(self.run_id)), 2)
 
         listed = self.repository.list_devices(self.run_id)
         self.assertEqual([row["address"] for row in listed], ["10.10.25.117", "10.10.25.118"])
@@ -309,10 +306,9 @@ class DiscoveryRepositoryTests(SqliteTestCase):
 
         # replace is idempotent: re-writing fewer rows replaces, not appends.
         self.repository.replace_devices(self.run_id, [{"address": "10.10.25.200"}])
-        self.assertEqual(self.repository.count_devices(self.run_id), 1)
         self.assertEqual([r["address"] for r in self.repository.list_devices(self.run_id)], ["10.10.25.200"])
 
-    def test_replace_list_count_points_roundtrip(self) -> None:
+    def test_replace_list_points_roundtrip(self) -> None:
         points = [
             {
                 "device_ref": "10.10.25.117",
@@ -326,7 +322,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
         ]
 
         self.assertEqual(self.repository.replace_points(self.run_id, points), 2)
-        self.assertEqual(self.repository.count_points(self.run_id), 2)
+        self.assertEqual(len(self.repository.list_points(self.run_id)), 2)
 
         listed = self.repository.list_points(self.run_id)
         self.assertEqual(listed[0]["point_name"], "supply_air_temperature_sensor")
@@ -335,7 +331,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
         self.assertEqual(listed[0]["attributes"], {"object_type": "analog-input"})
         self.assertIsNone(listed[1]["device_ref"])
 
-    def test_replace_list_count_topics_roundtrip(self) -> None:
+    def test_replace_list_topics_roundtrip(self) -> None:
         topics = [
             {
                 "topic": "electracom/sct/1532/ahu/l03/events/pointset",
@@ -347,7 +343,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
         ]
 
         self.assertEqual(self.repository.replace_topics(self.run_id, topics), 2)
-        self.assertEqual(self.repository.count_topics(self.run_id), 2)
+        self.assertEqual(len(self.repository.list_topics(self.run_id)), 2)
 
         listed = self.repository.list_topics(self.run_id)
         self.assertEqual(listed[0]["topic"], "electracom/sct/1532/ahu/l03/events/pointset")
@@ -363,15 +359,15 @@ class DiscoveryRepositoryTests(SqliteTestCase):
         self.repository.replace_devices(self.run_id, [{"address": "a"}])
         self.repository.replace_devices(other_run, [{"address": "b"}, {"address": "c"}])
 
-        self.assertEqual(self.repository.count_devices(self.run_id), 1)
-        self.assertEqual(self.repository.count_devices(other_run), 2)
+        self.assertEqual(len(self.repository.list_devices(self.run_id)), 1)
+        self.assertEqual(len(self.repository.list_devices(other_run)), 2)
         self.assertEqual([r["address"] for r in self.repository.list_devices(self.run_id)], ["a"])
 
     def test_cascade_delete_on_run_delete(self) -> None:
         self.repository.replace_devices(self.run_id, [{"address": "a"}])
         self.repository.replace_points(self.run_id, [{"point_name": "p"}])
         self.repository.replace_topics(self.run_id, [{"topic": "t"}])
-        self.assertEqual(self.repository.count_devices(self.run_id), 1)
+        self.assertEqual(len(self.repository.list_devices(self.run_id)), 1)
 
         from smart_commissioning_core.db.engine import session_factory
         from smart_commissioning_core.db.models import Run
@@ -380,9 +376,9 @@ class DiscoveryRepositoryTests(SqliteTestCase):
             session.delete(session.get(Run, self.run_id))
 
         # FK ondelete=CASCADE (PRAGMA foreign_keys=ON on SQLite) removes the rows.
-        self.assertEqual(self.repository.count_devices(self.run_id), 0)
-        self.assertEqual(self.repository.count_points(self.run_id), 0)
-        self.assertEqual(self.repository.count_topics(self.run_id), 0)
+        self.assertEqual(self.repository.list_devices(self.run_id), [])
+        self.assertEqual(self.repository.list_points(self.run_id), [])
+        self.assertEqual(self.repository.list_topics(self.run_id), [])
 
 
 class ConfigurationRepositoryTests(SqliteTestCase):

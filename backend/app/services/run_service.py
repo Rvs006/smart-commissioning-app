@@ -202,13 +202,6 @@ class RunService:
     ) -> RunRecord:
         return RunRecord.model_validate(self._store.replace_issues(run_id, issues))
 
-    def append_issue(
-        self,
-        run_id: str,
-        issue: ValidationIssueRecord | dict[str, object],
-    ) -> RunRecord:
-        return RunRecord.model_validate(self._store.append_issue(run_id, issue))
-
     # -- cooperative cancellation (CancellableRunStore protocol) --------------
 
     def request_cancel(self, run_id: str) -> RunRecord:

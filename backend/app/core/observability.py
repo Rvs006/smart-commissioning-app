@@ -20,7 +20,6 @@ client, and the real ping against a live broker requires on-site validation.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -195,15 +194,3 @@ def _safe_error(error: Exception) -> str:
     """Truncated error text; defensive so probe bodies stay small."""
     text = str(error).strip() or error.__class__.__name__
     return text[:200]
-
-
-class _Timer:
-    """Tiny monotonic timer used by the request middleware."""
-
-    __slots__ = ("_start",)
-
-    def __init__(self) -> None:
-        self._start = time.perf_counter()
-
-    def elapsed(self) -> float:
-        return time.perf_counter() - self._start

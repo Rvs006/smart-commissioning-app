@@ -182,9 +182,9 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   exe silently shipped without NIC enumeration — the health-only boot smoke
   could not see it. The launcher now freezes `psutil` explicitly and the
   `windows-portable` CI boot smoke additionally asserts `psutil` exists inside
-  the frozen bundle and that `/api/v1/system/interfaces` answers 200 (an empty
-  list is correct on the CI runner, whose only adapter is Hyper-V-virtual and
-  deliberately filtered).
+  the frozen bundle (a `_internal\psutil` presence check — the endpoint itself
+  cannot detect the regression because the import-guard makes an empty list a
+  valid 200 either way).
 - **Inactive users' API keys no longer grant local-mode admin.** In `local`
   auth mode, a key matching a deactivated (or corrupt-role) user row used to
   fall through to the keyless-loopback admin path, contradicting the
@@ -252,6 +252,29 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Removed
 
+- **Repo-wide over-engineering cleanup (~1,750 lines net, behavior-neutral).**
+  An audit ranked and adversarially verified the cuts before applying them;
+  every gate (ruff, backend/core/worker `unittest`, frontend
+  test/lint/typecheck/build) stays green. Highlights: a shared
+  `backend/tests/harness.py` collapses the DB-harness boilerplate duplicated
+  across 11 test files; four field pre-flight scripts fold into
+  `smoke_local.{sh,ps1}` behind a `--preflight`/`-Preflight` flag
+  (`phase5_preflight.*` deleted); dead modules and endpoints go
+  (`discovery_observations`, `smoke_udmi_api`, the `/blueprint` route and its
+  client, the pre-DB `import_runtime_state` migration, the worker's dead
+  `main.py`/`smoke_udmi_adapter.py`/`generate_report` actor); verbatim
+  duplicate helpers are de-duplicated across core engines and repositories;
+  hand-rolled code is replaced by stdlib (`dict.fromkeys` dedup,
+  `dataclasses.asdict`); import profiles stop listing their columns twice; and
+  seven never-rendered `ModuleDefinition` fields plus other dead frontend
+  exports are dropped.
+- **`pydantic-settings` dropped from the worker.** The worker read two env vars
+  (`REDIS_URL`, `DATABASE_URL`) through a settings model; that is now plain
+  `os.getenv`, removing the dependency from the worker image.
+- **CI runs halved per PR commit.** `ci.yml` and `windows-compat.yml` triggered
+  on unfiltered `push` *and* `pull_request`, so same-repo PR branches ran every
+  workflow twice; `push` is now filtered to `main`. `windows-compat.yml` also no
+  longer re-runs the ruff/eslint/tsc gates that `ci.yml` already owns.
 - Removed the dead UI prototypes and the zip-inspector dev tool (still available
   in git history at the baseline commit `3471050`).
 

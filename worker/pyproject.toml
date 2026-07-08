@@ -23,7 +23,6 @@ classifiers = [
 # change the pin here, re-run the tests locally, then commit.
 dependencies = [
   "dramatiq[redis]==1.18.0",
-  "pydantic-settings==2.13.1",
   "sqlalchemy==2.0.49",
   "psycopg[binary]==3.3.4"
 ]

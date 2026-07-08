@@ -79,7 +79,7 @@ cd frontend && npm run build
 
 ## CI gates
 
-CI (`.github/workflows/ci.yml`) runs three jobs on every push and pull request:
+CI (`.github/workflows/ci.yml`) runs three jobs on every pull request and push to `main`:
 
 - **`python`** — installs `core`/`backend`/`worker`, runs `ruff check`, then the
   core and backend `unittest` suites. mypy runs per package but is

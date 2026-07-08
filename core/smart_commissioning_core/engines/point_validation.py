@@ -42,6 +42,7 @@ the API/worker call (matching ``process_udmi_validation_run``).
 """
 
 from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Any
 
 from smart_commissioning_core.engines.base import (
@@ -54,9 +55,12 @@ from smart_commissioning_core.engines.comparison_common import (
     DiscoveryLoader,
     ImportLoader,
     Tolerance,
+    _is_required,
+    _stringify,
     build_tolerance_index,
     coerce_number,
     extract_observed_scalar,
+    make_issue,
     normalise_unit,
     within_tolerance,
 )
@@ -70,32 +74,8 @@ _CANCEL_CHECK_CHUNK = 200
 _ISSUE_PREFIX = "BPV"  # BACnet Point Validation
 
 
-def _issue(
-    issues: Sequence[ValidationIssueRecord],
-    *,
-    asset_id: str | None,
-    issue_type: str,
-    severity: str,
-    description: str,
-    point_name: str | None = None,
-    expected_value: str | None = None,
-    observed_value: str | None = None,
-    match_basis: str | None = None,
-    suggested_action: str | None = None,
-) -> ValidationIssueRecord:
-    """Construct a sequential, prefixed issue record (mirrors udmi_validation)."""
-    return ValidationIssueRecord(
-        issue_id=f"{_ISSUE_PREFIX}-{len(issues) + 1:04d}",
-        asset_id=asset_id,
-        issue_type=issue_type,
-        severity=severity,
-        description=description,
-        point_name=point_name,
-        expected_value=expected_value,
-        observed_value=observed_value,
-        match_basis=match_basis,
-        suggested_action=suggested_action,
-    )
+# Sequential "BPV-0001"-style issue builder (shared numbering helper).
+_issue = partial(make_issue, prefix=_ISSUE_PREFIX)
 
 
 def _expected_point_key(row: Mapping[str, Any]) -> str:
@@ -432,11 +412,6 @@ def _resolve_tolerance(
     return None
 
 
-def _is_required(flag: Any) -> bool:
-    text = str(flag or "").strip().casefold()
-    return text in {"required", "req", "mandatory", "true", "yes", "1"}
-
-
 def _observed_asset_id(observed: Mapping[str, Any]) -> str | None:
     attributes = observed.get("attributes")
     if isinstance(attributes, Mapping):
@@ -444,17 +419,6 @@ def _observed_asset_id(observed: Mapping[str, Any]) -> str | None:
         if value:
             return str(value)
     return None
-
-
-def _stringify(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float):
-        # Avoid noisy trailing zeros while staying deterministic.
-        return repr(value)
-    return str(value)
 
 
 # -- engine + processor wiring ---------------------------------------------

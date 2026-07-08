@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from smart_commissioning_core.engines.comparison_common import make_issue
 from smart_commissioning_core.mqtt_settings import (
     _broker_error_status,
     _string,
@@ -592,8 +593,9 @@ def _issue(
         "state_validation": "UDMI-ST",
         "metadata_validation": "UDMI-MD",
     }.get(issue_type, "UDMI-IS")
-    return ValidationIssueRecord(
-        issue_id=f"{prefix}-{len(issues) + 1:04d}",
+    return make_issue(
+        issues,
+        prefix,
         asset_id=asset_id,
         issue_type=issue_type,
         severity=severity,

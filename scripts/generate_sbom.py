@@ -390,16 +390,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit 2 if any installed dependency has a non-allowlisted/unknown license.",
     )
-    parser.add_argument(
-        "--allow",
-        action="append",
-        default=[],
-        help="Add a license substring to the allowlist (repeatable).",
-    )
-    parser.add_argument("--print", action="store_true", help="Print the markdown to stdout.")
     args = parser.parse_args(argv)
 
-    allowlist = DEFAULT_ALLOWLIST + tuple(args.allow)
+    allowlist = DEFAULT_ALLOWLIST
 
     sbom = build_sbom()
     markdown = render_markdown(sbom, allowlist)
@@ -410,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown:
         args.markdown.parent.mkdir(parents=True, exist_ok=True)
         args.markdown.write_text(markdown + "\n", encoding="utf-8")
-    if args.print or (not args.json and not args.markdown):
+    if not args.json and not args.markdown:
         print(markdown)
 
     flagged = [

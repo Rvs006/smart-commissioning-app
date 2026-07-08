@@ -232,7 +232,6 @@ Restore or extend these rules from the older validator logic:
 ### Health and Metadata
 
 - `GET /api/v1/health`
-- `GET /api/v1/blueprint`
 
 ### Configuration
 

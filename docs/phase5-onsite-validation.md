@@ -19,7 +19,7 @@ Legend: ☐ = to verify · **STOP** = a failure here blocks production rollout.
 
 ## 0. Pre-flight (off-site, before travelling)
 
-- ☐ **On the technician laptop, on arrival (before any live action): run the pre-site preflight** — `scripts/phase5_preflight.sh http://127.0.0.1:8000` (bash) or `pwsh scripts/phase5_preflight.ps1 -BaseUrl http://127.0.0.1:8000` (Windows). It does only SAFE checks (health/ready/metrics/config, cert-ref shape, **dry-run** IP + MQTT discovery, and a TCP-only broker reachability probe — no scan, no publish, no secret material printed) and exits non-zero on any failure. Also see the live-surface map in [phase5-live-surface-inventory.md](phase5-live-surface-inventory.md).
+- ☐ **On the technician laptop, on arrival (before any live action): run the pre-site preflight** — `scripts/smoke_local.sh --preflight http://127.0.0.1:8000` (bash) or `pwsh scripts/smoke_local.ps1 -Preflight -BaseUrl http://127.0.0.1:8000` (Windows). It does only SAFE checks (health/ready/metrics/config, cert-ref shape, **dry-run** IP + MQTT discovery, and a TCP-only broker reachability probe — no scan, no publish, no secret material printed) and exits non-zero on any failure. Also see the live-surface map in [phase5-live-surface-inventory.md](phase5-live-surface-inventory.md).
 - ☐ `docker compose -f infra/docker-compose.yml build api worker frontend` succeeds on a machine with the Docker daemon running. **STOP** if images don't build — never validated here.
 - ☐ `docker compose -f infra/docker-compose.yml config` renders with real `.env`; `${VAR:?}` guards fail fast when a required secret is missing.
 - ☐ CI is green on the branch (push to the company remote first — see the PR). Confirm the `python`, `frontend`, and `sbom` jobs all run.
@@ -43,7 +43,6 @@ Legend: ☐ = to verify · **STOP** = a failure here blocks production rollout.
 ## 1a. Postgres hub specifics
 
 - ☐ The full app works on **Postgres** (everything here was proven on SQLite). Watch for: timestamp tz handling, JSON column behavior, the `BEGIN IMMEDIATE`/`SELECT FOR UPDATE` concurrency path (SQLite-specific code is bypassed on Postgres — confirm `update_result_summary` merges don't lose updates under concurrent worker+API writes). **STOP** on any lost-update under concurrency.
-- ☐ `python -m app.scripts.import_runtime_state` (if migrating any existing edge data) lands correctly in Postgres.
 
 ---
 

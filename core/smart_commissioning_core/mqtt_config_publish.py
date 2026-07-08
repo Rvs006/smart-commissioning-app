@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from smart_commissioning_core.engines.comparison_common import make_issue
 from smart_commissioning_core.engines.safety import require_scan_authorization
 from smart_commissioning_core.mqtt_settings import (
     _broker_error_status,
@@ -565,9 +566,9 @@ def _issue(
     status_detail: str | None = None,
     last_seen_at: datetime | None = None,
 ) -> ValidationIssueRecord:
-    return ValidationIssueRecord(
-        issue_id=f"MQTT-CFG-{len(issues) + 1:04d}",
-        asset_id=None,
+    return make_issue(
+        issues,
+        "MQTT-CFG",
         issue_type=issue_type,
         severity=severity,
         description=description,

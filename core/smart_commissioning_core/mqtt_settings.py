@@ -43,8 +43,8 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
     if not host:
         raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")
 
-    port = _int(parameters.get("broker_port") or mqtt_values.get("Port"), default=8883)
-    use_tls = _bool(parameters.get("use_tls")) or port == 8883
+    port = parse_int(parameters.get("broker_port") or mqtt_values.get("Port"), default=8883)
+    use_tls = parse_bool(parameters.get("use_tls")) or port == 8883
 
     source_ip = _string(parameters.get("source_ip"))
     source_address = (source_ip, 0) if source_ip else None
@@ -53,28 +53,16 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
         host=host,
         port=port,
         client_id=_string(parameters.get("client_id")) or _string(mqtt_values.get("Client ID")) or "smart-commissioning-tool",
-        keep_alive=_int(parameters.get("keep_alive") or mqtt_values.get("Keep Alive Interval"), default=60),
+        keep_alive=parse_int(parameters.get("keep_alive") or mqtt_values.get("Keep Alive Interval"), default=60),
         username=_optional_secret(parameters.get("username") or mqtt_values.get("MQTT Username")),
         password=_optional_secret(parameters.get("password") or mqtt_values.get("MQTT Password")),
         use_tls=use_tls,
         ca_certificate=_optional_secret(certificate_values.get("CA Certificate")),
         client_certificate=_optional_secret(certificate_values.get("Client Certificate")),
         private_key=_optional_secret(certificate_values.get("Private Key")),
-        timeout_seconds=_float(parameters.get("connect_timeout_seconds"), default=5.0),
+        timeout_seconds=parse_float(parameters.get("connect_timeout_seconds"), default=5.0),
         source_address=source_address,
     )
-
-
-def parse_bool(value: object) -> bool:
-    return _bool(value)
-
-
-def parse_float(value: object, *, default: float) -> float:
-    return _float(value, default=default)
-
-
-def parse_int(value: object, *, default: int) -> int:
-    return _int(value, default=default)
 
 
 def _string(value: object) -> str:
@@ -93,7 +81,7 @@ def _broker_error_status(error: Exception) -> str:
     return "broker_unreachable"
 
 
-def _bool(value: object) -> bool:
+def parse_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -101,7 +89,7 @@ def _bool(value: object) -> bool:
     return bool(value)
 
 
-def _float(value: object, *, default: float) -> float:
+def parse_float(value: object, *, default: float) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
@@ -109,7 +97,7 @@ def _float(value: object, *, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
-def _int(value: object, *, default: int) -> int:
+def parse_int(value: object, *, default: int) -> int:
     try:
         parsed = int(str(value).strip())
     except (TypeError, ValueError):

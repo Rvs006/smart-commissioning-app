@@ -125,7 +125,6 @@ def configure_environment(root: Path) -> None:
         # is not already importable (for example in the unfrozen dev layout).
         sys.path.insert(0, str(core_root))
     os.environ["SCT_FRONTEND_DIST"] = str(frontend_dist)
-    os.environ["SMART_COMMISSIONING_RUNS_ROOT"] = str(runtime_root / "runs")
     os.environ["SMART_COMMISSIONING_SECRETS_ROOT"] = str(runtime_root / "secrets")
     # Run/import/configuration records live in this SQLite file; the API
     # applies migrations on startup (AUTO_MIGRATE defaults to true).

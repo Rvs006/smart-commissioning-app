@@ -34,8 +34,6 @@ from pathlib import Path
 from smart_commissioning_core.integrity import SigningKey, cryptography_available
 
 __all__ = [
-    "DEFAULT_EDGE_ID_FILENAME",
-    "DEFAULT_SIGNING_KEY_FILENAME",
     "EdgeIdentity",
     "edge_id_path",
     "edge_signing_key_path",
@@ -43,9 +41,6 @@ __all__ = [
     "load_or_create_edge_id",
     "load_or_create_edge_identity",
 ]
-
-DEFAULT_EDGE_ID_FILENAME = "edge_id"
-DEFAULT_SIGNING_KEY_FILENAME = "edge_signing_key"
 
 
 @dataclass(frozen=True)
@@ -62,31 +57,20 @@ class EdgeIdentity:
     public_key_pem: str | None
     public_key_fingerprint: str | None
 
-    def as_dict(self) -> dict[str, str | None]:
-        """Return the identity as a plain JSON-safe dict (for manifests/APIs)."""
-        return {
-            "edge_id": self.edge_id,
-            "public_key_pem": self.public_key_pem,
-            "public_key_fingerprint": self.public_key_fingerprint,
-        }
 
-
-def edge_id_path(root: str | os.PathLike[str], *, filename: str = DEFAULT_EDGE_ID_FILENAME) -> Path:
+def edge_id_path(root: str | os.PathLike[str]) -> Path:
     """Absolute path of the persisted edge_id file under ``root``."""
-    return Path(root) / filename
+    return Path(root) / "edge_id"
 
 
-def edge_signing_key_path(
-    root: str | os.PathLike[str], *, filename: str = DEFAULT_SIGNING_KEY_FILENAME
-) -> Path:
+def edge_signing_key_path(root: str | os.PathLike[str]) -> Path:
     """Absolute path of the persisted edge signing key (PEM) under ``root``."""
-    return Path(root) / filename
+    return Path(root) / "edge_signing_key"
 
 
 def load_or_create_edge_id(
     root: str | os.PathLike[str],
     *,
-    filename: str = DEFAULT_EDGE_ID_FILENAME,
     edge_id: str | None = None,
 ) -> str:
     """Load the persisted edge id under ``root``, creating it once if absent.
@@ -99,7 +83,7 @@ def load_or_create_edge_id(
     The UUID is generated here (only when no file and no override is supplied),
     never at module import scope.
     """
-    path = edge_id_path(root, filename=filename)
+    path = edge_id_path(root)
     if path.exists():
         existing = path.read_text(encoding="utf-8").strip()
         if existing:
@@ -110,11 +94,7 @@ def load_or_create_edge_id(
     return value
 
 
-def load_edge_signing_key(
-    root: str | os.PathLike[str],
-    *,
-    filename: str = DEFAULT_SIGNING_KEY_FILENAME,
-) -> SigningKey:
+def load_edge_signing_key(root: str | os.PathLike[str]) -> SigningKey:
     """Load (or create on first use) the edge's Ed25519 signing key under ``root``.
 
     Thin wrapper over :meth:`SigningKey.load_or_create` so the key path is
@@ -122,15 +102,13 @@ def load_edge_signing_key(
     :class:`smart_commissioning_core.integrity.IntegrityUnavailableError` when
     ``cryptography`` is unavailable.
     """
-    return SigningKey.load_or_create(edge_signing_key_path(root, filename=filename))
+    return SigningKey.load_or_create(edge_signing_key_path(root))
 
 
 def load_or_create_edge_identity(
     root: str | os.PathLike[str],
     *,
     edge_id: str | None = None,
-    id_filename: str = DEFAULT_EDGE_ID_FILENAME,
-    key_filename: str = DEFAULT_SIGNING_KEY_FILENAME,
 ) -> EdgeIdentity:
     """Resolve (creating once) the full edge identity rooted at ``root``.
 
@@ -142,10 +120,10 @@ def load_or_create_edge_identity(
     Deterministic given the inputs: pass ``edge_id`` to pin the id and a stable
     ``root`` to pin the key path.
     """
-    resolved_id = load_or_create_edge_id(root, filename=id_filename, edge_id=edge_id)
+    resolved_id = load_or_create_edge_id(root, edge_id=edge_id)
     if not cryptography_available():
         return EdgeIdentity(edge_id=resolved_id, public_key_pem=None, public_key_fingerprint=None)
-    key = load_edge_signing_key(root, filename=key_filename)
+    key = load_edge_signing_key(root)
     return EdgeIdentity(
         edge_id=resolved_id,
         public_key_pem=key.public_key_pem(),

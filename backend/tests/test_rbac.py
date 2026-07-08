@@ -23,72 +23,22 @@ What is covered here:
   * the Role total-order helper.
 """
 
-import atexit
-import os
-import shutil
-import tempfile
 import unittest
 import uuid
-from pathlib import Path
+
+from harness import ApiTestCase
 
 _SHARED_KEY = "test-rbac-shared-admin-key"
 
 
-def _shared_test_database_url() -> str:
-    """Process-wide temporary SQLite database shared by all API test modules."""
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
-
-
-class RbacApiTests(unittest.TestCase):
+class RbacApiTests(ApiTestCase):
     """api_key mode with a shared bootstrap key + per-user keys."""
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        overrides = {
-            "DATABASE_URL": _shared_test_database_url(),
-            "JOB_EXECUTION_MODE": "inline",
-            "AUTH_MODE": "api_key",
-            "API_KEY": _SHARED_KEY,
-        }
-        cls._previous_env = {}
-        for key, value in overrides.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls.app = app
-        cls._client_context = TestClient(app)
-        cls.client = cls._client_context.__enter__()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
+    env = {
+        "JOB_EXECUTION_MODE": "inline",
+        "AUTH_MODE": "api_key",
+        "API_KEY": _SHARED_KEY,
+    }
 
     # -- helpers --------------------------------------------------------------
 
@@ -492,15 +442,15 @@ class RoleOrderingUnitTests(unittest.TestCase):
     """Unit coverage of the total-order helper backing require_role."""
 
     def test_role_total_order(self) -> None:
-        from smart_commissioning_core.rbac import ROLE_ORDER, Role, role_at_least
+        from smart_commissioning_core.rbac import ROLE_ORDER, Role
 
         self.assertEqual([r.value for r in ROLE_ORDER], ["viewer", "reviewer", "engineer", "admin"])
         self.assertTrue(Role.ADMIN.at_least(Role.ENGINEER))
         self.assertTrue(Role.ENGINEER.at_least(Role.ENGINEER))
         self.assertFalse(Role.VIEWER.at_least(Role.REVIEWER))
-        # String-accepting helper.
-        self.assertTrue(role_at_least("admin", "viewer"))
-        self.assertFalse(role_at_least("viewer", "admin"))
+        # Persisted role strings go through Role.from_value first.
+        self.assertTrue(Role.from_value("admin").at_least(Role.VIEWER))
+        self.assertFalse(Role.from_value("viewer").at_least(Role.ADMIN))
 
     def test_role_equals_its_string_value(self) -> None:
         from smart_commissioning_core.rbac import Role

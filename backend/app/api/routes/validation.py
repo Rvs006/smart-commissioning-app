@@ -191,7 +191,7 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
 
     return _dispatch(
         run,
-        enqueue=queue_service.enqueue_udmi_validation,
+        enqueue=queue_service.enqueue_for("validate_udmi_payloads", "validation"),
         run_inline=run_inline,
         label="UDMI validation",
     )
@@ -296,7 +296,7 @@ def create_bacnet_validation_run(request: JobCreateRequest) -> JobAcceptedRespon
 
     return _dispatch(
         run,
-        enqueue=queue_service.enqueue_bacnet_validation,
+        enqueue=queue_service.enqueue_for("validate_bacnet_points", "validation"),
         run_inline=run_inline,
         label="BACnet validation",
     )
@@ -319,7 +319,7 @@ def create_mapping_validation_run(request: JobCreateRequest) -> JobAcceptedRespo
 
     return _dispatch(
         run,
-        enqueue=queue_service.enqueue_mapping_validation,
+        enqueue=queue_service.enqueue_for("compare_bacnet_mqtt", "validation"),
         run_inline=run_inline,
         label="BACnet to MQTT mapping validation",
     )

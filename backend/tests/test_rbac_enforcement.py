@@ -24,12 +24,9 @@ SQLite, in-process TestClient):
   * GET /runs returns each summary's edge_id and filters by edge_id and status.
 """
 
-import atexit
-import os
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
+
+from harness import ApiTestCase
 
 _SHARED_KEY = "test-rbac-enforcement-shared-admin-key"
 
@@ -45,61 +42,20 @@ _ENV_OVERRIDES = {
 _AUTH_PARAMS = {"authorized": True}
 
 
-def _shared_test_database_url() -> str:
-    """Process-wide temporary SQLite database shared by all API test modules."""
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
+class RbacEnforcementTests(ApiTestCase):
+    # No default header: each request chooses its own actor (shared admin key
+    # or a per-user role key) explicitly.
+    env = _ENV_OVERRIDES
 
-
-class RbacEnforcementTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls._previous_env = {}
-        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls.app = app
-        # No default header: each request chooses its own actor (shared admin key
-        # or a per-user role key) explicitly.
-        cls._client_context = TestClient(app)
-        cls.client = cls._client_context.__enter__()
+        super().setUpClass()
 
         # Per-role user keys, provisioned once via the shared admin key.
         cls._role_keys = {
             role: cls._provision_user(f"enf-{role}", role)
             for role in ("viewer", "reviewer", "engineer", "admin")
         }
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
 
     # -- helpers --------------------------------------------------------------
 

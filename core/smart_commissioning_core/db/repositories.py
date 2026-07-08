@@ -486,11 +486,6 @@ class DiscoveryRepository:
         list_points(run_id) -> list[dict]
         list_topics(run_id) -> list[dict]
             Return rows for the run in stored ``position`` order as plain dicts.
-
-        count_devices(run_id) -> int
-        count_points(run_id) -> int
-        count_topics(run_id) -> int
-            Return the number of rows of that kind for the run.
     """
 
     # Named (non-attributes) columns accepted on each row dict.
@@ -533,9 +528,6 @@ class DiscoveryRepository:
         with self._session_factory() as session:
             return [_device_to_dict(row) for row in session.scalars(statement).all()]
 
-    def count_devices(self, run_id: str) -> int:
-        return self._count(DiscoveredDevice, run_id)
-
     # -- points ---------------------------------------------------------------
 
     def replace_points(self, run_id: str, points: list[dict[str, object]]) -> int:
@@ -557,9 +549,6 @@ class DiscoveryRepository:
         )
         with self._session_factory() as session:
             return [_point_to_dict(row) for row in session.scalars(statement).all()]
-
-    def count_points(self, run_id: str) -> int:
-        return self._count(DiscoveredPoint, run_id)
 
     # -- topics ---------------------------------------------------------------
 
@@ -583,15 +572,7 @@ class DiscoveryRepository:
         with self._session_factory() as session:
             return [_topic_to_dict(row) for row in session.scalars(statement).all()]
 
-    def count_topics(self, run_id: str) -> int:
-        return self._count(DiscoveredTopic, run_id)
-
     # -- internals ------------------------------------------------------------
-
-    def _count(self, model: type, run_id: str) -> int:
-        statement = select(func.count()).select_from(model).where(model.run_id == run_id)
-        with self._session_factory() as session:
-            return int(session.scalar(statement) or 0)
 
     def _device_row(
         self, run_id: str, position: int, payload: dict[str, object]
@@ -768,11 +749,11 @@ class SyncRepository:
             for position, issue in enumerate(issues):
                 session.add(self._issue_row(run_id, position, issue))
             for position, device in enumerate(devices):
-                session.add(_insert_discovery_device(run_id, position, device))
+                session.add(self._discovery._device_row(run_id, position, device))
             for position, point in enumerate(points):
-                session.add(_insert_discovery_point(run_id, position, point))
+                session.add(self._discovery._point_row(run_id, position, point))
             for position, topic in enumerate(topics):
-                session.add(_insert_discovery_topic(run_id, position, topic))
+                session.add(self._discovery._topic_row(run_id, position, topic))
             session.flush()
 
     # -- row builders --------------------------------------------------------
@@ -803,44 +784,6 @@ class SyncRepository:
 
         record = ValidationIssueRecord.model_validate(issue)
         return RunIssue(run_id=run_id, position=position, **record.model_dump())
-
-
-def _insert_discovery_device(
-    run_id: str, position: int, payload: dict[str, object]
-) -> DiscoveredDevice:
-    columns = ("project_id", "site_id", "address", "device_type", "name", "vendor", "model")
-    return DiscoveredDevice(
-        run_id=run_id,
-        position=position,
-        attributes=dict(payload.get("attributes") or {}),
-        **{key: payload.get(key) for key in columns},
-    )
-
-
-def _insert_discovery_point(
-    run_id: str, position: int, payload: dict[str, object]
-) -> DiscoveredPoint:
-    columns = ("device_ref", "point_id", "point_name", "units")
-    return DiscoveredPoint(
-        run_id=run_id,
-        position=position,
-        observed_value=dict(payload.get("observed_value") or {}),
-        attributes=dict(payload.get("attributes") or {}),
-        **{key: payload.get(key) for key in columns},
-    )
-
-
-def _insert_discovery_topic(
-    run_id: str, position: int, payload: dict[str, object]
-) -> DiscoveredTopic:
-    return DiscoveredTopic(
-        run_id=run_id,
-        position=position,
-        topic=str(payload.get("topic") or ""),
-        last_payload=dict(payload.get("last_payload") or {}),
-        message_count=int(payload.get("message_count") or 0),
-        attributes=dict(payload.get("attributes") or {}),
-    )
 
 
 def _parse_dt(value: object) -> datetime:

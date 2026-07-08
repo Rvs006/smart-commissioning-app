@@ -43,6 +43,7 @@ from sqlalchemy.engine import Engine
 
 from smart_commissioning_core import __version__ as core_version
 from smart_commissioning_core.db.repositories import (
+    TERMINAL_RUN_STATUSES,
     SyncRepository,
 )
 from smart_commissioning_core.integrity import (
@@ -154,7 +155,6 @@ def build_sync_bundle(
     signing_key: SigningKey,
     edge_identity: EdgeIdentity,
     created_at: datetime,
-    include_reports: bool = False,
 ) -> bytes:
     """Build a signed ``.scbundle`` of TERMINAL runs and return its zip bytes.
 
@@ -176,10 +176,9 @@ def build_sync_bundle(
     version. The manifest body is signed (detached Ed25519) with ``signing_key``
     and the base64 signature embedded.
 
-    Pure/deterministic given its inputs (no clock, no network). ``include_reports``
-    is accepted for forward-compatibility: signed report artifacts already live
-    inside ``result_summary['integrity']`` of the run record and travel with it,
-    so no separate member is emitted today (flag is recorded in the manifest).
+    Pure/deterministic given its inputs (no clock, no network). Signed report
+    artifacts already live inside ``result_summary['integrity']`` of the run
+    record and travel with it, so no separate report member is emitted.
     """
     repository = SyncRepository(engine)
 
@@ -205,7 +204,6 @@ def build_sync_bundle(
         "edge_public_key_fingerprint": edge_identity.public_key_fingerprint,
         "created_at": created_at.isoformat(),
         "run_ids": list(selected),
-        "include_reports": bool(include_reports),
         "content": {run_id: content_hashes[run_id] for run_id in selected},
         "signature_algorithm": "ed25519",
         "signature": None,
@@ -241,7 +239,7 @@ def _select_run_ids(
             if export is None:
                 raise SyncError(f"Cannot bundle missing run: {run_id}")
             status = export["run"].get("status")
-            if status not in _terminal_statuses():
+            if status not in TERMINAL_RUN_STATUSES:
                 raise SyncError(
                     f"Refusing to bundle non-terminal run {run_id!r} (status={status!r}); "
                     "only terminal runs sync."
@@ -249,12 +247,6 @@ def _select_run_ids(
             ordered.append(run_id)
         return ordered
     return repository.list_unsynced_terminal_runs()
-
-
-def _terminal_statuses() -> tuple[str, ...]:
-    from smart_commissioning_core.db.repositories import TERMINAL_RUN_STATUSES
-
-    return TERMINAL_RUN_STATUSES
 
 
 def _write_zip(members: list[tuple[str, bytes]]) -> bytes:

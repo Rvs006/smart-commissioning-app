@@ -95,7 +95,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return {
       canAdmin: roleAtLeast(role ?? undefined, "admin"),
       canEngineer: roleAtLeast(role ?? undefined, "engineer"),
-      canReview: roleAtLeast(role ?? undefined, "reviewer"),
       error: meQuery.error,
       hasApiKey,
       isLoading: meQuery.isLoading,

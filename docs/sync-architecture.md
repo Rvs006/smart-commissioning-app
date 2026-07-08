@@ -185,15 +185,14 @@ runs/<run_id>.json     # canonical JSON of one run's full content
 
 The manifest records the schema/format versions, the `edge_id`, the edge's
 public-key PEM + fingerprint, the caller-supplied `created_at`, the ordered
-`run_ids`, a per-run **content → SHA-256** map, the `include_reports` flag, and a
-**base64 detached Ed25519 signature** over the canonical manifest body (the
-manifest minus the `signature` field itself). Given identical inputs the bytes
-are **deterministic** — stable key order, canonical JSON, fixed ZIP member
-timestamps (`test_bundle_bytes_are_deterministic`).
+`run_ids`, a per-run **content → SHA-256** map, and a **base64 detached Ed25519
+signature** over the canonical manifest body (the manifest minus the `signature`
+field itself). Given identical inputs the bytes are **deterministic** — stable
+key order, canonical JSON, fixed ZIP member timestamps
+(`test_bundle_bytes_are_deterministic`).
 
-> `include_reports` is recorded in the manifest for forward-compatibility. Signed
-> report artifacts already live in `result_summary['integrity']` inside the run
-> record and travel with it, so **no separate report member is emitted today**.
+> Signed report artifacts already live in `result_summary['integrity']` inside
+> the run record and travel with it, so **no separate report member is emitted**.
 
 ### 4.2 Ingest verification order (fail-closed)
 
