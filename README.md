@@ -248,6 +248,7 @@ Smart Commissioning Tool Specification.pdf
 | Document | Covers |
 | --- | --- |
 | [docs/what-is-this.md](docs/what-is-this.md) | Plain-English onboarding: what the app is, what it does, how to explain it |
+| [docs/field-quickstart.md](docs/field-quickstart.md) | Printable one-page card for an engineer at the panel: run the exe, pick the NIC, dry-run then scan |
 | [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) | Agent/contributor quick-reference: setup, the `unittest` test commands CI runs, lint, local run, conventions, gotchas (identical files) |
 | [docs/review-guide.md](docs/review-guide.md) | How to review this build: run it, what to look at, scope for this round |
 | [docs/windows-compatibility.md](docs/windows-compatibility.md) | Windows 11 Pro / Server 2022 support paths, CI coverage, local smoke command |
