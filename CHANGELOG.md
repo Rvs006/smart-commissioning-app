@@ -102,6 +102,14 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   **Installation & Setup** guide covering both install paths and first run
   (set API key, pick Source Interface, dry-run first scan).
 
+- **Run History page** — an Operate view listing every recorded run in one
+  sortable, filterable table with **absolute** Started/Finished timestamps, run
+  type, status, and a derived **duration**, plus **Export CSV** of the visible
+  rows. A read-only view over the existing `GET /runs` data (no backend change,
+  no new dependency); non-terminal runs show Finished/Duration as `—` rather
+  than a fabricated finish. Replaces reaching for the raw SQLite file to review
+  past runs.
+
 - **Windows portable build+boot CI** — new `windows-portable.yml` workflow:
   on changes to bundle inputs (`packaging/`, `backend/`, `core/`, `frontend/`)
   a windows-2022 runner builds the portable bundle via `build.ps1`, uploads it

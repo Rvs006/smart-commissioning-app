@@ -47,6 +47,12 @@ them and chooses which adapter to scan from.
 4. **First real scan:** if Windows Firewall pops up, click **Allow**.
 5. Review results, add comments, **export CSV/Excel**, send it back.
 
+## Look back at what you ran
+
+**Operate → Run History** lists every run this laptop has done, with the date and
+time each started/finished, its type, status, and how long it took. Sort or
+filter it, and hit **Export CSV** for the whole list — no digging through files.
+
 ## If something looks wrong
 
 - **Scan finds nothing and no firewall popup appeared** → Windows Firewall is the

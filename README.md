@@ -130,6 +130,10 @@ manual, error-prone checklist into a repeatable five-stage workflow:
 A controlled **MQTT config publish** path (multi-point write + read-back confirm, with rollback)
 lets an engineer correct a device's setpoints and prove the change took effect.
 
+**Operate** views sit alongside the workflow: **Hub** tracks runs across every project/site/edge,
+and **Run History** lists every recorded run in one sortable, filterable table with absolute
+Started/Finished timestamps and a **duration**, plus a one-click **Export CSV** of the visible rows.
+
 ### In-app onboarding — Brief & Learning
 
 The console is branded in the **Electracom** theme with a **light/dark toggle** in the header, and
