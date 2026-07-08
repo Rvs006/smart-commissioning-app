@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,7 +22,6 @@ from app.core.logging import (
 )
 from app.core.observability import (
     HTTP_REQUESTS_IN_PROGRESS,
-    _Timer,
     observe_request,
     render_latest,
     route_template,
@@ -80,7 +80,7 @@ async def _record_request_metrics(request: Request, call_next):  # noqa: ANN001,
     # /metrics must not measure itself (and is not auth/schema gated).
     if request.url.path == "/metrics":
         return await call_next(request)
-    timer = _Timer()
+    start = time.perf_counter()
     in_progress = HTTP_REQUESTS_IN_PROGRESS.labels(method=request.method)
     in_progress.inc()
     status_code = 500
@@ -90,7 +90,7 @@ async def _record_request_metrics(request: Request, call_next):  # noqa: ANN001,
         return response
     finally:
         in_progress.dec()
-        observe_request(request.method, route_template(request), status_code, timer.elapsed())
+        observe_request(request.method, route_template(request), status_code, time.perf_counter() - start)
 
 
 @app.middleware("http")

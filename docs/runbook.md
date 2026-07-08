@@ -87,12 +87,6 @@ Auth model (enforced by `backend/app/core/auth.py`):
    `AUTO_MIGRATE=true` — ensures the runtime directories exist and runs
    `upgrade_to_head` (Alembic) against `DATABASE_URL`.
 2. Verify health (section 4).
-3. (Optional) If you have pre-database runtime state from an older build
-   (`runtime/runs/*.json`, `runtime/configuration.json`, `runtime/imports/*.json`),
-   import it once — idempotent, applies migrations first:
-   ```sh
-   cd backend && python -m app.scripts.import_runtime_state
-   ```
 
 ## 4. Health, readiness, and metrics checks
 

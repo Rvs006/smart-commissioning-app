@@ -3,7 +3,7 @@ import type { UdmiAssetPayloadView } from "../../api/client";
 import { mergeAssetGroups, type AssetIssueGroup, type IssueRow } from "./operatorData";
 
 function issue(id: string, assetId: string): IssueRow {
-  return { id, assetId, severity: "minor", area: "pointset validation", message: "msg", owner: "team" };
+  return { id, assetId, severity: "minor", area: "pointset validation", message: "msg" };
 }
 
 describe("mergeAssetGroups (mq9m4bnv)", () => {

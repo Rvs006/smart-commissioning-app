@@ -12,8 +12,8 @@ Last reviewed: Friday, 2026-07-03.
 ## How we prove it
 
 - CI runs `Windows Server 2022 smoke` on GitHub Actions `windows-2022`: Python
-  install, lint, core/backend/worker unit tests, frontend install, lint,
-  typecheck, tests, and build.
+  install, core/backend/worker unit tests, frontend install, tests, and build.
+  Lint and typecheck run once on Linux in `ci.yml` (they are OS-independent).
 - Windows 11 Pro must be checked on a real laptop or self-hosted runner because
   GitHub-hosted Actions does not provide a Windows 11 Pro runner.
 - Building the portable bundle requires PowerShell 7 (`pwsh`); Windows PowerShell

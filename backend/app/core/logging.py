@@ -1,25 +1,22 @@
-"""Structured JSON logging and request/run correlation for the API + worker.
+"""Structured JSON logging and request correlation for the API.
 
 This module uses ONLY the Python standard library (``logging``, ``json``,
-``uuid``, ``contextvars``) — no third-party logging dependency — so it can be
-imported by both the FastAPI backend and the Dramatiq worker without pulling in
-extra packages.
+``uuid``, ``contextvars``) — no third-party logging dependency.
 
 What it provides:
 
 * :func:`configure_logging` — installs a :class:`JsonLogFormatter` on the root
   logger so every record is emitted as a single JSON line carrying a timestamp,
-  level, logger name, message, and the current ``request_id`` / ``run_id``
-  correlation values when they are set.
+  level, logger name, message, and the current ``request_id`` correlation value
+  when it is set.
 * Contextvar-based correlation helpers (:func:`set_request_id`,
-  :func:`set_run_id`, :func:`get_request_id`, :func:`get_run_id`) plus a
-  :class:`CorrelationIdFilter` that injects those values onto each record.
+  :func:`get_request_id`) plus a :class:`CorrelationIdFilter` that injects the
+  value onto each record.
 * :func:`new_request_id` — a stdlib ``uuid4`` generator used by the request-id
   middleware when no inbound ``X-Request-ID`` header is present.
 
-The correlation values are stored in :mod:`contextvars`, so they are isolated
-per asyncio task / per worker message and never leak across concurrent
-requests.
+The correlation value is stored in :mod:`contextvars`, so it is isolated per
+asyncio task and never leaks across concurrent requests.
 """
 
 from __future__ import annotations
@@ -29,19 +26,13 @@ import datetime as _dt
 import json
 import logging
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
 
 # -- correlation context ----------------------------------------------------
 
-# Defaults are None (not set). The formatter/filter render a missing value as
+# Default is None (not set). The formatter/filter render a missing value as
 # absent rather than the literal string "None".
 _request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "sct_request_id",
-    default=None,
-)
-_run_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "sct_run_id",
     default=None,
 )
 
@@ -67,46 +58,18 @@ def get_request_id() -> str | None:
     return _request_id_var.get()
 
 
-def set_run_id(value: str | None) -> contextvars.Token:
-    """Bind ``value`` as the current run id; returns a reset token."""
-    return _run_id_var.set(value)
-
-
-def reset_run_id(token: contextvars.Token) -> None:
-    _run_id_var.reset(token)
-
-
-def get_run_id() -> str | None:
-    return _run_id_var.get()
-
-
-@contextmanager
-def run_id_context(run_id: str | None) -> Iterator[None]:
-    """Bind ``run_id`` for the duration of the block, then restore.
-
-    Used by worker actors so every log record emitted while processing a run
-    carries that run's id without each call site having to pass it.
-    """
-    token = set_run_id(run_id)
-    try:
-        yield
-    finally:
-        reset_run_id(token)
-
-
 # -- logging filter + formatter ---------------------------------------------
 
 
 class CorrelationIdFilter(logging.Filter):
-    """Inject the current request_id / run_id onto every log record.
+    """Inject the current request_id onto every log record.
 
     Always returns True (it never filters records out); it only annotates them
-    so the formatter can render the correlation fields.
+    so the formatter can render the correlation field.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
         record.request_id = get_request_id()
-        record.run_id = get_run_id()
         return True
 
 
@@ -138,7 +101,6 @@ _RESERVED_RECORD_FIELDS = frozenset(
         "threadName",
         "taskName",
         "request_id",
-        "run_id",
     },
 )
 
@@ -147,10 +109,10 @@ class JsonLogFormatter(logging.Formatter):
     """Render a log record as a single-line JSON object.
 
     Always emits: ``timestamp`` (UTC ISO 8601), ``level``, ``logger``,
-    ``message``. Emits ``request_id`` / ``run_id`` only when they are set on the
-    record (the :class:`CorrelationIdFilter` sets them, possibly to ``None``).
-    Exception info is rendered under ``exc_info`` as formatted text. Any extra
-    fields attached via ``logger.info(..., extra={...})`` are merged in.
+    ``message``. Emits ``request_id`` only when it is set on the record (the
+    :class:`CorrelationIdFilter` sets it, possibly to ``None``). Exception info
+    is rendered under ``exc_info`` as formatted text. Any extra fields attached
+    via ``logger.info(..., extra={...})`` are merged in.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -165,9 +127,6 @@ class JsonLogFormatter(logging.Formatter):
         request_id = getattr(record, "request_id", None)
         if request_id is not None:
             payload["request_id"] = request_id
-        run_id = getattr(record, "run_id", None)
-        if run_id is not None:
-            payload["run_id"] = run_id
 
         # Merge user-supplied extras (skip reserved/internal attributes and any
         # private dunder fields).

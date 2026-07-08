@@ -10,7 +10,6 @@ export type SessionContextValue = {
   role: Role | null;
   // Convenience gates derived from the role. False while loading or signed out,
   // so actions stay disabled until the role is positively known (fail-closed).
-  canReview: boolean;
   canEngineer: boolean;
   canAdmin: boolean;
   // True while the /me query is in flight (a key is set but role not yet known).

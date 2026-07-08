@@ -220,21 +220,6 @@ class DbRunStore:
             session.refresh(run, attribute_names=["issues"])
             return _run_to_dict(run)
 
-    def append_issue(
-        self,
-        run_id: str,
-        issue: ValidationIssueRecord | dict[str, object],
-    ) -> dict[str, object]:
-        record = ValidationIssueRecord.model_validate(issue)
-        with self._session_factory.begin() as session:
-            run = self._load(session, run_id, for_update=True)
-            next_position = len(run.issues)
-            session.add(self._issue_row(run_id, next_position, record))
-            run.updated_at = _utcnow()
-            session.flush()
-            session.refresh(run, attribute_names=["issues"])
-            return _run_to_dict(run)
-
     # -- internals ------------------------------------------------------------
 
     # -- cooperative cancellation --------------------------------------------

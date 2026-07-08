@@ -42,7 +42,6 @@ from smart_commissioning_core.engines.base import (
     Throttle,
     ThrottleConfig,
     run_engine,
-    run_engine_async,
 )
 from smart_commissioning_core.engines.safety import (
     build_dry_run_plan,
@@ -758,59 +757,6 @@ def process_bacnet_discovery_run(
 
     Returns the terminal run record from the run store.
     """
-    ctx = _build_context(
-        run_id=run_id,
-        parameters=parameters,
-        run_store=run_store,
-        execution_mode=execution_mode,
-        throttle=throttle,
-        dry_run=dry_run,
-        is_cancelled=is_cancelled,
-    )
-    engine = make_bacnet_discovery_engine(backend)
-    if persist_records is not None:
-        return run_engine(ctx, engine, persist_records=persist_records)
-    return run_engine(ctx, engine)
-
-
-async def process_bacnet_discovery_run_async(
-    run_id: str,
-    parameters: dict[str, Any],
-    *,
-    run_store: RunStore,
-    execution_mode: str,
-    backend: BacnetDiscoveryBackend | None = None,
-    throttle: ThrottleConfig | None = None,
-    dry_run: bool = False,
-    persist_records: Callable[[str, Sequence[dict[str, Any]]], None] | None = None,
-    is_cancelled: Callable[[], bool] | None = None,
-) -> Any:
-    """Async variant of :func:`process_bacnet_discovery_run` (for event-loop callers)."""
-    ctx = _build_context(
-        run_id=run_id,
-        parameters=parameters,
-        run_store=run_store,
-        execution_mode=execution_mode,
-        throttle=throttle,
-        dry_run=dry_run,
-        is_cancelled=is_cancelled,
-    )
-    engine = make_bacnet_discovery_engine(backend)
-    if persist_records is not None:
-        return await run_engine_async(ctx, engine, persist_records=persist_records)
-    return await run_engine_async(ctx, engine)
-
-
-def _build_context(
-    *,
-    run_id: str,
-    parameters: dict[str, Any],
-    run_store: RunStore,
-    execution_mode: str,
-    throttle: ThrottleConfig | None,
-    dry_run: bool,
-    is_cancelled: Callable[[], bool] | None,
-) -> EngineContext:
     kwargs: dict[str, Any] = {
         "run_id": run_id,
         "parameters": parameters,
@@ -821,4 +767,8 @@ def _build_context(
     }
     if is_cancelled is not None:
         kwargs["_is_cancelled"] = is_cancelled
-    return EngineContext(**kwargs)
+    ctx = EngineContext(**kwargs)
+    engine = make_bacnet_discovery_engine(backend)
+    if persist_records is not None:
+        return run_engine(ctx, engine, persist_records=persist_records)
+    return run_engine(ctx, engine)

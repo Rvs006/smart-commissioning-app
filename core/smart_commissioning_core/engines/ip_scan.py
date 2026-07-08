@@ -203,13 +203,7 @@ def _expand_hosts(parameters: dict[str, Any]) -> list[str]:
             f"exceeding max_hosts={max_hosts}."
         )
     # De-duplicate while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for host in hosts:
-        if host not in seen:
-            seen.add(host)
-            ordered.append(host)
-    return ordered
+    return list(dict.fromkeys(hosts))
 
 
 def _parse_port_spec(spec: str) -> list[int]:

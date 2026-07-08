@@ -103,10 +103,9 @@ starts (it now has a Redis-ping healthcheck). App is served behind nginx on
 
 ### 3.5 Smoke test
 ```sh
-SC_API_KEY="<your API_KEY>" scripts/smoke_local.sh http://127.0.0.1:8000
-SC_API_KEY="<your API_KEY>" scripts/phase5_preflight.sh http://127.0.0.1:8000
+SC_API_KEY="<your API_KEY>" scripts/smoke_local.sh --preflight http://127.0.0.1:8000
 ```
-Both must exit 0 (preflight's broker-TCP check may legitimately fail if the
+Must exit 0 (the `--preflight` broker-TCP check may legitimately fail if the
 broker is unreachable from the server — that is expected off-site).
 
 ---

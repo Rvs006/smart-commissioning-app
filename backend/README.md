@@ -45,19 +45,3 @@ are applied out of band).
 
 Uploaded import files and secret material stay on disk under
 `backend/runtime/` — only `secret://` references are stored in the database.
-
-### Migrating pre-database runtime state
-
-If you have runtime state from before the database persistence layer
-(`runtime/runs/*.json`, `runtime/configuration.json`, `runtime/imports/*.json`),
-import it once with:
-
-```bash
-cd backend
-python -m app.scripts.import_runtime_state
-```
-
-The script applies migrations first and is idempotent: runs/imports whose ids
-already exist are skipped, and the configuration is only seeded when the
-target project/site (defaults: `demo-project`/`demo-site`, override with
-`--project-id`/`--site-id`) has no snapshot yet.

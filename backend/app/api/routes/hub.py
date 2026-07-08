@@ -29,12 +29,11 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from smart_commissioning_core.sync import ingest_sync_bundle
 
+from app.api.uploads import check_content_length, read_upload_capped, upload_too_large
 from app.core.config import get_settings
 from app.core.db import get_engine
 
 router = APIRouter()
-
-_READ_CHUNK_BYTES = 1024 * 1024
 
 
 def _require_hub_role() -> None:
@@ -47,22 +46,6 @@ def _require_hub_role() -> None:
     """
     if get_settings().deployment_role != "hub":
         raise HTTPException(status_code=404, detail="Not Found")
-
-
-def _upload_too_large(max_upload_bytes: int) -> HTTPException:
-    return HTTPException(
-        status_code=413,
-        detail=f"Uploaded bundle exceeds the maximum allowed size of {max_upload_bytes} bytes.",
-    )
-
-
-async def _read_upload_capped(file: UploadFile, max_upload_bytes: int) -> bytes:
-    buffer = bytearray()
-    while chunk := await file.read(_READ_CHUNK_BYTES):
-        buffer.extend(chunk)
-        if len(buffer) > max_upload_bytes:
-            raise _upload_too_large(max_upload_bytes)
-    return bytes(buffer)
 
 
 @router.post("/runs/ingest")
@@ -87,20 +70,14 @@ async def ingest_runs(
     settings = get_settings()
 
     # Fast pre-check on the declared body size; the capped read is authoritative.
-    content_length = request.headers.get("content-length")
-    if (
-        content_length is not None
-        and content_length.isdigit()
-        and int(content_length) > settings.max_upload_bytes
-    ):
-        raise _upload_too_large(settings.max_upload_bytes)
+    check_content_length(request, settings.max_upload_bytes, "bundle")
 
     if file is not None:
-        bundle_bytes = await _read_upload_capped(file, settings.max_upload_bytes)
+        bundle_bytes = await read_upload_capped(file, settings.max_upload_bytes, "bundle")
     else:
         bundle_bytes = await request.body()
         if len(bundle_bytes) > settings.max_upload_bytes:
-            raise _upload_too_large(settings.max_upload_bytes)
+            raise upload_too_large(settings.max_upload_bytes, "bundle")
 
     if not bundle_bytes:
         raise HTTPException(status_code=400, detail="Request did not contain a bundle.")

@@ -41,7 +41,6 @@ const toRow = (issue: ValidationIssueRecord): IssueRow => ({
   assetId: issue.asset_id ?? "Unknown asset",
   id: issue.issue_id,
   message: issue.description,
-  owner: "team",
   severity: "minor",
 });
 

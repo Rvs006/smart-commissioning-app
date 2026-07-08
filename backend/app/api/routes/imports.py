@@ -6,6 +6,7 @@ from typing import get_args
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from smart_commissioning_core.rbac import Role
 
+from app.api.uploads import check_content_length, read_upload_capped
 from app.core.auth import require_role
 from app.core.config import get_settings
 from app.schemas.imports import (
@@ -44,30 +45,6 @@ _VALID_IMPORT_TYPES = set(get_args(ImportType))
 #   * Creating an import (ingesting an uploaded register) stays engineer+.
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
-
-_READ_CHUNK_BYTES = 1024 * 1024
-
-
-def _upload_too_large(max_upload_bytes: int) -> HTTPException:
-    return HTTPException(
-        status_code=413,
-        detail=f"Uploaded file exceeds the maximum allowed size of {max_upload_bytes} bytes.",
-    )
-
-
-async def _read_upload_capped(file: UploadFile, max_upload_bytes: int) -> bytes:
-    """Read the upload in chunks, rejecting once the cap is exceeded.
-
-    The Content-Length header is checked before this as a fast pre-check, but
-    the header cannot be trusted: this capped read is the authoritative limit.
-    """
-    buffer = bytearray()
-    while chunk := await file.read(_READ_CHUNK_BYTES):
-        buffer.extend(chunk)
-        if len(buffer) > max_upload_bytes:
-            raise _upload_too_large(max_upload_bytes)
-    return bytes(buffer)
-
 
 def _guard_xlsx_decompressed_size(file_bytes: bytes, max_decompressed_bytes: int) -> None:
     """Basic zip-bomb guard: reject XLSX archives whose declared decompressed
@@ -135,14 +112,10 @@ async def create_import(
 
     settings = get_settings()
 
-    # Fast pre-check on the declared body size (the multipart body is always
-    # at least as large as the file). The header cannot be trusted, so the
-    # capped read below enforces the limit on the bytes actually received.
-    content_length = request.headers.get("content-length")
-    if content_length is not None and content_length.isdigit() and int(content_length) > settings.max_upload_bytes:
-        raise _upload_too_large(settings.max_upload_bytes)
-
-    file_bytes = await _read_upload_capped(file, settings.max_upload_bytes)
+    # Fast pre-check on the declared body size, then the authoritative capped
+    # read (see app.api.uploads).
+    check_content_length(request, settings.max_upload_bytes)
+    file_bytes = await read_upload_capped(file, settings.max_upload_bytes)
 
     if Path(file.filename).suffix.lower() == ".xlsx":
         _guard_xlsx_decompressed_size(file_bytes, settings.max_xlsx_decompressed_bytes)

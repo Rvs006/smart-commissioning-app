@@ -247,7 +247,7 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
 
     return _dispatch(
         run,
-        enqueue=queue_service.enqueue_ip_discovery,
+        enqueue=queue_service.enqueue_for("discover_ip_range", "discovery"),
         run_inline=run_inline,
         label="IP discovery",
     )
@@ -279,7 +279,7 @@ def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedRespons
 
     return _dispatch(
         run,
-        enqueue=queue_service.enqueue_bacnet_discovery,
+        enqueue=queue_service.enqueue_for("discover_bacnet", "discovery"),
         run_inline=run_inline,
         label="BACnet discovery",
     )
@@ -316,7 +316,7 @@ def create_mqtt_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
 
     return _dispatch(
         run,
-        enqueue=queue_service.enqueue_mqtt_discovery,
+        enqueue=queue_service.enqueue_for("discover_mqtt", "discovery"),
         run_inline=run_inline,
         label="MQTT discovery",
     )

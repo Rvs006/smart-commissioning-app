@@ -1,13 +1,13 @@
 """Authentication tests for the API (app.core.auth.require_auth).
 
-Each test class boots the app with its own auth environment: env vars are set
-and the settings cache is cleared in setUpClass before the TestClient is
-created, mirroring the DATABASE_URL pattern in test_runs_api.py.
+Each test class boots the app with its own auth environment via the shared
+harness.ApiTestCase: env vars are set and the settings cache is cleared in
+setUpClass before the TestClient is created.
 
-The database is shared per process (see _shared_test_database_url): route
-modules instantiate their services -- and therefore the SQLAlchemy engine --
-at the first app.main import, so every test class in the test run must point
-at the same database file.
+The database is shared per process (see harness.shared_test_database_url):
+route modules instantiate their services -- and therefore the SQLAlchemy
+engine -- at the first app.main import, so every test class in the test run
+must point at the same database file.
 
 Client addresses are simulated with Starlette's TestClient(client=(host, port))
 parameter. The default "testclient" host is treated as loopback by
@@ -15,13 +15,10 @@ app.core.auth because it is the ASGI test transport's synthetic host and can
 never appear as a real TCP peer address.
 """
 
-import atexit
-import os
-import shutil
-import tempfile
 import unittest
 import uuid
-from pathlib import Path
+
+from harness import ApiTestCase
 
 _API_KEY = "test-auth-secret-key"
 
@@ -29,75 +26,20 @@ _API_KEY = "test-auth-secret-key"
 _NON_LOOPBACK = ("203.0.113.9", 51234)
 _LOOPBACK = ("127.0.0.1", 51234)
 
-# Any authenticated route works as a probe; /blueprint is cheap (no DB writes).
-_PROTECTED_PATH = "/api/v1/blueprint"
+# Any authenticated route works as a probe; /me is cheap (no DB writes).
+_PROTECTED_PATH = "/api/v1/me"
 
 
-def _shared_test_database_url() -> str:
-    """Process-wide temporary SQLite database shared by all API test modules.
-
-    The directory is removed at interpreter exit (best effort: lingering
-    SQLite handles can block deletion on Windows, hence ignore_errors).
-    """
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
-
-
-class _AuthClientTestCase(unittest.TestCase):
-    """Shared scaffolding: env overrides + cache reset + lifespan-entered client."""
+class _AuthClientTestCase(ApiTestCase):
+    """ApiTestCase with per-class auth env and a peer-address helper."""
 
     # Subclasses override; None means "ensure the variable is unset".
     auth_env: dict[str, str | None] = {}
-    client_addr: tuple[str, int] = ("testclient", 50000)
 
     @classmethod
     def setUpClass(cls) -> None:
-        overrides: dict[str, str | None] = {
-            "DATABASE_URL": _shared_test_database_url(),
-            "JOB_EXECUTION_MODE": "inline",
-            **cls.auth_env,
-        }
-        cls._previous_env = {}
-        for key, value in overrides.items():
-            cls._previous_env[key] = os.environ.get(key)
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls.app = app
-        cls._client_context = TestClient(app, client=cls.client_addr)
-        cls.client = cls._client_context.__enter__()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
+        cls.env = {"JOB_EXECUTION_MODE": "inline", **cls.auth_env}
+        super().setUpClass()
 
     def _client_for(self, addr: tuple[str, int]):
         """Extra client simulating a different peer address.

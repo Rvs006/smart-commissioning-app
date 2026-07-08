@@ -312,7 +312,7 @@ export function DashboardPage() {
             </span>
           </div>
           <div className="workflow-board">
-            {workflowStages.slice(0, 4).map((stage) => (
+            {workflowStages.map((stage) => (
               <div className={`workflow-stage ${stage.state}`} key={stage.name}>
                 <div>
                   <strong>{stage.name}</strong>

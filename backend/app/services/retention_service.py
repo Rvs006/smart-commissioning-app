@@ -21,7 +21,7 @@ Pure DB work against the shared engine — fully unit-testable on tmp SQLite.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from smart_commissioning_core.db.engine import session_factory
@@ -57,23 +57,10 @@ class RetentionResult:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "cutoff": self.cutoff,
-            "dry_run": self.dry_run,
+            **asdict(self),
             "candidate_count": len(self.candidates),
             "deleted_count": len(self.deleted_run_ids),
             "skipped_evidence_count": len(self.skipped_evidence_run_ids),
-            "candidates": [
-                {
-                    "run_id": candidate.run_id,
-                    "job_type": candidate.job_type,
-                    "created_at": candidate.created_at,
-                    "evidence_linked": candidate.evidence_linked,
-                    "reason": candidate.reason,
-                }
-                for candidate in self.candidates
-            ],
-            "deleted_run_ids": list(self.deleted_run_ids),
-            "skipped_evidence_run_ids": list(self.skipped_evidence_run_ids),
         }
 
 

@@ -15,6 +15,13 @@
 #   6. POST /api/v1/discovery/ip/runs (dry_run)  -> a PLAN comes back, NO scan,
 #                                                   NO authorization required
 #
+# With --preflight, three PRE-SITE checks fold in (from the retired
+# scripts/phase5_preflight.sh) — still safe / side-effect-free:
+#
+#   P1. cert refs (certificates section)          -> non-empty secret:// refs
+#   P2. POST /api/v1/discovery/mqtt/runs(dry_run) -> plan w/ broker host:port
+#   P3. TCP connect to broker host:port           -> reachable, NO MQTT bytes
+#
 # It does NOT trigger any real (non-dry-run) active scan or any live broker
 # publish. Nothing here touches real BACnet / Redis / Postgres / brokers / Docker
 # directly; it only drives the HTTP API of whatever stack you point it at.
@@ -24,16 +31,25 @@
 # (AUTH_MODE=local, loopback) stack needs no key; leave SC_API_KEY unset.
 #
 # Usage:
-#   scripts/smoke_local.sh [BASE_URL]
+#   scripts/smoke_local.sh [--preflight] [BASE_URL]
 #   BASE_URL defaults to http://127.0.0.1:8000
 #   SC_API_KEY=<key> scripts/smoke_local.sh            # hosted
 #   scripts/smoke_local.sh                             # local / loopback
+#   scripts/smoke_local.sh --preflight                 # + pre-site checks
 #
 # Exit code: 0 if every check passed, 1 otherwise.
 
 set -u
 
-BASE_URL="${1:-http://127.0.0.1:8000}"
+PREFLIGHT=0
+BASE_URL=""
+for arg in "$@"; do
+  case "$arg" in
+    --preflight) PREFLIGHT=1 ;;
+    *) BASE_URL="$arg" ;;
+  esac
+done
+BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
 BASE_URL="${BASE_URL%/}"
 API="${BASE_URL}/api/v1"
 API_KEY="${SC_API_KEY:-}"
@@ -42,6 +58,12 @@ API_KEY="${SC_API_KEY:-}"
 CURL_TIMEOUT="${SC_CURL_TIMEOUT:-15}"
 POLL_ATTEMPTS="${SC_POLL_ATTEMPTS:-30}"
 POLL_INTERVAL="${SC_POLL_INTERVAL:-1}"
+
+# --preflight only: broker TCP probe timeout and the project/site whose broker
+# the MQTT dry-run resolves.
+TCP_TIMEOUT="${SC_TCP_TIMEOUT:-5}"
+PROJECT_ID="${SC_PROJECT_ID:-demo-project}"
+SITE_ID="${SC_SITE_ID:-demo-site}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -153,10 +175,12 @@ else
 fi
 
 # --- 4. configuration ------------------------------------------------------
+CFG_BODY=""
 if http_get "${API}/configuration" && [ "$HTTP_STATUS" = "200" ]; then
   # The default snapshot always carries a project section; a bare object means
   # something is wrong. Assert the body is non-trivial JSON.
   if printf '%s' "$HTTP_BODY" | grep -q '{'; then
+    CFG_BODY="$HTTP_BODY"
     pass "GET /api/v1/configuration -> 200 snapshot returned"
   else
     fail "GET /api/v1/configuration -> 200 but body was empty/unexpected"
@@ -257,6 +281,100 @@ if [ -n "$DISC_RUN_ID" ]; then
   fi
 else
   fail "dry-run IP discovery polling skipped (no run_id)"
+fi
+
+# --- preflight-only checks (--preflight) ------------------------------------
+# Folded in from the retired scripts/phase5_preflight.sh: cert-ref shape,
+# dry-run MQTT discovery, and a TCP-only broker probe. Still SAFE /
+# side-effect-free: no scan, no MQTT bytes, no secret material printed.
+if [ "$PREFLIGHT" = "1" ]; then
+
+  # --- P1. secret:// cert refs resolve (presence + shape; NO material) ------
+  # The certificates section returns secret://... refs VERBATIM (opaque
+  # pointers, never the material). Assert each of the 3 TLS cert fields is a
+  # non-empty secret:// ref. Actual on-disk decryption is server-side / on-site
+  # only.
+  # NOTE (drift kept on purpose): the retired preflight fetched /configuration
+  # scoped with ?project_id&site_id and asserted an "mqtt" section; this script
+  # keeps the smoke variant of check 4 (unscoped snapshot, non-trivial JSON),
+  # so the cert fields inspected here come from the default snapshot.
+  if [ -n "$CFG_BODY" ]; then
+    secret_count=0; value_count=0; empty=""
+    for field in "CA Certificate" "Client Certificate" "Private Key"; do
+      val="$(printf '%s' "$CFG_BODY" | tr -d '\n' \
+          | grep -oE "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+          | sed -E "s/.*:[[:space:]]*\"([^\"]*)\"$/\1/")"
+      if [ -z "$val" ]; then
+        empty="${empty} '${field}'"
+      elif printf '%s' "$val" | grep -q '^secret://'; then
+        secret_count=$((secret_count + 1))
+      else
+        value_count=$((value_count + 1))   # plain path / value — valid TLS config too
+      fi
+    done
+    if [ -z "$empty" ]; then
+      pass "MQTT-TLS cert fields all set (${secret_count} secret:// ref, ${value_count} path/value)"
+      info "Confirm live TLS load on site: secret:// refs decrypt server-side; the in-memory CA + temp client-cert load is on-site-untested."
+    else
+      # Empty cert fields are NOT a hard failure: the site's broker may be
+      # plaintext (no TLS). Surface it so the operator sets them before any TLS run.
+      info "MQTT-TLS cert field(s) empty:${empty} — OK if this broker is plaintext; set them before a TLS (8883) broker run."
+    fi
+  else
+    fail "cert-ref check skipped (no configuration snapshot)"
+  fi
+
+  # --- P2. DRY-RUN MQTT discovery (plan only; resolves configured broker) ---
+  mqtt_body="{\"project_id\":\"${PROJECT_ID}\",\"site_id\":\"${SITE_ID}\",\"job_type\":\"mqtt_discovery\",\"parameters\":{\"dry_run\":true}}"
+  MQ_ID=""; BROKER_HOST=""; BROKER_PORT=""
+  if http_post "${API}/discovery/mqtt/runs" "$mqtt_body" && [ "$HTTP_STATUS" = "200" ]; then
+    MQ_ID="$(json_field "$HTTP_BODY" run_id)"
+  fi
+  if [ -n "$MQ_ID" ]; then
+    st=""; attempt=0
+    while [ "$attempt" -lt "$POLL_ATTEMPTS" ]; do
+      if http_get "${API}/discovery/runs/${MQ_ID}" && [ "$HTTP_STATUS" = "200" ]; then
+        st="$(json_field "$HTTP_BODY" status)"
+        case "$st" in succeeded|failed|cancelled) break ;; esac
+      fi
+      attempt=$((attempt + 1)); sleep "$POLL_INTERVAL"
+    done
+    if [ "$st" = "succeeded" ] && printf '%s' "$HTTP_BODY" | grep -q '"dry_run_plan"'; then
+      BROKER_HOST="$(json_field "$HTTP_BODY" broker_host)"
+      BROKER_PORT="$(json_field "$HTTP_BODY" broker_port)"
+      pass "dry-run MQTT discovery returned a plan (broker ${BROKER_HOST}:${BROKER_PORT}, no connection)"
+    else
+      fail "dry-run MQTT discovery did not return a plan (status='${st}')"
+    fi
+  else
+    fail "POST /api/v1/discovery/mqtt/runs (dry_run) -> HTTP ${HTTP_STATUS} (expected 200)"
+  fi
+
+  # --- P3. Broker TCP reachability (NO MQTT bytes, no handshake) ------------
+  # A pure TCP connect-and-close. We send no CONNECT/SUBSCRIBE/PUBLISH, so the
+  # broker sees only an opened+closed socket. Proves the firewall/route is open;
+  # the real TLS/auth handshake stays an ON-SITE step.
+  if [ -n "$BROKER_HOST" ] && [ -n "$BROKER_PORT" ]; then
+    ok=1
+    # Prefer bash /dev/tcp; fall back to nc if present.
+    if (exec 3<>"/dev/tcp/${BROKER_HOST}/${BROKER_PORT}") 2>/dev/null; then
+      exec 3>&- 3<&- 2>/dev/null || true
+      ok=0
+    elif command -v nc >/dev/null 2>&1; then
+      nc -z -w "$TCP_TIMEOUT" "$BROKER_HOST" "$BROKER_PORT" >/dev/null 2>&1 && ok=0
+    else
+      info "Neither bash /dev/tcp nor nc available; cannot TCP-probe broker."
+      ok=2
+    fi
+    case "$ok" in
+      0) pass "TCP reach ${BROKER_HOST}:${BROKER_PORT} (socket opened+closed, no MQTT bytes)" ;;
+      2) info "broker TCP probe SKIPPED — no bash /dev/tcp and no nc on this host. Probe from the on-site machine (the PowerShell -Preflight run uses a TCP connect), or install nc." ;;
+      *) fail "TCP reach ${BROKER_HOST}:${BROKER_PORT} FAILED (firewall/route/broker down?)" ;;
+    esac
+  else
+    fail "broker TCP probe skipped (no broker host:port from MQTT dry-run plan)"
+  fi
+
 fi
 
 # --- summary ---------------------------------------------------------------

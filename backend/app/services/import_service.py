@@ -45,12 +45,19 @@ class ImportProfile:
     description: str
     required_columns: tuple[str, ...]
     duplicate_key_fields: tuple[str, ...]
-    row_validator: Callable[[dict[str, str], int], list[ImportErrorRecord]]
+    # Extra row checks run after the required-column emptiness check.
+    extra_checks: tuple[Callable[[dict[str, str], int], list[ImportErrorRecord]], ...] = ()
     # Recognised-but-not-required columns. Included in the downloadable template
     # and canonicalised into accepted rows when present, but an empty/missing
     # value never rejects a row (e.g. "Expected hostname", which most sites do
     # not populate).
     optional_columns: tuple[str, ...] = ()
+
+    def validate_row(self, row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+        errors = _base_row_validation(self.required_columns, row, row_number)
+        for check in self.extra_checks:
+            errors.extend(check(row, row_number))
+        return errors
 
     def as_summary(self) -> ImportProfileSummary:
         return ImportProfileSummary(
@@ -153,19 +160,6 @@ def _base_row_validation(required_columns: tuple[str, ...], row: dict[str, str],
     return errors
 
 
-def _make_validator(
-    required_columns: tuple[str, ...],
-    extra_checks: tuple[Callable[[dict[str, str], int], list[ImportErrorRecord]], ...],
-) -> Callable[[dict[str, str], int], list[ImportErrorRecord]]:
-    def validator(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
-        errors = _base_row_validation(required_columns, row, row_number)
-        for check in extra_checks:
-            errors.extend(check(row, row_number))
-        return errors
-
-    return validator
-
-
 def _field_check(field: str, fn: Callable[[dict[str, str], int, str], list[ImportErrorRecord]]) -> Callable[[dict[str, str], int], list[ImportErrorRecord]]:
     def wrapper(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
         return fn(row, row_number, field)
@@ -195,15 +189,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Ports that should not be enabled",
         ),
         duplicate_key_fields=("Asset ID", "Expected IP address"),
-        row_validator=_make_validator(
-            (
-                "Project/site",
-                "System",
-                "Expected IP address",
-                "Expected services/ports",
-            ),
-            (_validate_asset_identity, _field_check("Expected IP address", _validate_ip)),
-        ),
+        extra_checks=(_validate_asset_identity, _field_check("Expected IP address", _validate_ip)),
     ),
     "bacnet_register": ImportProfile(
         import_type="bacnet_register",
@@ -218,21 +204,10 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "IP address",
         ),
         duplicate_key_fields=("Asset ID", "BACnet device instance"),
-        row_validator=_make_validator(
-            (
-                "Project/site",
-                "System",
-                "Asset ID",
-                "Asset name",
-                "BACnet device instance",
-                "BACnet network",
-                "IP address",
-            ),
-            (
-                _field_check("IP address", _validate_ip),
-                _field_check("BACnet device instance", _validate_numeric),
-                _field_check("BACnet network", _validate_numeric),
-            ),
+        extra_checks=(
+            _field_check("IP address", _validate_ip),
+            _field_check("BACnet device instance", _validate_numeric),
+            _field_check("BACnet network", _validate_numeric),
         ),
     ),
     "mqtt_register": ImportProfile(
@@ -267,22 +242,10 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Firmware",
         ),
         duplicate_key_fields=("Asset ID", "Expected topic"),
-        row_validator=_make_validator(
-            (
-                "Project/site",
-                "System",
-                "Expected topic",
-                "Expected schema version",
-                "Expected points",
-                "Expected units",
-                "Expected reporting interval",
-                "Source protocol",
-            ),
-            (
-                _validate_asset_identity,
-                _field_check("Expected topic", _validate_topic),
-                _field_check("Expected reporting interval", _validate_numeric),
-            ),
+        extra_checks=(
+            _validate_asset_identity,
+            _field_check("Expected topic", _validate_topic),
+            _field_check("Expected reporting interval", _validate_numeric),
         ),
     ),
     "asset_validation": ImportProfile(
@@ -299,19 +262,6 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Location",
         ),
         duplicate_key_fields=("Asset ID",),
-        row_validator=_make_validator(
-            (
-                "Project/site",
-                "System",
-                "Asset ID",
-                "Asset name",
-                "Source protocol",
-                "Expected online status",
-                "Expected topic or device reference",
-                "Location",
-            ),
-            (),
-        ),
     ),
     "bacnet_points": ImportProfile(
         import_type="bacnet_points",
@@ -329,25 +279,11 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Required/optional flag",
         ),
         duplicate_key_fields=("Asset ID", "Object instance", "Expected point name"),
-        row_validator=_make_validator(
-            (
-                "Asset ID",
-                "Device instance",
-                "BACnet network",
-                "Object type",
-                "Object instance",
-                "Object name",
-                "Expected point name",
-                "Expected units",
-                "Expected value type",
-                "Required/optional flag",
-            ),
-            (
-                _field_check("Device instance", _validate_numeric),
-                _field_check("BACnet network", _validate_numeric),
-                _field_check("Object instance", _validate_numeric),
-                _field_check("Expected units", _validate_units),
-            ),
+        extra_checks=(
+            _field_check("Device instance", _validate_numeric),
+            _field_check("BACnet network", _validate_numeric),
+            _field_check("Object instance", _validate_numeric),
+            _field_check("Expected units", _validate_units),
         ),
     ),
     "mqtt_points": ImportProfile(
@@ -365,23 +301,10 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Expected reporting interval",
         ),
         duplicate_key_fields=("Asset ID", "JSON path or field name", "Expected point name"),
-        row_validator=_make_validator(
-            (
-                "Asset ID",
-                "Topic",
-                "Payload type",
-                "JSON path or field name",
-                "Expected point name",
-                "Expected units",
-                "Expected value type",
-                "Required/optional flag",
-                "Expected reporting interval",
-            ),
-            (
-                _field_check("Topic", _validate_topic),
-                _field_check("Expected units", _validate_units),
-                _field_check("Expected reporting interval", _validate_numeric),
-            ),
+        extra_checks=(
+            _field_check("Topic", _validate_topic),
+            _field_check("Expected units", _validate_units),
+            _field_check("Expected reporting interval", _validate_numeric),
         ),
     ),
     "mapping": ImportProfile(
@@ -401,27 +324,12 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Mapping required flag",
         ),
         duplicate_key_fields=("Asset ID", "BACnet object instance", "MQTT field/path"),
-        row_validator=_make_validator(
-            (
-                "Asset ID",
-                "BACnet device instance",
-                "BACnet object type",
-                "BACnet object instance",
-                "BACnet object name",
-                "BACnet units",
-                "MQTT topic",
-                "MQTT field/path",
-                "MQTT units",
-                "Tolerance",
-                "Mapping required flag",
-            ),
-            (
-                _field_check("BACnet device instance", _validate_numeric),
-                _field_check("BACnet object instance", _validate_numeric),
-                _field_check("MQTT topic", _validate_topic),
-                _field_check("BACnet units", _validate_units),
-                _field_check("MQTT units", _validate_units),
-            ),
+        extra_checks=(
+            _field_check("BACnet device instance", _validate_numeric),
+            _field_check("BACnet object instance", _validate_numeric),
+            _field_check("MQTT topic", _validate_topic),
+            _field_check("BACnet units", _validate_units),
+            _field_check("MQTT units", _validate_units),
         ),
     ),
     "tolerances": ImportProfile(
@@ -429,10 +337,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
         description="Point-level tolerances used by comparison validation.",
         required_columns=("Asset ID", "Point name", "Tolerance"),
         duplicate_key_fields=("Asset ID", "Point name"),
-        row_validator=_make_validator(
-            ("Asset ID", "Point name", "Tolerance"),
-            (_field_check("Tolerance", _validate_numeric),),
-        ),
+        extra_checks=(_field_check("Tolerance", _validate_numeric),),
     ),
 }
 
@@ -591,7 +496,7 @@ class ImportService:
         else:
             seen_keys: set[tuple[str, ...]] = set()
             for row_number, row in enumerate(mapped_rows, start=2):
-                row_errors = profile.row_validator(row, row_number)
+                row_errors = profile.validate_row(row, row_number)
                 duplicate_key = tuple(row.get(field, "").strip() for field in profile.duplicate_key_fields)
                 if duplicate_key and any(duplicate_key):
                     if duplicate_key in seen_keys:

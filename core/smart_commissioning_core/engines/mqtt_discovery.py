@@ -62,6 +62,7 @@ from smart_commissioning_core.engines.safety import (
     require_scan_authorization,
 )
 from smart_commissioning_core.mqtt_settings import (
+    _broker_error_status,
     build_mqtt_connection_settings,
     parse_int,
 )
@@ -134,27 +135,6 @@ def _capture_seconds(parameters: dict[str, Any]) -> float | None:
 
 def _max_messages(parameters: dict[str, Any]) -> int:
     return parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES)
-
-
-def _broker_status_detail(error: Exception) -> str:
-    """Map a transport error to a coarse, credential-free status label.
-
-    Mirrors udmi_validation._broker_error_status. NEVER returns the raw error
-    text (which can contain hostnames / auth detail).
-    """
-    text = str(error).casefold()
-    if "tls" in text or "certificate" in text or "ssl" in text:
-        return "tls_error"
-    if (
-        "username" in text
-        or "password" in text
-        or "authorised" in text
-        or "authorized" in text
-    ):
-        return "authentication_error"
-    if "timed out" in text or "timeout" in text:
-        return "broker_timeout"
-    return "broker_unreachable"
 
 
 def _device_ref_from_topic(topic: str) -> str | None:
@@ -341,7 +321,7 @@ def _run_mqtt_discovery(
             result_summary_extra={
                 "topics_discovered": 0,
                 "messages_captured": 0,
-                "broker_status_detail": _broker_status_detail(error),
+                "broker_status_detail": _broker_error_status(error),
             }
         )
 
@@ -360,7 +340,7 @@ def _run_mqtt_discovery(
             result_summary_extra={
                 "topics_discovered": 0,
                 "messages_captured": 0,
-                "broker_status_detail": _broker_status_detail(error),
+                "broker_status_detail": _broker_error_status(error),
             }
         )
 

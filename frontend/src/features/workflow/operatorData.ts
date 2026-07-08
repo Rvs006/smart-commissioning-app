@@ -29,7 +29,6 @@ export type IssueRow = {
   severity: "critical" | "major" | "minor";
   area: string;
   message: string;
-  owner: string;
 };
 
 // Groups validation issues by asset, then by derived payload type (mq9m4bnv).
@@ -218,12 +217,6 @@ export const workflowStages: WorkflowStage[] = [
     summary: "UDMI payload checks found pointset mismatches and silent devices.",
     action: "Resolve issues",
   },
-  {
-    name: "Reports",
-    state: "queued",
-    summary: "Evidence pack can be generated after current validation issues are reviewed.",
-    action: "Queue evidence",
-  },
 ];
 
 // Labelled sample issues. Used only as a fallback in the module inspector when
@@ -235,7 +228,6 @@ export const issueRows: IssueRow[] = [
     severity: "critical",
     area: "UDMI pointset",
     message: "fault_status expected STRING but received NUMBER.",
-    owner: "BMS contractor",
   },
   {
     id: "ISS-1037",
@@ -243,7 +235,6 @@ export const issueRows: IssueRow[] = [
     severity: "major",
     area: "BACnet discovery",
     message: "Four required points are absent from the live object list.",
-    owner: "Controls engineer",
   },
   {
     id: "ISS-1028",
@@ -251,7 +242,6 @@ export const issueRows: IssueRow[] = [
     severity: "major",
     area: "MQTT discovery",
     message: "Telemetry interval exceeds configured tolerance by 70 seconds.",
-    owner: "Integration engineer",
   },
   {
     id: "ISS-1019",
@@ -259,7 +249,6 @@ export const issueRows: IssueRow[] = [
     severity: "minor",
     area: "Report metadata",
     message: "Asset location is missing floor reference in imported register.",
-    owner: "Commissioning lead",
   },
 ];
 

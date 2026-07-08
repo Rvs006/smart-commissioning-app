@@ -1,9 +1,9 @@
 """API tests for the dispatch-time Source Interface availability guard.
 
 Boots the FastAPI app in api_key auth mode against the shared temporary SQLite
-database (same harness as test_system_interfaces_api.py: env overrides + cache
-clears BEFORE app.main is imported, TestClient entered as a context manager so
-the startup lifespan applies migrations).
+database (harness.ApiTestCase: env overrides + cache clears BEFORE app.main is
+imported, TestClient entered as a context manager so the startup lifespan
+applies migrations).
 
 Covered: a real (non-dry-run) discovery run whose EFFECTIVE source_ip fails
 ``interface_service.ensure_source_ip_available`` is rejected with HTTP 400 and
@@ -20,13 +20,10 @@ whole test process — writing a Source Interface into demo-project would leak
 into the other API test modules' runs.
 """
 
-import atexit
-import os
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
+
+from harness import ApiTestCase
 
 _SHARED_KEY = "test-source-interface-guard-admin-key"
 
@@ -49,38 +46,12 @@ _NOT_PRESENT_DETAIL = (
 _GUARD_TARGET = "app.services.interface_service.ensure_source_ip_available"
 
 
-def _shared_test_database_url() -> str:
-    """Process-wide temporary SQLite database shared by all API test modules."""
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
+class DiscoverySourceInterfaceGuardTests(ApiTestCase):
+    env = _ENV_OVERRIDES
 
-
-class DiscoverySourceInterfaceGuardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls._previous_env = {}
-        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        # Reset cached settings/engine so the app picks up the temporary database.
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        cls._client_context = TestClient(app)
-        cls.client = cls._client_context.__enter__()
+        super().setUpClass()
 
         # Runs are created as an engineer (run creation is engineer+), provisioned
         # once via the shared admin key.
@@ -101,21 +72,6 @@ class DiscoverySourceInterfaceGuardTests(unittest.TestCase):
             json=configuration,
         )
         assert response.status_code == 200, response.text
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
 
     @classmethod
     def _admin_headers(cls) -> dict[str, str]:

@@ -46,12 +46,6 @@ export type CreateUserResponse = {
   api_key: string;
 };
 
-export type Blueprint = {
-  services: string[];
-  modules: string[];
-  jobs: string[];
-};
-
 export type ConfigurationSection = {
   values: Record<string, string>;
   status: string;
@@ -118,18 +112,6 @@ export type ImportBatchSummary = {
   missing_columns: string[];
   stored_file_name: string;
   created_at: string;
-};
-
-export type ImportErrorRecord = {
-  row_number: number | null;
-  field: string | null;
-  code: string;
-  message: string;
-};
-
-export type ImportErrorReport = {
-  import_id: string;
-  errors: ImportErrorRecord[];
 };
 
 export type JobType =
@@ -289,13 +271,6 @@ export type DiscoveryResultsResponse = {
   devices: DiscoveryRowRecord[];
   points: DiscoveryRowRecord[];
   topics: DiscoveryRowRecord[];
-};
-
-export type DiscoveryPointsResponse = {
-  run_id: string;
-  job_type: JobType;
-  status: JobStatus;
-  points: DiscoveryRowRecord[];
 };
 
 export type DiscoveryTopicsResponse = {
@@ -469,10 +444,6 @@ export function formatApiDetail(detail: unknown): string {
 
 export function getHealth(): Promise<HealthStatus> {
   return request<HealthStatus>("/health");
-}
-
-export function getBlueprint(): Promise<Blueprint> {
-  return request<Blueprint>("/blueprint");
 }
 
 // Best-effort adapter classification from the backend. "virtual" is never
@@ -688,26 +659,12 @@ export function createImport(input: {
   });
 }
 
-export function getImportErrors(importId: string): Promise<ImportErrorReport> {
-  return request<ImportErrorReport>(`/imports/${importId}/errors`);
-}
-
 export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
   return `/imports/templates/${encodeURIComponent(importType)}.${format}`;
 }
 
-// URL helpers are display-only. Downloads must use downloadFile() so the
-// X-API-Key header is attached; bare anchors 401 in hosted deployments.
-export function getImportTemplateUrl(importType: ImportType, format: ImportTemplateFormat): string {
-  return `${apiBaseUrl}${getImportTemplatePath(importType, format)}`;
-}
-
 export function getReportDownloadPath(reportId: string): string {
   return `/reports/${encodeURIComponent(reportId)}/download`;
-}
-
-export function getReportDownloadUrl(reportId: string): string {
-  return `${apiBaseUrl}${getReportDownloadPath(reportId)}`;
 }
 
 export function startDiscoveryRun(input: {
@@ -833,10 +790,6 @@ export function listReports(): Promise<ReportListResponse> {
   return request<ReportListResponse>("/reports");
 }
 
-export function getReport(reportId: string): Promise<ReportSummary> {
-  return request<ReportSummary>(`/reports/${encodeURIComponent(reportId)}`);
-}
-
 export type ListRunsParams = {
   projectId?: string;
   siteId?: string;
@@ -886,20 +839,12 @@ export function cancelRun(runId: string): Promise<RunRecord> {
   });
 }
 
-export function listDiscoveryRuns(): Promise<RunListResponse> {
-  return request<RunListResponse>("/discovery/runs");
-}
-
 export function getDiscoveryRun(runId: string): Promise<RunRecord> {
   return request<RunRecord>(`/discovery/runs/${encodeURIComponent(runId)}`);
 }
 
 export function getDiscoveryResults(runId: string): Promise<DiscoveryResultsResponse> {
   return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`);
-}
-
-export function getDiscoveryPoints(runId: string): Promise<DiscoveryPointsResponse> {
-  return request<DiscoveryPointsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/points`);
 }
 
 export function getDiscoveryTopics(runId: string): Promise<DiscoveryTopicsResponse> {

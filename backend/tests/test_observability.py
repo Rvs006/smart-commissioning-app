@@ -7,15 +7,13 @@ would need a real Redis is exercised with a fake client or asserted only in the
 inline-mode path where Redis is genuinely not required.
 """
 
-import atexit
 import io
 import json
 import logging
-import os
-import shutil
-import tempfile
 import unittest
 from pathlib import Path
+
+from harness import ApiTestCase
 
 _API_KEY = "test-observability-key"
 
@@ -26,55 +24,14 @@ _ENV_OVERRIDES = {
 }
 
 
-def _shared_test_database_url() -> str:
-    existing = os.environ.get("SCT_TEST_DATABASE_URL")
-    if existing:
-        return existing
-    temp_dir = tempfile.mkdtemp(prefix="sct-test-db-")
-    atexit.register(shutil.rmtree, temp_dir, ignore_errors=True)
-    url = f"sqlite:///{(Path(temp_dir) / 'smart_commissioning.db').as_posix()}"
-    os.environ["SCT_TEST_DATABASE_URL"] = url
-    return url
+class ObservabilityApiTests(ApiTestCase):
+    """Endpoint-level coverage: /metrics, X-Request-ID, /ready.
 
+    No default X-API-Key header: individual tests choose whether to auth so
+    we can prove /metrics and /ready work WITHOUT credentials.
+    """
 
-class ObservabilityApiTests(unittest.TestCase):
-    """Endpoint-level coverage: /metrics, X-Request-ID, /ready."""
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls._previous_env = {}
-        for key, value in {"DATABASE_URL": _shared_test_database_url(), **_ENV_OVERRIDES}.items():
-            cls._previous_env[key] = os.environ.get(key)
-            os.environ[key] = value
-
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
-
-        from app.main import app
-        from fastapi.testclient import TestClient
-
-        # No default X-API-Key header: individual tests choose whether to auth so
-        # we can prove /metrics and /ready work WITHOUT credentials.
-        cls._client_context = TestClient(app)
-        cls.client = cls._client_context.__enter__()
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        from app.core import config as config_module
-        from app.core import db as db_module
-
-        cls._client_context.__exit__(None, None, None)
-        db_module.get_engine().dispose()
-        for key, value in cls._previous_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        config_module.get_settings.cache_clear()
-        db_module.get_engine.cache_clear()
+    env = _ENV_OVERRIDES
 
     # -- /metrics ----------------------------------------------------------
 
@@ -274,14 +231,6 @@ class JsonLoggingTests(unittest.TestCase):
         payload = json.loads(stream.getvalue().strip())
         self.assertNotIn("request_id", payload)
         self.assertNotIn("run_id", payload)
-
-    def test_run_id_context_binds_and_restores(self) -> None:
-        from app.core.logging import get_run_id, run_id_context
-
-        self.assertIsNone(get_run_id())
-        with run_id_context("run-xyz"):
-            self.assertEqual(get_run_id(), "run-xyz")
-        self.assertIsNone(get_run_id())
 
     def test_configure_logging_is_idempotent(self) -> None:
         from app.core.logging import _SCT_HANDLER_FLAG, configure_logging

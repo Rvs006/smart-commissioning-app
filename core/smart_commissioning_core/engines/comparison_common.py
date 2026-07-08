@@ -1,14 +1,18 @@
 """Shared, network-free helpers for the validation/comparison engines.
 
-These are pure functions used by both :mod:`point_validation` and
-:mod:`comparison`. Nothing here opens a socket or imports a transport — they
-are deterministic data transforms over imported register rows + observed
+These are pure functions used by the validation/comparison engines
+(:mod:`point_validation`, :mod:`comparison`, ``udmi_validation``,
+``mqtt_config_publish``). Nothing here opens a socket or imports a transport —
+they are deterministic data transforms over imported register rows + observed
 values, and are exercised directly by the engine tests.
 """
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
+
+from smart_commissioning_core.records import ValidationIssueRecord
 
 # Loader callables injected into the engines (mirrors udmi_validation's
 # ``LiveCapture`` injection style). They return plain row dicts; the engines
@@ -43,6 +47,66 @@ class Tolerance:
         if self.absolute is not None:
             return f"absolute +-{self.absolute}"
         return "exact"
+
+
+def make_issue(
+    issues: Sequence[ValidationIssueRecord],
+    prefix: str,
+    *,
+    issue_type: str,
+    severity: str,
+    description: str,
+    asset_id: str | None = None,
+    status: str | None = None,
+    point_name: str | None = None,
+    topic: str | None = None,
+    expected_value: str | None = None,
+    observed_value: str | None = None,
+    match_basis: str | None = None,
+    suggested_action: str | None = None,
+    raw_evidence_uri: str | None = None,
+    status_detail: str | None = None,
+    last_seen_at: datetime | None = None,
+) -> ValidationIssueRecord:
+    """Build a sequentially numbered issue: ``{prefix}-{len(issues) + 1:04d}``.
+
+    Every optional :class:`ValidationIssueRecord` field is spelled out (rather
+    than accepted as ``**fields``) so a typoed field name raises a TypeError
+    instead of being silently dropped by pydantic.
+    """
+    return ValidationIssueRecord(
+        issue_id=f"{prefix}-{len(issues) + 1:04d}",
+        asset_id=asset_id,
+        issue_type=issue_type,
+        severity=severity,
+        description=description,
+        status=status,
+        point_name=point_name,
+        topic=topic,
+        expected_value=expected_value,
+        observed_value=observed_value,
+        match_basis=match_basis,
+        suggested_action=suggested_action,
+        raw_evidence_uri=raw_evidence_uri,
+        status_detail=status_detail,
+        last_seen_at=last_seen_at,
+    )
+
+
+def _is_required(flag: Any) -> bool:
+    text = str(flag or "").strip().casefold()
+    return text in {"required", "req", "mandatory", "true", "yes", "1"}
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        # Avoid noisy trailing zeros while staying deterministic.
+        return repr(value)
+    return str(value)
 
 
 def coerce_number(value: Any) -> float | None:

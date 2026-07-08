@@ -1,7 +1,10 @@
+"""Worker settings from environment variables (stdlib only, no .env file)."""
+
+import os
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from smart_commissioning_core.db.engine import default_sqlite_url
 
 # Same SQLite default as the backend (backend/runtime/smart_commissioning.db)
@@ -10,18 +13,17 @@ from smart_commissioning_core.db.engine import default_sqlite_url
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-class WorkerSettings(BaseSettings):
-    environment: str = "development"
-    redis_url: str = "redis://localhost:6379/0"
-    database_url: str = default_sqlite_url(_REPOSITORY_ROOT / "backend" / "runtime")
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+@dataclass(frozen=True)
+class WorkerSettings:
+    redis_url: str
+    database_url: str
 
 
 @lru_cache
 def get_settings() -> WorkerSettings:
-    return WorkerSettings()
+    return WorkerSettings(
+        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        database_url=os.getenv(
+            "DATABASE_URL", default_sqlite_url(_REPOSITORY_ROOT / "backend" / "runtime")
+        ),
+    )
