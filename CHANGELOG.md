@@ -176,6 +176,13 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **Portable exe now bundles `psutil`, restoring the NIC picker.** The frozen
+  launcher never imported `psutil`, and backend/app import-guards it (degrading
+  to an Auto-only Source Interface list instead of erroring), so the packaged
+  exe silently shipped without NIC enumeration — the health-only boot smoke
+  could not see it. The launcher now freezes `psutil` explicitly and the
+  `windows-portable` CI boot smoke additionally requires
+  `/api/v1/system/interfaces` to return a non-empty list on the runner.
 - **Inactive users' API keys no longer grant local-mode admin.** In `local`
   auth mode, a key matching a deactivated (or corrupt-role) user row used to
   fall through to the keyless-loopback admin path, contradicting the

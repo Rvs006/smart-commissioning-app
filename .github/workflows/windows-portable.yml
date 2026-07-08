@@ -6,7 +6,11 @@
 # engineers: a PowerShell 5.1 -Include/-LiteralPath hazard that deleted
 # non-cache files from the bundle, and a missing --collect-all cryptography in
 # the PyInstaller freeze. Either class kills `import app.main`, so the
-# health-200 boot smoke below catches both.
+# health-200 boot smoke below catches both. A third shipped bug class is
+# subtler: backend/app import-guards optional deps (psutil), so a module
+# missing from the freeze degrades a feature (NIC picker -> Auto-only) while
+# health stays 200 — hence the smoke also requires /api/v1/system/interfaces
+# to return a non-empty list (the runner always has at least one IPv4 NIC).
 #
 # Separate workflow (not a job in windows-compat.yml) because path filters are
 # workflow-level: windows-compat.yml deliberately runs unfiltered on every
@@ -77,7 +81,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Boot smoke - exe answers /api/v1/health
+      - name: Boot smoke - exe answers /api/v1/health and lists NICs
         shell: pwsh
         run: |
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
@@ -134,6 +138,27 @@ jobs:
               }
               Start-Sleep -Seconds 2
             }
+
+            # Health proves the app serves; this proves the freeze carried
+            # psutil. /system/interfaces answers 200 with [] (not an error)
+            # when psutil is missing from the bundle — an exe-only NIC-picker
+            # regression that shipped once, invisible to the health probe.
+            if ($ok) {
+              $ifUrl = $healthUrl -replace '/health$', '/system/interfaces'
+              try {
+                $ifResp = Invoke-WebRequest -Uri $ifUrl -UseBasicParsing -TimeoutSec 10
+                if ($ifResp.Content.Trim() -in @('', '[]')) {
+                  Write-Host "NIC SMOKE FAILED: $ifUrl returned an empty interface list (psutil missing from the frozen bundle?)"
+                  $ok = $false
+                } else {
+                  $preview = $ifResp.Content.Substring(0, [Math]::Min(300, $ifResp.Content.Length))
+                  Write-Host "INTERFACES OK: $ifUrl -> $preview"
+                }
+              } catch {
+                Write-Host "NIC SMOKE FAILED: $ifUrl -> $_"
+                $ok = $false
+              }
+            }
           }
           finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -146,7 +171,7 @@ jobs:
               ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
           }
           if (-not $ok) {
-            Write-Error 'Portable exe never answered /api/v1/health with 200 within the deadline.'
+            Write-Error 'Boot smoke failed: no /api/v1/health 200 within the deadline, or /api/v1/system/interfaces returned an empty NIC list.'
             exit 1
           }
 
