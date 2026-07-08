@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -57,12 +58,21 @@ _APIPA_NETWORK = ipaddress.ip_network("169.254.0.0/16")
 
 _IS_WINDOWS = sys.platform == "win32"
 
+_logger = logging.getLogger(__name__)
+
 # Hard ceiling for the single PowerShell net-facts call; a blocked/hung
 # PowerShell (ThreatLocker hosts) costs at most this once per TTL window.
-_POWERSHELL_TIMEOUT_S = 5.0
+# 20s, not 5s: Get-NetAdapter/Get-NetRoute/Get-DnsClientServerAddress cold-load
+# the CIM/WMI subsystem inside the frozen exe's CREATE_NO_WINDOW subprocess and
+# were measured at ~9.5s wall time on real hardware. At 5s the call ALWAYS timed
+# out, so every adapter silently degraded to unknown/None/[] (no wired-first
+# default, no Wi-Fi tag, no gateway/DNS, virtual adapters unfiltered) in the
+# shipped portable exe — invisible because the timeout was swallowed to None.
+_POWERSHELL_TIMEOUT_S = 20.0
 # Facts cache TTL: fresh enough for a details panel, long enough that repeated
-# dropdown refreshes never fork one subprocess per request.
-_NET_FACTS_TTL_S = 10.0
+# dropdown refreshes never fork one subprocess per request. Kept >= the timeout
+# so a slow-but-eventually-successful call is cached, not re-forked every window.
+_NET_FACTS_TTL_S = 30.0
 
 # Dropdown ordering (requirement: Ethernet first, then USB-Ethernet, then
 # unknown, Wi-Fi last with a frontend warning tag; virtual never listed).
@@ -158,6 +168,7 @@ def _run_powershell_net_facts() -> str | None:
     caller serves psutil-only data with unknown/None/[] details.
     """
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    started = time.monotonic()
     try:
         completed = subprocess.run(
             [
@@ -180,9 +191,28 @@ def _run_powershell_net_facts() -> str | None:
             timeout=_POWERSHELL_TIMEOUT_S,
             creationflags=creationflags,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        # Was silently swallowed to None, which shipped a broken NIC picker with
+        # no trace. Log it so the field cause is diagnosable next time.
+        _logger.warning(
+            "NIC net-facts PowerShell timed out after %.1fs; adapters will "
+            "degrade to Auto-only (unknown type, no gateway/DNS). Raise "
+            "_POWERSHELL_TIMEOUT_S if this recurs.",
+            _POWERSHELL_TIMEOUT_S,
+        )
         return None
-    return completed.stdout if completed.returncode == 0 else None
+    except OSError as exc:
+        _logger.warning("NIC net-facts PowerShell could not be run: %s", exc)
+        return None
+    if completed.returncode != 0:
+        _logger.warning(
+            "NIC net-facts PowerShell exited %s after %.1fs: %s",
+            completed.returncode,
+            time.monotonic() - started,
+            (completed.stderr or "").strip()[:500],
+        )
+        return None
+    return completed.stdout
 
 
 def _as_dict_list(value: Any) -> list[dict[str, Any]]:

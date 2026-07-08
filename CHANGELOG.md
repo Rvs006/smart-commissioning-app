@@ -184,6 +184,19 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **NIC adapter classification / gateway / DNS restored in the portable exe.**
+  The Windows net-facts helper (`Get-NetAdapter` / `Get-NetRoute` /
+  `Get-DnsClientServerAddress`) was capped at a 5s timeout, but those CIM/WMI
+  queries take ~9.5s inside the frozen exe's no-window subprocess, so the call
+  *always* timed out and every adapter silently degraded to `unknown` type with
+  no gateway/DNS and no virtual-adapter filtering — the entire 2026-07-03 NIC
+  UX (wired-first default, "Wi-Fi not recommended" tag, gateway/DNS panel) was
+  dead in the shipped exe while dev/tests passed (they mock psutil and never run
+  the real PowerShell). Raised the timeout to 20s, kept the facts-cache TTL
+  `>=` the timeout, and — critically — the helper now **logs** a warning on
+  timeout / non-zero exit instead of swallowing it to `None`, so a future field
+  failure is diagnosable. Guarded by unit tests on the timeout floor and the
+  log-on-failure path.
 - **Portable exe now bundles `psutil`, restoring the NIC picker.** The frozen
   launcher never imported `psutil`, and backend/app import-guards it (degrading
   to an Auto-only Source Interface list instead of erroring), so the packaged
