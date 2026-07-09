@@ -71,14 +71,19 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
         status="Connected",
     ),
     certificates=ConfigurationSection(
+        # No cert material ships pre-installed: a fresh install has NOTHING
+        # uploaded, so the fields start empty rather than seeding placeholder
+        # secret:// refs + a fake expiry that the UI would render as a real,
+        # in-use, valid certificate. TLS trust material is uploaded by the
+        # operator (and is optional — plaintext / no-mutual-TLS is a valid setup).
         values={
-            "CA Certificate": "secret://bootstrap-ca-certificate",
-            "Client Certificate": "secret://bootstrap-client-certificate",
-            "Private Key": "secret://bootstrap-private-key",
+            "CA Certificate": "",
+            "Client Certificate": "",
+            "Private Key": "",
             "Key Password": "********",
-            "Certificate Expiry": "2027-05-20",
+            "Certificate Expiry": "",
         },
-        status="Valid",
+        status="Not configured",
     ),
     time=ConfigurationSection(
         values={
@@ -521,8 +526,11 @@ class ConfigurationService:
             errors.append(f"{label} must be Enabled or Disabled.")
 
     def _validate_certificate(self, errors: list[str], label: str, value: str) -> None:
-        if not value.strip():
-            errors.append(f"{label} must not be empty.")
+        value = value.strip()
+        if not value:
+            # Certificates are OPTIONAL: a plaintext MQTT connection (Use TLS
+            # Disabled) or a broker needing no client certificate is a valid
+            # setup, so an empty certificate field is not a validation error.
             return
         if value.startswith("secret://"):
             return

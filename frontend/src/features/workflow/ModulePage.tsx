@@ -103,10 +103,12 @@ const validationModeCards = [
   },
 ];
 
+// The IP scanner performs a TCP connect test only, so the defaults are TCP
+// service ports (not BACnet's UDP 47808 — that lives in BACnet Discovery).
 const defaultScanPorts: ScanPort[] = [
-  { port: "47808", protocol: "udp" },
-  { port: "80", protocol: "tcp" },
   { port: "443", protocol: "tcp" },
+  { port: "80", protocol: "tcp" },
+  { port: "22", protocol: "tcp" },
 ];
 const defaultExpectedSchedule = JSON.stringify(
   {
@@ -1355,6 +1357,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               Add port
             </button>
           </div>
+          <p className="field-note">
+            The IP scanner runs a TCP connect test only. For BACnet/IP devices (UDP 47808), use BACnet
+            Discovery — it sends a real Who-Is broadcast; a TCP probe cannot detect BACnet.
+          </p>
           <div className="port-editor">
             {scanPorts.map((entry, index) => (
               <div className="port-row" key={`${entry.protocol}-${index}`}>
@@ -1363,7 +1369,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <input
                     inputMode="numeric"
                     onChange={(event) => changeScanPort(index, "port", event.target.value)}
-                    placeholder="47808"
+                    placeholder="443"
                     value={entry.port}
                   />
                 </label>
@@ -1373,7 +1379,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     onChange={(event) => changeScanPort(index, "protocol", event.target.value as ScanPort["protocol"])}
                     value={entry.protocol}
                   >
-                    <option value="udp">UDP</option>
+                    {/* TCP only: the sweep is a TCP connect test. UDP (e.g. BACnet
+                        47808) is handled by the dedicated BACnet Discovery module. */}
                     <option value="tcp">TCP</option>
                   </select>
                 </label>
@@ -1390,7 +1397,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </div>
           <p className="section-copy">
             Sent to the API as <strong>{scanPortSpecification(scanPorts) || "common ports"}</strong>. Leave the
-            list empty to use the common fallback: 47808/udp, 80/tcp, and 443/tcp.
+            list empty to use the common TCP fallback (80, 443, 1883, 502). BACnet/IP (UDP 47808) is not probed
+            here — use BACnet Discovery.
           </p>
         </section>
       )}

@@ -436,6 +436,36 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
         self.assertTrue(by_type["state"]["observed_present"])
 
+    def test_failed_live_capture_does_not_mislabel_pasted_payloads(self) -> None:
+        # Audit fix: a failed/timed-out live capture leaves the pasted default
+        # payloads in place with NO captured topics; they must NOT be relabelled
+        # "live_capture" (which would present pasted values as real device data).
+        def failing_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise OSError("broker unreachable")
+
+        result = validate_udmi_full_report(
+            {
+                "broker_host": "mqtt.example.local",
+                "expected_schedule": {
+                    "asset_id": "AHU-1000001",
+                    "manufacturer": "ExpectedCo",
+                    "model": "Model-A",
+                    "guid": "ifc://expected",
+                    "units": {"co2_concentration_sensor": "parts_per_million"},
+                },
+                "state_payload": {"system": {"hardware": {"make": "ExpectedCo", "model": "Model-A"}}},
+                "metadata_payload": {"system": {"physical_tag": {"asset": {"guid": "ifc://expected"}}}},
+                "pointset_payload": {"points": {"co2_concentration_sensor": {"present_value": 500}}},
+                "state_topic": "334os/b1/ahu-1000001/state",
+                "use_live_broker": True,
+            },
+            live_capture=failing_capture,
+        )
+
+        self.assertEqual(result.result_summary["captured_topics"], [])
+        self.assertEqual(result.result_summary["payload_view_source"], "direct_inputs")
+        self.assertTrue(any("Live MQTT capture failed" in issue.description for issue in result.issues))
+
     def test_payload_views_empty_for_fixture_path(self) -> None:
         # The bundled fixture carries no payload JSON, so the view must stay empty
         # and be labelled rather than fabricated.

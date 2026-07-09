@@ -118,7 +118,12 @@ class MaskOnReadTests(SecretStorageTestCase):
         self.assertEqual(payload["mqtt"]["values"]["MQTT Password"], "broker-pass-1")
 
     def test_mqtt_provider_hook_receives_unmasked_values(self) -> None:
-        self.save_with_mqtt_password("broker-pass-2")
+        # No cert material ships by default (fresh install is honest), so store a
+        # CA reference explicitly, then confirm secret:// refs stay opaque.
+        configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        configuration.mqtt.values["MQTT Password"] = "broker-pass-2"
+        configuration.certificates.values["CA Certificate"] = "secret://ca-certificate"
+        self.service.save(configuration)
 
         with mock.patch.object(configuration_service_module, "ConfigurationService", return_value=self.service):
             mqtt_values, certificate_values = _configuration_values()
@@ -127,10 +132,24 @@ class MaskOnReadTests(SecretStorageTestCase):
         self.assertTrue(str(certificate_values["CA Certificate"]).startswith("secret://"))
 
     def test_secret_references_stay_opaque_and_empty_passwords_stay_empty(self) -> None:
-        api_snapshot = self.service.load()  # seeds defaults: sentinel resolves to empty
+        configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        configuration.certificates.values["CA Certificate"] = "secret://ca-certificate"
+        self.service.save(configuration)
 
+        api_snapshot = self.service.load()
         self.assertTrue(api_snapshot.certificates.values["CA Certificate"].startswith("secret://"))
         self.assertEqual(api_snapshot.mqtt.values["MQTT Password"], "")
+
+    def test_fresh_install_ships_no_certificate_material(self) -> None:
+        # Bug fix (audit): a fresh install must NOT present fabricated cert
+        # placeholders as real, in-use, valid material. Cert fields start empty
+        # and the config still validates (certificates are optional).
+        api_snapshot = self.service.load()
+        self.assertEqual(api_snapshot.certificates.values["CA Certificate"], "")
+        self.assertEqual(api_snapshot.certificates.values["Client Certificate"], "")
+        self.assertEqual(api_snapshot.certificates.values["Private Key"], "")
+        self.assertEqual(api_snapshot.certificates.values["Certificate Expiry"], "")
+        self.assertTrue(self.service.validate(api_snapshot).valid)
 
 
 class WriteOnlyUpdateTests(SecretStorageTestCase):

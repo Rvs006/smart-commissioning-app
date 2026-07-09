@@ -61,8 +61,11 @@ from smart_commissioning_core.engines.safety import (
     require_scan_authorization,
 )
 
-# Default ports. 47808=BACnet/IP, 1883=MQTT, 502=Modbus, 80/443=web mgmt UIs.
-DEFAULT_PORTS: tuple[int, ...] = (80, 443, 47808, 1883, 502)
+# Default ports for the TCP connect sweep. 1883=MQTT, 502=Modbus, 80/443=web
+# mgmt UIs. BACnet/IP (UDP 47808) is intentionally excluded: this engine only
+# does TCP connects, so a TCP probe of 47808 can never detect a BACnet device —
+# BACnet discovery is the dedicated Who-Is (UDP broadcast) engine.
+DEFAULT_PORTS: tuple[int, ...] = (80, 443, 1883, 502)
 
 # Hard ceiling on how many hosts a single sweep may expand to. This is the
 # operator policy cap: a request's ``max_hosts`` may LOWER it but can never

@@ -160,6 +160,11 @@ class EngineResult:
             decides (``succeeded``, or ``cancelled`` if the context was
             cancelled). May be set to ``"cancelled"``, ``"failed"`` or
             ``"succeeded"`` to override.
+        error_message: an operator-facing message stored on the run record when
+            the engine returns a self-diagnosed failure (``status_override=
+            "failed"``). Unlike a raised exception — which the wrapper replaces
+            with a sanitized generic message to avoid leaking credentials — this
+            is a message the engine has vetted as safe, so the UI can show it.
     """
 
     discovered_assets: list[dict[str, Any]] = field(default_factory=list)
@@ -167,6 +172,7 @@ class EngineResult:
     issues: list[ValidationIssueRecord | dict[str, Any]] = field(default_factory=list)
     result_summary_extra: dict[str, Any] = field(default_factory=dict)
     status_override: str | None = None
+    error_message: str | None = None
 
 
 # An engine is any (sync or async) callable taking an EngineContext and
@@ -372,6 +378,7 @@ def _apply_success(
         status=status,
         stage=_stage_for(status),
         progress_percent=100,
+        error_message=result.error_message,
     )
 
 

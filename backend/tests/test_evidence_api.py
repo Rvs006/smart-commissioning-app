@@ -12,10 +12,13 @@ Two layers, all in-process with tmp SQLite / tmp dirs (no live infra):
 """
 
 import atexit
+import io
+import json
 import os
 import shutil
 import tempfile
 import unittest
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -99,6 +102,16 @@ class EvidenceVerifyApiTests(ApiTestCase):
                 self.assertIsNotNone(body["signed_at"])
                 self.assertIsNotNone(body["public_key_fingerprint"])
                 self.assertEqual(body["stored_hash"], body["computed_hash"])
+
+    def test_unscoped_evidence_pack_labels_source_runs_honestly(self) -> None:
+        # Audit fix: an evidence pack generated with no selected source runs must
+        # NOT claim to cover "All completed runs" while carrying zero findings.
+        report_id = self._create_report("zip")
+        download = self.client.get(f"/api/v1/reports/{report_id}/download")
+        self.assertEqual(download.status_code, 200, download.text)
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            summary = json.loads(archive.read("summary.json"))
+        self.assertEqual(summary["Source runs"], "None selected (no run findings included)")
 
     def test_download_is_byte_reproducible(self) -> None:
         report_id = self._create_report("xlsx")

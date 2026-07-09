@@ -260,8 +260,8 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     tableTitle: "Network Scan Results",
     columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
     rows: [
-      { Asset: "Boiler 1 Controller", "Expected IP": "10.10.25.101", Observed: "Online", "MAC Address": "90:2C:D0:B0:03:36", Ports: "47808/udp, 443/tcp", "Match Basis": "MAC", "Last Seen": "48 sec ago", "Detailed Status": "Responded to UDP BACnet and HTTPS checks", Result: "Matched" },
-      { Asset: "AHU Level 3", "Expected IP": "10.10.25.117", Observed: "Online", "MAC Address": "5C:A1:1D:8D:6F:FF", Ports: "47808/udp", "Match Basis": "IP", "Last Seen": "7 min ago", "Detailed Status": "BACnet reachable, HTTP missing", Result: "Service mismatch" },
+      { Asset: "Boiler 1 Controller", "Expected IP": "10.10.25.101", Observed: "Online", "MAC Address": "90:2C:D0:B0:03:36", Ports: "80/tcp, 443/tcp", "Match Basis": "MAC", "Last Seen": "48 sec ago", "Detailed Status": "Responded to HTTP and HTTPS TCP checks", Result: "Matched" },
+      { Asset: "AHU Level 3", "Expected IP": "10.10.25.117", Observed: "Online", "MAC Address": "5C:A1:1D:8D:6F:FF", Ports: "443/tcp", "Match Basis": "IP", "Last Seen": "7 min ago", "Detailed Status": "HTTPS reachable on TCP 443, HTTP missing", Result: "Service mismatch" },
       { Asset: "Unknown host", "Expected IP": "-", Observed: "10.10.25.214", "MAC Address": "C0:A6:F3:F2:F3:2F", Ports: "80/tcp, 443/tcp", "Match Basis": "None", "Last Seen": "Now", "Detailed Status": "Matched no imported MAC address", Result: "Rogue" },
     ],
     issues: [],
