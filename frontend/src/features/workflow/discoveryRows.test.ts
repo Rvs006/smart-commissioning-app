@@ -1,5 +1,92 @@
 import { describe, expect, it } from "vitest";
-import { forbiddenOpenPorts, unexpectedOpenPorts, validationMetrics } from "./discoveryRows";
+import type { DiscoveryResultsResponse } from "../../api/client";
+import {
+  bacnetBackendLabel,
+  forbiddenOpenPorts,
+  ipRowsFromResults,
+  unexpectedOpenPorts,
+  validationMetrics,
+} from "./discoveryRows";
+
+// Minimal IP discovery results shell carrying one discovered asset, so the row
+// mapper can be exercised without the rest of the DiscoveryResultsResponse shape.
+function ipResults(
+  asset: Partial<DiscoveryResultsResponse["discovered_assets"][number]>,
+): DiscoveryResultsResponse {
+  return {
+    run_id: "run-ip-1",
+    job_type: "ip_discovery",
+    status: "succeeded",
+    result_summary: {},
+    discovered_assets: [{ ip_address: "10.10.25.214", ...asset }],
+    devices: [],
+    points: [],
+    topics: [],
+  };
+}
+
+// Minimal terminal BACnet results shell; only result_summary.backend matters
+// to bacnetBackendLabel, the rest satisfies the DiscoveryResultsResponse shape.
+function bacnetResults(resultSummary: Record<string, unknown>): DiscoveryResultsResponse {
+  return {
+    run_id: "run-bacnet-1",
+    job_type: "bacnet_discovery",
+    status: "succeeded",
+    result_summary: resultSummary,
+    discovered_assets: [],
+    devices: [],
+    points: [],
+    topics: [],
+  };
+}
+
+describe("bacnetBackendLabel", () => {
+  it("flags a simulated backend as demo data, not a real scan", () => {
+    expect(bacnetBackendLabel(bacnetResults({ backend: "simulated" }))).toEqual({
+      kind: "simulated",
+      text: "SIMULATED — demo data, not a real BACnet scan.",
+    });
+  });
+
+  it("confirms a real bacpypes3 scan", () => {
+    expect(bacnetBackendLabel(bacnetResults({ backend: "bacpypes3" }))).toEqual({
+      kind: "live",
+      text: "Live bacpypes3 scan.",
+    });
+  });
+
+  it("surfaces an unrecognised backend neutrally instead of swallowing it", () => {
+    expect(bacnetBackendLabel(bacnetResults({ backend: "acme-sim" }))).toEqual({
+      kind: "unknown",
+      text: "Backend: acme-sim",
+    });
+  });
+
+  it("returns null when no backend label is present (missing, empty, or non-string)", () => {
+    expect(bacnetBackendLabel(bacnetResults({}))).toBeNull();
+    expect(bacnetBackendLabel(bacnetResults({ backend: "" }))).toBeNull();
+    expect(bacnetBackendLabel(bacnetResults({ backend: 3 }))).toBeNull();
+  });
+});
+
+describe("ipRowsFromResults", () => {
+  it("maps a real MAC address and hostname into the row cells", () => {
+    const [row] = ipRowsFromResults(
+      ipResults({ mac_address: "C0:A6:F3:F2:F3:2F", hostname: "plant-controller" }),
+    );
+    expect(row["MAC Address"]).toBe("C0:A6:F3:F2:F3:2F");
+    expect(row.Hostname).toBe("plant-controller");
+    expect(row["Observed IP"]).toBe("10.10.25.214");
+  });
+
+  it("degrades a missing MAC/hostname to a blank placeholder, never fabricated", () => {
+    // Honesty: off-L2 hosts have no ARP entry and hosts without a PTR record have
+    // no hostname; both legitimately arrive null and must render the em-dash blank.
+    const [row] = ipRowsFromResults(ipResults({ mac_address: null, hostname: null }));
+    expect(row["MAC Address"]).toBe("—");
+    expect(row.Hostname).toBe("—");
+  });
+});
 
 describe("forbiddenOpenPorts", () => {
   it("extracts the forbidden port list from a flagged IP status_detail", () => {

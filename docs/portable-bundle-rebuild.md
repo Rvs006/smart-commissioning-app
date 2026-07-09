@@ -56,7 +56,11 @@ the supported build set. Verified offline on this dev box.
 - All runtime deps the launcher pins in `_bundle_dependency_imports()` installed
   in the build interpreter (fastapi, uvicorn, sqlalchemy, alembic, pydantic*,
   psycopg, redis, openpyxl, prometheus_client, httpx, dramatiq, multipart,
-  starlette, and `smart_commissioning_core`).
+  starlette, `bacpypes3`, and `smart_commissioning_core`). Pull `bacpypes3` via
+  core's `[bacnet]` extra — `pip install "./core[bacnet]" ./backend` — so
+  `build.ps1`'s `--collect-all bacpypes3` can freeze the real BACnet/IP backend.
+  (Without it an authorized real BACnet scan honestly RuntimeErrors in the exe
+  rather than faking a result.)
 
 ---
 

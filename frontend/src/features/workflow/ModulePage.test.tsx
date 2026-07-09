@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { SessionProvider } from "../../app/session";
@@ -148,6 +148,57 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByText("118")).not.toBeInTheDocument();
   });
 
+  it("renders the MAC column and opens a per-host detail dialog from the row View button", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    const queueButton = await screen.findByRole("button", { name: "Run" });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    await waitFor(() => expect(queueButton).toBeEnabled());
+    fireEvent.click(queueButton);
+
+    // The now-populated MAC column renders (header + the live cell value), proving
+    // the engine's mac_address flows through to the table.
+    expect(await screen.findByRole("columnheader", { name: "MAC Address" })).toBeInTheDocument();
+    expect((await screen.findAllByText("C0:A6:F3:F2:F3:2F")).length).toBeGreaterThan(0);
+
+    // Clicking the per-row "View" opens an unmistakable modal dialog whose labeled
+    // fields include the real MAC and hostname for that host.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("MAC Address")).toBeInTheDocument();
+    expect(within(dialog).getByText("C0:A6:F3:F2:F3:2F")).toBeInTheDocument();
+    expect(within(dialog).getByText("Hostname")).toBeInTheDocument();
+    expect(within(dialog).getByText("plant-controller")).toBeInTheDocument();
+
+    // Close returns to the table (dialog dismissed).
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
   it("shows a neutral empty-state metric (no hardcoded sample) before any run", async () => {
     vi.stubGlobal(
       "fetch",
@@ -193,6 +244,106 @@ describe("ModulePage discovery wiring", () => {
     const previewButton = await screen.findByRole("button", { name: "Preview" });
     // Enabled once the engineer role resolves (no scan-auth needed for dry run).
     await waitFor(() => expect(previewButton).toBeEnabled());
+  });
+});
+
+describe("ModulePage BACnet backend provenance", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  // Drives a BACnet discovery run to a terminal, succeeded state whose results
+  // carry result_summary.backend, then returns once the live table is showing.
+  async function runBacnetWithBackend(backend: string) {
+    const bacnetResults = {
+      run_id: "run-bacnet-1",
+      job_type: "bacnet_discovery",
+      status: "succeeded",
+      result_summary: { device_count: 1, point_count: 0, backend },
+      discovered_assets: [],
+      devices: [
+        {
+          name: "Acme Controls",
+          address: "10.0.0.5",
+          vendor: "Acme",
+          attributes: { device_instance: 1001 },
+        },
+      ],
+      points: [],
+      topics: [],
+    };
+    const bacnetTerminalRun = {
+      run_id: "run-bacnet-1",
+      job_type: "bacnet_discovery",
+      status: "succeeded",
+      stage: "discovery",
+      progress_percent: 100,
+      created_at: "2026-06-11T09:00:00Z",
+      updated_at: "2026-06-11T09:05:00Z",
+      project_id: "demo-project",
+      site_id: "demo-site",
+      parameters: {},
+      result_summary: { device_count: 1, backend },
+      error_message: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          return jsonResponse({
+            run_id: "run-bacnet-1",
+            job_type: "bacnet_discovery",
+            status: "queued",
+            message: "BACnet discovery accepted.",
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-bacnet-1/results")) {
+          return jsonResponse(bacnetResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-bacnet-1")) {
+          return jsonResponse(bacnetTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("bacnet-discovery");
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // The live table renders (Acme Controls only exists in the results payload).
+    expect((await screen.findAllByText("Acme Controls")).length).toBeGreaterThan(0);
+  }
+
+  it("shows a prominent SIMULATED warning for a simulated backend", async () => {
+    await runBacnetWithBackend("simulated");
+    const warning = await screen.findByText(/SIMULATED — demo data, not a real BACnet scan\./i);
+    expect(warning).toBeInTheDocument();
+    // Honesty-critical: it is an assertive alert, styled distinctly (not the
+    // neutral amber note), so simulated data cannot pass for a real scan.
+    expect(warning).toHaveAttribute("role", "alert");
+    expect(warning).toHaveClass("warning");
+    expect(screen.queryByText(/Live bacpypes3 scan\./i)).not.toBeInTheDocument();
+  });
+
+  it("shows a subtle Live confirmation for a real bacpypes3 backend", async () => {
+    await runBacnetWithBackend("bacpypes3");
+    expect(await screen.findByText(/Live bacpypes3 scan\./i)).toBeInTheDocument();
+    // The alarming simulated warning must NOT appear for a real scan.
+    expect(
+      screen.queryByText(/SIMULATED — demo data, not a real BACnet scan\./i),
+    ).not.toBeInTheDocument();
   });
 });
 

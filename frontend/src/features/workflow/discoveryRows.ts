@@ -204,6 +204,36 @@ export function discoveryViewFor(
   return null;
 }
 
+// The BACnet engine stamps result_summary.backend with the backend that actually
+// ran: "simulated" (demo/dry-run sample devices — Acme Controls / Globex BMS) or
+// "bacpypes3" (a real on-wire Who-Is / ReadProperty scan). Surface it so an
+// engineer never mistakes simulated sample data for a live scan. Only BACnet has
+// a simulated backend (IP/MQTT do not), so callers gate on the bacnet-discovery
+// route; returns null when the summary carries no backend label (e.g. a run that
+// predates the label, or a failed run that persisted no summary).
+export type BacnetBackendLabel = {
+  kind: "simulated" | "live" | "unknown";
+  text: string;
+};
+
+export function bacnetBackendLabel(
+  results: DiscoveryResultsResponse,
+): BacnetBackendLabel | null {
+  const backend = results.result_summary?.backend;
+  if (typeof backend !== "string" || backend === "") {
+    return null;
+  }
+  if (backend === "simulated") {
+    return { kind: "simulated", text: "SIMULATED — demo data, not a real BACnet scan." };
+  }
+  if (backend === "bacpypes3") {
+    return { kind: "live", text: "Live bacpypes3 scan." };
+  }
+  // Unrecognised but present: report it neutrally rather than swallow it, so an
+  // unexpected backend value is still visible instead of silently trusted.
+  return { kind: "unknown", text: `Backend: ${backend}` };
+}
+
 // Honest primary/secondary metrics derived from the discovery result_summary.
 export function discoveryMetrics(
   route: string,

@@ -94,6 +94,42 @@ def is_dry_run(parameters: dict[str, Any]) -> bool:
     return bool(value)
 
 
+# Parameter key the BACnet engine reads to select its transport backend.
+BACNET_BACKEND_KEY = "bacnet_backend"
+
+
+def resolve_bacnet_backend(parameters: dict[str, Any]) -> None:
+    """Default an AUTHORIZED, non-dry-run BACnet scan to the real bacpypes3 backend.
+
+    Honesty: a real scan must ATTEMPT real discovery. Simulated stays an explicit
+    opt-in (``bacnet_backend='simulated'``) and remains the dry-run plan default.
+    ``setdefault`` so an operator/demo override wins; dry runs are left untouched
+    (side-effect-free preview -> engine default 'simulated' plan). If bacpypes3 is
+    unavailable at scan time the engine records a real failed run — it never falls
+    back to simulated data for an authorized real run.
+    """
+    if is_dry_run(parameters):
+        return
+    parameters.setdefault(BACNET_BACKEND_KEY, "bacpypes3")
+
+
+def resolve_ip_enrichment(parameters: dict[str, Any]) -> None:
+    """Default an authorized, non-dry-run IP sweep to resolve hostnames (reverse DNS).
+
+    Best-effort: the engine's ``_reverse_lookup`` returns None when no PTR exists, so a
+    blank hostname is honest, never fabricated. Dry runs are left untouched (their
+    plan only advertises 'reverse-dns' if the operator opted in). ``setdefault`` so an
+    explicit ``reverse_dns=false`` operator override wins.
+
+    MAC enrichment needs no parameter here: the engine reads the OS ARP cache as an
+    unconditional best-effort per responsive host (gated only by host-responsive +
+    non-dry-run), degrading to a blank MAC when there is no ARP entry.
+    """
+    if is_dry_run(parameters):
+        return
+    parameters.setdefault("reverse_dns", True)
+
+
 # The literal dropdown value meaning "use the OS default route" (bind nothing).
 # Compared case-insensitively; empty / absent is treated the same way.
 _AUTO_SOURCE_INTERFACE = "Auto (OS default route)"

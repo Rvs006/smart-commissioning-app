@@ -14,6 +14,7 @@ comparison/mqtt-config tests use inline parameters / fakes. No assertion in this
 file depends on real hardware.
 """
 
+import importlib.util
 import socket
 import unittest
 
@@ -186,6 +187,51 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
         results = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertIn("dry_run_plan", results["result_summary"])
         self.assertEqual(results["devices"], [])
+
+    def test_authorized_run_defaults_bacnet_backend_to_bacpypes3(self) -> None:
+        # HONESTY: an authorized real run (no dry_run, no explicit override) is
+        # persisted with bacnet_backend=bacpypes3 so BOTH the inline and worker
+        # paths attempt REAL discovery. Deterministic — independent of whether
+        # bacpypes3 is installed (the parameter is stamped before the run executes;
+        # with an Auto source interface the run has no local_address so no socket
+        # I/O occurs even when the dependency is present).
+        response = self._post(
+            "/api/v1/discovery/bacnet/runs",
+            {**_AUTH},
+            "bacnet_discovery",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        run_id = response.json()["run_id"]
+        record = self.client.get(f"/api/v1/discovery/runs/{run_id}").json()
+        self.assertEqual(record["parameters"]["bacnet_backend"], "bacpypes3")
+
+    @unittest.skipIf(
+        importlib.util.find_spec("bacpypes3") is not None,
+        "bacpypes3 is installed; the honest-failure (missing-dep) path is unreachable",
+    )
+    def test_authorized_run_without_bacpypes3_fails_not_simulated(self) -> None:
+        # The exe-today case: an authorized real run selects bacpypes3, which is
+        # not installed, so the inline run must terminate FAILED and expose NO
+        # simulated devices/points — never the "Acme Controls"/"Globex BMS" fakes.
+        response = self._post(
+            "/api/v1/discovery/bacnet/runs",
+            {**_AUTH},
+            "bacnet_discovery",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "failed")
+        run_id = response.json()["run_id"]
+
+        results = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
+        self.assertEqual(results["status"], "failed")
+        self.assertEqual(results["devices"], [])
+        self.assertEqual(results["points"], [])
+        self.assertEqual(results["discovered_assets"], [])
+        # The simulated backend label must never appear on a real authorized run.
+        self.assertNotEqual(results["result_summary"].get("backend"), "simulated")
+        blob = str(results).lower()
+        self.assertNotIn("acme controls", blob)
+        self.assertNotIn("globex", blob)
 
 
 class MqttDiscoveryApiTests(_EngineApiTestCase):

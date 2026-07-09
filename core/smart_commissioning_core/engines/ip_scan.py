@@ -42,7 +42,10 @@ default uses ``asyncio.open_connection`` against real addresses.
 
 import asyncio
 import ipaddress
+import re
 import socket
+import subprocess
+import sys
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -315,6 +318,97 @@ def _reverse_lookup(ip: str) -> str | None:
         return None
 
 
+# A MAC token in OS ARP-cache output: six hex octets separated by ':' (Linux
+# /proc, ``ip neigh``) or '-' (Windows ``arp -a``).
+_MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
+# The all-zero MAC is an incomplete/unresolved ARP entry, not a real address.
+_INCOMPLETE_MAC = "00:00:00:00:00:00"
+
+
+def _normalise_mac(raw: str) -> str | None:
+    """Canonicalise an ARP MAC to upper-case colon form.
+
+    Returns None for the all-zero (incomplete) entry so an unresolved cache row
+    degrades to a blank rather than a fabricated ``00:00:...`` address.
+    """
+    mac = raw.replace("-", ":").upper()
+    return None if mac == _INCOMPLETE_MAC else mac
+
+
+def _arp_lookup_posix(ip: str) -> str | None:
+    """Read the MAC for ``ip`` from ``/proc/net/arp`` (no subprocess).
+
+    Falls back to ``ip neigh show`` only when /proc is absent. The /proc table
+    is a plain-text grid whose columns are IP, HW type, Flags, HW address, Mask,
+    Device — we match the IP column and return the HW address column.
+    """
+    try:
+        with open("/proc/net/arp", encoding="ascii", errors="replace") as table:
+            rows = table.read().splitlines()
+    except FileNotFoundError:
+        completed = subprocess.run(
+            ["ip", "neigh", "show", ip],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+        match = _MAC_RE.search(completed.stdout)
+        return _normalise_mac(match.group(0)) if match else None
+    for row in rows[1:]:  # row 0 is the header
+        fields = row.split()
+        if len(fields) >= 4 and fields[0] == ip:
+            return _normalise_mac(fields[3])
+    return None
+
+
+def _arp_lookup_windows(ip: str) -> str | None:
+    """Read the MAC for ``ip`` from the Windows ``arp -a <ip>`` cache dump.
+
+    ``CREATE_NO_WINDOW`` keeps the GUI portable-exe from flashing a console;
+    ``shell=False`` (the default) and a hard ``timeout`` keep a hung ``arp.exe``
+    from stalling the worker.
+    """
+    completed = subprocess.run(
+        ["arp", "-a", ip],
+        capture_output=True,
+        text=True,
+        timeout=1.0,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    for line in completed.stdout.splitlines():
+        # Trust a MAC only on the line that names this exact IP, so a shared
+        # table dump can never mis-attribute a neighbour's address.
+        if ip in line.split():
+            match = _MAC_RE.search(line)
+            if match:
+                return _normalise_mac(match.group(0))
+    return None
+
+
+def _arp_lookup(ip: str) -> str | None:
+    """Best-effort MAC address for ``ip`` from the OS ARP cache; None on any miss.
+
+    Contract mirrors :func:`_reverse_lookup`: best-effort, time-bounded, and it
+    NEVER raises. A MAC only exists for a same-L2-segment host whose entry the
+    kernel already cached — the successful TCP connect that just proved this host
+    live primed it. Off-L2 / routed hosts have no entry and legitimately yield
+    None; the caller renders that as a blank MAC, never a fabricated one.
+
+    Stdlib only (no new dependency): Linux reads ``/proc/net/arp`` with no
+    subprocess (cheapest, frozen-safe); Windows shells out to the system
+    ``arp.exe`` on PATH with a hard timeout and no console window. Any failure —
+    missing binary (``FileNotFoundError`` on a locked-down host), timeout,
+    unreadable table — degrades to None.
+    """
+    try:
+        if sys.platform.startswith("win"):
+            return _arp_lookup_windows(ip)
+        return _arp_lookup_posix(ip)
+    except Exception:
+        # Best-effort enrichment must never crash or stall the sweep.
+        return None
+
+
 def _build_observed_ports(open_ports: list[int]) -> list[dict[str, Any]]:
     return [
         {
@@ -337,6 +431,7 @@ def process_ip_discovery_run(
     persist_records: Callable[[str, Sequence[dict[str, Any]]], None] | None = None,
     connect: ConnectProbe | None = None,
     reverse_lookup: Callable[[str], str | None] = _reverse_lookup,
+    arp_lookup: Callable[[str], str | None] = _arp_lookup,
 ) -> Any:
     """Run an IP discovery sweep through the shared engine lifecycle.
 
@@ -354,6 +449,8 @@ def process_ip_discovery_run(
             ``asyncio.open_connection``). Tests inject a fake to avoid sockets;
             the real-network path is otherwise untested here.
         reverse_lookup: injectable reverse-DNS function (default: real DNS).
+        arp_lookup: injectable MAC-from-ARP-cache function (default: real OS ARP
+            cache read). Tests inject a fake so no subprocess / ARP is touched.
 
     Returns whatever ``run_store.update_run_status`` returns for the terminal
     status flip (the updated run record).
@@ -376,7 +473,9 @@ def process_ip_discovery_run(
     probe = connect or _make_default_connect(source_ip)
 
     async def engine(engine_ctx: EngineContext) -> EngineResult:
-        return await _run_ip_discovery(engine_ctx, probe=probe, reverse_lookup=reverse_lookup)
+        return await _run_ip_discovery(
+            engine_ctx, probe=probe, reverse_lookup=reverse_lookup, arp_lookup=arp_lookup
+        )
 
     # persist_records None -> run_engine's own _noop_persister default.
     if persist_records is None:
@@ -389,6 +488,7 @@ async def _run_ip_discovery(
     *,
     probe: ConnectProbe,
     reverse_lookup: Callable[[str], str | None],
+    arp_lookup: Callable[[str], str | None],
 ) -> EngineResult:
     """The engine body: expand targets, sweep (or plan), build results."""
     hosts = _expand_hosts(ctx.parameters)
@@ -475,6 +575,12 @@ async def _run_ip_discovery(
         # site resolver); run it off the event loop so it does not stall the
         # async sweep.
         hostname = await asyncio.to_thread(reverse_lookup, host) if do_reverse else None
+        # Best-effort MAC from the OS ARP cache — the connect above just primed
+        # it for same-L2 hosts. Off-L2/routed hosts have no ARP entry and yield
+        # None (honest blank, never fabricated). Threaded + time-bounded so it
+        # never stalls the async sweep. Enrichment only: liveness is the IP
+        # connect, so match_basis stays "ip".
+        mac = await asyncio.to_thread(arp_lookup, host)
         # Per-asset forbidden set wins for this host; else the global union.
         host_forbidden = forbidden_by_address.get(host, forbidden_ports)
         flagged = [port for port in open_ports if port in host_forbidden]
@@ -493,6 +599,7 @@ async def _run_ip_discovery(
             {
                 "asset_id": None,
                 "ip_address": host,
+                "mac_address": mac,
                 "hostname": hostname,
                 "observed_ports": _build_observed_ports(open_ports),
                 "match_basis": "ip",
@@ -512,6 +619,7 @@ async def _run_ip_discovery(
                     "forbidden_open_ports": flagged,
                     "unexpected_open_ports": unexpected,
                     "hostname": hostname,
+                    "mac_address": mac,
                 },
             }
         )

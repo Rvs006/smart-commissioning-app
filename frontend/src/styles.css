@@ -775,6 +775,15 @@ label {
   font-weight: 600;
 }
 
+/* Honesty-critical: a SIMULATED BACnet result must never read like a real scan.
+   Red + heavier weight makes the demo-data warning stand apart from the neutral
+   amber "live observations" note. */
+.sample-banner.warning {
+  background: var(--red-bg);
+  color: var(--red);
+  font-weight: 720;
+}
+
 .hero-side h2 {
   margin: 0;
 }
@@ -928,6 +937,25 @@ label {
   font-size: 12px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+/* Per-row "View" detail dialog for the discovery results table. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: saturate(140%) blur(6px);
+}
+
+.modal-card {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
 }
 
 .progress-block {

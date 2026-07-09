@@ -30,6 +30,7 @@ import {
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { groupIssuesByAsset, mergeAssetGroups, moduleWorkspaces, type IssueRow } from "./operatorData";
 import {
+  bacnetBackendLabel,
   discoveryMetrics,
   discoveryViewFor,
   forbiddenOpenPorts,
@@ -214,6 +215,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("5");
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
+  // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
+  // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
+  const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
   // Per-asset expansion in the UDMI per-payload-type results view (mq9m4bnv),
   // and the nested expected-vs-observed payload expand keyed `${asset}:${type}`.
   const [expandedAsset, setExpandedAsset] = useState<string | null>(null);
@@ -622,6 +626,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return discoveryMetrics(module.route, discoveryResultsQuery.data);
   }, [isDiscoveryModule, discoveryResultsQuery.data, module.route]);
+
+  // BACnet-only provenance: read result_summary.backend so simulated sample
+  // devices are never mistaken for a real on-wire scan. Null for other routes
+  // and until a terminal run's results arrive.
+  const bacnetBackend = useMemo(() => {
+    if (module.route !== "bacnet-discovery" || !discoveryResultsQuery.data) {
+      return null;
+    }
+    return bacnetBackendLabel(discoveryResultsQuery.data);
+  }, [module.route, discoveryResultsQuery.data]);
 
   const usingLiveResults = Boolean(discoveryView);
   const tableColumns = discoveryView?.columns ?? workspace?.columns ?? [];
@@ -1857,6 +1871,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               are produced by validation, not discovery, so no "Result" column is shown here.
             </div>
           )}
+          {bacnetBackend &&
+            (bacnetBackend.kind === "simulated" ? (
+              <div className="sample-banner warning" role="alert">
+                {bacnetBackend.text}
+              </div>
+            ) : (
+              <div className="sample-banner" role="note">
+                {bacnetBackend.text}
+              </div>
+            ))}
 
           <div className="data-table-wrap">
             {resultRows.length > 0 ? (
@@ -1878,7 +1902,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       <td>
                         <button
                           className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
-                          onClick={() => setSelectedResultIndex(rowIndex)}
+                          onClick={() => {
+                            setSelectedResultIndex(rowIndex);
+                            setDetailRow(row);
+                          }}
                           type="button"
                         >
                           View
@@ -1904,6 +1931,40 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             )}
           </div>
         </article>
+
+        {detailRow && (
+          <div
+            className="modal-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Result detail"
+            onClick={() => setDetailRow(null)}
+          >
+            <div className="modal-card surface" onClick={(event) => event.stopPropagation()}>
+              <div className="surface-heading">
+                <div>
+                  <span className="eyebrow">Detail</span>
+                  <h3>Result detail</h3>
+                </div>
+                <button
+                  className="secondary-button compact"
+                  onClick={() => setDetailRow(null)}
+                  type="button"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="detail-list">
+                {buildResultDetailItems(module.route, detailRow, usingLiveResults).map((item) => (
+                  <div className="detail-row" key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
 
         <aside className="surface inspector">
           <div className="surface-heading">
@@ -2413,6 +2474,33 @@ function buildResultDetailItems(
   row: Record<string, string>,
   live: boolean,
 ): DetailItem[] {
+  if (route === "ip-scanner") {
+    // The per-host detail surfaced by the results "View" button. MAC/Hostname are
+    // best-effort enrichment: the engine emits "—" (blank) when no ARP entry or
+    // PTR record exists, so a blank here is honest, never fabricated.
+    const items: DetailItem[] = [
+      { label: "Asset", value: row.Asset ?? "—" },
+      { label: "Observed IP", value: row["Observed IP"] ?? "—" },
+      { label: "MAC Address", value: row["MAC Address"] ?? "—" },
+      { label: "Hostname", value: row.Hostname ?? "—" },
+      { label: "Open ports", value: row.Ports ?? "—" },
+      { label: "Match basis", value: row["Match Basis"] ?? "—" },
+      { label: "Last seen", value: row["Last Seen"] ?? "—" },
+      { label: "Detailed status", value: row["Detailed Status"] ?? "—" },
+    ];
+    // Surface any policy-flagged ports the engine stamped into status_detail,
+    // mirroring the table cell chips so the detail view is self-contained.
+    const forbidden = forbiddenOpenPorts(row["Detailed Status"]);
+    const unexpected = unexpectedOpenPorts(row["Detailed Status"]);
+    if (forbidden) {
+      items.push({ label: "Forbidden ports open", value: forbidden });
+    }
+    if (unexpected) {
+      items.push({ label: "Unexpected ports open", value: unexpected });
+    }
+    return items;
+  }
+
   if (route === "bacnet-discovery") {
     return [
       { label: "Device", value: row.Device ?? "Selected BACnet device" },
