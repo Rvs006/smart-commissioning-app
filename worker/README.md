@@ -11,10 +11,11 @@ This worker owns long-running jobs for:
 
 UDMI validation and MQTT config publish validation are implemented by the shared
 `smart-commissioning-core` package (`../core`), so the worker produces the same
-issue records as the API. The worker currently runs the validate-only paths: it
-passes `live_capture=None` / `broker_publisher=None` because it has no broker
-configuration access yet, so it never publishes to or captures from a live
-broker.
+issue records as the API. The worker registers an MQTT configuration provider
+at import, so live UDMI capture and MQTT config publish resolve a broker host
+from stored configuration or run parameters (see `app/mqtt_config_provider.py`
+for the honest limits on mutual-TLS material). The real-broker capture/publish
+behaviour is untested here and remains on-site-validation surface.
 
 ## Database
 

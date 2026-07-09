@@ -8,7 +8,7 @@ This service is the HTTP boundary for:
 - validation runs
 - reports
 
-The current implementation is a scaffold with typed contracts and placeholder responses. It is intended to be expanded against the specification and the architecture document in `../docs/production-architecture.md`.
+The current implementation pairs typed contracts with real run execution — discovery and validation runs invoke the shared core engines and record real results (a UDMI validation run without its required register import is refused, never answered from the packaged sample fixture). It is intended to be expanded against the specification and the architecture document in `../docs/production-architecture.md`.
 
 ## Quickstart
 

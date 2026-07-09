@@ -278,6 +278,10 @@ Current implemented behavior:
 - Provides a controlled publish form with confirmation gate.
 - Can verify next pointset payload against expected point/value.
 - Emits normalized issues for payload/schema/state/metadata/pointset problems.
+- Matches each payload's top-level `version` against the register's Expected schema version and applies pinned UDMI 1.5.2 structural checks; unknown versions record a structural-checks-skipped issue.
+- Checks expected register units against metadata payload units (alias-aware) and expected points in both metadata pointset and pointset events.
+- Can run against the imported `mqtt_register` directly, fanning out one expected asset per row; register mode without an accepted register import is rejected rather than falling back to the packaged sample fixture.
+- Shows real per-asset, per-payload result rows (observed, issues, raw payload, result) after a run, labelled captured vs pasted; sample rows appear only before a run.
 
 Production gaps:
 
