@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from smart_commissioning_core.engines.comparison_common import make_issue
+from smart_commissioning_core.engines.comparison_common import make_issue, normalise_unit
 from smart_commissioning_core.mqtt_settings import (
     _broker_error_status,
     _string,
@@ -16,6 +16,7 @@ from smart_commissioning_core.mqtt_settings import (
 )
 from smart_commissioning_core.mqtt_transport import MqttMessage, MqttTransportError, subscribe_and_capture
 from smart_commissioning_core.records import ValidationIssueRecord
+from smart_commissioning_core.udmi_schema import declared_version, structural_issues, versions_match
 
 # When the core package is installed editable from the repository checkout,
 # parents[2] is the repository root (udmi_validation.py -> smart_commissioning_core -> core -> root).
@@ -45,6 +46,54 @@ NUMERIC_UDMI_UNITS = {
     "volts",
 }
 KNOWN_UDMI_UNITS = NUMERIC_UDMI_UNITS | {"no_units", "boolean", "enum"}
+
+# Register shorthand -> canonical UDMI unit (hyphenated, normalise_unit form),
+# so a register that says "kwh" matches a metadata payload that says
+# "kilowatt_hours" instead of tripping a false mismatch/unknown-unit issue.
+_UNIT_ALIASES = {
+    "kwh": "kilowatt-hours",
+    "kw": "kilowatts",
+    "kva": "kilovolt-amperes",
+    "kvar": "kilovolt-amperes-reactive",
+    "a": "amperes",
+    "amp": "amperes",
+    "amps": "amperes",
+    "v": "volts",
+    "hz": "hertz",
+    "ppm": "parts-per-million",
+    "%": "percent",
+    "degc": "degrees-celsius",
+    "deg-c": "degrees-celsius",
+    "celsius": "degrees-celsius",
+}
+_KNOWN_CANONICAL_UNITS = {unit.replace("_", "-") for unit in KNOWN_UDMI_UNITS}
+_NUMERIC_CANONICAL_UNITS = {unit.replace("_", "-") for unit in NUMERIC_UDMI_UNITS}
+
+# Structural / version issues are attributed to the payload they were found in.
+_PAYLOAD_ISSUE_TYPES = {
+    "state": "state_validation",
+    "metadata": "metadata_validation",
+    "pointset": "pointset_validation",
+}
+
+
+def _canonical_unit(value: object) -> str | None:
+    """Canonical hyphenated unit, or None when no unit was supplied at all.
+
+    An explicitly declared unit-less unit ("no_units"/"none"/"unitless") is a
+    real observed value — it canonicalises to "no-units" so a register that
+    expects e.g. kilowatt-hours still gets a mismatch against it. Only a
+    missing/blank value reads as None (no comparison possible).
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalised = normalise_unit(text)
+    if normalised is None:
+        return "no-units"
+    return _UNIT_ALIASES.get(normalised, normalised)
 
 
 @dataclass(frozen=True)
@@ -281,6 +330,75 @@ def _review_payload_issues(
     pointset_payload = _dict_or_empty(parameters.get("pointset_payload"))
     raw_evidence_uri = str(parameters.get("raw_evidence_uri") or "runtime://udmi-validation/review-payloads")
 
+    # Version gate first (workbench contract, Pete 2026-07-09): the register's
+    # Expected schema version must equal each payload's declared top-level
+    # version. A mismatch is reported immediately and that payload's structure
+    # is NOT checked against the wrong schema; on a match (or when the register
+    # carries no version) the structure is checked against the declared version.
+    expected_version = str(expected.get("udmi_version") or expected.get("schema_version") or "").strip()
+    for payload_type, payload in (
+        ("state", state_payload),
+        ("metadata", metadata_payload),
+        ("pointset", pointset_payload),
+    ):
+        if not payload:
+            continue
+        issue_type = _PAYLOAD_ISSUE_TYPES[payload_type]
+        payload_version = declared_version(payload)
+        if payload_version is None:
+            if expected_version:
+                issues.append(
+                    _issue(
+                        [*existing_issues, *issues],
+                        asset_id=asset_id,
+                        issue_type=issue_type,
+                        severity="high",
+                        description=(
+                            f"The {payload_type} payload does not declare a UDMI version; "
+                            f"the register expects {expected_version}."
+                        ),
+                        expected_value=expected_version,
+                        observed_value="missing",
+                        suggested_action="Fix the publisher so every UDMI payload carries its schema version.",
+                        raw_evidence_uri=raw_evidence_uri,
+                    )
+                )
+            continue
+        if expected_version and not versions_match(expected_version, payload_version):
+            issues.append(
+                _issue(
+                    [*existing_issues, *issues],
+                    asset_id=asset_id,
+                    issue_type=issue_type,
+                    severity="critical",
+                    description=(
+                        f"Expected schema version does not match the {payload_type} payload version."
+                    ),
+                    expected_value=expected_version,
+                    observed_value=payload_version,
+                    suggested_action=(
+                        "Align the register's Expected schema version with the device's UDMI version."
+                    ),
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+            continue
+        for finding in structural_issues(payload_type, payload):
+            issues.append(
+                _issue(
+                    [*existing_issues, *issues],
+                    asset_id=asset_id,
+                    issue_type=issue_type,
+                    severity=finding.severity,
+                    description=finding.description,
+                    point_name=finding.point_name,
+                    expected_value=finding.expected_value,
+                    observed_value=finding.observed_value,
+                    suggested_action=finding.suggested_action,
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+
     # manufacturer/model/serial/firmware/guid/site/room: flag any expected value
     # that is present in both register and payload but differs (see _IDENTITY_CHECKS).
     for expected_key, observed_getter, issue_type, severity, description, action in _IDENTITY_CHECKS:
@@ -301,13 +419,38 @@ def _review_payload_issues(
                 )
             )
 
-    metadata_points = metadata_payload.get("pointset", {}).get("points", {}) if metadata_payload else {}
-    pointset_points = pointset_payload.get("points", {}) or pointset_payload.get("pointset", {}).get("points", {})
+    # Tolerate malformed shapes (pointset/points as a non-object) so a bad
+    # payload yields structural issues above instead of crashing the run.
+    metadata_points = _dict_or_empty(_dict_or_empty(metadata_payload.get("pointset")).get("points")) if metadata_payload else {}
+    pointset_points = _dict_or_empty(pointset_payload.get("points")) or _dict_or_empty(
+        _dict_or_empty(pointset_payload.get("pointset")).get("points")
+    )
     expected_units = _dict_or_empty(expected.get("units"))
     for point_name, expected_unit in expected_units.items():
         metadata_unit = _dict_or_empty(metadata_points.get(point_name)).get("units")
+        # Workbench contract: the register's expected unit must MATCH the
+        # metadata payload's unit (after alias/format normalisation), not merely
+        # be a recognisable UDMI unit.
+        expected_canonical = _canonical_unit(expected_unit)
+        observed_canonical = _canonical_unit(metadata_unit)
+        if expected_canonical and observed_canonical and expected_canonical != observed_canonical:
+            issues.append(
+                _issue(
+                    [*existing_issues, *issues],
+                    asset_id=asset_id,
+                    issue_type="metadata_validation",
+                    severity="high",
+                    description=f"Metadata unit for {point_name} does not match the expected register unit.",
+                    point_name=str(point_name),
+                    expected_value=str(expected_unit),
+                    observed_value=str(metadata_unit),
+                    suggested_action="Correct the device metadata units or the register's Expected units.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
         unit_to_check = metadata_unit or expected_unit
-        if unit_to_check and str(unit_to_check) not in KNOWN_UDMI_UNITS:
+        canonical_to_check = observed_canonical or expected_canonical
+        if canonical_to_check and canonical_to_check not in _KNOWN_CANONICAL_UNITS:
             issues.append(
                 _issue(
                     [*existing_issues, *issues],
@@ -324,16 +467,16 @@ def _review_payload_issues(
             )
 
         present_value = _dict_or_empty(pointset_points.get(point_name)).get("present_value")
-        if unit_to_check in NUMERIC_UDMI_UNITS and present_value is not None and not isinstance(present_value, int | float):
+        if canonical_to_check in _NUMERIC_CANONICAL_UNITS and present_value is not None and not isinstance(present_value, int | float):
             issues.append(
                 _issue(
                     [*existing_issues, *issues],
                     asset_id=asset_id,
                     issue_type="pointset_validation",
                     severity="critical",
-                    description=f"Pointset payload value for {point_name} should be numeric for unit {unit_to_check}.",
+                    description=f"Pointset payload value for {point_name} should be numeric for unit {canonical_to_check}.",
                     point_name=str(point_name),
-                    expected_value=f"numeric {unit_to_check}",
+                    expected_value=f"numeric {canonical_to_check}",
                     observed_value=f"{type(present_value).__name__}: {present_value}",
                     suggested_action="Fix the publisher so present_value type matches the expected unit.",
                     raw_evidence_uri=raw_evidence_uri,
@@ -372,6 +515,43 @@ def _review_payload_issues(
                 raw_evidence_uri=raw_evidence_uri,
             )
         )
+
+    # The register's expected point names must also exist in the metadata
+    # pointset definition, not only in the live pointset events. Checked only
+    # when a metadata payload was actually supplied/captured, so a missing
+    # payload is reported once (capture/not-publishing) rather than per point.
+    if metadata_payload:
+        metadata_point_names = set(str(point) for point in metadata_points)
+        for point_name in sorted(expected_points - metadata_point_names):
+            issues.append(
+                _issue(
+                    [*existing_issues, *issues],
+                    asset_id=asset_id,
+                    issue_type="metadata_validation",
+                    severity="high",
+                    description=f"Expected point {point_name} is not defined in the metadata pointset.",
+                    point_name=point_name,
+                    expected_value="present",
+                    observed_value="missing",
+                    suggested_action="Add the point to the device metadata or correct the register.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+        for point_name in sorted(metadata_point_names - expected_points):
+            issues.append(
+                _issue(
+                    [*existing_issues, *issues],
+                    asset_id=asset_id,
+                    issue_type="metadata_validation",
+                    severity="medium",
+                    description=f"Metadata defines point {point_name} that is not in the expected schedule.",
+                    point_name=point_name,
+                    expected_value="absent",
+                    observed_value="present",
+                    suggested_action="Confirm whether this is a valid new point or a register omission.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
 
     return issues
 
@@ -536,7 +716,17 @@ def _capture_topics(parameters: dict[str, object]) -> list[str]:
         _string(parameters.get("metadata_topic")),
         _string(parameters.get("pointset_topic")),
     ]
-    return [topic for topic in topics if topic]
+    # Optional additional subscriptions (e.g. the legacy singular
+    # "<prefix>/event/pointset" alongside "<prefix>/events/pointset") so a
+    # register wildcard captures whichever suffix convention the site uses.
+    extra = parameters.get("extra_capture_topics")
+    if isinstance(extra, list):
+        topics.extend(_string(topic) for topic in extra)
+    unique: list[str] = []
+    for topic in topics:
+        if topic and topic not in unique:
+            unique.append(topic)
+    return unique
 
 
 def _payload_key_for_topic(topic: str) -> str | None:
@@ -552,15 +742,13 @@ def _payload_key_for_topic(topic: str) -> str | None:
 def _uses_direct_payload_inputs(parameters: dict[str, object]) -> bool:
     return any(
         key in parameters
-        for key in ("expected_schedule", "state_payload", "metadata_payload", "pointset_payload", "messages")
+        for key in ("expected_schedule", "assets", "state_payload", "metadata_payload", "pointset_payload", "messages")
     ) and not (parameters.get("full_report_path") or parameters.get("fixture_path"))
 
 
 def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
-    expected = _dict_or_empty(parameters.get("expected_schedule"))
-    asset_id = str(expected.get("asset_id") or "UDMI asset") if expected else "UDMI asset"
-    return {
-        "DeviceList": [asset_id],
+    report: dict[str, object] = {
+        "DeviceList": [],
         "DevicesNotPublishing": [],
         "DevicesNotExpected": {},
         "DevicePayloadErrors": {},
@@ -569,6 +757,30 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
         "DevicesPointsetValid": [],
         "DevicesStateValid": [],
     }
+    assets = parameters.get("assets")
+    if isinstance(assets, list) and assets:
+        # Register-driven multi-asset run: every register row is an expected
+        # device. An asset is reported not-publishing only when a live capture
+        # was actually attempted and delivered nothing for it — with no capture
+        # there was no observation, so no publishing claim is made either way.
+        capture_attempted = parse_bool(parameters.get("use_live_broker"))
+        for entry in assets:
+            if not isinstance(entry, dict):
+                continue
+            expected = _dict_or_empty(entry.get("expected_schedule"))
+            asset_id = str(expected.get("asset_id") or "UDMI asset")
+            report["DeviceList"].append(asset_id)  # type: ignore[union-attr]
+            has_payload = any(
+                _dict_or_empty(entry.get(key))
+                for key in ("state_payload", "metadata_payload", "pointset_payload")
+            )
+            if capture_attempted and not has_payload:
+                report["DevicesNotPublishing"].append(asset_id)  # type: ignore[union-attr]
+        return report
+    expected = _dict_or_empty(parameters.get("expected_schedule"))
+    asset_id = str(expected.get("asset_id") or "UDMI asset") if expected else "UDMI asset"
+    report["DeviceList"] = [asset_id]
+    return report
 
 
 def _issue(
@@ -648,6 +860,9 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
         facet = {key: expected[key] for key in ("units",) if expected.get(key) is not None}
     else:
         facet = {}
+    # The version check applies to every payload type, so surface it in each facet.
+    if expected.get("udmi_version") is not None:
+        facet["udmi_version"] = expected["udmi_version"]
     return facet or None
 
 
@@ -744,6 +959,10 @@ def _dict_or_empty(value: object) -> dict[str, Any]:
 
 
 def _message_count(parameters: dict[str, object]) -> int:
+    # Multi-asset runs carry their payloads inside each assets[] entry.
+    assets = parameters.get("assets")
+    if isinstance(assets, list) and assets:
+        return sum(_message_count(entry) for entry in assets if isinstance(entry, dict))
     messages = parameters.get("messages")
     if isinstance(messages, list):
         return len(messages)
@@ -752,11 +971,16 @@ def _message_count(parameters: dict[str, object]) -> int:
 
 def _latest_payload_timestamp(parameters: dict[str, object]) -> str | None:
     timestamps: list[str] = []
-    for key in ("state_payload", "metadata_payload", "pointset_payload"):
-        payload = _dict_or_empty(parameters.get(key))
-        timestamp = payload.get("timestamp")
-        if isinstance(timestamp, str):
-            timestamps.append(timestamp)
+    sources: list[dict[str, object]] = [parameters]
+    assets = parameters.get("assets")
+    if isinstance(assets, list):
+        sources.extend(entry for entry in assets if isinstance(entry, dict))
+    for source in sources:
+        for key in ("state_payload", "metadata_payload", "pointset_payload"):
+            payload = _dict_or_empty(source.get(key))
+            timestamp = payload.get("timestamp")
+            if isinstance(timestamp, str):
+                timestamps.append(timestamp)
     if not timestamps:
         return None
     return max(timestamps, key=_parse_timestamp_sort_key)

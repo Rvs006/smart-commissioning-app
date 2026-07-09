@@ -13,6 +13,28 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Added
 
+- **UDMI workbench: real schema-version + structural validation** — the register
+  template's **Expected schema version** now flows into the UDMI validator and is
+  compared against each captured/pasted payload's declared top-level `version`
+  (mismatch → immediate critical issue; missing version flagged). On a match the
+  payload structure is checked against a field-level ruleset for that version
+  (`udmi_schema.py`, `1.5.2` pinned from the published UDMI schemas: required
+  `timestamp`/`version`/`system` or `points`, RFC 3339 timestamps, point-name
+  pattern, `present_value` per pointset entry, string `units` in metadata).
+  Expected register units must now **match** the metadata payload units (with
+  `kwh`→`kilowatt_hours`-style alias normalisation, and an explicit `no_units`
+  declaration treated as a real observed value) instead of only being
+  "a known unit", expected points are checked in the **metadata** pointset as
+  well as the live pointset events, and a register wildcard topic additionally
+  captures the legacy `…/event/pointset` convention. The workbench gained a
+  **register-driven mode** (auto-enabled after an accepted `mqtt_register`
+  import): Run sends no pasted schedule/payloads and the backend fans out one
+  expected asset per register row — a single row keeps its capture topics, and
+  a register-driven run with no register import is refused (400) instead of
+  silently validating the packaged sample fixture. The workbench Results table
+  now renders **real per-asset, per-payload rows** from the run's payload views
+  and issues (labelled with whether payloads were captured or pasted) instead
+  of permanently showing the "Sample preview" rows.
 - **Production scaffold (MVP baseline)** — multi-service layout: React + TypeScript
   + Vite frontend, FastAPI backend, Dramatiq worker, `infra/` Docker Compose
   stack, and `docs/`.

@@ -9,22 +9,29 @@ validation against real brokers/hardware). Accurate to
 
 ## 1. UDMI
 
-UDMI validation lives in `udmi_validation.py`. It validates expected MQTT assets
-against UDMI-style `state`, `metadata`, and `pointset` contracts and emits the
-shared normalized issue record. There is no single pinned UDMI schema-version
-import here; validation is **feature-level** against the UDMI message shapes the
-tool consumes, rather than a claim of full conformance to a specific UDMI
-release.
+UDMI validation lives in `udmi_validation.py` (with the per-version structural
+rules in `udmi_schema.py`). It validates expected MQTT assets against UDMI-style
+`state`, `metadata`, and `pointset` contracts and emits the shared normalized
+issue record. The register's **Expected schema version** is compared against
+each payload's declared top-level `version` (mismatch → immediate critical
+issue), and on a match the payload structure is checked against a
+**field-level structural ruleset for that version** (currently pinned:
+`1.5.2`, grounded in the published github.com/faucetsdn/udmi schemas). This is
+deliberate field-level checking, not a full JSON-Schema evaluation; an unknown
+declared version reports "structural checks skipped" rather than silently
+passing.
 
 Validated features (each exercised by unit tests with inline/fixture payloads):
 
 | UDMI feature | What is checked | Status |
 | --- | --- | --- |
+| Schema version match | register `Expected schema version` vs each payload's top-level `version`; missing payload version flagged; mismatch is a critical issue and blocks structural checks against the wrong schema. | Tested |
+| Structural checks (per declared version, 1.5.2 pinned) | required top-level fields (`timestamp`/`version`/`system` for state+metadata, `timestamp`/`version`/`points` for pointset); RFC 3339 timestamp; `system` is an object; pointset point names match the UDMI pattern and entries carry `present_value`; metadata point `units` are strings. | Tested |
 | `state` payload | manufacturer (`system.hardware.make`) and model (`system.hardware.model`) match the asset register; offline/error states. | Tested (inline payloads) |
-| `metadata` payload | asset GUID (`system.physical_tag.asset.guid`) matches the register; point units sourced from `metadata.pointset.points`. | Tested |
+| `metadata` payload | asset GUID (`system.physical_tag.asset.guid`) matches the register; point units sourced from `metadata.pointset.points`; expected points must be defined in the metadata pointset (missing/extra flagged). | Tested |
 | `pointset` payload | expected points present; unexpected points flagged; `present_value` is numeric for numeric units. | Tested |
-| Units | unit is a known UDMI unit (`degrees_celsius`, `parts_per_million`, `percent`, `volts`, `amperes`, `hertz`, `kilowatts`, `kilowatt_hours`, `kilovolt_amperes`, `kilovolt_amperes_reactive`, plus `no_units`/`boolean`/`enum`); numeric units require numeric values. | Tested |
-| Schedule / expected-asset input | a supplied expected schedule (`expected_schedule` with `asset_id`, `manufacturer`, `model`, `guid`, `units`) drives the per-point checks. | Tested |
+| Units | the register's expected unit must **match** the metadata payload unit after normalisation (case, `-`/`_`, and shorthand aliases such as `kwh` → `kilowatt_hours`); the unit must also be a known UDMI unit (`degrees_celsius`, `parts_per_million`, `percent`, `volts`, `amperes`, `hertz`, `kilowatts`, `kilowatt_hours`, `kilovolt_amperes`, `kilovolt_amperes_reactive`, plus `no_units`/`boolean`/`enum`); numeric units require numeric values. | Tested |
+| Schedule / expected-asset input | a supplied expected schedule (`expected_schedule` with `asset_id`, `manufacturer`, `model`, `guid`, `udmi_version`, `units`) drives the per-point checks; the backend fills it from the imported `mqtt_register` (including `Expected schema version` and wildcard `Expected topic` expansion, plus the legacy `…/event/pointset` capture alias). | Tested |
 | Silent / not-publishing device | devices in `DevicesNotPublishing`, and (live) an empty capture window, raise `not_publishing`. | Tested (fixture/inline); live capture is live-untested |
 | Missing vs unexpected points | expected-but-absent points and received-but-unexpected points are classified separately. | Tested |
 | Full-report fixture mode | normalizes a `full_report.json` (DeviceList, PayloadErrors, PointsetErrors, StateErrors, ...) into issues. | Tested (packaged fixture) |
