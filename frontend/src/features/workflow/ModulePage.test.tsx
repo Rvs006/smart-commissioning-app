@@ -148,6 +148,59 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByText("118")).not.toBeInTheDocument();
   });
 
+  it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    // Type an ad-hoc CIDR override and authorize the real scan, mirroring the
+    // authorized-scan test above.
+    fireEvent.change(screen.getByLabelText(/Target override/i), {
+      target: { value: "10.20.0.0/24" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    const queueButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(queueButton).toBeEnabled());
+    fireEvent.click(queueButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    // CIDR override flows through as parameters.cidr; the single-address branch
+    // is untouched, so no addresses key is sent.
+    expect(parameters.cidr).toBe("10.20.0.0/24");
+    expect(parameters).not.toHaveProperty("addresses");
+    expect(parameters).not.toHaveProperty("start");
+    expect(parameters).not.toHaveProperty("end");
+    // Fix 6: only the boolean shorthand is sent; the backend stamps the real
+    // authenticated principal, so no fabricated scan_authorization block.
+    expect(parameters.authorized).toBe(true);
+    expect(parameters).not.toHaveProperty("scan_authorization");
+  });
+
   it("renders the MAC column and opens a per-host detail dialog from the row View button", async () => {
     vi.stubGlobal(
       "fetch",

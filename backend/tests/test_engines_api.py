@@ -118,6 +118,40 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertIn("authoriz", response.json()["detail"].lower())
 
+    def test_authorized_run_stamps_real_authorizer(self) -> None:
+        # scan_authorization.authorized_by must name the REAL authenticated
+        # principal (the shared-key admin in these tests), never a client-supplied
+        # label; an operator-supplied note is preserved.
+        response = self._post(
+            "/api/v1/discovery/ip/runs",
+            {
+                **_AUTH,
+                "cidr": "127.0.0.1/32",
+                "ports": [9],  # discard port, closed -> connect refused fast
+                "scan_connect_timeout_s": 1,
+                "scan_rate_limit_per_sec": 0,
+                "scan_authorization": {"authorized_by": "frontend-operator", "note": "floor 3 sign-off"},
+            },
+            "ip_discovery",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        run_id = response.json()["run_id"]
+        record = self.client.get(f"/api/v1/discovery/runs/{run_id}").json()
+        authz = record["parameters"]["scan_authorization"]
+        self.assertTrue(authz["authorized"])
+        self.assertEqual(authz["authorized_by"], "shared-key")
+        self.assertEqual(authz["note"], "floor 3 sign-off")  # operator note preserved
+
+    def test_dry_run_adds_no_scan_authorization(self) -> None:
+        # A dry run needs no authorization, so the route must NOT stamp one.
+        run_id = self._post(
+            "/api/v1/discovery/ip/runs",
+            {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+            "ip_discovery",
+        ).json()["run_id"]
+        record = self.client.get(f"/api/v1/discovery/runs/{run_id}").json()
+        self.assertNotIn("scan_authorization", record["parameters"])
+
     def test_no_cidr_falls_back_to_imported_register_addresses(self) -> None:
         # Upload an IP register with NO hostname column + a duplicate address,
         # then run discovery with no cidr/range: the route must scan the register's

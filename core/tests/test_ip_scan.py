@@ -399,6 +399,49 @@ class FakeConnectScanTests(unittest.TestCase):
         self.assertLess(len(scanned_hosts), 14, "cancellation must stop the sweep early")
 
 
+class AssetIdAndLastSeenTests(unittest.TestCase):
+    """The live "Asset" and "Last Seen" columns: a responsive host resolves its
+    registered asset from ``asset_id_by_address`` and carries an observation
+    timestamp; a host with no mapping keeps ``asset_id`` None (honest blank)."""
+
+    def test_asset_id_and_last_seen_populated_from_mapping(self) -> None:
+        from datetime import datetime
+
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_asset",
+            {**_AUTH, "addresses": ["127.0.0.1"], "ports": [80],
+             "asset_id_by_address": {"127.0.0.1": "CAM-1"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        asset = store.summary_calls[-1]["discovered_assets"][0]
+        self.assertEqual(asset["asset_id"], "CAM-1")
+        # last_seen_at is a parseable ISO-8601 timestamp of the observation.
+        parsed = datetime.fromisoformat(asset["last_seen_at"])
+        self.assertIsNotNone(parsed.tzinfo, "last_seen_at must be timezone-aware UTC")
+
+    def test_asset_id_none_without_mapping(self) -> None:
+        # No asset_id_by_address supplied -> asset_id stays None (rendered "—"),
+        # never a fabricated identity.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_asset_none",
+            {**_AUTH, "addresses": ["127.0.0.1"], "ports": [80]},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIsNone(store.summary_calls[-1]["discovered_assets"][0]["asset_id"])
+
+
 class LoopbackSocketTests(unittest.TestCase):
     """Real asyncio.open_connection against a REAL ephemeral loopback listener.
 

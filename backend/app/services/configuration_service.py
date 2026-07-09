@@ -278,6 +278,7 @@ class ConfigurationService:
     def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
+        self._drop_dangling_secret_refs(configuration)
         self._repository.save(project_id, site_id, configuration.model_dump(mode="json"))
         return configuration
 
@@ -316,6 +317,40 @@ class ConfigurationService:
                     continue
                 previous = str(previous_values.get(field_name) or "")
                 values[field_name] = "" if _is_secret_sentinel(previous) else previous
+
+    def _drop_dangling_secret_refs(self, configuration: ConfigurationSnapshot) -> None:
+        """Blank imported secret:// cert refs that point at no file on disk.
+
+        A cross-machine import (or a hand-edited payload) can carry a secret://
+        reference whose encrypted material never came across, alongside a
+        plaintext expiry. Left in place the UI would render the dangling ref as a
+        real, in-use certificate. Refs whose .pem exists are untouched; if none
+        of the three cert fields still holds a resolvable ref, the expiry (which
+        otherwise implies a present cert) is cleared too. Runs on the persist
+        path only — validation must still accept a not-yet-resolvable ref so a
+        cross-machine PUT import is not rejected.
+        """
+        values = configuration.certificates.values
+        # Only CA/Client certs carry a notAfter, so only a resolvable one of THOSE
+        # justifies keeping the "Certificate Expiry" pill — a surviving Private Key
+        # must not keep a stale expiry alive when both certs dangled away.
+        any_cert_resolvable = False
+        for field in ("CA Certificate", "Client Certificate", "Private Key"):
+            value = str(values.get(field, ""))
+            if not value.startswith("secret://"):
+                continue
+            try:
+                path = _secret_path(value)
+            except ValueError:
+                values[field] = ""
+                continue
+            if path.exists():
+                if field != "Private Key":
+                    any_cert_resolvable = True
+            else:
+                values[field] = ""
+        if not any_cert_resolvable:
+            values["Certificate Expiry"] = ""
 
     def validate(self, configuration: ConfigurationSnapshot) -> ConfigurationValidationResult:
         errors: list[str] = []
@@ -392,11 +427,19 @@ class ConfigurationService:
         expiry = self._certificate_expiry(field, content)
         configuration = self.load(project_id, site_id, mask_secrets=False)
         configuration.certificates.values[field] = secret_ref
-        # Reflect the real uploaded cert's expiry so the read-only "Certificate
-        # Expiry" status pill (mq9ll2vf) is driven by the actual notAfter, not a
-        # seeded placeholder. Private Key / unparseable uploads leave it as-is.
-        if expiry is not None:
-            configuration.certificates.values["Certificate Expiry"] = expiry
+        # Drive the read-only "Certificate Expiry" status pill (mq9ll2vf) from the
+        # SOONEST notAfter across BOTH the CA and Client certificates, not just the
+        # cert uploaded last — an expired cert must not be hidden behind a newer,
+        # still-valid one. Private Key / unparseable uploads contribute nothing, so
+        # a Private-Key-only store leaves the field untouched.
+        cert_values = configuration.certificates.values
+        expiries = [
+            resolved
+            for cert_field in ("CA Certificate", "Client Certificate")
+            if (resolved := self._stored_certificate_expiry(cert_field, cert_values.get(cert_field, ""))) is not None
+        ]
+        if expiries:
+            cert_values["Certificate Expiry"] = min(expiries)
         self.save(configuration, project_id=project_id, site_id=site_id)
 
         return SecretMaterialResponse(
@@ -564,3 +607,22 @@ class ConfigurationService:
             return None
         not_after = getattr(certificate, "not_valid_after_utc", None) or certificate.not_valid_after
         return not_after.date().isoformat()
+
+    def _stored_certificate_expiry(self, field: str, value: str) -> str | None:
+        """Expiry (YYYY-MM-DD) for a certificate field's stored value, or None.
+
+        None when the field is not a CA/Client certificate or the value is empty.
+        A ``secret://`` reference is resolved to its PEM material (guarding a
+        missing or unreadable file); any other value is treated as inline PEM
+        content, then delegated to :meth:`_certificate_expiry`.
+        """
+        if field not in {"CA Certificate", "Client Certificate"} or not value:
+            return None
+        if value.startswith("secret://"):
+            try:
+                content = read_secret_material(value)
+            except (FileNotFoundError, ValueError):
+                return None
+        else:
+            content = value
+        return self._certificate_expiry(field, content)
