@@ -456,6 +456,91 @@ class LoopbackSocketTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(store.summary_calls[-1]["discovered_assets"][0]["hostname"], "localhost.test")
 
+    def test_arp_mac_injected(self) -> None:
+        # Inject connect + arp_lookup so this is hermetic (no subprocess / ARP).
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_arp", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80]},
+            run_store=store, execution_mode="x",
+            connect=fake_connect,
+            arp_lookup=lambda ip: "C0:A6:F3:F2:F3:2F",
+        )
+        self.assertEqual(result["status"], "succeeded")
+        asset = store.summary_calls[-1]["discovered_assets"][0]
+        self.assertEqual(asset["mac_address"], "C0:A6:F3:F2:F3:2F")
+        # match_basis stays "ip": MAC is enrichment, not the discovery basis.
+        self.assertEqual(asset["match_basis"], "ip")
+
+    def test_arp_mac_none_degrades_to_blank(self) -> None:
+        # Off-L2 / routed host with no ARP entry -> mac_address is None, never a
+        # fabricated placeholder (honesty law: best-effort enrichment degrades to
+        # blank, it does not invent a value).
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_arp_none", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80]},
+            run_store=store, execution_mode="x",
+            connect=fake_connect,
+            arp_lookup=lambda ip: None,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIsNone(store.summary_calls[-1]["discovered_assets"][0]["mac_address"])
+
+
+class ArpLookupUnitTests(unittest.TestCase):
+    """Pure ARP-cache parsing / normalisation (subprocess + /proc mocked)."""
+
+    def test_normalise_dashes_to_colons_upper(self) -> None:
+        self.assertEqual(ip_scan._normalise_mac("c0-a6-f3-f2-f3-2f"), "C0:A6:F3:F2:F3:2F")
+
+    def test_all_zero_incomplete_entry_degrades_to_none(self) -> None:
+        # An incomplete ARP entry must render blank, never a fabricated 00:00:...
+        self.assertIsNone(ip_scan._normalise_mac("00:00:00:00:00:00"))
+        self.assertIsNone(ip_scan._normalise_mac("00-00-00-00-00-00"))
+
+    def test_arp_lookup_posix_parses_proc_table(self) -> None:
+        proc = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "10.0.0.5         0x1         0x2         c0:a6:f3:f2:f3:2f     *        eth0\n"
+            "10.0.0.6         0x1         0x0         00:00:00:00:00:00     *        eth0\n"
+        )
+        with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
+            self.assertEqual(ip_scan._arp_lookup_posix("10.0.0.5"), "C0:A6:F3:F2:F3:2F")
+        # Incomplete (all-zero) entry -> None, not a fabricated MAC.
+        with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
+            self.assertIsNone(ip_scan._arp_lookup_posix("10.0.0.6"))
+        # Absent host -> None.
+        with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
+            self.assertIsNone(ip_scan._arp_lookup_posix("10.0.0.9"))
+
+    def test_arp_lookup_windows_parses_arp_output(self) -> None:
+        output = (
+            "\nInterface: 10.0.0.2 --- 0x5\n"
+            "  Internet Address      Physical Address      Type\n"
+            "  10.0.0.5              c0-a6-f3-f2-f3-2f     dynamic\n"
+        )
+        completed = mock.Mock(stdout=output)
+        with mock.patch.object(ip_scan.subprocess, "run", return_value=completed):
+            self.assertEqual(ip_scan._arp_lookup_windows("10.0.0.5"), "C0:A6:F3:F2:F3:2F")
+        # A "no entries" dump degrades to None.
+        completed_none = mock.Mock(stdout="No ARP Entries Found.\n")
+        with mock.patch.object(ip_scan.subprocess, "run", return_value=completed_none):
+            self.assertIsNone(ip_scan._arp_lookup_windows("10.0.0.5"))
+
+    def test_arp_lookup_never_raises_on_subprocess_failure(self) -> None:
+        # Locked-down host: the arp binary is absent. The public entry point must
+        # degrade to None, never propagate the error into the sweep.
+        with mock.patch.object(ip_scan.subprocess, "run", side_effect=FileNotFoundError):
+            with mock.patch("builtins.open", side_effect=FileNotFoundError):
+                self.assertIsNone(ip_scan._arp_lookup("10.0.0.5"))
+
 
 if __name__ == "__main__":
     unittest.main()

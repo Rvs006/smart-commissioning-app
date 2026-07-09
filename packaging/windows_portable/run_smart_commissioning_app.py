@@ -67,6 +67,13 @@ def install_crash_logging(root: Path) -> Path | None:
 def _bundle_dependency_imports() -> None:
     """Keep PyInstaller aware of runtime dependencies imported by backend/app."""
     import alembic  # noqa: F401
+    # bacpypes3 (real BACnet/IP discovery backend, core's [bacnet] extra) is
+    # imported lazily via a string import in Bacpypes3Backend._ensure_app, so
+    # PyInstaller cannot trace it from the launcher. Naming it here (belt-and-
+    # braces alongside --collect-all bacpypes3 in build.ps1) keeps it in the
+    # freeze. Optional dep, same pattern as psutil below: if it is ever absent an
+    # authorized real scan honestly RuntimeErrors instead of faking a result.
+    import bacpypes3  # noqa: F401
     import dramatiq  # noqa: F401
     import fastapi  # noqa: F401
     import fastapi.middleware.cors  # noqa: F401

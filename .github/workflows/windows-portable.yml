@@ -7,10 +7,11 @@
 # non-cache files from the bundle, and a missing --collect-all cryptography in
 # the PyInstaller freeze. Either class kills `import app.main`, so the
 # health-200 boot smoke below catches both. A third shipped bug class is
-# subtler: backend/app import-guards optional deps (psutil), so a module
-# missing from the freeze degrades a feature (NIC picker -> Auto-only) while
-# health stays 200 — hence the smoke also asserts psutil exists inside the
-# frozen bundle.
+# subtler: backend/app and core import-guard optional deps (psutil; bacpypes3,
+# the real BACnet/IP backend), so a module missing from the freeze degrades a
+# feature (NIC picker -> Auto-only) or makes an authorized real BACnet scan
+# RuntimeError on-site while health stays 200 — hence the smoke also asserts
+# psutil and bacpypes3 exist inside the frozen bundle.
 #
 # Separate workflow (not a job in windows-compat.yml) because path filters are
 # workflow-level: windows-compat.yml deliberately runs without path filters,
@@ -62,9 +63,12 @@ jobs:
       # NON-editable install on purpose: PyInstaller does not follow PEP 660
       # editable finders reliably, and a regular install also lands core's
       # data files in sys.prefix. Pins match the build box
-      # (docs/portable-bundle-rebuild.md section 1).
+      # (docs/portable-bundle-rebuild.md section 1). core[bacnet] pulls bacpypes3
+      # (the real BACnet/IP backend) so the freeze can carry it; without the
+      # extra an authorized real BACnet scan honestly RuntimeErrors in the exe
+      # rather than ever faking a simulated result.
       - name: Install Python packages + PyInstaller
-        run: python -m pip install ./core ./backend pyinstaller==6.20.0
+        run: python -m pip install "./core[bacnet]" ./backend pyinstaller==6.20.0
 
       # build.ps1 is `#Requires -Version 7.0`; pwsh is the runner default.
       - name: Build portable bundle (frontend + freeze + assemble)
@@ -81,7 +85,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Boot smoke - exe answers /api/v1/health and froze psutil
+      - name: Boot smoke - exe answers /api/v1/health and froze psutil + bacpypes3
         shell: pwsh
         run: |
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
@@ -153,6 +157,22 @@ jobs:
                 $ok = $false
               }
             }
+
+            # Same failure class as psutil, one layer deeper: bacpypes3 (the real
+            # BACnet/IP backend) is import-guarded and imported lazily, so a
+            # freeze that dropped it stays health-200 while an authorized real
+            # scan RuntimeErrors on-site (health can't see it). Assert the frozen
+            # module directly. (See --collect-all bacpypes3 in build.ps1 and the
+            # core[bacnet] install above.)
+            if ($ok) {
+              $frozenBacpypes3 = Join-Path $bundle '_internal\bacpypes3'
+              if (Test-Path $frozenBacpypes3) {
+                Write-Host "BACPYPES3 FROZEN OK: $frozenBacpypes3"
+              } else {
+                Write-Host "BACPYPES3 SMOKE FAILED: $frozenBacpypes3 missing - the freeze lost the real BACnet backend (build box must install core[bacnet]; build.ps1 must --collect-all bacpypes3)."
+                $ok = $false
+              }
+            }
           }
           finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -165,7 +185,7 @@ jobs:
               ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
           }
           if (-not $ok) {
-            Write-Error 'Boot smoke failed: no /api/v1/health 200 within the deadline, or psutil missing from the frozen bundle.'
+            Write-Error 'Boot smoke failed: no /api/v1/health 200 within the deadline, or psutil/bacpypes3 missing from the frozen bundle.'
             exit 1
           }
 

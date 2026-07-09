@@ -372,6 +372,39 @@ class Bacpypes3BackendGuardTests(unittest.TestCase):
         self.assertIn("install", message.lower())
 
     @unittest.skipIf(
+        importlib.util.find_spec("bacpypes3") is not None,
+        "bacpypes3 is installed; the honest-failure (missing-dep) branch is unreachable",
+    )
+    def test_authorized_bacpypes3_run_without_install_fails_not_simulated(self) -> None:
+        # HONESTY LAW: an AUTHORIZED, non-dry-run run that selects the real
+        # bacpypes3 backend while the dependency is missing must record a REAL
+        # failed status (from _ensure_app's RuntimeError at the first Who-Is) —
+        # never silently fall back to simulated data. No backend is injected, so
+        # selection goes through parameters["bacnet_backend"] == "bacpypes3".
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        def persist(run_id: str, records: list[dict[str, Any]]) -> None:
+            persisted.append((run_id, list(records)))
+
+        result = process_bacnet_discovery_run(
+            "run_real_missing_dep",
+            {**_AUTHORIZED, "bacnet_backend": "bacpypes3", "local_address": "192.0.2.10/24"},
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            throttle=ThrottleConfig(rate_limit_per_sec=None),
+            persist_records=persist,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        # A real, recorded failure — not a silent success with fabricated data.
+        self.assertIsNotNone(store.last_error)
+        # No simulated fallback: no result summary (no "simulated" backend label)
+        # and NO devices/points were persisted.
+        self.assertEqual(store.summary_calls, [])
+        self.assertEqual(persisted, [])
+
+    @unittest.skipIf(
         importlib.util.find_spec("bacpypes3") is None,
         "bacpypes3 not installed (expected in this offline environment)",
     )

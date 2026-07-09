@@ -184,6 +184,30 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **Real BACnet discovery in the portable exe (field bug, on-site 2026-07-09).**
+  The exe returned *simulated* devices ("Acme Controls"/"Globex BMS") for every
+  BACnet scan because (a) `bacpypes3` was not bundled, (b) the route never
+  requested the real backend, and (c) the UI never showed which backend ran.
+  Now: an **authorized, non-dry-run** BACnet scan defaults to the real
+  `bacpypes3` backend (`bacpypes3` is bundled with `--collect-all` + a frozen
+  hidden-import + a `_internal\bacpypes3` boot-smoke assert); if the real stack
+  or the NIC bind is unavailable the run records a **real failed status** — it
+  never silently returns simulated data. Dry-run stays a simulated *plan*, and
+  an explicit `bacnet_backend="simulated"` remains the demo escape hatch. The
+  discovery results view now shows a prominent **"SIMULATED — demo data"**
+  banner vs a **"Live bacpypes3 scan"** confirmation, driven by
+  `result_summary.backend`. NOTE: the real bacpypes3 path is validated by frozen
+  import + boot only — real on-wire discovery remains an on-site step.
+- **IP discovery now populates MAC address and hostname, and the "View" button
+  works.** The TCP-connect sweep never read MAC (blank) and reverse DNS was off
+  and unexposed (blank hostname), and the per-row **View** button was a dead
+  handler. Now: after a host is confirmed live, a best-effort **ARP-cache MAC
+  lookup** (`/proc/net/arp` on Linux, `arp -a` on Windows, time-bounded,
+  no-window) fills `mac_address`; **reverse DNS is defaulted on** for real
+  (non-dry) runs so `hostname` fills — both degrade to blank on a miss and are
+  never fabricated (MAC only exists for same-L2 hosts; hostname only with a PTR
+  record). The results table shows MAC + Hostname columns and **View** opens a
+  per-host detail panel.
 - **NIC adapter classification / gateway / DNS restored in the portable exe.**
   The Windows net-facts helper (`Get-NetAdapter` / `Get-NetRoute` /
   `Get-DnsClientServerAddress`) was capped at a 5s timeout, but those CIM/WMI

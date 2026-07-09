@@ -47,6 +47,8 @@ from app.services.engine_dispatch import (
     make_device_persister,
     make_device_point_persister,
     make_topic_persister,
+    resolve_bacnet_backend,
+    resolve_ip_enrichment,
     resolve_source_interface,
 )
 from app.services.job_queue import JobQueueService, JobQueueUnavailable
@@ -227,6 +229,7 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
     # run.parameters, not just the inline dict).
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    resolve_ip_enrichment(parameters)
     _ensure_ip_targets(request.project_id, request.site_id, parameters)
     _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
     _resolve_expected_ports(request.project_id, request.site_id, parameters)
@@ -262,6 +265,11 @@ def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedRespons
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
+    # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
+    # backend so it ATTEMPTS real discovery (never silently returns simulated
+    # data). Persisted into run.parameters BEFORE _create_run so both the inline
+    # and worker paths select the same backend. Dry-run/explicit override untouched.
+    resolve_bacnet_backend(parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_discovery")
 
     def run_inline() -> RunRecord:
