@@ -184,6 +184,16 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **MQTT password Show/Hide reveal is now repeatable, and a secure/non-secure
+  connection selector was added (field review, 2026-07-09).** The Configuration
+  page's MQTT (and Key) password fields now render a Show/Hide toggle that flips
+  the input between masked and plaintext as many times as the operator wants
+  (the earlier reveal only worked once). The MQTT Settings section also gains an
+  explicit **Use TLS** (Enabled/Disabled) control so a secure (8883/TLS) vs
+  non-secure (1883/plain) broker connection can be chosen directly rather than
+  inferred only from the port. `build_mqtt_connection_settings` honours the
+  persisted `Use TLS` selection (explicit `use_tls` run parameter still wins);
+  configs saved before the control keep the port-based default (8883 = TLS).
 - **Real BACnet discovery in the portable exe (field bug, on-site 2026-07-09).**
   The exe returned *simulated* devices ("Acme Controls"/"Globex BMS") for every
   BACnet scan because (a) `bacpypes3` was not bundled, (b) the route never

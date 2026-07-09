@@ -44,7 +44,7 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
         raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")
 
     port = parse_int(parameters.get("broker_port") or mqtt_values.get("Port"), default=8883)
-    use_tls = parse_bool(parameters.get("use_tls")) or port == 8883
+    use_tls = _resolve_use_tls(parameters, mqtt_values, port)
 
     source_ip = _string(parameters.get("source_ip"))
     source_address = (source_ip, 0) if source_ip else None
@@ -63,6 +63,27 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
         timeout_seconds=parse_float(parameters.get("connect_timeout_seconds"), default=5.0),
         source_address=source_address,
     )
+
+
+def _resolve_use_tls(parameters: dict[str, object], mqtt_values: dict[str, object], port: int) -> bool:
+    """Resolve whether the broker connection uses TLS (secure) or plaintext.
+
+    Precedence, so an explicit secure/non-secure choice always wins over the
+    legacy port heuristic:
+
+        1. An explicit ``use_tls`` job parameter (chosen per run).
+        2. The persisted ``"Use TLS"`` configuration selection (Enabled/Disabled)
+           — the Configuration page's secure/non-secure control.
+        3. Back-compat fallback: infer from the port (8883 = TLS), matching the
+           historical behaviour for configs saved before the control existed.
+    """
+    explicit = parameters.get("use_tls")
+    if explicit is not None:
+        return parse_bool(explicit)
+    configured = _string(mqtt_values.get("Use TLS"))
+    if configured:
+        return parse_bool(configured)
+    return port == 8883
 
 
 def _string(value: object) -> str:
