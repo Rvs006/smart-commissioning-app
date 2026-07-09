@@ -119,7 +119,10 @@ class MaskOnReadTests(SecretStorageTestCase):
 
     def test_mqtt_provider_hook_receives_unmasked_values(self) -> None:
         # No cert material ships by default (fresh install is honest), so store a
-        # CA reference explicitly, then confirm secret:// refs stay opaque.
+        # CA reference explicitly (with its backing file so persist keeps it),
+        # then confirm secret:// refs stay opaque.
+        self.secrets_root.mkdir(parents=True, exist_ok=True)
+        (self.secrets_root / "ca-certificate.pem").write_bytes(PEM_CONTENT.encode("utf-8"))
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.mqtt.values["MQTT Password"] = "broker-pass-2"
         configuration.certificates.values["CA Certificate"] = "secret://ca-certificate"
@@ -132,6 +135,8 @@ class MaskOnReadTests(SecretStorageTestCase):
         self.assertTrue(str(certificate_values["CA Certificate"]).startswith("secret://"))
 
     def test_secret_references_stay_opaque_and_empty_passwords_stay_empty(self) -> None:
+        self.secrets_root.mkdir(parents=True, exist_ok=True)
+        (self.secrets_root / "ca-certificate.pem").write_bytes(PEM_CONTENT.encode("utf-8"))
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.certificates.values["CA Certificate"] = "secret://ca-certificate"
         self.service.save(configuration)
@@ -215,6 +220,71 @@ class CertificateExpiryTests(SecretStorageTestCase):
             SecretMaterialRequest(field="Private Key", file_name="device.key", content=KEY_CONTENT)
         )
         self.assertIsNone(response.expiry)
+
+    def test_expiry_pill_shows_soonest_across_both_certs(self) -> None:
+        # An EXPIRED CA plus a still-VALID Client must surface the soonest
+        # (expired) date, not last-write-wins — the expiry must not be hidden.
+        from datetime import UTC, datetime
+
+        expired_ca = self._self_signed_cert(datetime(2020, 1, 1, tzinfo=UTC))
+        valid_client = self._self_signed_cert(datetime(2030, 1, 2, tzinfo=UTC))
+
+        self.service.store_secret(
+            SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=expired_ca)
+        )
+        self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="client.pem", content=valid_client)
+        )
+
+        snapshot = self.service.load(mask_secrets=False)
+        self.assertEqual(snapshot.certificates.values["Certificate Expiry"], "2020-01-01")
+
+    def test_expiry_pill_soonest_regardless_of_upload_order(self) -> None:
+        # Same certs uploaded in the reverse order still resolve to the soonest.
+        from datetime import UTC, datetime
+
+        expired_ca = self._self_signed_cert(datetime(2020, 1, 1, tzinfo=UTC))
+        valid_client = self._self_signed_cert(datetime(2030, 1, 2, tzinfo=UTC))
+
+        self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="client.pem", content=valid_client)
+        )
+        self.service.store_secret(
+            SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=expired_ca)
+        )
+
+        snapshot = self.service.load(mask_secrets=False)
+        self.assertEqual(snapshot.certificates.values["Certificate Expiry"], "2020-01-01")
+
+
+class DanglingSecretRefTests(SecretStorageTestCase):
+    def test_imported_dangling_ref_is_blanked_and_expiry_cleared(self) -> None:
+        # An imported payload can carry a secret:// ref whose encrypted file never
+        # came across, plus a plaintext expiry. Persist must drop the dangling ref
+        # so the UI never renders it as a real, in-use cert, and clear the orphan
+        # expiry once no resolvable ref remains.
+        configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        configuration.certificates.values["CA Certificate"] = "secret://missing-ca"
+        configuration.certificates.values["Certificate Expiry"] = "2031-05-05"
+        self.service.save(configuration)
+
+        snapshot = self.service.load(mask_secrets=False)
+        self.assertEqual(snapshot.certificates.values["CA Certificate"], "")
+        self.assertEqual(snapshot.certificates.values["Certificate Expiry"], "")
+
+    def test_existing_secret_ref_preserved_on_unrelated_save(self) -> None:
+        # A ref whose file exists on disk must survive an unrelated edit+save.
+        stored = self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="client.pem", content=PEM_CONTENT)
+        )
+        configuration = self.service.load(mask_secrets=False)
+        self.assertEqual(configuration.certificates.values["Client Certificate"], stored.secret_ref)
+
+        configuration.device.values["Hostname"] = "edited-host"
+        self.service.save(configuration)
+
+        reloaded = self.service.load(mask_secrets=False)
+        self.assertEqual(reloaded.certificates.values["Client Certificate"], stored.secret_ref)
 
 
 if __name__ == "__main__":

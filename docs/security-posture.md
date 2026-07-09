@@ -76,6 +76,11 @@ route except health):
 
 Properties:
 
+- **Loopback edge trusts any co-resident process.** In `local` mode a loopback
+  request with no key resolves to a synthetic **ADMIN** principal, so on the edge
+  the RBAC `require_role()` gates are **not** a security boundary — any local
+  process can reach any endpoint as ADMIN. Those gates bite only under
+  `api_key` mode with per-user keys (a rejected/inactive key still 401s).
 - **Health endpoints are exempt** so liveness/readiness probes work without
   credentials (they expose no project data).
 - The configured key is **never echoed** back; 401 detail messages are generic.
@@ -181,8 +186,10 @@ assessed it. Framed as "what the app addresses vs what is open / out of scope".
 | FR6 Timely response to events | Structured JSON logs with `request_id`/`run_id`; `/metrics` for rate/latency/runs-by-status; readiness probe; cancellation; rollback. | No built-in SIEM/alerting — wire the metrics/logs into your monitoring (`docs/observability.md`). Audit-trail of config changes/runs/exports is recorded; long-term retention is operational. |
 | FR7 Resource availability | Throttle + timeouts prevent self-inflicted DoS on OT; readiness gating; worker horizontal scaling. | Broker/DB availability and backups are deployment concerns (`docs/backup-restore.md`). |
 
-Open items, stated plainly: there is **no role-based access control** (a single
-shared API key, not per-user identities), the app does **not terminate TLS**
-itself (delegated to a reverse proxy), network **segmentation is a site control**
-outside the app, and the **bacpypes3 / live broker** paths are unvalidated
-against real hardware. None of these are claimed as solved.
+Open items, stated plainly: **RBAC exists but is inert on the loopback edge**
+(`UserRepository`, `Role`, `require_role`); it is a boundary only under `api_key`
+mode with per-user keys — in `local` mode any co-resident loopback process is
+trusted as ADMIN. The app does **not terminate TLS** itself (delegated to a
+reverse proxy), network **segmentation is a site control** outside the app, and
+the **bacpypes3 / live broker** paths are unvalidated against real hardware. None
+of these are claimed as solved.

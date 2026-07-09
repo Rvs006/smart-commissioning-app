@@ -207,6 +207,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [scanPorts, setScanPorts] = useState<ScanPort[]>(defaultScanPorts);
   const [scanAuthorized, setScanAuthorized] = useState(false);
   const [scanDryRun, setScanDryRun] = useState(false);
+  const [scanTarget, setScanTarget] = useState("");
   const [udmiExpectedSchedule, setUdmiExpectedSchedule] = useState(defaultExpectedSchedule);
   const [udmiStatePayload, setUdmiStatePayload] = useState(defaultStatePayload);
   const [udmiMetadataPayload, setUdmiMetadataPayload] = useState(defaultMetadataPayload);
@@ -366,6 +367,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReportToast(null);
     setScanAuthorized(false);
     setScanDryRun(false);
+    setScanTarget("");
     setStep("setup");
     resetTemplateDownload();
     resetReportDownload();
@@ -439,6 +441,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             captureTopicFilter,
             dryRun: scanDryRun,
             scanPorts,
+            target: scanTarget,
           }),
           runKind: action.runKind,
         });
@@ -1400,6 +1403,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             list empty to use the common TCP fallback (80, 443, 1883, 502). BACnet/IP (UDP 47808) is not probed
             here — use BACnet Discovery.
           </p>
+          <div className="publish-grid capture-controls">
+            <label>
+              Target override (CIDR 10.0.0.0/24, range 10.0.0.1-10.0.0.50, or blank to use the imported IP
+              register)
+              <input
+                onChange={(event) => setScanTarget(event.target.value)}
+                placeholder="Blank = imported IP register"
+                value={scanTarget}
+              />
+            </label>
+          </div>
         </section>
       )}
 
@@ -2192,20 +2206,37 @@ function buildDiscoveryParameters(
     scanPorts: ScanPort[];
     captureTopicFilter?: string;
     captureSeconds?: string;
+    target?: string;
   },
 ): Record<string, unknown> {
   const parameters: Record<string, unknown> = {};
   if (options.dryRun) {
     parameters.dry_run = true;
   } else {
+    // Boolean shorthand only — the backend stamps the real authenticated
+    // principal, so the frontend never fabricates a scan_authorization block.
     parameters.authorized = options.authorized;
-    parameters.scan_authorization = {
-      authorized: options.authorized,
-      authorized_by: "frontend-operator",
-    };
   }
   if (action.runKind === "ip") {
     parameters.port_specification = scanPortSpecification(options.scanPorts);
+    // Optional ad-hoc target override. Blank sends nothing so the backend falls
+    // back to the imported IP register exactly as before. "/" => CIDR; "-" =>
+    // start/end range; otherwise a single address. No UI validation — the
+    // backend returns a clear 400/failed run for malformed input.
+    const target = options.target?.trim();
+    if (target) {
+      if (target.includes("/")) {
+        parameters.cidr = target;
+      } else if (target.includes("-")) {
+        // Split once on the first "-" so the operator's input reaches the
+        // backend intact (JS split(limit) would drop any trailing segment).
+        const dash = target.indexOf("-");
+        parameters.start = target.slice(0, dash).trim();
+        parameters.end = target.slice(dash + 1).trim();
+      } else {
+        parameters.addresses = [target];
+      }
+    }
   }
   // MQTT discovery: forward the operator's topic filter and capture window so
   // the engine subscribes to the requested topics for the requested duration

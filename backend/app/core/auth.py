@@ -204,6 +204,8 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
     # only loopback clients are trusted.
     if configured_key and _key_matches(presented, configured_key):
         return AuthPrincipal(None, "shared-key", Role.ADMIN, "shared_key")
+    # On the loopback edge ANY co-resident local process is trusted as ADMIN, so require_role() gates are NOT a
+    # security boundary here — they bite only under AUTH_MODE=api_key with per-user keys.
     if _is_loopback_client(request):
         return AuthPrincipal(None, "local", Role.ADMIN, "local")
     raise HTTPException(status_code=401, detail=rejection_detail)

@@ -184,6 +184,24 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **Medium/low audit backlog: honesty and safety fixes (2026-07-09).** A batch of
+  smaller audit findings, all now honest or fail-closed: MQTT **fails closed when
+  a configured CA file is missing** (no silent fallback to system trust); the
+  Configuration page warns when connecting to a **TLS broker by IP** (the cert SAN
+  cannot match an address) and when **Use TLS / Port look mismatched**; the IP
+  scanner gained an **ad-hoc target field** (CIDR / range / addresses) so a sweep
+  no longer requires an imported register, and its results now populate the
+  **Asset** (from the register) and **Last Seen** columns; scan authorization
+  records the **real authenticated user** instead of a hardcoded
+  `frontend-operator`; the **Certificate Expiry** pill shows the **soonest**
+  expiry across CA + client (so an expired cert cannot hide behind a later one)
+  and imported **dangling cert references are dropped** so the UI no longer shows a
+  missing cert as "in use"; and the portable exe **warns (by name, never value)**
+  when an ambient environment variable overrides its local / inline / SQLite
+  profile. Two items are documented as **by design** (not changed): MQTT config
+  publish is **QoS0 / non-retained**, and loopback `local` mode grants **keyless
+  admin** (single-user edge; RBAC is a boundary only under `api_key` with per-user
+  keys).
 - **Usability audit: five misleading-output fixes (2026-07-09).** A multi-agent
   audit found five places where a working-looking screen hid a non-result; all
   now honest: (1) the IP scanner is TCP-only, so its UI no longer ships BACnet's

@@ -214,6 +214,25 @@ class SecretResolverTlsTests(unittest.TestCase):
         self.assertEqual(self.fake_context.cert_chain["keyfile"], str(key_path))
         self.assertEqual(client._temp_cert_files, [])
 
+    def test_plain_missing_ca_path_fails_closed(self) -> None:
+        """A CONFIGURED but missing plain CA path fails CLOSED (raises), rather
+        than silently falling back to the system trust store."""
+        settings = _settings(ca_certificate="/definitely/missing/ca.pem")
+        client = self._client(settings)
+        with self.assertRaises(mqtt_transport.MqttTransportError):
+            client._wrap_tls(FakeSocket())
+
+    def test_absent_ca_builds_context_without_raising(self) -> None:
+        """ca_certificate=None means 'no CA pinned' -> build the default context
+        (keeping the system trust store) WITHOUT raising."""
+        client = self._client(_settings(ca_certificate=None))
+        wrapped = client._wrap_tls(FakeSocket())
+        # No CA pinned: neither cadata nor a cafile was set on the context.
+        self.assertIsNone(self.fake_context.cadata)
+        self.assertEqual(self.fake_context.cafile, "UNSET")
+        self.assertEqual(client._temp_cert_files, [])
+        self.assertTrue(wrapped.wrapped)
+
     def test_resolver_failure_degrades_to_no_material(self) -> None:
         """A raising resolver must not abort context build with a leak."""
 

@@ -151,6 +151,14 @@ class MqttClient:
         self._cleanup_temp_cert_files()
 
     def publish(self, topic: str, payload: str | bytes) -> None:
+        # QoS0 + non-retained BY DESIGN. The fixed 0x30 packet type carries no
+        # QoS bits (QoS0) and no RETAIN flag. This tool publishes to an online,
+        # already-subscribed device and immediately waits for the echoed
+        # pointset, so retain (which only benefits future/reconnecting
+        # subscribers) is intentionally not set — and a lingering retained
+        # config could conflict with the site's real config authority. KNOWN
+        # GAP: the Configuration "QoS" field drives only the subscribe/capture
+        # path; this publish is hardcoded QoS0.
         payload_bytes = payload.encode("utf-8") if isinstance(payload, str) else payload
         packet = _encode_utf8(topic) + payload_bytes
         self._send_packet(0x30, packet)
@@ -267,7 +275,21 @@ class MqttClient:
                 # Prefer in-memory loading for the CA: no temp file needed.
                 context.load_verify_locations(cadata=material.decode("utf-8"))
             return context
-        return ssl.create_default_context(cafile=_path_if_file(ca_field))
+        # Plain filesystem CA path. If one is CONFIGURED but the file is
+        # missing/typo'd, fail CLOSED with a clear (tls_error-classified) message
+        # rather than silently falling back to the system trust store — a silent
+        # fallback would quietly drop private-CA pinning with no signal. An
+        # empty/absent ca_field means "no CA pinned" (the intended default) and
+        # keeps the system trust store.
+        if ca_field and ca_field.strip():
+            resolved = _path_if_file(ca_field)
+            if resolved is None:
+                raise MqttTransportError(
+                    "Configured CA certificate file was not found; refusing to "
+                    "fall back to the system trust store."
+                )
+            return ssl.create_default_context(cafile=resolved)
+        return ssl.create_default_context()
 
     def _resolve_cert_field_to_path(self, value: str | None) -> str | None:
         """Return a filesystem path for a cert field, materializing secrets.
@@ -343,6 +365,12 @@ def publish_config_and_wait_for_pointset(
     pointset_topic: str,
     timeout_seconds: float,
 ) -> MqttMessage | None:
+    # The config publish is QoS0 + non-retained BY DESIGN: we subscribe first,
+    # publish to an online, already-subscribed device, then immediately wait for
+    # the echoed pointset. Retain only helps future/reconnecting subscribers and
+    # is intentionally omitted so a lingering retained config cannot conflict with
+    # the site's real config authority. KNOWN GAP: the Configuration "QoS" field
+    # drives only the subscribe/capture path — this publish is hardcoded QoS0.
     with MqttClient(settings) as client:
         client.subscribe(pointset_topic)
         client.publish(config_topic, config_payload)

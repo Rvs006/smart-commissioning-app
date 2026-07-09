@@ -47,6 +47,7 @@ import socket
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 from smart_commissioning_core.engines.base import (
@@ -500,6 +501,13 @@ async def _run_ip_discovery(
     forbidden_by_address = _resolve_spec_map(ctx.parameters, "forbidden_ports_by_address")
     expected_by_address = _resolve_spec_map(ctx.parameters, "expected_ports_by_address")
     do_reverse = bool(ctx.parameters.get("reverse_dns"))
+    # Registered identity per host (Expected IP address -> Asset ID/name), filled
+    # by the route from the IP register so the live "Asset" column resolves a
+    # scanned host to its registered asset. A rogue / CIDR host absent from the
+    # map stays None (honest blank), never a fabricated identity.
+    asset_by_address = ctx.parameters.get("asset_id_by_address")
+    if not isinstance(asset_by_address, dict):
+        asset_by_address = {}
 
     # DRY RUN: enumerate the (ip, port) target list, perform NO I/O.
     if ctx.dry_run:
@@ -600,13 +608,14 @@ async def _run_ip_discovery(
             hosts_with_unexpected += 1
         discovered_assets.append(
             {
-                "asset_id": None,
+                "asset_id": asset_by_address.get(host),
                 "ip_address": host,
                 "mac_address": mac,
                 "hostname": hostname,
                 "observed_ports": _build_observed_ports(open_ports),
                 "match_basis": "ip",
                 "status_detail": status_detail,
+                "last_seen_at": datetime.now(UTC).isoformat(),
             }
         )
         structured_records.append(

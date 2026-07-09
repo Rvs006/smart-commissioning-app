@@ -272,6 +272,81 @@ describe("ConfigurationPage", () => {
     expect(select.value).toBe("Disabled");
   });
 
+  it("warns that a TLS connection to an IP literal needs the certificate SAN", async () => {
+    const payload = configurationPayload();
+    // Use TLS stays Enabled (fixture default); the broker is a bare IP literal.
+    payload.mqtt.values["MQTT Broker FQDN or IP Address"] = "10.0.0.5";
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payload);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const brokerLabel = (await screen.findByText("MQTT Broker FQDN or IP Address")).closest("label");
+    expect(brokerLabel).not.toBeNull();
+    expect(
+      within(brokerLabel as HTMLElement).getByText(/certificate to list this IP address \(SAN\)/i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show the TLS-by-IP SAN hint when the broker is a hostname", async () => {
+    // Fixture default: Use TLS Enabled, broker host "mqtt.local" (not an IP).
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const brokerLabel = (await screen.findByText("MQTT Broker FQDN or IP Address")).closest("label");
+    expect(brokerLabel).not.toBeNull();
+    expect(
+      within(brokerLabel as HTMLElement).queryByText(/certificate to list this IP address \(SAN\)/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns when Use TLS is Disabled but the port is the standard TLS port 8883", async () => {
+    const payload = configurationPayload();
+    // Port stays 8883 (fixture default); flip Use TLS off to create the mismatch.
+    payload.mqtt.values["Use TLS"] = "Disabled";
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payload);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const useTlsLabel = (await screen.findByText("Use TLS")).closest("label");
+    expect(useTlsLabel).not.toBeNull();
+    expect(
+      within(useTlsLabel as HTMLElement).getByText(/Port 8883 is the standard TLS port/i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not warn about a port mismatch for the matched Use TLS Enabled + port 8883 pairing", async () => {
+    // Fixture default: Use TLS Enabled, Port 8883 — the expected, matched pairing.
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const useTlsLabel = (await screen.findByText("Use TLS")).closest("label");
+    expect(useTlsLabel).not.toBeNull();
+    expect(within(useTlsLabel as HTMLElement).queryByText(/standard TLS port/i)).not.toBeInTheDocument();
+    expect(within(useTlsLabel as HTMLElement).queryByText(/standard plaintext port/i)).not.toBeInTheDocument();
+  });
+
   it("renders Source Interface as a select of enumerated NICs plus Auto, keeping a stored non-enumerated value", async () => {
     interfacesPayload = [
       interfaceFixture(),

@@ -26,7 +26,7 @@ from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discove
 from smart_commissioning_core.engines.safety import is_authorized
 from smart_commissioning_core.rbac import Role
 
-from app.core.auth import require_role
+from app.core.auth import AuthPrincipal, get_principal, require_role
 from app.core.config import get_settings
 from app.schemas.jobs import (
     DiscoveryPointsResponse,
@@ -94,6 +94,26 @@ def _require_scan_authorization(parameters: dict) -> None:
         return
     if not is_authorized(parameters):
         raise HTTPException(status_code=403, detail=_SCAN_AUTH_DETAIL)
+
+
+def _stamp_authorizer(parameters: dict, principal: AuthPrincipal) -> None:
+    """Record the REAL authenticated principal as ``scan_authorization.authorized_by``
+    on an authorized real scan, so the audit trail names who actually authorized
+    the run instead of a hard-coded client label. Any operator-supplied note /
+    authorized_at (and other keys) are preserved; only authorized/authorized_by
+    are asserted from the server side. Dry runs and unauthorized requests are left
+    untouched — a dry run needs no authorization, so stamping one would imply a
+    consent that was never required.
+    """
+    if is_dry_run(parameters) or not is_authorized(parameters):
+        return
+    existing = parameters.get("scan_authorization")
+    existing = existing if isinstance(existing, dict) else {}
+    parameters["scan_authorization"] = {
+        **existing,
+        "authorized": True,
+        "authorized_by": principal.username,
+    }
 
 
 def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRecord:
@@ -221,18 +241,50 @@ def _resolve_expected_ports(project_id: str, site_id: str, parameters: dict) -> 
             parameters["expected_ports_by_address"] = by_address
 
 
+def _resolve_asset_ids(project_id: str, site_id: str, parameters: dict) -> None:
+    """Fill ``asset_id_by_address`` from the register so the live "Asset" column
+    resolves each scanned host to its registered identity — the Asset ID, else
+    the Asset name (asset identity is one-of). First-seen address wins
+    (``setdefault``), from the newest register import that carries any identity.
+    Operator-supplied value wins; a host absent from the register stays None.
+    """
+    if parameters.get("asset_id_by_address"):
+        return
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="ip_register"
+    )
+    for record in imports:  # newest-first
+        by_address: dict[str, str] = {}
+        for row in record.get("accepted_rows", []):
+            address = str(row.get("Expected IP address", "") or "").strip()
+            identity = (
+                str(row.get("Asset ID", "") or "").strip()
+                or str(row.get("Asset name", "") or "").strip()
+            )
+            if address and identity:
+                by_address.setdefault(address, identity)
+        if by_address:
+            parameters["asset_id_by_address"] = by_address
+            return
+
+
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
-def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
+def create_ip_discovery_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
     # Validate authorization + resolve scan targets BEFORE creating the run, so a
     # rejected request never leaves an orphaned queued run, and the resolved
     # register addresses are persisted into the run record (the worker path reads
     # run.parameters, not just the inline dict).
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    _stamp_authorizer(parameters, principal)
     resolve_ip_enrichment(parameters)
     _ensure_ip_targets(request.project_id, request.site_id, parameters)
     _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
     _resolve_expected_ports(request.project_id, request.site_id, parameters)
+    _resolve_asset_ids(request.project_id, request.site_id, parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
 
@@ -257,13 +309,17 @@ def create_ip_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
 
 
 @router.post("/bacnet/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
-def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
+def create_bacnet_discovery_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
     # Resolve parameters (auth check + source-NIC injection) BEFORE creating the
     # run, so the injected source_ip / local_address are persisted into
     # run.parameters for the worker path — matching the IP / MQTT routes. (BACnet
     # binds via parameters["local_address"], already consumed by the engine.)
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    _stamp_authorizer(parameters, principal)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
     # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
     # backend so it ATTEMPTS real discovery (never silently returns simulated
@@ -294,9 +350,13 @@ def create_bacnet_discovery_run(request: JobCreateRequest) -> JobAcceptedRespons
 
 
 @router.post("/mqtt/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
-def create_mqtt_discovery_run(request: JobCreateRequest) -> JobAcceptedResponse:
+def create_mqtt_discovery_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
+    _stamp_authorizer(parameters, principal)
     # Inherit Root Topic (-> default subscribe filter) and QoS from saved config
     # when the operator didn't override them on the run.
     defaults = config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)

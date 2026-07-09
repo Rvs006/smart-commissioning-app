@@ -209,10 +209,13 @@ const ADAPTER_TYPE_SUFFIX: Record<string, string> = {
 const AUTO_MULTI_ADAPTER_HINT =
   "Multiple active adapters detected. Auto follows the Windows default route — often the internet adapter, not the site network. Pick your wired adapter to make sure scans use it.";
 
-// The single certificate-expiry indicator field. It is engine/backend-derived
-// (store_secret currently returns expiry:null, so real PEM parsing is on-site),
-// surfaced here as a read-only status: we compare the displayed date to today
-// and flag it red when expired rather than asking the operator to type it.
+// The single certificate-expiry indicator field. Its value is the real uploaded
+// certificate's notAfter, parsed server-side in store_secret via
+// cryptography.x509 and surfaced here as a read-only status: we compare the
+// displayed date to today and flag it red when it is in the past rather than
+// asking the operator to type it. The single pill reflects the SOONEST expiry
+// across the CA and Client certificates, so a newer still-valid cert never
+// hides an expired one.
 const CERT_EXPIRY_FIELD = "Certificate Expiry";
 
 // Classifies a free-text section status into a colour band. Engines set values
@@ -773,9 +776,20 @@ export function ConfigurationPage() {
   );
 }
 
+// True when `value` looks like a network-address literal rather than a
+// hostname: four dot-separated numeric groups (IPv4), or anything containing a
+// colon (IPv6, or a host:port form). Used only to nudge TLS-by-IP setups toward
+// a certificate that lists the IP in its SAN — it is not address validation.
+function isIpLiteral(value: string): boolean {
+  const trimmed = value.trim();
+  return /^\d+\.\d+\.\d+\.\d+$/.test(trimmed) || trimmed.includes(":");
+}
+
 // Per-field helper text. Beyond the BBMD lock hint, the certificate-expiry
 // field gets an honest status note explaining it is a derived indicator (red
-// when the stored expiry date is in the past) rather than a value to type.
+// when the stored expiry date is in the past) rather than a value to type, and
+// the MQTT TLS fields carry non-blocking warnings when the host/port pairing
+// looks inconsistent with the Use TLS choice.
 function fieldHint(
   section: ConfigurationSectionKey,
   field: string,
@@ -784,8 +798,24 @@ function fieldHint(
   if (section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)) {
     return "Locked because BBMD is enabled.";
   }
+  if (section === "mqtt" && field === "MQTT Broker FQDN or IP Address") {
+    const host = draft.mqtt.values[field] ?? "";
+    if (draft.mqtt.values["Use TLS"] === "Enabled" && isIpLiteral(host)) {
+      return "TLS verifies the broker certificate's hostname. Connecting by IP requires the certificate to list this IP address (SAN); otherwise use the hostname on the certificate.";
+    }
+  }
   if (section === "mqtt" && field === "Use TLS") {
-    return "Secure connection to the broker. Enable with the secure port 8883; disable with the plain port 1883.";
+    let hint =
+      "Secure connection to the broker. Enable with the secure port 8883; disable with the plain port 1883.";
+    const port = draft.mqtt.values.Port;
+    if (draft.mqtt.values["Use TLS"] === "Disabled" && port === "8883") {
+      hint +=
+        " Port 8883 is the standard TLS port, but Use TLS is Disabled — confirm the broker really serves plaintext there.";
+    } else if (draft.mqtt.values["Use TLS"] === "Enabled" && port === "1883") {
+      hint +=
+        " Port 1883 is the standard plaintext port, but Use TLS is Enabled — confirm the broker really serves TLS there.";
+    }
+    return hint;
   }
   if (section === "certificates" && field === CERT_EXPIRY_FIELD) {
     const value = draft.certificates.values[field] ?? "";

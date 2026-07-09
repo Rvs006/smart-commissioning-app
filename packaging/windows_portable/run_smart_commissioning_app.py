@@ -115,6 +115,26 @@ def reserve_port(start: int = DEFAULT_PORT, attempts: int = 50) -> int:
     raise RuntimeError(f"No available local port found from {start} to {start + attempts - 1}.")
 
 
+def _set_env_default(name: str, value: str) -> None:
+    """``os.environ.setdefault`` that surfaces a pre-existing override.
+
+    The portable profile wants a specific local/inline/sqlite value for each of
+    these variables. ``setdefault`` preserves any pre-existing value as a
+    deliberate escape hatch, but a stray/leftover env var (e.g. a ``DATABASE_URL``
+    pointing at a remote Postgres) would otherwise swap in a different profile
+    *silently*. Warn when that happens — naming the VARIABLE only, never its value,
+    since ``DATABASE_URL`` may embed a password — then defer to ``setdefault`` so
+    the override still stands.
+    """
+    existing = os.environ.get(name)
+    if existing is not None and existing != value:
+        print(
+            f"WARNING: {name} is already set in the environment; keeping that "
+            f"value and NOT applying the portable default (value hidden)."
+        )
+    os.environ.setdefault(name, value)
+
+
 def configure_environment(root: Path) -> None:
     backend_root = root / "backend"
     core_root = root / "core"
@@ -135,16 +155,16 @@ def configure_environment(root: Path) -> None:
     os.environ["SMART_COMMISSIONING_SECRETS_ROOT"] = str(runtime_root / "secrets")
     # Run/import/configuration records live in this SQLite file; the API
     # applies migrations on startup (AUTO_MIGRATE defaults to true).
-    os.environ.setdefault(
+    _set_env_default(
         "DATABASE_URL",
         f"sqlite:///{(runtime_root / 'smart_commissioning.db').as_posix()}",
     )
-    os.environ.setdefault("ENVIRONMENT", "portable_windows")
+    _set_env_default("ENVIRONMENT", "portable_windows")
     # Single-user edge profile bound to 127.0.0.1 only, so skip API-key auth;
     # the hosted compose profile (infra/) sets AUTH_MODE=api_key instead.
-    os.environ.setdefault("AUTH_MODE", "local")
-    os.environ.setdefault("JOB_EXECUTION_MODE", "inline")
-    os.environ.setdefault("ALLOW_INLINE_WORKER_FALLBACK", "true")
+    _set_env_default("AUTH_MODE", "local")
+    _set_env_default("JOB_EXECUTION_MODE", "inline")
+    _set_env_default("ALLOW_INLINE_WORKER_FALLBACK", "true")
 
 
 def open_browser_later(url: str) -> None:
