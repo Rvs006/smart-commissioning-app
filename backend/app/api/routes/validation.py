@@ -96,7 +96,9 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
 
     Make/Model/GUID/Serial/Firmware/Site/Room feed the metadata/state identity
     checks; comma-separated Expected points + Expected units become the per-point
-    units map. Blank fields are dropped so the matcher only checks what's set.
+    units map; Expected schema version drives the payload version match and the
+    per-version structural checks. Blank fields are dropped so the matcher only
+    checks what's set.
     """
     points = [p.strip() for p in str(row.get("Expected points", "")).split(",") if p.strip()]
     units = [u.strip() for u in str(row.get("Expected units", "")).split(",") if u.strip()]
@@ -109,6 +111,7 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
         "guid": row.get("GUID"),
         "site": row.get("Site"),
         "room": row.get("Room"),
+        "udmi_version": row.get("Expected schema version"),
     }
     schedule = {key: value for key, value in fields.items() if value}
     units_map = {point: (units[index] if index < len(units) else "") for index, point in enumerate(points)}
@@ -122,8 +125,11 @@ def _capture_topics_from_expected(expected_topic: object) -> dict:
 
     Accepts a ``prefix/#`` wildcard (covers all three), an explicit per-type topic,
     or a comma-separated list of those — matching the register's topic conventions.
+    A wildcard also subscribes the legacy singular ``<prefix>/event/pointset`` so
+    sites on that convention still deliver their pointset payload.
     """
-    topics: dict[str, str] = {}
+    topics: dict[str, object] = {}
+    extra_topics: list[str] = []
     for part in str(expected_topic or "").split(","):
         topic = part.strip()
         if not topic:
@@ -133,12 +139,15 @@ def _capture_topics_from_expected(expected_topic: object) -> dict:
             topics.setdefault("state_topic", prefix + "/state")
             topics.setdefault("metadata_topic", prefix + "/metadata")
             topics.setdefault("pointset_topic", prefix + "/events/pointset")
+            extra_topics.append(prefix + "/event/pointset")
         elif topic.endswith("/state"):
             topics["state_topic"] = topic
         elif topic.endswith("/metadata"):
             topics["metadata_topic"] = topic
         elif topic.endswith("/pointset"):
             topics["pointset_topic"] = topic
+    if extra_topics:
+        topics["extra_capture_topics"] = extra_topics
     return topics
 
 
@@ -163,9 +172,10 @@ def _expected_assets_from_register(project_id: str, site_id: str) -> list[dict]:
 def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
     # When the operator hasn't pasted expected values, fill them from the imported
     # MQTT register so the workbench validates against Make/Model/GUID/points/units
-    # without re-typing. One asset (asset_id given, or a single-row register) ->
-    # expected_schedule; a multi-row register with no asset_id -> an `assets` list
-    # so the matcher fans out over every asset (and live capture runs per asset).
+    # without re-typing. Register rows always become an `assets` list (even a
+    # single row) so each asset keeps its register-derived capture topics and the
+    # matcher/live capture fan out per asset. An explicit asset_id narrows the
+    # list to that row.
     parameters = dict(request.parameters)
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     if not parameters.get("expected_schedule") and not parameters.get("assets"):
@@ -173,11 +183,27 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
         asset_id = str(parameters.get("asset_id") or "").strip()
         if asset_id and assets:
             chosen = next((a for a in assets if asset_id == a["expected_schedule"].get("asset_id")), assets[0])
-            parameters["expected_schedule"] = chosen["expected_schedule"]
-        elif len(assets) > 1:
+            assets = [chosen]
+        if assets:
+            if len(assets) == 1:
+                # A caller may pair the single register row with directly
+                # supplied payloads; keep them reviewable against that row.
+                for key in ("state_payload", "metadata_payload", "pointset_payload", "messages"):
+                    if parameters.get(key) is not None:
+                        assets[0].setdefault(key, parameters[key])
             parameters["assets"] = assets
-        elif assets:
-            parameters["expected_schedule"] = assets[0]["expected_schedule"]
+        elif parameters.get("use_register"):
+            # The operator explicitly asked to validate against the imported
+            # register and there is none: refuse rather than silently falling
+            # back to the packaged sample fixture and presenting it as a result.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No accepted MQTT register import was found for this project/site. "
+                    "Upload an mqtt_register file, or untick the register option to "
+                    "validate pasted payloads instead."
+                ),
+            )
     run = _create_run(request.model_copy(update={"parameters": parameters}), "udmi_validation")
 
     def run_inline() -> RunRecord:

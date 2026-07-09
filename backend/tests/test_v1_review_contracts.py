@@ -234,14 +234,18 @@ class UdmiRegisterScheduleTests(unittest.TestCase):
                 "Room": "L3",
                 "Expected points": "energy_sensor,power_sensor",
                 "Expected units": "kwh,kw",
+                "Expected schema version": "1.5.2",
             }
         )
 
         self.assertEqual(schedule["manufacturer"], "Acme")
         self.assertEqual(schedule["serial"], "SN1")
         self.assertEqual(schedule["units"], {"energy_sensor": "kwh", "power_sensor": "kw"})
+        # The template's Expected schema version drives the payload version match.
+        self.assertEqual(schedule["udmi_version"], "1.5.2")
         # Blank register fields are dropped so the matcher only checks what's set.
         self.assertNotIn("model", _expected_schedule_from_register_row({"Asset ID": "x"}))
+        self.assertNotIn("udmi_version", _expected_schedule_from_register_row({"Asset ID": "x"}))
 
     def test_asset_entry_derives_capture_topics_from_wildcard(self) -> None:
         from app.api.routes.validation import _asset_entry_from_row
@@ -253,6 +257,15 @@ class UdmiRegisterScheduleTests(unittest.TestCase):
         self.assertEqual(entry["state_topic"], "hv/ems/01/em/EM-1001001/state")
         self.assertEqual(entry["metadata_topic"], "hv/ems/01/em/EM-1001001/metadata")
         self.assertEqual(entry["pointset_topic"], "hv/ems/01/em/EM-1001001/events/pointset")
+        # A wildcard also captures the legacy singular event/pointset convention.
+        self.assertEqual(entry["extra_capture_topics"], ["hv/ems/01/em/EM-1001001/event/pointset"])
+
+    def test_explicit_topic_list_has_no_legacy_alias(self) -> None:
+        from app.api.routes.validation import _capture_topics_from_expected
+
+        topics = _capture_topics_from_expected("a/b/metadata,a/b/state,a/b/events/pointset")
+        self.assertEqual(topics["pointset_topic"], "a/b/events/pointset")
+        self.assertNotIn("extra_capture_topics", topics)
 
 
 class UdmiReviewTests(unittest.TestCase):

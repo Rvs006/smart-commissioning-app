@@ -116,6 +116,7 @@ const defaultExpectedSchedule = JSON.stringify(
     guid: "ifc://expected-ahu-1000001",
     manufacturer: "Schneider",
     model: "PM5111",
+    udmi_version: "1.5.2",
     units: {
       supply_air_temperature_setpoint: "degrees_celsius",
     },
@@ -135,6 +136,7 @@ const defaultStatePayload = JSON.stringify(
       },
     },
     timestamp: "2026-04-01T10:47:38.697+01:00",
+    version: "1.5.2",
   },
   null,
   2,
@@ -156,20 +158,20 @@ const defaultMetadataPayload = JSON.stringify(
       },
     },
     timestamp: "2026-04-01T10:48:00.000+01:00",
+    version: "1.5.2",
   },
   null,
   2,
 );
 const defaultPointsetPayload = JSON.stringify(
   {
-    pointset: {
-      points: {
-        supply_air_temperature_setpoint: {
-          present_value: 22,
-        },
+    points: {
+      supply_air_temperature_setpoint: {
+        present_value: 22,
       },
     },
     timestamp: "2026-04-01T10:48:56.312+01:00",
+    version: "1.5.2",
   },
   null,
   2,
@@ -208,6 +210,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [scanAuthorized, setScanAuthorized] = useState(false);
   const [scanDryRun, setScanDryRun] = useState(false);
   const [scanTarget, setScanTarget] = useState("");
+  // Register-driven mode: Run sends NO pasted schedule/payloads, so the backend
+  // fans out one expected asset per imported mqtt_register row (topics + points
+  // + units + schema version from the register). Auto-enabled when an
+  // mqtt_register import is accepted on this page; the operator can untick it.
+  const [udmiUseRegister, setUdmiUseRegister] = useState(false);
   const [udmiExpectedSchedule, setUdmiExpectedSchedule] = useState(defaultExpectedSchedule);
   const [udmiStatePayload, setUdmiStatePayload] = useState(defaultStatePayload);
   const [udmiMetadataPayload, setUdmiMetadataPayload] = useState(defaultMetadataPayload);
@@ -419,6 +426,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     onSuccess: (summary) => {
       setImportOutcome(summary);
+      // An accepted MQTT register flips the UDMI workbench into register-driven
+      // validation so Run checks the uploaded rows, not the pasted sample.
+      if (summary.import_type === "mqtt_register" && summary.status !== "rejected") {
+        setUdmiUseRegister(true);
+      }
     },
   });
 
@@ -462,6 +474,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   statePayload: udmiStatePayload,
                   stateTopic: udmiStateTopic,
                   useLiveBroker: udmiUseLiveBroker,
+                  useRegister: udmiUseRegister,
                 })
               : undefined,
           runKind: action.runKind,
@@ -616,6 +629,62 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return mergeAssetGroups(groups, views);
   }, [module.route, activeRun, assetIssueGroups, payloadViews]);
 
+  // Live UDMI results table: one row per asset x payload type, derived only
+  // from the terminal run's real payload_views + issues (never fabricated).
+  // Replaces the illustrative sample rows that previously showed after a run.
+  const udmiLiveResults = useMemo<{ columns: string[]; rows: Array<Record<string, string>> } | null>(() => {
+    // job_type guard: mqtt_config_publish runs share this route's run monitor;
+    // only a udmi_validation run may populate the per-asset payload table.
+    if (
+      module.route !== "udmi-validation" ||
+      !mergedAssetGroups ||
+      validationRunQuery.data?.job_type !== "udmi_validation" ||
+      !isTerminalStatus(validationRunQuery.data?.status)
+    ) {
+      return null;
+    }
+    const rows = mergedAssetGroups.flatMap((group) =>
+      group.payloadTypes.map((entry) => {
+        const critical = entry.issues.filter((issue) => issue.severity === "critical").length;
+        const major = entry.issues.filter((issue) => issue.severity === "major").length;
+        const total = entry.issues.length;
+        const observed = entry.hasPayloadView ? (entry.observedPresent ? "Yes" : "No") : "—";
+        const result =
+          critical > 0
+            ? `Fail — ${total} issue${total === 1 ? "" : "s"} (${critical} critical)`
+            : major > 0
+              ? `Fail — ${total} issue${total === 1 ? "" : "s"}`
+              : total > 0
+                ? "Pass with notes"
+                : entry.observedPresent
+                  ? "Pass"
+                  : "Not received";
+        return {
+          Asset: group.assetId,
+          Payload: `UDMI ${entry.payloadType}`,
+          Observed: observed,
+          Issues: String(total),
+          "Raw Payload": entry.observed ? JSON.stringify(entry.observed) : "",
+          Result: result,
+        };
+      }),
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return { columns: ["Asset", "Payload", "Observed", "Issues", "Raw Payload", "Result"], rows };
+  }, [module.route, mergedAssetGroups, validationRunQuery.data]);
+
+  // Reset the row selection when the live UDMI view replaces the sample rows so
+  // the inspector never shows a stale sample-row selection against live results.
+  const hasUdmiLiveResults = udmiLiveResults !== null;
+  useEffect(() => {
+    if (hasUdmiLiveResults) {
+      setSelectedResultIndex(0);
+      setDetailRow(null);
+    }
+  }, [hasUdmiLiveResults]);
+
   // Live discovery results view (ip/bacnet/mqtt). Built only after a terminal
   // run; until then the table falls back to labelled sample rows.
   const discoveryView = useMemo(() => {
@@ -642,9 +711,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return bacnetBackendLabel(discoveryResultsQuery.data);
   }, [module.route, discoveryResultsQuery.data]);
 
-  const usingLiveResults = Boolean(discoveryView);
-  const tableColumns = discoveryView?.columns ?? workspace?.columns ?? [];
-  const resultRows = discoveryView?.rows ?? workspace?.rows ?? [];
+  const usingLiveResults = Boolean(discoveryView) || Boolean(udmiLiveResults);
+  const tableColumns = discoveryView?.columns ?? udmiLiveResults?.columns ?? workspace?.columns ?? [];
+  const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? workspace?.rows ?? [];
   const selectedResult = resultRows[selectedResultIndex] ?? resultRows[0] ?? null;
   const resultDetails = selectedResult
     ? buildResultDetailItems(module.route, selectedResult, usingLiveResults)
@@ -1544,10 +1613,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <h3>Schedule and Payload Evidence</h3>
             </div>
           </div>
+          <label className="confirm-row">
+            <input
+              checked={udmiUseRegister}
+              onChange={(event) => setUdmiUseRegister(event.target.checked)}
+              type="checkbox"
+            />
+            Validate against the imported MQTT register — one expected asset per row (topic, points,
+            units, and Expected schema version come from the register). Auto-enabled after an
+            accepted register import.
+          </label>
+
+          {udmiUseRegister ? (
+            <p className="section-copy">
+              Register-driven run: the pasted schedule and payload JSON below are ignored. Untick the
+              option above to validate the pasted values instead.
+            </p>
+          ) : null}
           <div className="json-workbench">
             <label>
               Expected schedule JSON
               <textarea
+                disabled={udmiUseRegister}
                 onChange={(event) => setUdmiExpectedSchedule(event.target.value)}
                 rows={9}
                 value={udmiExpectedSchedule}
@@ -1556,6 +1643,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <label>
               State payload JSON
               <textarea
+                disabled={udmiUseRegister}
                 onChange={(event) => setUdmiStatePayload(event.target.value)}
                 rows={9}
                 value={udmiStatePayload}
@@ -1564,6 +1652,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <label>
               Metadata payload JSON
               <textarea
+                disabled={udmiUseRegister}
                 onChange={(event) => setUdmiMetadataPayload(event.target.value)}
                 rows={9}
                 value={udmiMetadataPayload}
@@ -1572,6 +1661,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <label>
               Pointset payload JSON
               <textarea
+                disabled={udmiUseRegister}
                 onChange={(event) => setUdmiPointsetPayload(event.target.value)}
                 rows={9}
                 value={udmiPointsetPayload}
@@ -1590,18 +1680,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
           {udmiUseLiveBroker && (
             <div className="publish-grid">
-              <label>
-                State topic
-                <input onChange={(event) => setUdmiStateTopic(event.target.value)} value={udmiStateTopic} />
-              </label>
-              <label>
-                Metadata topic
-                <input onChange={(event) => setUdmiMetadataTopic(event.target.value)} value={udmiMetadataTopic} />
-              </label>
-              <label>
-                Pointset topic
-                <input onChange={(event) => setUdmiPointsetTopic(event.target.value)} value={udmiPointsetTopic} />
-              </label>
+              {!udmiUseRegister && (
+                <>
+                  <label>
+                    State topic
+                    <input onChange={(event) => setUdmiStateTopic(event.target.value)} value={udmiStateTopic} />
+                  </label>
+                  <label>
+                    Metadata topic
+                    <input onChange={(event) => setUdmiMetadataTopic(event.target.value)} value={udmiMetadataTopic} />
+                  </label>
+                  <label>
+                    Pointset topic
+                    <input onChange={(event) => setUdmiPointsetTopic(event.target.value)} value={udmiPointsetTopic} />
+                  </label>
+                </>
+              )}
               <label>
                 Capture window seconds
                 <input
@@ -1624,9 +1718,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               {runMutation.isPending ? "Executing..." : "Execute capture"}
             </button>
             <span className="section-copy execute-note">
-              {udmiUseLiveBroker
-                ? "Runs the UDMI validation, capturing the state, metadata, and pointset payloads for the topics above. Live broker capture is on-site-untested; with no broker reachable the engine records broker_unreachable rather than fabricating payloads."
-                : "Runs the UDMI validation against the pasted state, metadata, and pointset payloads above. Tick the broker option to capture live payloads instead (on-site-untested)."}
+              {udmiUseRegister
+                ? udmiUseLiveBroker
+                  ? "Runs the UDMI validation for every imported register row, capturing each asset's state, metadata, and pointset payloads from its register topic. With no broker reachable the engine records broker_unreachable rather than fabricating payloads."
+                  : "Runs the UDMI validation for every imported register row. Without broker capture there are no observed payloads, so expected points are reported as not received — tick the broker option to capture live payloads."
+                : udmiUseLiveBroker
+                  ? "Runs the UDMI validation, capturing the state, metadata, and pointset payloads for the topics above. Live broker capture is on-site-untested; with no broker reachable the engine records broker_unreachable rather than fabricating payloads."
+                  : "Runs the UDMI validation against the pasted state, metadata, and pointset payloads above. Tick the broker option to capture live payloads instead (on-site-untested)."}
             </span>
           </div>
         </section>
@@ -1889,8 +1987,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
           {usingLiveResults && (
             <div className="sample-banner" role="note">
-              Live discovery observations. Register-comparison verdicts (matched / rogue / missing)
-              are produced by validation, not discovery, so no "Result" column is shown here.
+              {isDiscoveryModule
+                ? 'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
+                : `Live validation results — per-asset payload checks from the latest run. Observed payloads were ${
+                    payloadViewSource === "live_capture"
+                      ? "captured from the MQTT broker"
+                      : "supplied directly (pasted), not captured from a broker"
+                  }.`}
             </div>
           )}
           {bacnetBackend &&
@@ -2266,7 +2369,20 @@ function buildUdmiValidationParameters(input: {
   statePayload: string;
   stateTopic: string;
   useLiveBroker: boolean;
+  useRegister: boolean;
 }): Record<string, unknown> {
+  if (input.useRegister) {
+    // Register-driven run: send no pasted schedule/payloads/topics so the
+    // backend builds one expected asset per imported mqtt_register row (its
+    // wildcard topic, points, units, and Expected schema version). use_register
+    // makes the backend refuse (400) when no register import exists, instead of
+    // silently validating the packaged sample fixture.
+    return {
+      capture_seconds: Number(input.captureSeconds) || 5,
+      use_live_broker: input.useLiveBroker,
+      use_register: true,
+    };
+  }
   return {
     capture_seconds: Number(input.captureSeconds) || 5,
     expected_schedule: parseJsonObject(input.expectedSchedule, "Expected schedule JSON"),
@@ -2576,6 +2692,19 @@ function buildResultDetailItems(
   }
 
   if (route === "udmi-validation") {
+    if (live) {
+      return [
+        { label: "Asset", value: row.Asset ?? "Selected MQTT asset" },
+        { label: "Payload type", value: row.Payload ?? "—" },
+        { label: "Observed", value: row.Observed ?? "—" },
+        { label: "Issues", value: row.Issues ?? "0" },
+        { label: "Result", value: row.Result ?? "Pending" },
+        {
+          label: "Live data view",
+          value: "Derived from the validation run's real payload views and issues — expand the asset in the issues panel for expected-vs-observed detail.",
+        },
+      ];
+    }
     return [
       { label: "Asset", value: row.Asset ?? "Selected MQTT asset" },
       { label: "Topic", value: row.Topic ?? "State, metadata, or pointset topic" },

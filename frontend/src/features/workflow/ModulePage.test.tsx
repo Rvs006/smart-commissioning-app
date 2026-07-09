@@ -543,3 +543,165 @@ describe("ModulePage labels and templates", () => {
     expect(screen.getByRole("columnheader", { name: "Network Number" })).toBeInTheDocument();
   });
 });
+
+describe("ModulePage UDMI workbench live results", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  const udmiAccepted = {
+    run_id: "run-udmi-1",
+    job_type: "udmi_validation",
+    status: "queued",
+    message: "UDMI validation accepted.",
+  };
+
+  const udmiTerminalRun = {
+    run_id: "run-udmi-1",
+    job_type: "udmi_validation",
+    status: "succeeded",
+    stage: "udmi_fixture_validation_complete",
+    progress_percent: 100,
+    created_at: "2026-07-09T09:00:00Z",
+    updated_at: "2026-07-09T09:05:00Z",
+    project_id: "demo-project",
+    site_id: "demo-site",
+    parameters: {},
+    result_summary: {
+      expected_devices: 1,
+      publishing_seen: 1,
+      not_publishing: 0,
+      issue_count: 1,
+      message_count: 3,
+      source: "schedule_payload_inputs",
+      payload_view_source: "direct_inputs",
+      payload_views: [
+        {
+          asset_id: "EM-1",
+          payload_types: [
+            {
+              payload_type: "pointset",
+              expected: { udmi_version: "1.5.2", units: { energy_sensor: "kwh" } },
+              observed: { version: "1.4.0", points: { energy_sensor: { present_value: 12.5 } } },
+              observed_present: true,
+            },
+            {
+              payload_type: "metadata",
+              expected: { udmi_version: "1.5.2", units: { energy_sensor: "kwh" } },
+              observed: { version: "1.5.2", pointset: { points: { energy_sensor: { units: "kilowatt_hours" } } } },
+              observed_present: true,
+            },
+          ],
+        },
+      ],
+    },
+    error_message: null,
+  };
+
+  const udmiIssuesPayload = {
+    run_id: "run-udmi-1",
+    issues: [
+      {
+        issue_id: "UDMI-PS-001",
+        asset_id: "EM-1",
+        issue_type: "pointset_validation",
+        severity: "critical",
+        description: "Expected schema version does not match the pointset payload version.",
+        point_name: null,
+        expected_value: "1.5.2",
+        observed_value: "1.4.0",
+        suggested_action: "Align the register's Expected schema version with the device's UDMI version.",
+        status_detail: null,
+        raw_evidence_uri: "runtime://udmi-validation/review-payloads",
+      },
+    ],
+  };
+
+  it("replaces the sample rows with real per-asset payload rows after a terminal run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    // Before a run the labelled sample rows are shown.
+    expect(await screen.findByText(/Sample preview/i)).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    // After the terminal run the table shows REAL per-asset payload rows —
+    // the version-mismatch verdict and the run's asset id, not the sample rows.
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText("EM-1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
+    // Row cells also render in the selected-result detail aside, so match >=1.
+    expect(screen.getAllByText("Fail — 1 issue (1 critical)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
+    // The old illustrative sample asset never appears as a live result.
+    expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
+  });
+
+  it("register-driven mode sends no pasted schedule or payloads so the backend uses the imported register", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Validate against the imported MQTT register/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    // No pasted expectation/payloads: the backend fans out one asset per
+    // imported mqtt_register row (topic, points, units, schema version).
+    expect(parameters).not.toHaveProperty("expected_schedule");
+    expect(parameters).not.toHaveProperty("state_payload");
+    expect(parameters).not.toHaveProperty("metadata_payload");
+    expect(parameters).not.toHaveProperty("pointset_payload");
+    expect(parameters).not.toHaveProperty("state_topic");
+    expect(parameters.capture_seconds).toBe(5);
+  });
+});
