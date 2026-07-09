@@ -404,6 +404,36 @@ class Bacpypes3BackendGuardTests(unittest.TestCase):
         self.assertEqual(store.summary_calls, [])
         self.assertEqual(persisted, [])
 
+    def test_authorized_bacpypes3_run_without_source_interface_fails_with_reason(self) -> None:
+        # Audit fix: a live bacpypes3 scan with no Source Interface (local_address
+        # unset) cannot bind a socket, so it fails with an ACTIONABLE reason on the
+        # run's error_message (what the UI surfaces) — never a silent simulated
+        # fallback, and deterministic regardless of whether bacpypes3 is installed
+        # (the guard fires before any bacpypes3 import). It deliberately does NOT
+        # stamp a live-backend provenance label, since no scan actually ran.
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        def persist(run_id: str, records: list[dict[str, Any]]) -> None:
+            persisted.append((run_id, list(records)))
+
+        result = process_bacnet_discovery_run(
+            "run_no_source_interface",
+            {**_AUTHORIZED, "bacnet_backend": "bacpypes3"},  # no local_address
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            throttle=ThrottleConfig(rate_limit_per_sec=None),
+            persist_records=persist,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        # The actionable reason is on error_message (the field the UI renders).
+        self.assertIn("Source Interface", str(result["error_message"]))
+        self.assertEqual(store.last_error, result["error_message"])
+        # No false "Live bacpypes3 scan" provenance: backend is not stamped.
+        self.assertNotIn("backend", store.summary_calls[-1])
+        self.assertEqual(persisted, [])
+
     @unittest.skipIf(
         importlib.util.find_spec("bacpypes3") is None,
         "bacpypes3 not installed (expected in this offline environment)",

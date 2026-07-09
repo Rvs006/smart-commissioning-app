@@ -107,8 +107,7 @@ def validate_udmi_full_report(
         "captured_topics": capture_summary["captured_topics"],
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
-            parameters or {},
-            capture_attempted=bool(capture_summary["attempted"]),
+            captured_topics=capture_summary["captured_topics"],
             has_views=bool(payload_views),
         ),
     }
@@ -717,17 +716,17 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
     return [view] if view is not None else []
 
 
-def _payload_view_source(
-    parameters: dict[str, object], *, capture_attempted: bool, has_views: bool
-) -> str:
-    """Label the origin of the payload views so the UI never implies fabrication."""
+def _payload_view_source(*, captured_topics: object, has_views: bool) -> str:
+    """Label the origin of the payload views so the UI never implies fabrication.
+
+    Only claim ``live_capture`` when the broker ACTUALLY delivered payloads (a
+    non-empty ``captured_topics``). A failed or timed-out capture leaves the
+    pasted default payloads in place with an empty ``captured_topics``; labelling
+    those "live_capture" would present pasted values as real device data.
+    """
     if not has_views:
         return "none"
-    has_observed = any(
-        isinstance(parameters.get(key), dict) and parameters.get(key)
-        for key in ("state_payload", "metadata_payload", "pointset_payload")
-    )
-    if capture_attempted and has_observed:
+    if isinstance(captured_topics, (list, tuple)) and captured_topics:
         return "live_capture"
     return "direct_inputs"
 

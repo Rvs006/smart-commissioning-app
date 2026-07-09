@@ -719,6 +719,27 @@ def make_bacnet_discovery_engine(
         if ctx.dry_run:
             return _dry_run_result(ctx, chosen)
         require_scan_authorization(ctx.parameters)
+        # A real bacpypes3 Who-Is must bind a specific local interface. When no
+        # Source Interface is configured (local_address unset), the scan cannot
+        # run — fail with an ACTIONABLE error_message (which the UI surfaces via
+        # the run's error_message) instead of a raw bind error that the framework
+        # would sanitize to a generic "engine execution failed". Deliberately do
+        # NOT stamp result_summary.backend here: no socket was bound and no scan
+        # ran, so a "Live bacpypes3 scan" provenance label would be a false
+        # positive — the run is simply a failure with a clear, safe reason.
+        if _backend_name(chosen) == BACKEND_BACPYPES3 and not str(
+            ctx.parameters.get("local_address") or ""
+        ).strip():
+            return EngineResult(
+                status_override="failed",
+                error_message=(
+                    "No Source Interface selected for a live BACnet scan. Open the "
+                    "Configuration page, set Source Interface to your wired network "
+                    "adapter, and Save, then run the scan again — a real BACnet Who-Is "
+                    "must bind to a specific local network interface."
+                ),
+                result_summary_extra={"device_count": 0, "point_count": 0},
+            )
         return await _run_bacnet_discovery(ctx, chosen)
 
     return _engine

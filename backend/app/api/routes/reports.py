@@ -179,7 +179,11 @@ def _report_rows(run: object) -> list[tuple[str, str]]:
         ("Project", str(run.project_id)),
         ("Site", str(run.site_id)),
         ("Status", str(run.status)),
-        ("Source runs", ", ".join(str(item) for item in parameters.get("source_run_ids", [])) or "All completed runs"),
+        (
+            "Source runs",
+            ", ".join(str(item) for item in parameters.get("source_run_ids", []))
+            or "None selected (no run findings included)",
+        ),
         ("Generated", _generated_at(run)),
     ]
 

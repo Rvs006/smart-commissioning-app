@@ -184,6 +184,21 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **Usability audit: five misleading-output fixes (2026-07-09).** A multi-agent
+  audit found five places where a working-looking screen hid a non-result; all
+  now honest: (1) the IP scanner is TCP-only, so its UI no longer ships BACnet's
+  UDP 47808 as a default port / protocol option (a TCP probe cannot detect
+  BACnet — use BACnet Discovery); (2) a live BACnet scan with no Source Interface
+  configured now fails with an actionable, operator-visible reason (on the run's
+  error_message) telling the engineer to pick and save a Source Interface, instead
+  of an opaque "engine execution failed" — and it no longer stamps a false "Live
+  bacpypes3 scan" provenance label on a run where no socket was ever bound; (3) a
+  failed/timed-out UDMI live capture no longer relabels the pasted default
+  payloads as "live-captured"; (4) a fresh install no longer seeds placeholder
+  certificate references that render as a real, in-use, valid certificate — cert
+  fields start empty and are optional in validation; (5) an evidence pack
+  generated with no selected source runs is labelled "None selected" instead of
+  claiming to cover "All completed runs".
 - **MQTT password Show/Hide reveal is now repeatable, and a secure/non-secure
   connection selector was added (field review, 2026-07-09).** The Configuration
   page's MQTT (and Key) password fields now render a Show/Hide toggle that flips
