@@ -56,6 +56,22 @@ class ConfigurationReviewTests(unittest.TestCase):
         result = ConfigurationService().validate(DEFAULT_CONFIGURATION.model_copy(deep=True))
         self.assertNotIn("Source Interface", " ".join(result.errors))
 
+    def test_legacy_mqtt_config_derives_use_tls_from_port(self) -> None:
+        # A config saved before the "Use TLS" control must keep its port-based
+        # security: the merge must NOT force the static "Enabled" default onto a
+        # legacy plaintext (1883) broker, and must keep TLS for a legacy 8883 one.
+        plain = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        del plain.mqtt.values["Use TLS"]
+        plain.mqtt.values["Port"] = "1883"
+        merged_plain = ConfigurationService()._merge_with_defaults(plain)
+        self.assertEqual(merged_plain.mqtt.values["Use TLS"], "Disabled")
+
+        secure = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        del secure.mqtt.values["Use TLS"]
+        secure.mqtt.values["Port"] = "8883"
+        merged_secure = ConfigurationService()._merge_with_defaults(secure)
+        self.assertEqual(merged_secure.mqtt.values["Use TLS"], "Enabled")
+
     def test_validation_rejects_bad_network_and_backup_values(self) -> None:
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.device.values["Subnet Mask"] = "bad-mask"

@@ -33,7 +33,12 @@ function configurationPayload() {
       status: "Listening",
     },
     mqtt: {
-      values: { "MQTT Broker FQDN or IP Address": "mqtt.local", Port: "8883", "MQTT Password": "********" },
+      values: {
+        "MQTT Broker FQDN or IP Address": "mqtt.local",
+        Port: "8883",
+        "Use TLS": "Enabled",
+        "MQTT Password": "********",
+      },
       status: "Broker unreachable: connection refused at mqtt.local:8883 after 3 retries",
     },
     certificates: {
@@ -214,6 +219,57 @@ describe("ConfigurationPage", () => {
     expect(optionValues).toContain("UTC");
     expect(optionValues).toContain("Asia/Tokyo");
     expect(optionValues).toContain("America/New_York");
+  });
+
+  it("reveals and re-hides a password field as many times as clicked", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    // MQTT Settings is expanded by default, so the password field is present.
+    const passwordLabel = (await screen.findByText("MQTT Password")).closest("label");
+    expect(passwordLabel).not.toBeNull();
+    const input = within(passwordLabel as HTMLElement).getByDisplayValue("********") as HTMLInputElement;
+    // The adjacent Show/Hide toggle must not pollute the input's accessible name.
+    expect(input).toHaveAccessibleName("MQTT Password");
+    const toggle = within(passwordLabel as HTMLElement).getByRole("button", { name: /Show MQTT Password/i });
+
+    // Masked by default, revealed on click, re-hidden on a second click, and it
+    // keeps working past the first toggle (the original one-view bug).
+    expect(input.type).toBe("password");
+    fireEvent.click(toggle);
+    expect(input.type).toBe("text");
+    fireEvent.click(within(passwordLabel as HTMLElement).getByRole("button", { name: /Hide MQTT Password/i }));
+    expect(input.type).toBe("password");
+    fireEvent.click(within(passwordLabel as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
+    expect(input.type).toBe("text");
+  });
+
+  it("renders a secure/non-secure MQTT connection selector (Use TLS)", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const useTlsLabel = (await screen.findByText("Use TLS")).closest("label");
+    expect(useTlsLabel).not.toBeNull();
+    const select = within(useTlsLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe("Enabled");
+    const optionValues = Array.from(select.options).map((option) => option.value);
+    expect(optionValues).toEqual(["Enabled", "Disabled"]);
+
+    // The operator can switch to a non-secure connection.
+    fireEvent.change(select, { target: { value: "Disabled" } });
+    expect(select.value).toBe("Disabled");
   });
 
   it("renders Source Interface as a select of enumerated NICs plus Auto, keeping a stored non-enumerated value", async () => {

@@ -60,6 +60,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
         values={
             "MQTT Broker FQDN or IP Address": "mqtt.electracom.local",
             "Port": "8883",
+            "Use TLS": "Enabled",
             "Client ID": "sct-gateway-01",
             "Root Topic": "electracom/sct/1532",
             "QoS": "1 - At least once",
@@ -419,6 +420,15 @@ class ConfigurationService:
             mqtt_values["MQTT Broker FQDN or IP Address"] = mqtt_values.pop("MQTT Broker")
         if "Keep Alive" in mqtt_values and "Keep Alive Interval" not in mqtt_values:
             mqtt_values["Keep Alive Interval"] = mqtt_values.pop("Keep Alive")
+        # A config saved before the "Use TLS" control existed carries no such key.
+        # Derive it from the stored port here — BEFORE _merge_with_defaults unions
+        # the new static "Use TLS": "Enabled" default in — so a legacy plaintext
+        # (non-8883) broker is not silently forced onto TLS and left unable to
+        # connect. This mirrors the historical port heuristic (8883 = TLS); a
+        # config that has already chosen "Use TLS" keeps its explicit value.
+        port = str(mqtt_values.get("Port", "")).strip()
+        if "Use TLS" not in mqtt_values and port:
+            mqtt_values["Use TLS"] = "Enabled" if port == "8883" else "Disabled"
 
     def _validate_ip_field(self, errors: list[str], label: str, value: str) -> None:
         value = value.strip()

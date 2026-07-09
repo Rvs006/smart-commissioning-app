@@ -165,6 +165,7 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
     "Diagnostics Mode": { kind: "select", options: ["Enabled", "Disabled"] },
   },
   mqtt: {
+    "Use TLS": { kind: "select", options: ["Enabled", "Disabled"] },
     "MQTT Password": { kind: "password" },
     QoS: { kind: "select", options: ["0 - At most once", "1 - At least once", "2 - Exactly once"] },
   },
@@ -783,6 +784,9 @@ function fieldHint(
   if (section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)) {
     return "Locked because BBMD is enabled.";
   }
+  if (section === "mqtt" && field === "Use TLS") {
+    return "Secure connection to the broker. Enable with the secure port 8883; disable with the plain port 1883.";
+  }
   if (section === "certificates" && field === CERT_EXPIRY_FIELD) {
     const value = draft.certificates.values[field] ?? "";
     if (isExpired(value)) {
@@ -822,6 +826,8 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   // MQTT Settings
   "MQTT Broker FQDN or IP Address": "Hostname or IP of the MQTT broker to connect to.",
   Port: "MQTT broker TCP port (1883 plain, 8883 TLS).",
+  "Use TLS":
+    "Secure the broker connection with TLS. Enable for the secure port (8883); disable for a plaintext port (1883).",
   "Client ID": "Unique client identifier this gateway connects with.",
   "Root Topic": "Base MQTT topic prefix for this site's messages.",
   QoS: "MQTT delivery guarantee — 0 at most once, 1 at least once, 2 exactly once.",
@@ -894,6 +900,11 @@ function FieldControl({
   value,
 }: FieldControlProps) {
   const [maskedSentinel, setMaskedSentinel] = useState<string | null>(null);
+  // Password-kind fields render masked by default with a Show/Hide toggle that
+  // flips as many times as the operator wants (the original review flagged a
+  // reveal that only worked once). It toggles the input type between
+  // "password" and "text"; the stored value never leaves the field.
+  const [revealed, setRevealed] = useState(false);
   // Secret material (CA cert, client cert, private key) is collapsed to the
   // masked value + a "Replace…" button by default, so the Certificates card
   // stays compact. The paste box + file picker only appear when replacing.
@@ -983,27 +994,50 @@ function FieldControl({
     );
   }
 
+  const isPassword = kind === "password";
+  const inputElement = (
+    <input
+      // Password inputs sit beside the Show/Hide toggle inside the <label>, so
+      // an explicit aria-label keeps the accessible name clean ("MQTT Password")
+      // instead of absorbing the toggle button's name from the label content.
+      aria-label={isPassword ? field : undefined}
+      className={expired ? "field-expired" : undefined}
+      onBlur={() => {
+        if (isPassword && maskedSentinel && !value) {
+          onValueChange(maskedSentinel);
+        }
+      }}
+      onChange={(event) => onValueChange(event.target.value)}
+      onFocus={() => {
+        if (isPassword && isSecretSentinel(value)) {
+          setMaskedSentinel(value);
+          onValueChange("");
+        }
+      }}
+      readOnly={disabled || kind === "readonly"}
+      type={isPassword ? (revealed ? "text" : "password") : "text"}
+      value={value}
+    />
+  );
   return (
     <label className={expired ? "field-expired" : undefined} title={FIELD_TOOLTIPS[field]}>
       {field}
-      <input
-        className={expired ? "field-expired" : undefined}
-        onBlur={() => {
-          if (kind === "password" && maskedSentinel && !value) {
-            onValueChange(maskedSentinel);
-          }
-        }}
-        onChange={(event) => onValueChange(event.target.value)}
-        onFocus={() => {
-          if (kind === "password" && isSecretSentinel(value)) {
-            setMaskedSentinel(value);
-            onValueChange("");
-          }
-        }}
-        readOnly={disabled || kind === "readonly"}
-        type={kind === "password" ? "password" : "text"}
-        value={value}
-      />
+      {isPassword ? (
+        <span className="password-field">
+          {inputElement}
+          <button
+            aria-label={revealed ? `Hide ${field}` : `Show ${field}`}
+            aria-pressed={revealed}
+            className="secondary-button compact"
+            onClick={() => setRevealed((shown) => !shown)}
+            type="button"
+          >
+            {revealed ? "Hide" : "Show"}
+          </button>
+        </span>
+      ) : (
+        inputElement
+      )}
       {hint && <small>{hint}</small>}
     </label>
   );
