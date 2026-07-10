@@ -1255,47 +1255,52 @@ def _state_severity(message: str) -> str:
 
 
 def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict[str, Any] | None:
-    """Slice of the expected schedule that maps to a payload type.
-
-    Mirrors the facets _review_payload_issues compares so the per-type view's
-    "expected" column stays consistent with the issue logic: manufacturer/model
-    -> state, guid/points/units -> metadata, points -> pointset.
-    """
-    facet: dict[str, Any] = {}
-    if expected.get("udmi_version") is not None:
-        facet["version"] = expected["udmi_version"]
+    """UDMI-shaped display template with register constraints and explicit placeholders."""
+    version = expected.get("udmi_version") or "<UDMI schema version>"
+    timestamp = "<RFC 3339 timestamp>"
+    points = expected.get("points", expected.get("units", {}))
+    point_names = [str(point) for point in points]
+    units = _dict_or_empty(expected.get("units"))
     if payload_type == "state":
-        hardware = {
-            payload_key: expected[schedule_key]
-            for schedule_key, payload_key in (("manufacturer", "make"), ("model", "model"))
-            if expected.get(schedule_key) is not None
+        return {
+            "timestamp": timestamp,
+            "version": version,
+            "system": {
+                "last_config": timestamp,
+                "operation": {"operational": "<boolean>"},
+                "serial_no": expected.get("serial") or "<device serial number>",
+                "hardware": {
+                    "make": expected.get("manufacturer") or "<device manufacturer>",
+                    "model": expected.get("model") or "<device model>",
+                },
+                "software": {"firmware": expected.get("firmware") or "<device firmware>"},
+            },
         }
-        if hardware:
-            facet["system"] = {"hardware": hardware}
-    elif payload_type == "metadata":
-        system: dict[str, Any] = {}
-        if expected.get("guid") is not None:
-            system["physical_tag"] = {"asset": {"guid": expected["guid"]}}
-        location = {
-            payload_key: expected[schedule_key]
-            for schedule_key, payload_key in (("site", "site"), ("room", "section"))
-            if expected.get(schedule_key) is not None
+    if payload_type == "metadata":
+        return {
+            "timestamp": timestamp,
+            "version": version,
+            "system": {
+                "location": {
+                    "site": expected.get("site") or "<site>",
+                    "section": expected.get("room") or "<room>",
+                },
+                "physical_tag": {
+                    "asset": {
+                        "guid": expected.get("guid") or "<asset GUID>",
+                        "name": expected.get("asset_id") or "<asset name>",
+                    }
+                },
+            },
+            "pointset": {"points": {name: ({"units": units[name]} if name in units else {}) for name in point_names}},
         }
-        if location:
-            system["location"] = location
-        if system:
-            facet["system"] = system
-        expected_points = expected.get("points", expected.get("units", {}))
-        if expected_points:
-            expected_units = _dict_or_empty(expected.get("units"))
-            facet["pointset"] = {
-                "points": {name: ({"units": expected_units[name]} if name in expected_units else {}) for name in expected_points}
-            }
-    elif payload_type == "pointset":
-        expected_points = expected.get("points", expected.get("units", {}))
-        if expected_points:
-            facet["points"] = {name: {} for name in expected_points}
-    return facet or None
+    if payload_type == "pointset":
+        return {
+            "timestamp": timestamp,
+            "version": version,
+            "points": {name: {"present_value": "<device-reported value>"} for name in point_names},
+        }
+    return None
 
 
 def _asset_payload_view(

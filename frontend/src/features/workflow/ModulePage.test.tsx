@@ -582,13 +582,21 @@ describe("ModulePage UDMI workbench live results", () => {
           payload_types: [
             {
               payload_type: "pointset",
-              expected: { version: "1.5.2", points: { energy_sensor: { units: "kwh" } } },
+              expected: {
+                timestamp: "<RFC 3339 timestamp>",
+                version: "1.5.2",
+                points: { energy_sensor: { present_value: "<device-reported value>" } },
+              },
               observed: { version: "1.4.0", points: { energy_sensor: { present_value: 12.5 } } },
               observed_present: true,
             },
             {
               payload_type: "metadata",
-              expected: { udmi_version: "1.5.2", units: { energy_sensor: "kwh" } },
+              expected: {
+                timestamp: "<RFC 3339 timestamp>",
+                version: "1.5.2",
+                pointset: { points: { energy_sensor: { units: "kwh" } } },
+              },
               observed: { version: "1.5.2", pointset: { points: { energy_sensor: { units: "kilowatt_hours" } } } },
               observed_present: true,
             },
@@ -660,6 +668,11 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
     // The old illustrative sample asset never appears as a live result.
     expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
+    fireEvent.click(screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0]);
+    expect(screen.getByText("Expected UDMI template")).toBeInTheDocument();
+    expect(screen.getByText(/angle-bracket values are required device-supplied fields/i)).toBeInTheDocument();
   });
 
   it("register-driven mode sends no pasted schedule or payloads so the backend uses the imported register", async () => {

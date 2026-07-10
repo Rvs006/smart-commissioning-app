@@ -2194,7 +2194,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                       {payloadOpen && (
                                         <div className="payload-compare">
                                           <div>
-                                            <h6>Expected</h6>
+                                            <h6>Expected UDMI template</h6>
+                                            <p className="section-copy">Registered values are shown where known; angle-bracket values are required device-supplied fields.</p>
                                             <pre className="payload-cell">
                                               {entry.expected
                                                 ? JSON.stringify(entry.expected, null, 2)
