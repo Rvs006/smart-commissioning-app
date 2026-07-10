@@ -7,6 +7,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- **UDMI live-result readability and identity checks.** Expected payload evidence
+  now uses the same UDMI field paths as captured payloads (`version`,
+  `system.hardware.make`, and `system.hardware.model`) instead of internal
+  matcher names. Expected captured identity values that are absent now fail
+  explicitly, and the result detail includes a local expandable JSON tree for
+  inspecting a captured payload without sending it to an external service.
+
 ## [0.1.1] - 2026-07-10
 
 ### Fixed

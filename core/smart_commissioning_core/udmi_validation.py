@@ -423,12 +423,27 @@ def _review_payload_issues(
                 )
             )
 
-    # manufacturer/model/serial/firmware/guid/site/room: flag any expected value
-    # that is present in both register and payload but differs (see _IDENTITY_CHECKS).
+    # manufacturer/model/serial/firmware/guid/site/room: flag missing or
+    # differing expected values when the corresponding payload was captured.
     for expected_key, observed_getter, issue_type, severity, description, action in _IDENTITY_CHECKS:
         expected_value = expected.get(expected_key)
         observed_value = observed_getter(state_payload, metadata_payload)
-        if expected_value and observed_value and expected_value != observed_value:
+        payload_present = bool(state_payload) if issue_type == "state_validation" else bool(metadata_payload)
+        if expected_value and payload_present and not observed_value:
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type=issue_type,
+                    severity=severity,
+                    description=f"Expected {expected_key} is missing from the {issue_type.removesuffix('_validation')} payload.",
+                    expected_value=str(expected_value),
+                    observed_value="missing",
+                    suggested_action=action,
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+        elif expected_value and observed_value and expected_value != observed_value:
             issues.append(
                 _issue(
                     issues,
@@ -1244,21 +1259,34 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
     "expected" column stays consistent with the issue logic: manufacturer/model
     -> state, guid/units -> metadata, units -> pointset.
     """
-    if payload_type == "state":
-        facet = {key: expected[key] for key in ("manufacturer", "model") if expected.get(key) is not None}
-    elif payload_type == "metadata":
-        facet = {key: expected[key] for key in ("guid", "units") if expected.get(key) is not None}
-    elif payload_type == "pointset":
-        facet = {
-            key: expected[key]
-            for key in ("units", "reporting_interval_seconds")
-            if expected.get(key) is not None
-        }
-    else:
-        facet = {}
-    # The version check applies to every payload type, so surface it in each facet.
+    facet: dict[str, Any] = {}
     if expected.get("udmi_version") is not None:
-        facet["udmi_version"] = expected["udmi_version"]
+        facet["version"] = expected["udmi_version"]
+    if payload_type == "state":
+        hardware = {
+            payload_key: expected[schedule_key]
+            for schedule_key, payload_key in (("manufacturer", "make"), ("model", "model"))
+            if expected.get(schedule_key) is not None
+        }
+        if hardware:
+            facet["system"] = {"hardware": hardware}
+    elif payload_type == "metadata":
+        system: dict[str, Any] = {}
+        if expected.get("guid") is not None:
+            system["physical_tag"] = {"asset": {"guid": expected["guid"]}}
+        location = {
+            payload_key: expected[schedule_key]
+            for schedule_key, payload_key in (("site", "site"), ("room", "section"))
+            if expected.get(schedule_key) is not None
+        }
+        if location:
+            system["location"] = location
+        if system:
+            facet["system"] = system
+        if expected.get("units") is not None:
+            facet["pointset"] = {"points": {name: {"units": unit} for name, unit in expected["units"].items()}}
+    elif payload_type == "pointset" and expected.get("units") is not None:
+        facet["points"] = {name: {"units": unit} for name, unit in expected["units"].items()}
     return facet or None
 
 

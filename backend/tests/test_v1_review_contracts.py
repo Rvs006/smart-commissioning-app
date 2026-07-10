@@ -467,8 +467,14 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertTrue(all(pt["observed_present"] for pt in by_type.values()))
         # observed payload passes through verbatim; expected facet is sliced.
         self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
-        self.assertEqual(by_type["state"]["expected"], {"manufacturer": "ExpectedCo", "model": "Model-A"})
-        self.assertEqual(by_type["metadata"]["expected"]["guid"], "ifc://expected")
+        self.assertEqual(
+            by_type["state"]["expected"],
+            {"system": {"hardware": {"make": "ExpectedCo", "model": "Model-A"}}},
+        )
+        self.assertEqual(
+            by_type["metadata"]["expected"]["system"]["physical_tag"]["asset"]["guid"],
+            "ifc://expected",
+        )
 
     def test_payload_views_from_live_capture(self) -> None:
         def fake_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
