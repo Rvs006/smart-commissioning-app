@@ -4,6 +4,7 @@ import unittest
 
 from smart_commissioning_core.mqtt_settings import (
     build_mqtt_connection_settings,
+    parse_capture_seconds,
     set_configuration_values_provider,
 )
 
@@ -46,6 +47,35 @@ class ResolveUseTlsTests(unittest.TestCase):
         self.assertTrue(build_mqtt_connection_settings({}).use_tls)
         self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "1883"})
         self.assertFalse(build_mqtt_connection_settings({}).use_tls)
+
+
+class ParseCaptureSecondsTests(unittest.TestCase):
+    """Blank/0/negative => indefinite (None); junk and non-finite => default.
+
+    "nan"/"inf" parse as floats but would yield a bounded window whose deadline
+    never expires (NaN/inf comparisons), so they must fall back to the default
+    — and "-inf" must not slip through the <= 0 rule as explicit-indefinite.
+    """
+
+    def test_missing_value_keeps_default(self) -> None:
+        self.assertEqual(parse_capture_seconds(None, default=30.0), 30.0)
+
+    def test_blank_zero_and_negative_are_indefinite(self) -> None:
+        for value in ("", "   ", 0, "0", -5, "-2.5"):
+            with self.subTest(value=value):
+                self.assertIsNone(parse_capture_seconds(value, default=30.0))
+
+    def test_valid_value_is_used(self) -> None:
+        self.assertEqual(parse_capture_seconds("2.5", default=30.0), 2.5)
+        self.assertEqual(parse_capture_seconds(9, default=30.0), 9.0)
+
+    def test_unparseable_value_keeps_default(self) -> None:
+        self.assertEqual(parse_capture_seconds("soon", default=30.0), 30.0)
+
+    def test_non_finite_values_keep_default(self) -> None:
+        for value in ("nan", "inf", "-inf", "NaN", "Infinity", float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertEqual(parse_capture_seconds(value, default=30.0), 30.0)
 
 
 if __name__ == "__main__":

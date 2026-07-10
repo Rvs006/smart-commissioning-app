@@ -13,6 +13,25 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Added
 
+- **UDMI workbench: run until every register topic reports (or a set run time)** —
+  the workbench Setup stage's capture field is now **Run time (seconds)**: blank
+  (or 0) runs the live capture until a payload has been seen for **every**
+  expected topic from the imported register (distinct topics, wildcard-aware —
+  duplicate publishes on one chatty topic no longer end the capture early), the
+  operator presses **Cancel run**, or a safety ceiling is hit; a positive number
+  bounds the run to that many seconds. Multi-asset runs now use **one shared
+  broker subscription** across all assets' topics (messages route back to each
+  asset's state/metadata/pointset evidence) instead of sequential per-asset
+  windows, so quiet assets are no longer starved behind chatty ones. Cancel is
+  wired end-to-end for UDMI validation (Cancel run → cooperative flag → capture
+  stops within ~1s → run finishes as `cancelled` with its real partial results).
+  Honesty: a capture that ends with expected topics still silent is reported as
+  `live_capture_timeout` with a `not_publishing` issue naming the missing
+  topics; `live_payloads_captured` is only claimed when every expected topic
+  reported; an indefinite request with no reachable cancel path (or on the
+  inline/portable-exe path, where no Cancel button can render mid-request) is
+  bounded and flagged (`capture_mode` / `indefinite_bounded_inline`) rather than
+  hanging unkillably.
 - **UDMI workbench: real schema-version + structural validation** — the register
   template's **Expected schema version** now flows into the UDMI validator and is
   compared against each captured/pasted payload's declared top-level `version`

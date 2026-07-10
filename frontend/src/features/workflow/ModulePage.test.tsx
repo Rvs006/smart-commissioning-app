@@ -702,6 +702,78 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(parameters).not.toHaveProperty("metadata_payload");
     expect(parameters).not.toHaveProperty("pointset_payload");
     expect(parameters).not.toHaveProperty("state_topic");
-    expect(parameters.capture_seconds).toBe(5);
+    // Blank run time (the default) => 0, the backend's indefinite sentinel:
+    // run until every expected topic reports a payload or the run is stopped.
+    expect(parameters.capture_seconds).toBe(0);
+  });
+
+  it("a positive run time bounds the capture window sent with the run", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    // The run-time input renders once live broker capture is ticked.
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.change(await screen.findByLabelText(/Run time \(seconds/i), { target: { value: "45" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.capture_seconds).toBe(45);
+  });
+
+  it("a non-numeric run time blocks the submit with a validation error and posts nothing", async () => {
+    let posted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          posted = true;
+          return jsonResponse(udmiAccepted);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.change(await screen.findByLabelText(/Run time \(seconds/i), { target: { value: "45s" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    // "45s" must not silently coerce to the 0 = indefinite sentinel: the run is
+    // rejected client-side with a visible error and no parameters are posted.
+    expect(await screen.findByText(/Run time must be a positive number of seconds/i)).toBeInTheDocument();
+    expect(posted).toBe(false);
   });
 });

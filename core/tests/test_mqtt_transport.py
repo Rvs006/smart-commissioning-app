@@ -13,7 +13,13 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from smart_commissioning_core.mqtt_transport import MqttClient, MqttConnectionSettings
+from smart_commissioning_core import mqtt_transport
+from smart_commissioning_core.mqtt_transport import (
+    MqttClient,
+    MqttConnectionSettings,
+    MqttMessage,
+    MqttTransportError,
+)
 
 
 class RecordingSocket:
@@ -108,6 +114,114 @@ class SourceAddressTests(unittest.TestCase):
                 pass
         self.assertEqual(captured["addr"], ("broker.test", 1883))
         self.assertIs(client._socket, sock)
+
+
+class _FakeCaptureClient:
+    """Context-manager stand-in for MqttClient inside subscribe_and_capture.
+
+    ``reads`` scripts read_publish_any: an MqttMessage (or None) is returned,
+    an Exception instance is raised — letting a test drop the broker mid-loop.
+    """
+
+    def __init__(self, reads: list[Any]) -> None:
+        self._reads = reads
+        self.subscribed: list[tuple[str, int]] = []
+
+    def __enter__(self) -> "_FakeCaptureClient":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        pass
+
+    def subscribe(self, topic: str, qos: int = 0) -> None:
+        self.subscribed.append((topic, qos))
+
+    def ping(self) -> None:
+        pass
+
+    def read_publish_any(
+        self,
+        *,
+        expected_topics: set[str] | None = None,
+        timeout_seconds: float,
+        cancel_check: Any = None,
+    ) -> MqttMessage | None:
+        item = self._reads.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class ExitTeardownTests(unittest.TestCase):
+    """__exit__ must never raise on a dead connection: the DISCONNECT sendall
+    failing with an OSError (RST/timeout) would otherwise propagate out of the
+    with-block in subscribe_and_capture and discard the partial messages the
+    session already captured.
+    """
+
+    def test_exit_swallows_os_error_from_disconnect_and_still_closes(self) -> None:
+        class DeadSocket(RecordingSocket):
+            def __init__(self) -> None:
+                super().__init__()
+                self.closed = False
+
+            def sendall(self, data: bytes) -> None:
+                raise ConnectionResetError("connection reset by broker")
+
+            def close(self) -> None:
+                self.closed = True
+
+        sock = DeadSocket()
+        client = MqttClient(_settings(), socket_factory=lambda _addr, _t: sock)
+        client._socket = sock
+        client.__exit__(None, None, None)  # must not raise
+        self.assertTrue(sock.closed)
+
+
+class SubscribeAndCaptureFailureTests(unittest.TestCase):
+    """Partial-capture honesty: a broker drop mid-capture returns what was
+    already captured (the honesty layer then names the still-missing topics),
+    while connect/subscribe failures — before any message could exist — raise.
+    """
+
+    def test_mid_capture_transport_error_returns_partial_messages(self) -> None:
+        captured = MqttMessage(topic="ASSET-1/events/pointset", payload=b"{}")
+        for error in (ConnectionResetError("broker dropped"), MqttTransportError("broker closed the connection")):
+            with self.subTest(error=type(error).__name__):
+                fake = _FakeCaptureClient([captured, error])
+                with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings, fake=fake: fake):
+                    messages = mqtt_transport.subscribe_and_capture(
+                        _settings(),
+                        topics=["ASSET-1/#", "ASSET-2/#"],
+                        timeout_seconds=None,  # indefinite capture, 4-of-5 style
+                        max_messages=5,
+                    )
+                self.assertEqual(messages, [captured])
+
+    def test_connect_failure_still_raises(self) -> None:
+        class FailingConnect:
+            def __enter__(self) -> "FailingConnect":
+                raise OSError("connection refused")
+
+            def __exit__(self, *_exc: object) -> None:
+                pass
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: FailingConnect()):
+            with self.assertRaises(OSError):
+                mqtt_transport.subscribe_and_capture(
+                    _settings(), topics=["ASSET-1/#"], timeout_seconds=5, max_messages=5
+                )
+
+    def test_subscribe_failure_still_raises(self) -> None:
+        class FailingSubscribe(_FakeCaptureClient):
+            def subscribe(self, topic: str, qos: int = 0) -> None:
+                raise MqttTransportError("MQTT broker rejected the subscription.")
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: FailingSubscribe([])):
+            with self.assertRaises(MqttTransportError):
+                mqtt_transport.subscribe_and_capture(
+                    _settings(), topics=["ASSET-1/#"], timeout_seconds=5, max_messages=5
+                )
 
 
 if __name__ == "__main__":

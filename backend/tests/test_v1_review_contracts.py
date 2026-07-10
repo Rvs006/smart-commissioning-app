@@ -327,15 +327,15 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertIn("room/section does not match", descriptions)
 
     def test_assets_list_captures_and_reviews_per_asset(self) -> None:
-        # Live capture runs per asset (each entry's own state topic), and the
-        # matcher fans out so a mismatch is flagged for EACH asset in one run.
+        # Live capture is ONE shared subscription across every asset's topics;
+        # messages route back per entry and the matcher fans out so a mismatch
+        # is flagged for EACH asset in one run.
         def fake_capture(_settings: object, *, topics: list[str], **_kwargs: object) -> list[MqttMessage]:
-            state = next((topic for topic in topics if topic.endswith("/state")), None)
-            return (
-                [MqttMessage(topic=state, payload=b'{"system":{"hardware":{"make":"WrongCo"}}}')]
-                if state
-                else []
-            )
+            return [
+                MqttMessage(topic=topic, payload=b'{"system":{"hardware":{"make":"WrongCo"}}}')
+                for topic in topics
+                if topic.endswith("/state")
+            ]
 
         result = validate_udmi_full_report(
             {

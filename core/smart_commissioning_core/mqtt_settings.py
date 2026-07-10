@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 
 from smart_commissioning_core.mqtt_transport import (
@@ -13,6 +14,7 @@ __all__ = [
     "ConfigurationValuesProvider",
     "build_mqtt_connection_settings",
     "parse_bool",
+    "parse_capture_seconds",
     "parse_float",
     "parse_int",
     "set_configuration_values_provider",
@@ -116,6 +118,34 @@ def parse_float(value: object, *, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def parse_capture_seconds(value: object, *, default: float) -> float | None:
+    """Capture window in seconds, or None for an indefinite capture (mq9nhbzu).
+
+    A MISSING value keeps the caller's default window (back-compat). An
+    EXPLICIT 0, empty string, or negative value means "run until stopped (via
+    cancellation) or a completion condition" — represented as None downstream.
+    Shared by the mqtt_discovery and UDMI validation capture paths so the
+    blank/0 => indefinite convention cannot drift between them.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str) and not value.strip():
+        return None
+    # Explicit 0 / negative => indefinite. Do NOT route 0 through parse_float:
+    # it treats the falsy 0 as "missing" and returns the default window.
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    # Non-finite values ("nan"/"inf"/"-inf") parse as floats but would yield a
+    # bounded window whose deadline never expires (NaN/inf comparisons), so
+    # treat them as invalid input and keep the default — checked BEFORE the
+    # <= 0 rule so "-inf" cannot masquerade as an explicit indefinite request.
+    if not math.isfinite(seconds):
+        return default
+    return None if seconds <= 0 else seconds
 
 
 def parse_int(value: object, *, default: int) -> int:

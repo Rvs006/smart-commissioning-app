@@ -11,10 +11,15 @@ from smart_commissioning_core.mqtt_settings import (
     _string,
     build_mqtt_connection_settings,
     parse_bool,
-    parse_float,
+    parse_capture_seconds,
     parse_int,
 )
-from smart_commissioning_core.mqtt_transport import MqttMessage, MqttTransportError, subscribe_and_capture
+from smart_commissioning_core.mqtt_transport import (
+    MqttMessage,
+    MqttTransportError,
+    _topic_matches_filter,
+    subscribe_and_capture,
+)
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_schema import declared_version, structural_issues, versions_match
 
@@ -104,16 +109,26 @@ class UdmiValidationResult:
 
 
 LiveCapture = Callable[..., list[MqttMessage]]
+CancelCheck = Callable[[], bool]
+
+# Capture defaults: the window matches mqtt_discovery's DEFAULT_CAPTURE_SECONDS;
+# the message cap is a SAFETY ceiling only — completion is decided by
+# _capture_stop_when (a payload seen for every expected topic), never by raw
+# message count, so duplicate publishes on one chatty topic cannot end a
+# capture before the quiet topics report.
+DEFAULT_CAPTURE_SECONDS = 5.0
+DEFAULT_MAX_MESSAGES = 500
 
 
 def validate_udmi_full_report(
     parameters: dict[str, object] | None = None,
     *,
     live_capture: LiveCapture | None = subscribe_and_capture,
+    cancel_check: CancelCheck | None = None,
 ) -> UdmiValidationResult:
     parameters = dict(parameters or {})
     capture_issues: list[ValidationIssueRecord] = []
-    capture_summary = _capture_live_payloads(parameters, live_capture=live_capture)
+    capture_summary = _capture_live_payloads(parameters, live_capture=live_capture, cancel_check=cancel_check)
     if capture_summary["issue"] is not None:
         capture_issues.append(capture_summary["issue"])
 
@@ -153,6 +168,10 @@ def validate_udmi_full_report(
         "source_fixture": source_fixture,
         "broker_capture_attempted": capture_summary["attempted"],
         "broker_status_detail": capture_summary["status_detail"],
+        # "bounded" / "indefinite" / "indefinite_bounded_no_cancel" for capture
+        # runs; None when no capture was attempted. Surfaces honestly when an
+        # indefinite request had to be bounded for lack of a cancel path.
+        "capture_mode": capture_summary.get("capture_mode"),
         "captured_topics": capture_summary["captured_topics"],
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
@@ -556,10 +575,88 @@ def _review_payload_issues(
     return issues
 
 
+def _capture_window(parameters: dict[str, object], cancel_check: CancelCheck | None) -> tuple[float | None, str]:
+    """Resolve the (timeout_seconds, capture_mode) pair for a live capture.
+
+    Blank/0/negative ``capture_seconds`` means indefinite: run until every
+    expected topic has reported, cancellation, or the message cap. An
+    indefinite capture with NO cancel path would be unkillable if a device
+    never publishes, so it is bounded to the default window instead — and the
+    downgrade is recorded honestly in ``capture_mode`` rather than hidden.
+    """
+    seconds = parse_capture_seconds(parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS)
+    if seconds is None and cancel_check is None:
+        return DEFAULT_CAPTURE_SECONDS, "indefinite_bounded_no_cancel"
+    return seconds, ("indefinite" if seconds is None else "bounded")
+
+
+def _capture_topic_groups(topics: list[str]) -> list[list[str]]:
+    """Group one asset's subscribed topics into the distinct payloads to see.
+
+    Topics routing to the same payload slot are aliases (a register wildcard
+    subscribes both ``…/events/pointset`` and the legacy ``…/event/pointset``);
+    a payload on EITHER satisfies the slot, so requiring every literal topic
+    would never complete on a single-convention site. A topic with no payload
+    slot (e.g. a hand-entered wildcard) forms its own group.
+    """
+    slots: dict[str, list[str]] = {}
+    groups: list[list[str]] = []
+    for topic in topics:
+        key = _payload_key_for_topic(topic)
+        if key is None:
+            groups.append([topic])
+        else:
+            slots.setdefault(key, []).append(topic)
+    groups.extend(slots.values())
+    return groups
+
+
+def _unseen_groups(groups: list[list[str]], seen_topics: set[str]) -> list[list[str]]:
+    """The topic groups no captured topic has matched yet (wildcard-aware)."""
+    return [
+        group
+        for group in groups
+        if not any(_topic_matches_filter(topic, topic_filter) for topic in seen_topics for topic_filter in group)
+    ]
+
+
+def _capture_stop_when(groups: list[list[str]]) -> Callable[[list[MqttMessage]], bool]:
+    """Completion predicate: True once every expected topic group has a payload.
+
+    Counts DISTINCT captured topics, never raw message count, so duplicate
+    publishes on one chatty topic cannot end the capture early.
+    """
+
+    def _complete(messages: list[MqttMessage]) -> bool:
+        return not _unseen_groups(groups, {message.topic for message in messages})
+
+    return _complete
+
+
+def _missing_topics_issue(*, asset_id: str, missing: list[list[str]], got_any: bool) -> ValidationIssueRecord:
+    """Real not_publishing issue naming WHICH expected topics never reported."""
+    topics_text = ", ".join(group[0] for group in missing)
+    if got_any:
+        description = f"Capture ended before every expected topic reported. No payload was seen for: {topics_text}."
+    else:
+        description = "No UDMI payloads were captured from the live broker during the capture window." + (
+            f" Expected topic(s): {topics_text}." if topics_text else ""
+        )
+    return _issue(
+        [],
+        asset_id=asset_id,
+        issue_type="not_publishing",
+        severity="high",
+        description=description,
+        suggested_action="Confirm the device is publishing and widen the capture window if needed.",
+    )
+
+
 def _capture_live_payloads(
     parameters: dict[str, object],
     *,
     live_capture: LiveCapture | None,
+    cancel_check: CancelCheck | None = None,
 ) -> dict[str, object]:
     if not parse_bool(parameters.get("use_live_broker")):
         return {
@@ -571,7 +668,7 @@ def _capture_live_payloads(
 
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
-        return _capture_live_payloads_per_asset(parameters, assets, live_capture=live_capture)
+        return _capture_live_payloads_per_asset(parameters, assets, live_capture=live_capture, cancel_check=cancel_check)
 
     if live_capture is None:
         return {
@@ -604,13 +701,17 @@ def _capture_live_payloads(
             ),
         }
 
+    timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
+    groups = _capture_topic_groups(topics)
     try:
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
             topics=topics,
-            timeout_seconds=parse_float(parameters.get("capture_seconds"), default=5.0),
-            max_messages=parse_int(parameters.get("max_messages"), default=len(topics)),
+            timeout_seconds=timeout_seconds,
+            max_messages=parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES),
             qos=parse_int(parameters.get("qos"), default=0),
+            cancel_check=cancel_check,
+            stop_when=_capture_stop_when(groups),
         )
     except (MqttTransportError, OSError, ValueError) as error:
         # Use the coarse status label only; the raw exception text may carry
@@ -620,6 +721,7 @@ def _capture_live_payloads(
         return {
             "attempted": True,
             "status_detail": broker_status_detail,
+            "capture_mode": capture_mode,
             "captured_topics": [],
             "issue": _issue(
                 [],
@@ -642,19 +744,20 @@ def _capture_live_payloads(
         if key:
             parameters[key] = payload
 
+    # Honesty: "captured" is only claimed when EVERY expected topic reported;
+    # a partial capture is still a timeout, with the gaps named in the issue.
+    missing = _unseen_groups(groups, {message.topic for message in messages})
     return {
         "attempted": True,
-        "status_detail": "live_payloads_captured" if messages else "live_capture_timeout",
+        "status_detail": "live_payloads_captured" if messages and not missing else "live_capture_timeout",
+        "capture_mode": capture_mode,
         "captured_topics": [message.topic for message in messages],
         "issue": None
-        if messages
-        else _issue(
-            [],
+        if messages and not missing
+        else _missing_topics_issue(
             asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
-            issue_type="not_publishing",
-            severity="high",
-            description="No UDMI payloads were captured from the live broker during the capture window.",
-            suggested_action="Confirm the device is publishing and widen the capture window if needed.",
+            missing=missing,
+            got_any=bool(messages),
         ),
     }
 
@@ -664,16 +767,17 @@ def _capture_live_payloads_per_asset(
     assets: list,
     *,
     live_capture: LiveCapture | None,
+    cancel_check: CancelCheck | None = None,
 ) -> dict[str, object]:
-    """Capture live payloads for each asset entry into that entry's *_payload keys.
+    """Capture live payloads for every asset entry in ONE shared subscription.
 
     Each entry carries its own state/metadata/pointset topics + expected_schedule;
-    the broker connection settings are shared (top level). Reuses the single-asset
-    capture per entry so routing/parsing stays in one place.
-
-    ponytail: sequential, one short window per asset. Fine when each asset
-    publishes within the window; concurrent capture / long (COV, daily) windows —
-    Dhilen's "run 2-3 validations at once" — are a separate change.
+    the broker connection settings are shared (top level). A single capture
+    subscribes the union of every entry's topics and routes each message back to
+    the entries whose topics match, so quiet assets are not starved behind chatty
+    ones and an indefinite run genuinely waits for ALL assets (the old
+    sequential per-asset windows would block asset 2..N behind asset 1 forever
+    in indefinite mode).
     """
     if live_capture is None:
         return {
@@ -690,23 +794,88 @@ def _capture_live_payloads_per_asset(
             ),
         }
 
-    connection = {key: value for key, value in parameters.items() if key != "assets"}
-    captured_topics: list[str] = []
-    for entry in assets:
-        if not isinstance(entry, dict):
-            continue
-        merged = {**connection, **entry}
-        summary = _capture_live_payloads(merged, live_capture=live_capture)
-        # Copy the captured payloads back so the per-asset reviewer sees them.
-        for key in ("messages", "state_payload", "metadata_payload", "pointset_payload"):
-            if key in merged:
-                entry[key] = merged[key]
-        captured_topics.extend(summary.get("captured_topics") or [])
+    entries = [entry for entry in assets if isinstance(entry, dict)]
+    per_entry_topics = [_capture_topics(entry) for entry in entries]
+    topics: list[str] = []
+    for entry_topics in per_entry_topics:
+        for topic in entry_topics:
+            if topic not in topics:
+                topics.append(topic)
+    if not topics:
+        return {
+            "attempted": True,
+            "status_detail": "missing_capture_topics",
+            "captured_topics": [],
+            "issue": _issue(
+                [],
+                asset_id="UDMI assets",
+                issue_type="payload_error",
+                severity="high",
+                description="Live UDMI validation requires at least one state, metadata, or pointset topic.",
+                suggested_action="Import a register with Expected topics, or enter capture topics, before starting live capture.",
+            ),
+        }
+
+    groups: list[list[str]] = []
+    for entry_topics in per_entry_topics:
+        groups.extend(_capture_topic_groups(entry_topics))
+    timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
+    try:
+        messages = live_capture(
+            build_mqtt_connection_settings(parameters),
+            topics=topics,
+            timeout_seconds=timeout_seconds,
+            max_messages=parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES),
+            qos=parse_int(parameters.get("qos"), default=0),
+            cancel_check=cancel_check,
+            stop_when=_capture_stop_when(groups),
+        )
+    except (MqttTransportError, OSError, ValueError) as error:
+        # Coarse status label only — raw broker error text may carry credentials.
+        broker_status_detail = _broker_error_status(error)
+        return {
+            "attempted": True,
+            "status_detail": broker_status_detail,
+            "capture_mode": capture_mode,
+            "captured_topics": [],
+            "issue": _issue(
+                [],
+                asset_id="UDMI assets",
+                issue_type="payload_error",
+                severity="critical",
+                description=f"Live MQTT capture failed ({broker_status_detail}).",
+                suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
+            ),
+        }
+
+    # Route every message back to each entry whose subscribed topics match it,
+    # mirroring the single-asset routing (last payload per slot wins).
+    for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
+        entry_messages = [
+            message
+            for message in messages
+            if any(_topic_matches_filter(message.topic, topic) for topic in entry_topics)
+        ]
+        entry["messages"] = [
+            {"topic": message.topic, "payload": message.json_payload()} for message in entry_messages
+        ]
+        for message in entry_messages:
+            payload = message.json_payload()
+            if not isinstance(payload, dict):
+                continue
+            key = _payload_key_for_topic(message.topic)
+            if key:
+                entry[key] = payload
+
+    missing = _unseen_groups(groups, {message.topic for message in messages})
     return {
         "attempted": True,
-        "status_detail": "live_payloads_captured" if captured_topics else "live_capture_timeout",
-        "captured_topics": captured_topics,
-        "issue": None,
+        "status_detail": "live_payloads_captured" if messages and not missing else "live_capture_timeout",
+        "capture_mode": capture_mode,
+        "captured_topics": [message.topic for message in messages],
+        "issue": None
+        if messages and not missing
+        else _missing_topics_issue(asset_id="UDMI assets", missing=missing, got_any=bool(messages)),
     }
 
 
