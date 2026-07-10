@@ -707,6 +707,117 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(parameters.capture_seconds).toBe(0);
   });
 
+  it("an accepted MQTT register enables register validation and live capture while keeping both reversible", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse([
+            {
+              import_type: "mqtt_register",
+              description: "Expected MQTT assets.",
+              required_columns: ["asset_id", "topic"],
+              duplicate_key_fields: ["asset_id"],
+            },
+          ]);
+        }
+        if (url.endsWith("/api/v1/imports") && init?.method === "POST") {
+          return jsonResponse({
+            import_id: "import-mqtt-1",
+            import_type: "mqtt_register",
+            file_name: "mqtt_register.csv",
+            file_type: "csv",
+            project_id: "demo-project",
+            site_id: "demo-site",
+            total_rows: 1,
+            accepted_rows: 1,
+            rejected_rows: 0,
+            status: "accepted",
+            missing_columns: [],
+            stored_file_name: "import-mqtt-1.csv",
+            created_at: "2026-07-10T09:00:00Z",
+          });
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    const registerMode = await screen.findByLabelText(/Validate against the imported MQTT register/i);
+    const liveCapture = screen.getByLabelText(/Capture latest state, metadata, and pointset payloads/i);
+    expect(registerMode).not.toBeChecked();
+    expect(liveCapture).not.toBeChecked();
+
+    fireEvent.change(screen.getByLabelText(/CSV or XLSX file/i), {
+      target: { files: [new File(["asset_id,topic\nEM-1,site/device"], "mqtt_register.csv")] },
+    });
+    const upload = screen.getByRole("button", { name: "Upload and validate" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
+
+    await waitFor(() => expect(registerMode).toBeChecked());
+    expect(liveCapture).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.use_register).toBe(true);
+    expect(parameters.use_live_broker).toBe(true);
+    expect(parameters.capture_seconds).toBe(0);
+    expect(parameters).not.toHaveProperty("expected_schedule");
+    expect(parameters).not.toHaveProperty("state_payload");
+    expect(parameters).not.toHaveProperty("metadata_payload");
+    expect(parameters).not.toHaveProperty("pointset_payload");
+
+    fireEvent.click(registerMode);
+    fireEvent.click(liveCapture);
+    expect(registerMode).not.toBeChecked();
+    expect(liveCapture).not.toBeChecked();
+  });
+
+  it("explains blank run time and every capture safety limit", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+
+    expect(screen.getByText(/Blank runs until all required topics report or you press Cancel run/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Worker captures are capped at 1 hour.*inline\/portable captures at 240 seconds.*500 distinct concrete topics/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("a positive run time bounds the capture window sent with the run", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(

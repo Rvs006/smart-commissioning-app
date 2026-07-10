@@ -1,0 +1,32 @@
+{
+  "$udmi_version": "1.5.2",
+  "title": "Family Discovery State",
+  "description": "State for [discovery](../docs/specs/discovery.md)",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "generation": {
+      "description": "Generational marker for reporting discovery",
+      "type": "string",
+      "format": "date-time"
+    },
+    "phase": {
+      "description": "Current phase of the discovery process",
+      "enum": [
+        "pending",
+        "active",
+        "stopped",
+        "done"
+      ]
+    },
+    "record_count": {
+      "description": "Number of records produced so far for this scan generation",
+      "type": "integer"
+    },
+    "status": {
+      "description": "Status information about the discovery operation",
+      "$ref": "file:entry.json"
+    }
+  }
+}

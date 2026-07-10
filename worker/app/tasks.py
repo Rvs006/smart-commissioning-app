@@ -184,10 +184,9 @@ def discover_ip_range(run_id: str, parameters: dict) -> None:
 def discover_bacnet(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet discovery", extra={"actor": "discover_bacnet"})
-        # Default backend is the OFFLINE SimulatedBacnetBackend unless parameters
-        # select bacnet_backend='bacpypes3' (the UNVALIDATED real path). The engine
-        # stamps result_summary['backend'] so simulated data is never mistaken for
-        # a real scan.
+        # Non-dry runs default to the UNVALIDATED real bacpypes3 path; simulation
+        # is dry-run/test-only. The engine stamps result_summary['backend'] so a
+        # preview can never be mistaken for a real scan.
         process_bacnet_discovery_run(
             run_id,
             parameters,

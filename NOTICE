@@ -25,6 +25,8 @@ pydantic-core      - MIT License                        - https://github.com/pyd
 pydantic-settings  - MIT License                        - https://github.com/pydantic/pydantic-settings
 SQLAlchemy         - MIT License                        - https://github.com/sqlalchemy/sqlalchemy
 Alembic            - MIT License                        - https://github.com/sqlalchemy/alembic
+jsonschema          - MIT License                        - https://github.com/python-jsonschema/jsonschema
+referencing         - MIT License                        - https://github.com/python-jsonschema/referencing
 Dramatiq           - GNU LGPL v3 or later (LGPL-3.0+)   - https://github.com/Bogdanp/dramatiq
 redis-py           - MIT License                        - https://github.com/redis/redis-py
 psycopg (3)        - GNU LGPL v3 only (LGPL-3.0-only)   - https://github.com/psycopg/psycopg
@@ -34,6 +36,13 @@ openpyxl           - MIT License                        - https://foss.heptapod.
 prometheus-client  - Apache-2.0 AND BSD-2-Clause        - https://github.com/prometheus/client_python
 HTTPX              - BSD 3-Clause License               - https://github.com/encode/httpx
 python-multipart   - Apache-2.0 License                 - https://github.com/Kludex/python-multipart
+
+Vendored data:
+
+UDMI 1.5.2 schemas  - Apache-2.0 License                 - https://github.com/faucetsdn/udmi/tree/1.5.2/schema
+  Unmodified 34-file recursive schema closure for state, metadata, and
+  events/pointset; upstream license ships at
+  core/smart_commissioning_core/schemas/udmi/LICENSE.
 
 Optional extra (smart-commissioning-core[bacnet], NOT installed by default):
 

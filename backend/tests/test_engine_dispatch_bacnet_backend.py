@@ -27,16 +27,27 @@ class ResolveBacnetBackendTests(unittest.TestCase):
             resolve_bacnet_backend(parameters)
             self.assertNotIn("bacnet_backend", parameters)
 
-    def test_explicit_simulated_override_is_preserved(self) -> None:
-        # The demo/test escape hatch: an explicit backend wins (setdefault no-op).
+    def test_non_dry_run_rejects_explicit_simulated_backend(self) -> None:
         parameters: dict = {"authorized": True, "bacnet_backend": "simulated"}
-        resolve_bacnet_backend(parameters)
-        self.assertEqual(parameters["bacnet_backend"], "simulated")
+        with self.assertRaisesRegex(ValueError, "only available for dry runs"):
+            resolve_bacnet_backend(parameters)
 
     def test_explicit_bacpypes3_override_is_preserved(self) -> None:
         parameters: dict = {"authorized": True, "bacnet_backend": "bacpypes3"}
         resolve_bacnet_backend(parameters)
         self.assertEqual(parameters["bacnet_backend"], "bacpypes3")
+
+    def test_unknown_backend_is_rejected(self) -> None:
+        for selector in ("not-a-backend", False, 0):
+            for dry_run in (False, True):
+                parameters: dict = {
+                    "authorized": True,
+                    "bacnet_backend": selector,
+                    "dry_run": dry_run,
+                }
+                with self.subTest(selector=selector, dry_run=dry_run):
+                    with self.assertRaisesRegex(ValueError, "Unsupported BACnet backend"):
+                        resolve_bacnet_backend(parameters)
 
     def test_no_other_parameters_are_added(self) -> None:
         # The helper only defaults the one key; it must not inject anything else.

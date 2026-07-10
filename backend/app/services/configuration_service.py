@@ -379,6 +379,7 @@ class ConfigurationService:
             maximum=65535,
         )
         self._validate_port(errors, "MQTT Port", configuration.mqtt.values.get("Port", ""))
+        self._validate_enabled_disabled(errors, "MQTT Use TLS", configuration.mqtt.values.get("Use TLS", ""))
         self._validate_non_empty(
             errors,
             "MQTT Broker FQDN or IP Address",

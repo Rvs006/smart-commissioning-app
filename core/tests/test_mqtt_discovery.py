@@ -152,10 +152,39 @@ class AggregationTests(unittest.TestCase):
             "run_empty", {**_AUTH}, run_store=store, execution_mode="x",
             live_capture=FakeCapture([]), build_settings=_stub_build,
         )
-        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["status"], "failed")
         summary = store.summary_calls[-1]
         self.assertEqual(summary["topics_discovered"], 0)
         self.assertEqual(summary["broker_status_detail"], "capture_window_empty")
+        self.assertIn("capture_window_empty", result["error_message"])
+
+    def test_partial_broker_drop_fails_and_keeps_captured_topics(self) -> None:
+        store = FakeRunStore()
+        partial = [_json_msg("udmi/AHU-1/state", {"timestamp": "2026-07-09T10:00:00Z"})]
+
+        def interrupted_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise mqtt_discovery.MqttCaptureInterrupted(
+                partial,
+                ConnectionResetError("broker dropped password=hunter2"),
+            )
+
+        result = mqtt_discovery.process_mqtt_discovery_run(
+            "run_partial_drop",
+            {**_AUTH},
+            run_store=store,
+            execution_mode="x",
+            live_capture=interrupted_capture,
+            build_settings=_stub_build,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["topics_discovered"], 1)
+        self.assertEqual(summary["messages_captured"], 1)
+        self.assertEqual(summary["broker_status_detail"], "authentication_error")
+        self.assertNotIn("hunter2", str(summary))
+        self.assertIn("authentication_error", result["error_message"])
+        self.assertNotIn("hunter2", result["error_message"])
 
 
 class BoundTests(unittest.TestCase):
@@ -347,7 +376,7 @@ class ErrorSanitizationTests(unittest.TestCase):
             run_store=store, execution_mode="x",
             live_capture=failing_capture, build_settings=_stub_build,
         )
-        self.assertEqual(result["status"], "succeeded")  # status_detail, not a hard failure
+        self.assertEqual(result["status"], "failed")
         summary = store.summary_calls[-1]
         detail = summary["broker_status_detail"]
         # Coarse label only — raw secret must NOT appear anywhere in the summary.
@@ -364,8 +393,9 @@ class ErrorSanitizationTests(unittest.TestCase):
             run_store=store, execution_mode="x",
             live_capture=None, build_settings=_stub_build,
         )
-        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(store.summary_calls[-1]["broker_status_detail"], "live_capture_unavailable")
+        self.assertIn("live_capture_unavailable", result["error_message"])
 
     def test_missing_broker_host_maps_to_status(self) -> None:
         store = FakeRunStore()
@@ -378,8 +408,9 @@ class ErrorSanitizationTests(unittest.TestCase):
             run_store=store, execution_mode="x",
             live_capture=FakeCapture([]), build_settings=failing_build,
         )
-        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(store.summary_calls[-1]["broker_status_detail"], "broker_unreachable")
+        self.assertIn("broker_unreachable", result["error_message"])
 
 
 if __name__ == "__main__":

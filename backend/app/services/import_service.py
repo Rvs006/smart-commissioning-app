@@ -114,12 +114,19 @@ def _validate_topic(row: dict[str, str], row_number: int, field: str) -> list[Im
     if not value:
         return []
     # A topic field may hold one topic, a "prefix/#" wildcard (covers an asset's
-    # metadata/state/events topics in one entry), or a comma-separated list of
-    # those. Validate each segment; "#"/"+" wildcards are allowed.
+    # metadata/state/events topics in one entry), or a comma-separated list.
+    # Wildcards must occupy a complete MQTT level; a bare wildcard is too broad
+    # for an asset register and cannot be mapped to state/metadata/pointset.
     for topic in (part.strip() for part in value.split(",")):
         if not topic:
             continue
-        if " " in topic or ("/" not in topic and topic not in ("#", "+")):
+        levels = topic.split("/")
+        wildcard_invalid = any(
+            ("#" in level and (level != "#" or index != len(levels) - 1))
+            or ("+" in level and level != "+")
+            for index, level in enumerate(levels)
+        )
+        if " " in topic or "/" not in topic or topic in ("#", "+") or wildcard_invalid:
             return [
                 ImportErrorRecord(
                     row_number=row_number,
@@ -129,6 +136,85 @@ def _validate_topic(row: dict[str, str], row_number: int, field: str) -> list[Im
                 )
             ]
     return []
+
+
+def _validate_positive_numeric(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
+    errors = _validate_numeric(row, row_number, field)
+    if errors:
+        return errors
+    try:
+        if float(row.get(field, "").strip()) <= 0:
+            raise ValueError
+    except ValueError:
+        return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_number", message=f"{field} must be greater than zero.")]
+    return []
+
+
+def _validate_mqtt_asset_topic(
+    row: dict[str, str], row_number: int, field: str
+) -> list[ImportErrorRecord]:
+    value = row.get(field, "").strip()
+    if not value or _validate_topic(row, row_number, field):
+        return []
+    topics = [topic.strip() for topic in value.split(",") if topic.strip()]
+    supported_suffixes = ("/#", "/state", "/metadata", "/event/pointset", "/events/pointset")
+    if not any("+" in topic.split("/") for topic in topics) and all(
+        topic.endswith(supported_suffixes) for topic in topics
+    ):
+        if not row.get("Payload type", "").strip():
+            roots = {topic.removesuffix("/#").removesuffix("/state").removesuffix("/metadata").removesuffix("/event/pointset").removesuffix("/events/pointset") for topic in topics}
+            if len(roots) != 1:
+                return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_topic", message=f"{field} blank payload type must reference one asset root.")]
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field=field,
+            code="invalid_topic",
+            message=(
+                f"{field} must use a fixed asset prefix ending in /# or identify "
+                "that asset's state, metadata, or event(s)/pointset topic; '+' is not allowed."
+            ),
+        )
+    ]
+
+
+def _validate_payload_type(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    value = row.get("Payload type", "").strip().casefold()
+    if value in {"", "state", "metadata", "pointset"}:
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="Payload type",
+            code="invalid_payload_type",
+            message="Payload type must be blank, state, metadata, or pointset.",
+        )
+    ]
+
+
+def _validate_mqtt_point_unit_pairs(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    points_value = row.get("Expected points", "").strip()
+    units_value = row.get("Expected units", "").strip()
+    if not points_value or not units_value:
+        return []  # Required-field validation already reports blanks.
+    point_count = len([value for value in points_value.split(",") if value.strip()])
+    unit_count = len([value for value in units_value.split(",") if value.strip()])
+    if point_count == unit_count:
+        return []
+    point_label = "point" if point_count == 1 else "points"
+    unit_label = "unit" if unit_count == 1 else "units"
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="Expected units",
+            code="point_unit_count_mismatch",
+            message=(
+                "Expected points and Expected units must pair one-to-one "
+                f"({point_count} {point_label} and {unit_count} {unit_label} provided)."
+            ),
+        )
+    ]
 
 
 def _validate_asset_identity(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
@@ -245,7 +331,10 @@ PROFILES: dict[ImportType, ImportProfile] = {
         extra_checks=(
             _validate_asset_identity,
             _field_check("Expected topic", _validate_topic),
-            _field_check("Expected reporting interval", _validate_numeric),
+            _field_check("Expected topic", _validate_mqtt_asset_topic),
+            _field_check("Expected reporting interval", _validate_positive_numeric),
+            _validate_payload_type,
+            _validate_mqtt_point_unit_pairs,
         ),
     ),
     "asset_validation": ImportProfile(

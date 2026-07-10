@@ -83,6 +83,8 @@ PURPOSE = {
     "starlette": "ASGI toolkit underlying FastAPI (middleware, routing).",
     "sqlalchemy": "ORM / database access layer for runs, imports, configuration.",
     "alembic": "Database schema migrations (applied on API startup).",
+    "jsonschema": "Offline validation against the vendored canonical UDMI schemas.",
+    "referencing": "Offline JSON-Schema $ref registry for the vendored UDMI closure.",
     "dramatiq": "Background job queue (worker actors over Redis).",
     "redis": "Redis client for the Dramatiq broker + readiness ping.",
     "pydantic": "Typed request/response and domain models.",

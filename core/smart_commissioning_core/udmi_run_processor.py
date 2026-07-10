@@ -20,6 +20,7 @@ from smart_commissioning_core.udmi_validation import (
 # stop condition usually ends the run far earlier) and the downgrade is
 # recorded as indefinite_bounded_inline in the result summary.
 INLINE_INDEFINITE_CEILING_SECONDS = 240.0
+_SANITIZED_FAILURE_MESSAGE = "UDMI validation failed; see server logs."
 
 
 def process_udmi_validation_run(
@@ -80,13 +81,28 @@ def process_udmi_validation_run(
                 stage="udmi_validation_cancelled",
                 progress_percent=100,
             )
+        if (
+            result_summary.get("broker_capture_attempted")
+            and result_summary.get("broker_status_detail") != "live_payloads_captured"
+        ):
+            status_detail = str(result_summary.get("broker_status_detail") or "capture_failed")
+            return run_store.update_run_status(
+                run_id,
+                status="failed",
+                stage="udmi_fixture_validation_failed",
+                progress_percent=100,
+                error_message=(
+                    f"Live MQTT capture did not complete ({status_detail}); "
+                    "see validation issues."
+                ),
+            )
         return run_store.update_run_status(
             run_id,
             status="succeeded",
             stage="udmi_fixture_validation_complete",
             progress_percent=100,
         )
-    except Exception as error:
+    except Exception:
         run_store.update_result_summary(
             run_id,
             {
@@ -99,5 +115,5 @@ def process_udmi_validation_run(
             status="failed",
             stage="udmi_fixture_validation_failed",
             progress_percent=100,
-            error_message=str(error),
+            error_message=_SANITIZED_FAILURE_MESSAGE,
         )

@@ -68,6 +68,7 @@ from smart_commissioning_core.mqtt_settings import (
     parse_int,
 )
 from smart_commissioning_core.mqtt_transport import (
+    MqttCaptureInterrupted,
     MqttConnectionSettings,
     MqttMessage,
     MqttTransportError,
@@ -296,23 +297,33 @@ def _run_mqtt_discovery(
                 "topics_discovered": 0,
                 "messages_captured": 0,
                 "broker_status_detail": "live_capture_unavailable",
-            }
+            },
+            status_override="cancelled" if ctx.is_cancelled() else "failed",
+            error_message=(
+                None if ctx.is_cancelled() else _mqtt_failure_message("live_capture_unavailable")
+            ),
         )
 
     try:
         settings = build_settings(ctx.parameters)
     except (ValueError, MqttTransportError) as error:
         # build error (e.g. missing host). Surface a coarse, credential-free
-        # label; run_engine still marks this succeeded (no devices found) so
-        # the operator can see the status_detail.
+        # label and fail the run so the operator cannot mistake it for an empty
+        # successful discovery.
+        broker_status_detail = _broker_error_status(error)
         return EngineResult(
             result_summary_extra={
                 "topics_discovered": 0,
                 "messages_captured": 0,
-                "broker_status_detail": _broker_error_status(error),
-            }
+                "broker_status_detail": broker_status_detail,
+            },
+            status_override="cancelled" if ctx.is_cancelled() else "failed",
+            error_message=(
+                None if ctx.is_cancelled() else _mqtt_failure_message(broker_status_detail)
+            ),
         )
 
+    capture_error_status: str | None = None
     try:
         messages = live_capture(
             settings,
@@ -322,14 +333,22 @@ def _run_mqtt_discovery(
             cancel_check=ctx.is_cancelled,
             qos=parse_int(ctx.parameters.get("qos"), default=0),
         )
+    except MqttCaptureInterrupted as error:
+        messages = error.messages
+        capture_error_status = _broker_error_status(error.cause)
     except (MqttTransportError, OSError, ValueError) as error:
         # NEVER surface raw error text — map to a coarse status only.
+        broker_status_detail = _broker_error_status(error)
         return EngineResult(
             result_summary_extra={
                 "topics_discovered": 0,
                 "messages_captured": 0,
-                "broker_status_detail": _broker_error_status(error),
-            }
+                "broker_status_detail": broker_status_detail,
+            },
+            status_override="cancelled" if ctx.is_cancelled() else "failed",
+            error_message=(
+                None if ctx.is_cancelled() else _mqtt_failure_message(broker_status_detail)
+            ),
         )
 
     return _aggregate_capture(
@@ -341,6 +360,7 @@ def _run_mqtt_discovery(
         site_id=ctx.parameters.get("site_id"),
         cancelled=ctx.is_cancelled(),
         indefinite_bounded_inline=indefinite_bounded_inline,
+        capture_error_status=capture_error_status,
     )
 
 
@@ -354,6 +374,7 @@ def _aggregate_capture(
     site_id: Any,
     cancelled: bool,
     indefinite_bounded_inline: bool = False,
+    capture_error_status: str | None = None,
 ) -> EngineResult:
     """Aggregate captured messages into topics + assets + structured records.
 
@@ -416,17 +437,34 @@ def _aggregate_capture(
         "indefinite_bounded_inline": indefinite_bounded_inline,
         "max_messages": max_messages,
         "broker_status_detail": (
-            "messages_captured" if messages else "capture_window_empty"
+            "cancelled"
+            if cancelled
+            else capture_error_status or ("messages_captured" if messages else "capture_window_empty")
         ),
         "message_limit_reached": len(messages) >= max_messages,
     }
 
+    failure_status = capture_error_status or ("capture_window_empty" if not messages else None)
     return EngineResult(
         discovered_assets=discovered_assets,
         structured_records=structured_records,
         result_summary_extra=extra,
-        status_override="cancelled" if cancelled else None,
+        status_override=(
+            "cancelled"
+            if cancelled
+            else ("failed" if capture_error_status or not messages else None)
+        ),
+        error_message=(
+            _mqtt_failure_message(failure_status)
+            if failure_status and not cancelled
+            else None
+        ),
     )
+
+
+def _mqtt_failure_message(status_detail: str) -> str:
+    """Credential-free operator reason for a self-diagnosed failed run."""
+    return f"MQTT discovery failed ({status_detail})."
 
 
 def _safe_str(value: Any) -> str | None:

@@ -1,0 +1,142 @@
+{
+  "$udmi_version": "1.5.2",
+  "title": "Cloud Model",
+  "description": "Information specific to how the device communicates with the cloud.",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "timestamp": {
+      "description": "Not published by devices, appended to message subblocks within cloud pipeline. RFC 3339 Timestamp the payload was generated",
+      "type": "string",
+      "format": "date-time",
+      "examples": ["2019-01-17T14:02:29.364Z"]
+    },
+    "version": {
+      "description": "Version of the UDMI schema",
+      "type": "string"
+    },
+    "connection_type": {
+      "description": "Connection type for connecting to cloud",
+      "enum": [
+        "GATEWAY",
+        "DIRECT",
+        "PROXIED"
+      ]
+    },
+    "auth_type": {
+      "description": "The key type used for cloud communication.",
+      "enum": [
+        "ES256",
+        "ES256_X509",
+        "RS256",
+        "RS256_X509"
+      ]
+    },
+    "device_key": {
+      "type": "boolean",
+      "description": "Indicates if the device private key is provided in the site model."
+    },
+    "resource_type": {
+      "description": "The resource type of this model",
+      "enum": [
+        "DEVICE",
+        "GATEWAY",
+        "REGISTRY"
+      ]
+    },
+    "config": {
+      "$ref": "file:model_cloud_config.json#"
+    },
+    "blocked": {
+      "type": "boolean"
+    },
+    "detail": {
+      "type": "string"
+    },
+    "credentials": {
+      "type": "array",
+      "items": {
+        "properties": {
+          "key_format": {
+            "description": "The key type used for cloud communication.",
+            "enum": [
+              "PASSWORD",
+              "ES256",
+              "ES256_X509",
+              "RS256",
+              "RS256_X509"
+            ]
+          },
+          "key_data": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "updated_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_event_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_state_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_config_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_error_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_config_ack": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "num_id": {
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "ERROR",
+        "FETCH",
+        "CREATE",
+        "UPDATE",
+        "DELETE",
+        "MODIFY",
+        "BIND",
+        "ALLOW",
+        "BLOCK"
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "existingJavaType": "java.util.Map<String, String>",
+      "patternProperties": {
+        "^[-_a-zA-Z0-9]+$": {
+          "additionalProperties": false,
+          "type": "string"
+        }
+      }
+    },
+    "metadata_str": {
+      "type": "string",
+      "description": "Strigified version of the metadata object, used for internal backend processing"
+    },
+    "device_ids": {
+      "description": "If operating on the entire registry, then this manifests as a map of devices not just one device.",
+      "existingJavaType": "java.util.Map<String, CloudModel>",
+      "patternProperties": {
+        "^[-_a-zA-Z0-9]+$": {
+          "additionalProperties": false,
+          "type": "object"
+        }
+      }
+    }
+  }
+}

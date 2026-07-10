@@ -41,6 +41,16 @@ class ResolveUseTlsTests(unittest.TestCase):
         settings = build_mqtt_connection_settings({"use_tls": False})
         self.assertFalse(settings.use_tls)
 
+    def test_malformed_explicit_parameter_is_rejected(self) -> None:
+        self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "8883", "Use TLS": "Enabled"})
+        with self.assertRaisesRegex(ValueError, "use_tls must be a boolean"):
+            build_mqtt_connection_settings({"use_tls": "Maybe"})
+
+    def test_malformed_persisted_selection_is_rejected(self) -> None:
+        self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "8883", "Use TLS": "Maybe"})
+        with self.assertRaisesRegex(ValueError, "Use TLS must be Enabled or Disabled"):
+            build_mqtt_connection_settings({})
+
     def test_port_inference_when_control_absent(self) -> None:
         # Legacy config without the "Use TLS" field keeps the port-based default.
         self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "8883"})
