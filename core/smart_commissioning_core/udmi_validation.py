@@ -354,6 +354,30 @@ def _review_payload_issues(
     pointset_payload = _dict_or_empty(parameters.get("pointset_payload"))
     raw_evidence_uri = str(parameters.get("raw_evidence_uri") or "runtime://udmi-validation/review-payloads")
 
+    # The expected side is a real UDMI-shaped template, not a copy of an
+    # observation. Report invalid register constraints before comparing a
+    # captured payload, otherwise a malformed register value would look valid.
+    for payload_type in ("state", "metadata", "pointset"):
+        expected_template = _expected_payload_facet(expected, payload_type)
+        for finding in structural_issues(payload_type, expected_template or {}):
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type=_PAYLOAD_ISSUE_TYPES[payload_type],
+                    severity=finding.severity,
+                    description=(
+                        f"Expected register values cannot form a valid UDMI {payload_type} template: "
+                        f"{finding.description}"
+                    ),
+                    point_name=finding.point_name,
+                    expected_value=finding.expected_value,
+                    observed_value=finding.observed_value,
+                    suggested_action="Correct the imported register value so it conforms to the expected UDMI payload.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+
     # Version gate first (workbench contract, Pete 2026-07-09): the register's
     # Expected schema version must equal each payload's declared top-level
     # version. A mismatch is reported immediately and that payload's structure
@@ -554,7 +578,14 @@ def _review_payload_issues(
 
     # ``points`` is the register's Expected points column. Older API callers
     # supplied only ``units``, whose keys remain a compatible point fallback.
-    expected_points = set(str(point) for point in expected.get("points", expected_units))
+    expected_point_values = expected.get("points")
+    if expected_point_values is None:
+        expected_point_values = expected_units
+    expected_points = (
+        {str(point) for point in expected_point_values}
+        if isinstance(expected_point_values, (dict, list, tuple))
+        else set()
+    )
     observed_points = set(str(point) for point in pointset_points)
     for point_name in sorted(expected_points - observed_points):
         issues.append(
@@ -1254,20 +1285,28 @@ def _state_severity(message: str) -> str:
     return "high" if "offline" in message.lower() else "medium"
 
 
+def _expected_payload_header(expected: dict[str, Any]) -> dict[str, Any]:
+    """Schema-valid fields shared by display-only UDMI templates."""
+    header: dict[str, Any] = {"timestamp": "1970-01-01T00:00:00Z"}
+    if version := expected.get("udmi_version"):
+        header["version"] = version
+    return header
+
+
 def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict[str, Any] | None:
     """UDMI-shaped display template with register constraints and explicit placeholders."""
-    version = expected.get("udmi_version") or "<UDMI schema version>"
-    timestamp = "<RFC 3339 timestamp>"
-    points = expected.get("points", expected.get("units", {}))
-    point_names = [str(point) for point in points]
+    header = _expected_payload_header(expected)
+    points = expected.get("points")
+    if points is None:
+        points = expected.get("units", {})
+    point_names = [str(point) for point in points] if isinstance(points, (dict, list, tuple)) else []
     units = _dict_or_empty(expected.get("units"))
     if payload_type == "state":
         return {
-            "timestamp": timestamp,
-            "version": version,
+            **header,
             "system": {
-                "last_config": timestamp,
-                "operation": {"operational": "<boolean>"},
+                "last_config": header["timestamp"],
+                "operation": {"operational": False},
                 "serial_no": expected.get("serial") or "<device serial number>",
                 "hardware": {
                     "make": expected.get("manufacturer") or "<device manufacturer>",
@@ -1278,16 +1317,15 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
         }
     if payload_type == "metadata":
         return {
-            "timestamp": timestamp,
-            "version": version,
+            **header,
             "system": {
                 "location": {
-                    "site": expected.get("site") or "<site>",
-                    "section": expected.get("room") or "<room>",
+                    "site": expected.get("site") or "ZZ-TEST-000",
+                    "section": expected.get("room") or "UNSPECIFIED",
                 },
                 "physical_tag": {
                     "asset": {
-                        "guid": expected.get("guid") or "<asset GUID>",
+                        "guid": expected.get("guid") or "placeholder://asset",
                         "name": expected.get("asset_id") or "<asset name>",
                     }
                 },
@@ -1296,9 +1334,8 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
         }
     if payload_type == "pointset":
         return {
-            "timestamp": timestamp,
-            "version": version,
-            "points": {name: {"present_value": "<device-reported value>"} for name in point_names},
+            **header,
+            "points": {name: {"present_value": None} for name in point_names},
         }
     return None
 

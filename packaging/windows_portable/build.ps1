@@ -81,6 +81,9 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $AppName   = "SmartCommissioningApp"
+$Git = Get-Command git -ErrorAction SilentlyContinue
+$BuildVersion = if ($Git) { (& $Git.Source -C $RepoRoot describe --tags --always --dirty 2>$null | Select-Object -First 1).Trim() } else { "unversioned" }
+if ([string]::IsNullOrWhiteSpace($BuildVersion)) { $BuildVersion = "unversioned" }
 
 if (-not $OutputDir) {
     $OutputDir = Join-Path $RepoRoot "build\Smart_Commissioning_App_Windows_Portable"
@@ -126,6 +129,7 @@ function Remove-PythonCaches([string]$Root) {
 }
 
 Write-Host "Smart Commissioning App - Windows portable bundle (Option A)" -ForegroundColor Green
+Write-Host "  version   : $BuildVersion"
 Write-Host "  repo root : $RepoRoot"
 Write-Host "  output    : $OutputDir"
 Write-Host "  python    : $Python"
@@ -250,7 +254,7 @@ Copy-Item -Path $FrontendDistSrc -Destination $FrontendDistDst -Recurse -Force
 # 3e. operator note (unsigned tester build)
 $ReadmePath = Join-Path $OutputDir "README_FIRST.txt"
 @"
-Smart Commissioning App - Windows portable (tester build)
+Smart Commissioning App $BuildVersion - Windows portable (tester build)
 =========================================================
 
 To run:

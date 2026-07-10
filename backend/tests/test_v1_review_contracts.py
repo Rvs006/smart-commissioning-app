@@ -473,7 +473,7 @@ class UdmiReviewTests(unittest.TestCase):
         # Observed payload passes through verbatim; expected is a UDMI-shaped
         # template with register constraints and explicit device placeholders.
         self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
-        self.assertEqual(by_type["state"]["expected"]["timestamp"], "<RFC 3339 timestamp>")
+        self.assertEqual(by_type["state"]["expected"]["timestamp"], "1970-01-01T00:00:00Z")
         self.assertEqual(by_type["state"]["expected"]["system"]["hardware"], {"make": "ExpectedCo", "model": "Model-A"})
         self.assertEqual(by_type["state"]["expected"]["system"]["serial_no"], "<device serial number>")
         self.assertEqual(
