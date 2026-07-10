@@ -144,7 +144,9 @@ class MqttClient:
     def __exit__(self, *_exc: object) -> None:
         try:
             self._send_packet(0xE0, b"")
-        except MqttTransportError:
+        except (OSError, MqttTransportError):
+            # A dead connection (RST/timeout) must not raise out of teardown —
+            # it would discard messages already captured in this session.
             pass
         if self._socket:
             self._socket.close()
@@ -406,6 +408,7 @@ def subscribe_and_capture(
     timeout_seconds: float | None,
     max_messages: int,
     cancel_check: Callable[[], bool] | None = None,
+    stop_when: Callable[[list[MqttMessage]], bool] | None = None,
     qos: int = 0,
 ) -> list[MqttMessage]:
     """Subscribe to ``topics`` and collect messages up to ``max_messages``.
@@ -415,6 +418,10 @@ def subscribe_and_capture(
     message cap is reached (mq9nhbzu "run until stopped"). The loop polls in
     short slices so cancellation is observed promptly in both modes. ``qos`` is
     the requested max subscribe QoS (0-2; broker grants min of this and publish).
+    ``stop_when`` (optional) is a completion predicate called with the messages
+    captured so far after each new one; returning True ends the capture — used
+    for "stop once every expected topic has reported" so duplicates on one
+    chatty topic cannot exhaust ``max_messages`` before the quiet topics arrive.
     """
     messages: list[MqttMessage] = []
     expected_topics = set(topics)
@@ -443,13 +450,25 @@ def subscribe_and_capture(
             else:
                 # Indefinite: poll in 1s slices, re-checking cancel each time.
                 poll = 1.0
-            message = client.read_publish_any(
-                expected_topics=expected_topics,
-                timeout_seconds=poll,
-                cancel_check=cancel_check,
-            )
+            try:
+                message = client.read_publish_any(
+                    expected_topics=expected_topics,
+                    timeout_seconds=poll,
+                    cancel_check=cancel_check,
+                )
+            except (OSError, MqttTransportError):
+                # Broker dropped mid-capture (between keepalive pings): return
+                # the partial capture instead of discarding evidence already
+                # collected — the honesty layer reports live_capture_timeout
+                # naming the still-missing topics. CONSTRAINT: only this
+                # in-loop read degrades to a partial return; connect/subscribe
+                # failures above still raise, since no message could exist yet
+                # and a real broker error must surface as one.
+                break
             if message is not None:
                 messages.append(message)
+                if stop_when is not None and stop_when(messages):
+                    break
             # No message this slice: keep looping (re-check cancel/deadline)
             # rather than breaking, so a quiet broker does not end the window
             # early and an indefinite capture keeps waiting.

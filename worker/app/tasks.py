@@ -24,6 +24,7 @@ import logging
 
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
+from dramatiq.middleware import Interrupt, TimeLimitExceeded
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
@@ -124,12 +125,45 @@ def _discovery_loader(run_id: str):
     return list(discovery_repository.list_points(run_id))
 
 
+def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) -> None:
+    """Record an honest terminal failure when dramatiq interrupts an actor.
+
+    Dramatiq's time-limit/shutdown interrupts derive from BaseException, so they
+    bypass the ``except Exception`` failure paths inside the engines/processors;
+    without this the run row would stay 'running' forever while the frontend
+    polls. Callers re-raise the interrupt afterwards so dramatiq's own message
+    accounting stays correct.
+    """
+    if isinstance(interrupt, TimeLimitExceeded):
+        message = "live capture exceeded the 1h worker time limit"
+    else:
+        message = f"run interrupted by the worker ({type(interrupt).__name__})"
+    try:
+        run_store.update_run_status(
+            run_id,
+            status="failed",
+            stage=stage,
+            progress_percent=100,
+            error_message=message,
+        )
+    except Exception:
+        # Best effort: if the status write itself fails the run row stays
+        # 'running', but nothing is faked and the interrupt still propagates.
+        logger.exception("Could not record interrupted run as failed")
+
+
 # Engine actors set max_retries=0: a failed engine run is already recorded as a
 # terminal failure by run_engine, so Dramatiq's default ~20x exponential-backoff
 # retry would re-run a deterministic failure (or a TimeLimitExceeded on a long
 # capture) into a retry storm while the run row stays "running". time_limit is
 # generous for discovery so a legitimate long/indefinite capture (bounded by
-# max_messages + cancel) is not killed mid-run.
+# max_messages + cancel) is not killed mid-run. The long-capture actors
+# (discover_mqtt, validate_udmi_payloads) additionally catch dramatiq's
+# Interrupt via _fail_interrupted_run so a time-limit kill leaves a real
+# 'failed' run, not a stranded 'running' row.
+# ponytail: discover_ip_range / discover_bacnet share the Interrupt hole but
+# their scans are bounded, so hitting the 1h ceiling there means something is
+# already very wrong; guard them too if long captures ever land there.
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
 def discover_ip_range(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
@@ -176,30 +210,45 @@ def discover_mqtt(run_id: str, parameters: dict) -> None:
         # resolves from stored configuration or run parameters. If no broker is
         # reachable the engine records a credential-free 'broker_unreachable' status
         # rather than faking success.
-        process_mqtt_discovery_run(
-            run_id,
-            parameters,
-            run_store=run_store,
-            execution_mode="dramatiq_worker",
-            throttle=_build_throttle(parameters),
-            dry_run=_is_dry_run(parameters),
-            persist_records=_persist_topics,
-        )
+        try:
+            process_mqtt_discovery_run(
+                run_id,
+                parameters,
+                run_store=run_store,
+                execution_mode="dramatiq_worker",
+                throttle=_build_throttle(parameters),
+                dry_run=_is_dry_run(parameters),
+                persist_records=_persist_topics,
+            )
+        except Interrupt as interrupt:
+            # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
+            _fail_interrupted_run(run_id, interrupt, stage="engine_failed")
+            raise
         logger.info("Finished MQTT discovery", extra={"actor": "discover_mqtt"})
 
 
-@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
+# 1h time limit (matching discover_mqtt): an indefinite "run until every
+# expected topic reports or Cancel" capture must not be killed at the shorter
+# 15 min ceiling the other validation actors keep.
+@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=3_600_000)
 def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting UDMI validation", extra={"actor": "validate_udmi_payloads"})
         # live_capture defaults to the real subscribe_and_capture; broker host now
         # resolves via the worker MQTT configuration provider / run parameters.
-        process_udmi_validation_run(
-            run_id,
-            parameters,
-            run_store=run_store,
-            execution_mode="dramatiq_worker",
-        )
+        try:
+            process_udmi_validation_run(
+                run_id,
+                parameters,
+                run_store=run_store,
+                execution_mode="dramatiq_worker",
+            )
+        except Interrupt as interrupt:
+            # A fully silent broker with no cancel rides the indefinite capture
+            # into the 1h time limit; the processor's own failure path only
+            # catches Exception. Stage mirrors its failure stage.
+            _fail_interrupted_run(run_id, interrupt, stage="udmi_fixture_validation_failed")
+            raise
         logger.info("Finished UDMI validation", extra={"actor": "validate_udmi_payloads"})
 
 

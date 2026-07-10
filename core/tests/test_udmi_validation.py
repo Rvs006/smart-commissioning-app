@@ -8,8 +8,18 @@ skipped structural check is never presented as a pass.
 
 import unittest
 
+from smart_commissioning_core.mqtt_transport import MqttMessage
+from smart_commissioning_core.udmi_run_processor import (
+    INLINE_INDEFINITE_CEILING_SECONDS,
+    process_udmi_validation_run,
+)
 from smart_commissioning_core.udmi_schema import declared_version, structural_issues, versions_match
-from smart_commissioning_core.udmi_validation import _capture_topics, validate_udmi_full_report
+from smart_commissioning_core.udmi_validation import (
+    DEFAULT_CAPTURE_SECONDS,
+    DEFAULT_MAX_MESSAGES,
+    _capture_topics,
+    validate_udmi_full_report,
+)
 
 
 def _issues(parameters: dict) -> list:
@@ -354,6 +364,268 @@ class CaptureTopicTests(unittest.TestCase):
             topics,
             ["a/b/state", "a/b/metadata", "a/b/events/pointset", "a/b/event/pointset"],
         )
+
+
+class RecordingCapture:
+    """Fake live_capture that records every call's kwargs and returns canned messages."""
+
+    def __init__(self, messages: list[MqttMessage] | None = None) -> None:
+        self.messages = messages or []
+        self.calls: list[dict] = []
+
+    def __call__(self, _settings: object, **kwargs: object) -> list[MqttMessage]:
+        self.calls.append(kwargs)
+        return self.messages
+
+
+def _msg(topic: str, payload: bytes = b'{"timestamp":"2026-07-09T10:00:00Z"}') -> MqttMessage:
+    return MqttMessage(topic=topic, payload=payload)
+
+
+_BROKER = {"use_live_broker": True, "broker_host": "203.0.113.10"}
+_TOPICS = {
+    "state_topic": "a/b/state",
+    "metadata_topic": "a/b/metadata",
+    "pointset_topic": "a/b/events/pointset",
+    "extra_capture_topics": ["a/b/event/pointset"],
+}
+_ALL_TOPIC_MESSAGES = [_msg("a/b/state"), _msg("a/b/metadata"), _msg("a/b/events/pointset")]
+
+
+class CaptureRunTimeTests(unittest.TestCase):
+    def test_blank_capture_seconds_is_indefinite_until_all_topics(self) -> None:
+        # Blank run time + a cancel path => indefinite capture (timeout None)
+        # that completes once every expected topic has a payload.
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": ""},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        call = capture.calls[-1]
+        self.assertIsNone(call["timeout_seconds"])
+        self.assertTrue(callable(call["cancel_check"]))
+        self.assertEqual(call["max_messages"], DEFAULT_MAX_MESSAGES)
+        self.assertEqual(result.result_summary["capture_mode"], "indefinite")
+        self.assertEqual(result.result_summary["broker_status_detail"], "live_payloads_captured")
+
+    def test_stop_when_needs_distinct_topics_not_message_count(self) -> None:
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 0},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        stop_when = capture.calls[-1]["stop_when"]
+        # Duplicate publishes on one chatty topic never complete the capture.
+        self.assertFalse(stop_when([_msg("a/b/state")] * 10))
+        # One payload per expected topic completes it.
+        self.assertTrue(stop_when(list(_ALL_TOPIC_MESSAGES)))
+        # The legacy event/pointset alias satisfies the same pointset slot as
+        # events/pointset — either convention completes the capture.
+        self.assertTrue(stop_when([_msg("a/b/state"), _msg("a/b/metadata"), _msg("a/b/event/pointset")]))
+
+    def test_numeric_capture_seconds_is_a_bounded_window(self) -> None:
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 45},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], 45.0)
+        self.assertEqual(result.result_summary["capture_mode"], "bounded")
+
+    def test_indefinite_without_cancel_path_is_bounded_and_labelled(self) -> None:
+        # No cancel mechanism reachable => an indefinite request would be
+        # unkillable, so it is bounded to the default window and says so.
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 0},
+            live_capture=capture,
+        )
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], DEFAULT_CAPTURE_SECONDS)
+        self.assertEqual(result.result_summary["capture_mode"], "indefinite_bounded_no_cancel")
+
+    def test_partial_capture_names_the_missing_topics(self) -> None:
+        # Only state arrived: the run is an honest timeout, not "captured", and
+        # the issue names which expected topics never reported.
+        capture = RecordingCapture([_msg("a/b/state")])
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 1},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(result.result_summary["broker_status_detail"], "live_capture_timeout")
+        missing_issues = [issue for issue in result.issues if issue.issue_type == "not_publishing"]
+        self.assertEqual(len(missing_issues), 1)
+        self.assertIn("a/b/metadata", missing_issues[0].description)
+        self.assertIn("a/b/events/pointset", missing_issues[0].description)
+        self.assertNotIn("a/b/state", missing_issues[0].description)
+
+
+class SharedMultiAssetCaptureTests(unittest.TestCase):
+    def test_one_shared_capture_routes_payloads_to_each_asset(self) -> None:
+        # ONE live_capture call subscribes every asset's topics; messages route
+        # back to each entry's payload slots (duplicates keep the last payload).
+        messages = [
+            _msg("site/a1/state", b'{"system":{"hardware":{"make":"Co1"}}}'),
+            _msg("site/a2/state", b'{"system":{"hardware":{"make":"stale"}}}'),
+            _msg("site/a2/state", b'{"system":{"hardware":{"make":"Co2"}}}'),
+        ]
+        capture = RecordingCapture(messages)
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 2,
+            "assets": [
+                {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+            ],
+        }
+        result = validate_udmi_full_report(parameters, live_capture=capture, cancel_check=lambda: False)
+        self.assertEqual(len(capture.calls), 1)
+        self.assertEqual(capture.calls[0]["topics"], ["site/a1/state", "site/a2/state"])
+        entries = result.result_summary["payload_views"]
+        self.assertEqual([view["asset_id"] for view in entries], ["A1", "A2"])
+        self.assertEqual(result.result_summary["broker_status_detail"], "live_payloads_captured")
+        self.assertEqual(result.result_summary["message_count"], 3)
+        # Messages routed back per entry: A2 saw both publishes, last one wins.
+        asset_entries = parameters["assets"]
+        self.assertEqual(len(asset_entries[0]["messages"]), 1)
+        self.assertEqual(len(asset_entries[1]["messages"]), 2)
+        self.assertEqual(asset_entries[0]["state_payload"]["system"]["hardware"]["make"], "Co1")
+        self.assertEqual(asset_entries[1]["state_payload"]["system"]["hardware"]["make"], "Co2")
+
+    def test_shared_capture_stop_when_waits_for_every_asset(self) -> None:
+        capture = RecordingCapture([_msg("site/a1/state"), _msg("site/a2/state")])
+        validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 0,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        call = capture.calls[-1]
+        self.assertIsNone(call["timeout_seconds"])
+        stop_when = call["stop_when"]
+        # A chatty first asset does not end the capture while the second is quiet.
+        self.assertFalse(stop_when([_msg("site/a1/state")] * 5))
+        self.assertTrue(stop_when([_msg("site/a1/state"), _msg("site/a2/state")]))
+
+    def test_shared_capture_timeout_names_missing_assets_topics(self) -> None:
+        capture = RecordingCapture([_msg("site/a1/state")])
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 1,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(result.result_summary["broker_status_detail"], "live_capture_timeout")
+        missing_issues = [issue for issue in result.issues if issue.issue_type == "not_publishing"]
+        self.assertTrue(any("site/a2/state" in issue.description for issue in missing_issues))
+
+
+class _FakeRunStore:
+    """Minimal cancellable run store for exercising the processor without a DB."""
+
+    def __init__(self, *, cancel: bool = False, cancellable: bool = True) -> None:
+        self.cancel = cancel
+        self.status_calls: list[dict] = []
+        self.summaries: list[dict] = []
+        if not cancellable:
+            # Hide the cancel API entirely: the processor must then pass no
+            # cancel_check and the engine bounds indefinite captures itself.
+            self.is_cancel_requested = None  # type: ignore[assignment]
+
+    def update_run_status(self, run_id: str, **kwargs: object) -> dict:
+        record = {"run_id": run_id, **kwargs}
+        self.status_calls.append(record)
+        return record
+
+    def update_result_summary(self, run_id: str, summary: dict, merge: bool = True) -> None:
+        self.summaries.append(summary)
+
+    def replace_issues(self, run_id: str, issues: list) -> None:
+        self.issues = issues
+
+    def is_cancel_requested(self, run_id: str) -> bool:
+        return self.cancel
+
+
+_PROCESSOR_PARAMS = {**_BROKER, **_TOPICS, "capture_seconds": 0}
+
+
+class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
+    def test_worker_mode_honours_indefinite_and_wires_cancel(self) -> None:
+        store = _FakeRunStore()
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        record = process_udmi_validation_run(
+            "run-1", dict(_PROCESSOR_PARAMS), run_store=store,
+            execution_mode="dramatiq_worker", live_capture=capture,
+        )
+        call = capture.calls[-1]
+        self.assertIsNone(call["timeout_seconds"])
+        self.assertTrue(callable(call["cancel_check"]))
+        self.assertEqual(record["status"], "succeeded")
+        self.assertFalse(store.summaries[-1]["indefinite_bounded_inline"])
+
+    def test_inline_mode_bounds_indefinite_to_the_ceiling(self) -> None:
+        # Inline runs execute inside the API request with no Cancel button
+        # available, so an indefinite request is bounded and flagged honestly.
+        store = _FakeRunStore()
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        record = process_udmi_validation_run(
+            "run-2", dict(_PROCESSOR_PARAMS), run_store=store,
+            execution_mode="inline_local_fallback", live_capture=capture,
+        )
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], INLINE_INDEFINITE_CEILING_SECONDS)
+        self.assertEqual(record["status"], "succeeded")
+        self.assertTrue(store.summaries[-1]["indefinite_bounded_inline"])
+
+    def test_explicit_window_is_untouched_by_the_inline_guard(self) -> None:
+        store = _FakeRunStore()
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        process_udmi_validation_run(
+            "run-3", {**_PROCESSOR_PARAMS, "capture_seconds": 7}, run_store=store,
+            execution_mode="inline_local_fallback", live_capture=capture,
+        )
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], 7.0)
+        self.assertFalse(store.summaries[-1]["indefinite_bounded_inline"])
+
+    def test_cancel_observed_marks_the_run_cancelled(self) -> None:
+        store = _FakeRunStore(cancel=True)
+        capture = RecordingCapture([])
+        record = process_udmi_validation_run(
+            "run-4", dict(_PROCESSOR_PARAMS), run_store=store,
+            execution_mode="dramatiq_worker", live_capture=capture,
+        )
+        # The capture received a live checker reflecting the store's flag …
+        self.assertTrue(capture.calls[-1]["cancel_check"]())
+        # … and the run finishes under a real cancelled status, not succeeded.
+        self.assertEqual(record["status"], "cancelled")
+
+    def test_store_without_cancel_api_falls_back_to_bounded(self) -> None:
+        store = _FakeRunStore(cancellable=False)
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        record = process_udmi_validation_run(
+            "run-5", dict(_PROCESSOR_PARAMS), run_store=store,
+            execution_mode="dramatiq_worker", live_capture=capture,
+        )
+        call = capture.calls[-1]
+        self.assertIsNone(call["cancel_check"])
+        self.assertEqual(call["timeout_seconds"], DEFAULT_CAPTURE_SECONDS)
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(store.summaries[-1]["capture_mode"], "indefinite_bounded_no_cancel")
 
 
 if __name__ == "__main__":

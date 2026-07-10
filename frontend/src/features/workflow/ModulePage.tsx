@@ -223,7 +223,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiStateTopic, setUdmiStateTopic] = useState("334os/b1/ahu-1000001/state");
   const [udmiMetadataTopic, setUdmiMetadataTopic] = useState("334os/b1/ahu-1000001/metadata");
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
-  const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("5");
+  // Blank (the default) = run until every expected topic has reported a
+  // payload or the run is cancelled; a positive number bounds the run time.
+  const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("");
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
   // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
   // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
@@ -1697,10 +1699,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </>
               )}
               <label>
-                Capture window seconds
+                Run time (seconds — blank = run until all expected topics are captured or you stop the run)
                 <input
                   inputMode="numeric"
                   onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
+                  placeholder="blank = until every topic reports"
                   value={udmiCaptureSeconds}
                 />
               </label>
@@ -2371,6 +2374,21 @@ function buildUdmiValidationParameters(input: {
   useLiveBroker: boolean;
   useRegister: boolean;
 }): Record<string, unknown> {
+  // Blank => 0, the backend's "indefinite" sentinel: run until every expected
+  // topic has reported a payload, Cancel, or the message cap. A positive value
+  // bounds the run to that many seconds. Anything else ("45s", "abc", "-5") is
+  // rejected at submit — silently coercing it to the indefinite sentinel would
+  // turn an intended 45-second run into an unbounded one with no warning. The
+  // thrown Error surfaces through the same runMutation error panel as the
+  // parseJsonObject failures below.
+  const rawSeconds = input.captureSeconds.trim();
+  const parsedSeconds = Number(rawSeconds);
+  if (rawSeconds !== "" && !(Number.isFinite(parsedSeconds) && parsedSeconds > 0)) {
+    throw new Error(
+      "Run time must be a positive number of seconds, or blank to run until all expected topics are captured.",
+    );
+  }
+  const captureSeconds = rawSeconds === "" ? 0 : parsedSeconds;
   if (input.useRegister) {
     // Register-driven run: send no pasted schedule/payloads/topics so the
     // backend builds one expected asset per imported mqtt_register row (its
@@ -2378,13 +2396,13 @@ function buildUdmiValidationParameters(input: {
     // makes the backend refuse (400) when no register import exists, instead of
     // silently validating the packaged sample fixture.
     return {
-      capture_seconds: Number(input.captureSeconds) || 5,
+      capture_seconds: captureSeconds,
       use_live_broker: input.useLiveBroker,
       use_register: true,
     };
   }
   return {
-    capture_seconds: Number(input.captureSeconds) || 5,
+    capture_seconds: captureSeconds,
     expected_schedule: parseJsonObject(input.expectedSchedule, "Expected schedule JSON"),
     metadata_payload: parseJsonObject(input.metadataPayload, "Metadata payload JSON"),
     metadata_topic: input.metadataTopic,
