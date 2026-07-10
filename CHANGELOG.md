@@ -11,9 +11,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 - **UDMI expected payload templates.** Expected-versus-observed evidence now
   renders complete state, metadata, and pointset UDMI shapes. Known register
-  values are embedded at their UDMI paths; explicit placeholders identify
-  device-supplied values rather than copying broker observations into an
-  expectation.
+  values are embedded at their UDMI paths; schema-valid sentinel values identify
+  device-supplied fields rather than copying broker observations into an
+  expectation. Invalid register constraints are now reported explicitly.
+
+- **Portable build identification.** `README_FIRST.txt` and the Windows EXE
+  Properties → Details tab now show the build version, executable name, and
+  product description.
 
 - **UDMI live-result readability and identity checks.** Expected payload evidence
   now uses the same UDMI field paths as captured payloads (`version`,

@@ -71,6 +71,9 @@ collection order is alphabetical — keep it so.
 - **Sync**: after a verified commit, push its feature branch unless the user
   explicitly asks to keep it local or the remote is unavailable. Never merge or
   publish a release without the user's authorization.
+- **Portable releases**: give `packaging/windows_portable/build.ps1` an explicit
+  `-Version vX.Y.Z` when producing a release. It writes that version into both
+  `README_FIRST.txt` and the Windows EXE Properties → Details metadata.
 - **Style**: smallest correct change, reuse before adding, stdlib before deps.
   Deliberate shortcuts carry a `ponytail:` comment naming the ceiling.
 - **Honesty**: engines never fake success — unreachable broker / unauthorized

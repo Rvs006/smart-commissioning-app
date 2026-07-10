@@ -29,6 +29,11 @@
 5. That's it — no API key, no sign-in. The app trusts your own laptop (loopback), so
    Run / Publish / Export and the certificate/key **Replace** buttons are enabled automatically.
 
+**Check the build before use:** `README_FIRST.txt` names the packaged version and
+executable. In Windows, right-click `SmartCommissioningApp.exe` → **Properties** →
+**Details** to see the product name, file description, and version. These should
+match the version on the GitHub release page you downloaded.
+
 For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#pete-mqttudmi-field-check-v011-or-later) after startup. The **latest release** link above is the single supported download location.
 
 > ⚠️ **Windows SmartScreen may warn** — this is an internal unsigned build. Choose
