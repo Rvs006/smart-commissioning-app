@@ -582,7 +582,7 @@ describe("ModulePage UDMI workbench live results", () => {
           payload_types: [
             {
               payload_type: "pointset",
-              expected: { udmi_version: "1.5.2", units: { energy_sensor: "kwh" } },
+              expected: { version: "1.5.2", points: { energy_sensor: { units: "kwh" } } },
               observed: { version: "1.4.0", points: { energy_sensor: { present_value: 12.5 } } },
               observed_present: true,
             },

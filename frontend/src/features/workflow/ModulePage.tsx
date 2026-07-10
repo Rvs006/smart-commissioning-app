@@ -2208,6 +2208,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                                 ? JSON.stringify(entry.observed, null, 2)
                                                 : "not captured"}
                                             </pre>
+                                            {entry.observedPresent && entry.observed !== null && entry.observed !== undefined && (
+                                              <details className="json-inspector">
+                                                <summary>Explore JSON tree</summary>
+                                                <JsonTree value={entry.observed} />
+                                              </details>
+                                            )}
                                           </div>
                                         </div>
                                       )}
@@ -2437,6 +2443,28 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
     throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : "parse failed"}`);
   }
   throw new Error(`${label} must be a JSON object.`);
+}
+
+function JsonTree({ value }: { value: unknown }) {
+  if (value === null || typeof value !== "object") {
+    return <span>{JSON.stringify(value)}</span>;
+  }
+  return (
+    <ul className="json-tree">
+      {Object.entries(value).map(([key, child]) => (
+        <li key={key}>
+          {child !== null && typeof child === "object" ? (
+            <details>
+              <summary>{key}</summary>
+              <JsonTree value={child} />
+            </details>
+          ) : (
+            <><strong>{key}</strong>: {JSON.stringify(child)}</>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function toIssueRow(issue: ValidationIssueRecord): IssueRow {

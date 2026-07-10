@@ -136,6 +136,52 @@ class SchemaVersionMatchTests(unittest.TestCase):
         self.assertIsNone(declared_version({"version": ""}))
         self.assertIsNone(declared_version({}))
 
+    def test_pete_metadata_shape_matches_registered_point_units(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(
+                    units={
+                        "primary_ratio_sensor": "no_units",
+                        "phase_2_power_sensor": "kilowatts",
+                    }
+                ),
+                "metadata_payload": _metadata(
+                    pointset={
+                        "points": {
+                            "primary_ratio_sensor": {"units": "no_units"},
+                            "phase_2_power_sensor": {"units": "kilowatts"},
+                        }
+                    }
+                ),
+            }
+        )
+        self.assertNotIn("not defined in the metadata pointset", " ".join(issue.description for issue in issues))
+
+    def test_expected_identity_missing_from_captured_state_is_reported(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(manufacturer="Schneider", model="PM5121"),
+                "state_payload": _state(system={"hardware": {}}),
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertIn("Expected manufacturer is missing", descriptions)
+        self.assertIn("Expected model is missing", descriptions)
+
+    def test_payload_view_uses_udmi_field_names_for_expectations(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(manufacturer="Schneider", model="PM5121"),
+                "state_payload": _state(hardware={"make": "Schneider", "model": "PM5121"}),
+            },
+            live_capture=None,
+        )
+        expected = result.result_summary["payload_views"][0]["payload_types"][0]["expected"]
+        self.assertEqual(expected["version"], "1.5.2")
+        self.assertEqual(expected["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
+        self.assertNotIn("udmi_version", expected)
+        self.assertNotIn("manufacturer", expected)
+
 
 class StructuralCheckTests(unittest.TestCase):
     def test_canonical_fixtures_are_valid_and_all_local_refs_are_vendored(self) -> None:
