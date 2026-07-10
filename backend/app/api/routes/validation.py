@@ -137,6 +137,12 @@ def _capture_topics_from_expected(expected_topic: object, payload_type: object =
         topic = part.strip()
         if not topic:
             continue
+        # Keep a register wildcard in the live subscription set as well as
+        # its derived siblings; some site ACLs/brokers behave differently for
+        # wildcard versus concrete subscriptions. Explicit topics remain
+        # unchanged to avoid broadening their contract.
+        if topic.endswith("/#"):
+            topics.setdefault("register_topic_filter", topic)
         if topic.endswith("/#"):
             prefix = topic[:-2].rstrip("/")
             roots.add(prefix)

@@ -689,6 +689,15 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         missing_issues = [issue for issue in result.issues if issue.issue_type == "not_publishing"]
         self.assertTrue(any("site/a2/state" in issue.description for issue in missing_issues))
 
+    def test_register_wildcard_is_subscribed_alongside_derived_topics(self) -> None:
+        capture = RecordingCapture([_msg("site/a1/state")])
+        validate_udmi_full_report(
+            {**_BROKER, "capture_seconds": 1, "assets": [{"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state", "register_topic_filter": "site/a1/#"}]},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertIn("site/a1/#", capture.calls[0]["topics"])
+
 
 class _FakeRunStore:
     """Minimal cancellable run store for exercising the processor without a DB."""
