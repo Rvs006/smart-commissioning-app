@@ -166,6 +166,24 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
         self.assertEqual(ok_list, [])
         bad = self._mqtt(**{"Asset ID": "MTR-9", "Expected topic": "has a space/x"})
         self.assertIn("invalid_topic", [e.code for e in bad])
+        for unsafe in ("#", "+", "a/#/state", "a/b/custom", "site/+/state"):
+            with self.subTest(topic=unsafe):
+                errors = self._mqtt(**{"Asset ID": "MTR-9", "Expected topic": unsafe})
+                self.assertIn("invalid_topic", [error.code for error in errors])
+
+    def test_payload_type_is_blank_or_a_supported_udmi_payload(self) -> None:
+        self.assertEqual(self._mqtt(**{"Asset ID": "MTR-9", "Payload type": "state"}), [])
+        errors = self._mqtt(**{"Asset ID": "MTR-9", "Payload type": "telemetry"})
+        self.assertIn("invalid_payload_type", [error.code for error in errors])
+
+    def test_expected_points_and_units_must_pair_one_to_one(self) -> None:
+        errors = self._mqtt(**{"Asset ID": "MTR-9", "Expected units": "kwh"})
+
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].row_number, 2)
+        self.assertEqual(errors[0].field, "Expected units")
+        self.assertEqual(errors[0].code, "point_unit_count_mismatch")
+        self.assertIn("2 points and 1 unit", errors[0].message)
 
     def test_mqtt_template_exposes_metadata_columns(self) -> None:
         columns = PROFILES["mqtt_register"].template_columns
@@ -235,6 +253,7 @@ class UdmiRegisterScheduleTests(unittest.TestCase):
                 "Expected points": "energy_sensor,power_sensor",
                 "Expected units": "kwh,kw",
                 "Expected schema version": "1.5.2",
+                "Expected reporting interval": "20",
             }
         )
 
@@ -243,6 +262,7 @@ class UdmiRegisterScheduleTests(unittest.TestCase):
         self.assertEqual(schedule["units"], {"energy_sensor": "kwh", "power_sensor": "kw"})
         # The template's Expected schema version drives the payload version match.
         self.assertEqual(schedule["udmi_version"], "1.5.2")
+        self.assertEqual(schedule["reporting_interval_seconds"], "20")
         # Blank register fields are dropped so the matcher only checks what's set.
         self.assertNotIn("model", _expected_schedule_from_register_row({"Asset ID": "x"}))
         self.assertNotIn("udmi_version", _expected_schedule_from_register_row({"Asset ID": "x"}))
@@ -266,6 +286,37 @@ class UdmiRegisterScheduleTests(unittest.TestCase):
         topics = _capture_topics_from_expected("a/b/metadata,a/b/state,a/b/events/pointset")
         self.assertEqual(topics["pointset_topic"], "a/b/events/pointset")
         self.assertNotIn("extra_capture_topics", topics)
+
+    def test_blank_payload_type_expands_one_explicit_topic_to_the_whole_asset(self) -> None:
+        from app.api.routes.validation import _asset_entry_from_row
+
+        entry = _asset_entry_from_row(
+            {
+                "Asset ID": "EM-9",
+                "Payload type": "",
+                "Expected topic": "a/b/events/pointset",
+            }
+        )
+
+        self.assertEqual(entry["state_topic"], "a/b/state")
+        self.assertEqual(entry["metadata_topic"], "a/b/metadata")
+        self.assertEqual(entry["pointset_topic"], "a/b/events/pointset")
+        self.assertEqual(entry["extra_capture_topics"], ["a/b/event/pointset"])
+
+    def test_explicit_payload_type_limits_a_wildcard_to_that_payload(self) -> None:
+        from app.api.routes.validation import _asset_entry_from_row
+
+        entry = _asset_entry_from_row(
+            {
+                "Asset ID": "EM-9",
+                "Payload type": "pointset",
+                "Expected topic": "a/b/#",
+            }
+        )
+
+        self.assertNotIn("state_topic", entry)
+        self.assertNotIn("metadata_topic", entry)
+        self.assertEqual(entry["pointset_topic"], "a/b/events/pointset")
 
 
 class UdmiReviewTests(unittest.TestCase):

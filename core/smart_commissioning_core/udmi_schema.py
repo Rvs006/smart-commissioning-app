@@ -1,11 +1,16 @@
-"""Structural UDMI payload checks keyed by the payload's declared schema version.
+"""Canonical UDMI payload validation keyed by the declared schema version.
 
 The register template carries an "Expected schema version" (e.g. ``1.5.2``) and
 every UDMI payload declares its own top-level ``version``. Once those two agree,
 the payload's structure is checked against the field rules of that version.
 
-The 1.5.2 rules are grounded in the published UDMI schemas
-(github.com/faucetsdn/udmi, tag ``1.5.2``):
+The canonical Draft 7 schemas and their complete recursive ``$ref`` closure for
+state, metadata, and events/pointset are vendored from
+``github.com/faucetsdn/udmi`` tag ``1.5.2``. They run offline through an
+in-memory registry; schema validation never depends on site internet access.
+
+The existing focused checks remain for clearer operator messages and two useful
+strictness additions around upstream schema quirks:
 
 - ``state.json`` and ``metadata.json`` require ``timestamp``, ``version`` and
   ``system``.
@@ -15,15 +20,21 @@ The 1.5.2 rules are grounded in the published UDMI schemas
 - ``model_pointset_point.json`` (metadata points) has no required fields, but
   ``units`` must be a string when present.
 
-These are deliberate field-level structural checks, not a full JSON-Schema
-evaluation. ponytail: vendoring the complete google/udmi schema tree plus a
-JSON-Schema validator is the ceiling; until then an unknown declared version is
-reported honestly as "structural checks skipped", never silently passed.
+Unknown declared versions are reported honestly as "structural checks skipped",
+never silently passed.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cache
+from pathlib import Path
+
+from jsonschema import Draft7Validator, FormatChecker
+from jsonschema.exceptions import ValidationError
+from referencing import Registry
+from referencing.jsonschema import DRAFT7
 
 _POINT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 # RFC 3339 date-time: full date, 'T' separator, full time, and an offset
@@ -32,6 +43,20 @@ _POINT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 _RFC3339_PATTERN = re.compile(
     r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$"
 )
+
+
+def _is_rfc3339_datetime(value: object) -> bool:
+    if not isinstance(value, str) or not _RFC3339_PATTERN.match(value):
+        return False
+    try:
+        datetime.fromisoformat(value.upper().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+_FORMAT_CHECKER = FormatChecker()
+_FORMAT_CHECKER.checks("date-time")(_is_rfc3339_datetime)
 
 # Required top-level fields per payload type, keyed by declared UDMI version.
 _RULES_1_5_2 = {
@@ -42,6 +67,14 @@ _RULES_1_5_2 = {
 STRUCTURAL_RULESETS: dict[str, dict[str, tuple[str, ...]]] = {
     "1.5.2": _RULES_1_5_2,
 }
+_SCHEMA_ROOTS = {
+    "1.5.2": {
+        "state": "state.json",
+        "metadata": "metadata.json",
+        "pointset": "events_pointset.json",
+    }
+}
+_SCHEMA_DIRECTORY = Path(__file__).resolve().parent / "schemas" / "udmi"
 
 
 @dataclass(frozen=True)
@@ -146,19 +179,154 @@ def structural_issues(payload_type: str, payload: dict) -> list[StructuralFindin
         findings.extend(_pointset_points_findings(payload))
     if payload_type == "metadata":
         findings.extend(_metadata_pointset_findings(payload))
+    findings.extend(_canonical_schema_findings(payload_type, payload, _normalise_version(version)))
     return findings
+
+
+@cache
+def _canonical_schema_bundle(version: str) -> tuple[dict[str, dict], Registry]:
+    schema_directory = _SCHEMA_DIRECTORY / version
+    schemas: dict[str, dict] = {}
+    for schema_path in sorted(schema_directory.glob("*.json")):
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        schemas[schema_path.name] = schema
+    registry = Registry().with_contents(
+        ((f"file:{name}", schema) for name, schema in schemas.items()),
+        default_specification=DRAFT7,
+    )
+    return schemas, registry
+
+
+@cache
+def _canonical_validator(version: str, payload_type: str) -> Draft7Validator:
+    schemas, registry = _canonical_schema_bundle(version)
+    root_name = _SCHEMA_ROOTS[version][payload_type]
+    if root_name not in schemas:
+        raise FileNotFoundError(f"Canonical UDMI {version} schema is missing {root_name}.")
+    return Draft7Validator(
+        schemas[root_name],
+        registry=registry,
+        format_checker=_FORMAT_CHECKER,
+    )
+
+
+def _canonical_schema_findings(
+    payload_type: str,
+    payload: dict,
+    version: str,
+) -> list[StructuralFinding]:
+    validator = _canonical_validator(version, payload_type)
+    canonical_payload = _canonical_payload(payload_type, payload)
+    errors = sorted(
+        validator.iter_errors(canonical_payload),
+        key=lambda error: ([str(part) for part in error.absolute_path], error.message),
+    )
+    return [
+        _canonical_finding(payload_type, version, error)
+        for error in errors
+        if not _focused_check_covers(payload_type, version, error)
+    ]
+
+
+def _canonical_payload(payload_type: str, payload: dict) -> dict:
+    """Normalize the one supported legacy shape without hiding other errors."""
+    nested_points = _nested_pointset_points(payload)
+    if payload_type != "pointset" or "points" in payload or nested_points is None:
+        return payload
+    normalized = {**payload, "points": nested_points}
+    normalized.pop("pointset", None)
+    return normalized
+
+
+def _canonical_finding(
+    payload_type: str,
+    version: str,
+    error: ValidationError,
+) -> StructuralFinding:
+    path = [str(part) for part in error.absolute_path]
+    location = ".".join(path) or "payload root"
+    point_name = _point_name_from_path(path)
+    if error.validator == "additionalProperties":
+        description = (
+            f"Property at {location} is not allowed by the canonical UDMI {version} "
+            f"{payload_type} schema: {error.message}"
+        )
+    elif error.validator == "required":
+        missing = _required_property(error)
+        description = (
+            f"Required canonical field '{'.'.join([*path, str(missing)])}' is missing "
+            f"from the UDMI {version} {payload_type} payload."
+        )
+    elif error.validator == "format" and error.validator_value == "date-time":
+        description = f"Field '{location}' is not an RFC 3339 date-time string."
+    elif error.validator == "type":
+        description = (
+            f"Field '{location}' in the {payload_type} payload must be "
+            f"{error.validator_value}; observed {type(error.instance).__name__}."
+        )
+    else:
+        description = (
+            f"Field '{location}' violates the canonical UDMI {version} {payload_type} "
+            f"schema ({error.validator}): {error.message}"
+        )
+    return StructuralFinding(
+        description=description,
+        severity="high" if error.validator in {"additionalProperties", "required", "type"} else "medium",
+        point_name=point_name,
+        expected_value=str(error.validator_value),
+        observed_value="missing" if error.validator == "required" else _observed_value(error.instance),
+        suggested_action=f"Correct the {payload_type} publisher output to satisfy UDMI {version}.",
+    )
+
+
+def _required_property(error: ValidationError) -> str:
+    match = re.match(r"^'(.+)' is a required property$", error.message)
+    if match:
+        return match.group(1)
+    return next(
+        (str(name) for name in error.validator_value if name not in error.instance),
+        "required field",
+    )
+
+
+def _point_name_from_path(path: list[str]) -> str | None:
+    for index, part in enumerate(path):
+        if part == "points" and index + 1 < len(path):
+            return path[index + 1]
+    return None
+
+
+def _observed_value(value: object) -> str:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return str(value)[:200]
+    return type(value).__name__
+
+
+def _focused_check_covers(payload_type: str, version: str, error: ValidationError) -> bool:
+    """Avoid duplicate canonical issues where a clearer focused check exists."""
+    path = [str(part) for part in error.absolute_path]
+    if error.validator == "required":
+        missing = _required_property(error)
+        if not path and missing in STRUCTURAL_RULESETS[version].get(payload_type, ()):
+            return True
+        if missing == "present_value" and "points" in path:
+            return True
+    if error.validator == "format" and path == ["timestamp"]:
+        return True
+    if error.validator == "type":
+        if path in (["system"], ["points"], ["pointset"]):
+            return True
+        if "points" in path and (path[-1] == "units" or len(path) == path.index("points") + 2):
+            return True
+    return error.validator == "additionalProperties" and bool(path) and path[-1] == "points"
 
 
 def _timestamp_findings(payload_type: str, payload: dict) -> list[StructuralFinding]:
     timestamp = payload.get("timestamp")
     if timestamp is None:
         return []  # absence is already reported by the required-field check
-    if isinstance(timestamp, str) and _RFC3339_PATTERN.match(timestamp):
-        try:
-            datetime.fromisoformat(timestamp.upper().replace("Z", "+00:00"))
-            return []
-        except ValueError:
-            pass
+    if _is_rfc3339_datetime(timestamp):
+        return []
     return [
         StructuralFinding(
             description=(

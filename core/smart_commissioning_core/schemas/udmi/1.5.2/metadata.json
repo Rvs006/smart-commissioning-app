@@ -1,0 +1,59 @@
+{
+  "$udmi_version": "1.5.2",
+  "title": "Metadata",
+  "description": "[Metadata](../docs/specs/metadata.md) is a description about the device: a specification about how the device should be configured and expectations about what the device should be doing. Defined by `metadata.json`",
+  "$section": "Site Model",
+  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "required": [ 
+    "timestamp",
+    "version",
+    "system"
+  ],
+  "properties": {
+    "timestamp": {
+      "description": "RFC 3339 timestamp UTC the data was generated",
+      "type": "string",
+      "format": "date-time",
+      "examples": ["2019-01-17T14:02:29.364Z"]
+    },
+    "version": {
+      "description": "Version of the UDMI schema for this file",
+      "type": "string"
+    },
+    "upgraded_from": {
+      "description": "Original version of the UDMI schema for this file",
+      "type": "string"
+    },
+    "hash": {
+      "description": "Automatically generated field that contains the hash of file contents.",
+      "type": "string",
+      "pattern": "^[0-9a-z]{8}$"
+    },
+    "cloud": {
+      "$ref": "file:model_cloud.json#"
+    },
+    "system": {
+      "$ref": "file:model_system.json#"
+    },
+    "gateway": {
+      "$ref": "file:model_gateway.json#"
+    },
+    "discovery": {
+      "$ref": "file:model_discovery.json#"
+    },
+    "localnet": {
+      "$ref": "file:model_localnet.json#"
+    },
+    "testing": {
+      "$ref": "file:model_testing.json#"
+    },
+    "features": {
+      "$ref": "file:model_features.json#"
+    },
+    "pointset": {
+      "$ref": "file:model_pointset.json#"
+    }
+  }
+}

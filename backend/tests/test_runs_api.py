@@ -136,6 +136,15 @@ class RunsApiTests(ApiTestCase):
         rejected = self.client.put("/api/v1/configuration", json=invalid)
         self.assertEqual(rejected.status_code, 400)
 
+    def test_configuration_put_rejects_malformed_mqtt_use_tls(self) -> None:
+        configuration = self.client.get("/api/v1/configuration").json()
+        configuration["mqtt"]["values"]["Use TLS"] = "Maybe"
+
+        rejected = self.client.put("/api/v1/configuration", json=configuration)
+
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("MQTT Use TLS must be Enabled or Disabled.", rejected.json()["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

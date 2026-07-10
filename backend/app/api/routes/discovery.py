@@ -324,8 +324,12 @@ def create_bacnet_discovery_run(
     # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
     # backend so it ATTEMPTS real discovery (never silently returns simulated
     # data). Persisted into run.parameters BEFORE _create_run so both the inline
-    # and worker paths select the same backend. Dry-run/explicit override untouched.
-    resolve_bacnet_backend(parameters)
+    # and worker paths select the same backend. Dry runs may use simulation;
+    # unsafe or unknown live selectors are rejected before a run is created.
+    try:
+        resolve_bacnet_backend(parameters)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_discovery")
 
     def run_inline() -> RunRecord:

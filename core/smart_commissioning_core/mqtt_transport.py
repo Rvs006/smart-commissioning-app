@@ -5,7 +5,8 @@ import ssl
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -84,12 +85,23 @@ class MqttConnectionSettings:
 class MqttMessage:
     topic: str
     payload: bytes
+    retained: bool = False
+    received_at: datetime = field(default_factory=lambda: datetime.now(UTC), compare=False)
 
     def json_payload(self) -> object | None:
         try:
             return json.loads(self.payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return None
+
+
+class MqttCaptureInterrupted(MqttTransportError):
+    """Broker failure that preserves messages captured before the interruption."""
+
+    def __init__(self, messages: list[MqttMessage], cause: Exception) -> None:
+        super().__init__("MQTT capture was interrupted; partial messages are available.")
+        self.messages = list(messages)
+        self.cause = cause
 
 
 def _resolve_socket_factory(
@@ -126,6 +138,8 @@ class MqttClient:
         self.socket_factory = _resolve_socket_factory(socket_factory, settings.source_address)
         self._socket: socket.socket | None = None
         self._packet_id = 1
+        self._pending_messages: list[MqttMessage] = []
+        self._qos2_pending_messages: dict[int, MqttMessage] = {}
         # Temp files materialized from secret:// cert material; removed on exit.
         self._temp_cert_files: list[str] = []
 
@@ -166,14 +180,50 @@ class MqttClient:
         self._send_packet(0x30, packet)
 
     def subscribe(self, topic: str, qos: int = 0) -> None:
+        self.subscribe_many([topic], qos)
+
+    def subscribe_many(self, topics: list[str], qos: int = 0) -> None:
+        """Subscribe all filters in one packet before retained publishes arrive.
+
+        Brokers send each retained value immediately after acknowledging its
+        subscription. Issuing one SUBSCRIBE per filter lets that PUBLISH become
+        the next packet while the client is waiting for another SUBACK, causing
+        an honest broker to look like a failed setup. MQTT supports multiple
+        filters per SUBSCRIBE, so batch them and await one matching SUBACK.
+        """
+        if not topics:
+            raise ValueError("At least one MQTT subscription topic is required.")
         packet_id = self._next_packet_id()
-        packet = packet_id.to_bytes(2, "big") + _encode_utf8(topic) + bytes([qos & 0x03])
+        packet = packet_id.to_bytes(2, "big") + b"".join(
+            _encode_utf8(topic) + bytes([qos & 0x03]) for topic in topics
+        )
         self._send_packet(0x82, packet)
-        packet_type, payload = self._read_packet()
-        if packet_type != 0x90:
-            raise MqttTransportError("MQTT broker did not acknowledge the subscription.")
-        if len(payload) < 3 or payload[2] == 0x80:
-            raise MqttTransportError("MQTT broker rejected the subscription.")
+        deadline = time.monotonic() + self.settings.timeout_seconds
+        while time.monotonic() < deadline:
+            self._require_socket().settimeout(max(0.1, deadline - time.monotonic()))
+            packet_type, payload = self._read_packet()
+            if packet_type & 0xF0 == 0x30:
+                message = self._decode_publish(packet_type, payload)
+                if message is not None:
+                    self._pending_messages.append(message)
+                continue
+            if packet_type & 0xF0 == 0x60:
+                message = self._complete_qos2(payload)
+                if message is not None:
+                    self._pending_messages.append(message)
+                continue
+            if packet_type == 0xD0:  # PINGRESP may race with a later subscribe.
+                continue
+            if packet_type != 0x90:
+                raise MqttTransportError("MQTT broker did not acknowledge the subscription.")
+            if (
+                len(payload) != 2 + len(topics)
+                or int.from_bytes(payload[:2], "big") != packet_id
+                or any(code not in {0x00, 0x01, 0x02} for code in payload[2:])
+            ):
+                raise MqttTransportError("MQTT broker rejected the subscription.")
+            return
+        raise MqttTransportError("MQTT broker timed out acknowledging the subscription.")
 
     def ping(self) -> None:
         """Send an MQTT PINGREQ (0xC0) keepalive.
@@ -196,6 +246,9 @@ class MqttClient:
         timeout_seconds: float,
         cancel_check: Callable[[], bool] | None = None,
     ) -> MqttMessage | None:
+        pending = self._take_pending_message(expected_topics)
+        if pending is not None:
+            return pending
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             # Observe cancellation promptly even mid-window (used by long /
@@ -208,13 +261,81 @@ class MqttClient:
                 packet_type, payload = self._read_packet()
             except TimeoutError:
                 return None
-            if packet_type & 0xF0 != 0x30 or len(payload) < 2:
+            if packet_type & 0xF0 == 0x60:
+                message = self._complete_qos2(payload)
+                if message is not None:
+                    if expected_topics is None or any(
+                        _topic_matches_filter(message.topic, expected)
+                        for expected in expected_topics
+                    ):
+                        return message
+                    self._pending_messages.append(message)
                 continue
-            topic_length = int.from_bytes(payload[:2], "big")
-            topic = payload[2 : 2 + topic_length].decode("utf-8", errors="replace")
-            message_payload = payload[2 + topic_length :]
-            if expected_topics is None or any(_topic_matches_filter(topic, expected) for expected in expected_topics):
-                return MqttMessage(topic=topic, payload=message_payload)
+            if packet_type & 0xF0 != 0x30:
+                continue
+            message = self._decode_publish(packet_type, payload)
+            if message is not None and (
+                expected_topics is None
+                or any(_topic_matches_filter(message.topic, expected) for expected in expected_topics)
+            ):
+                return message
+        return None
+
+    def _decode_publish(self, packet_type: int, payload: bytes) -> MqttMessage | None:
+        if len(payload) < 2:
+            raise MqttTransportError("MQTT broker returned a malformed PUBLISH packet.")
+        qos = (packet_type >> 1) & 0x03
+        if qos == 0x03:
+            raise MqttTransportError("MQTT broker returned a PUBLISH packet with reserved QoS bits.")
+        topic_length = int.from_bytes(payload[:2], "big")
+        payload_offset = 2 + topic_length
+        if topic_length == 0 or payload_offset > len(payload):
+            raise MqttTransportError("MQTT broker returned a malformed PUBLISH topic.")
+        topic = payload[2:payload_offset].decode("utf-8", errors="replace")
+
+        packet_id: int | None = None
+        if qos > 0:
+            if payload_offset + 2 > len(payload):
+                raise MqttTransportError("MQTT QoS PUBLISH omitted its packet identifier.")
+            packet_id = int.from_bytes(payload[payload_offset : payload_offset + 2], "big")
+            if packet_id == 0:
+                raise MqttTransportError("MQTT QoS PUBLISH used packet identifier zero.")
+            payload_offset += 2
+
+        if qos == 1 and packet_id is not None:
+            self._send_packet(0x40, packet_id.to_bytes(2, "big"))
+        elif qos == 2 and packet_id is not None:
+            self._send_packet(0x50, packet_id.to_bytes(2, "big"))
+            if packet_id in self._qos2_pending_messages:
+                return None
+        message = MqttMessage(
+            topic=topic,
+            payload=payload[payload_offset:],
+            retained=bool(packet_type & 0x01),
+        )
+        if qos == 2 and packet_id is not None:
+            self._qos2_pending_messages[packet_id] = message
+            return None
+        return message
+
+    def _complete_qos2(self, payload: bytes) -> MqttMessage | None:
+        if len(payload) != 2:
+            raise MqttTransportError("MQTT broker returned a malformed PUBREL packet.")
+        packet_id = int.from_bytes(payload, "big")
+        if packet_id == 0:
+            raise MqttTransportError("MQTT PUBREL used packet identifier zero.")
+        self._send_packet(0x70, payload)
+        return self._qos2_pending_messages.pop(packet_id, None)
+
+    def discard_pending_messages(self) -> None:
+        self._pending_messages.clear()
+
+    def _take_pending_message(self, expected_topics: set[str] | None) -> MqttMessage | None:
+        for index, message in enumerate(self._pending_messages):
+            if expected_topics is None or any(
+                _topic_matches_filter(message.topic, expected) for expected in expected_topics
+            ):
+                return self._pending_messages.pop(index)
         return None
 
     def _connect(self) -> None:
@@ -375,8 +496,22 @@ def publish_config_and_wait_for_pointset(
     # drives only the subscribe/capture path — this publish is hardcoded QoS0.
     with MqttClient(settings) as client:
         client.subscribe(pointset_topic)
+        client.discard_pending_messages()
+        published_at = datetime.now(UTC)
         client.publish(config_topic, config_payload)
-        return client.read_publish(expected_topic=pointset_topic, timeout_seconds=timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            message = client.read_publish(
+                expected_topic=pointset_topic,
+                timeout_seconds=max(0.1, deadline - time.monotonic()),
+            )
+            if message is None:
+                return None
+            # Retained or already-buffered pointsets describe state from before
+            # this write and cannot confirm that the device applied it.
+            if not message.retained and message.received_at >= published_at:
+                return message
+        return None
 
 
 def read_retained_config(
@@ -419,11 +554,13 @@ def subscribe_and_capture(
     short slices so cancellation is observed promptly in both modes. ``qos`` is
     the requested max subscribe QoS (0-2; broker grants min of this and publish).
     ``stop_when`` (optional) is a completion predicate called with the messages
-    captured so far after each new one; returning True ends the capture — used
-    for "stop once every expected topic has reported" so duplicates on one
-    chatty topic cannot exhaust ``max_messages`` before the quiet topics arrive.
+    captured so far after each new one; returning True ends the capture. In this
+    mode one latest message is retained per concrete topic, so ``max_messages``
+    is a distinct-topic cap and duplicates cannot starve quiet topics. Raw
+    captures (no predicate) retain every message up to the ordinary cap.
     """
     messages: list[MqttMessage] = []
+    topic_positions: dict[str, int] = {}
     expected_topics = set(topics)
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
     # Keepalive: ping at keep_alive/2 so a quiet broker does not drop a long /
@@ -431,16 +568,15 @@ def subscribe_and_capture(
     ping_interval = max(1.0, settings.keep_alive / 2.0) if settings.keep_alive and settings.keep_alive > 0 else None
     last_ping = time.monotonic()
     with MqttClient(settings) as client:
-        for topic in topics:
-            client.subscribe(topic, qos)
+        client.subscribe_many(topics, qos)
         while len(messages) < max_messages:
             if cancel_check is not None and cancel_check():
                 break
             if ping_interval is not None and time.monotonic() - last_ping >= ping_interval:
                 try:
                     client.ping()
-                except (OSError, MqttTransportError):
-                    break  # connection lost — stop the capture cleanly
+                except (OSError, MqttTransportError) as error:
+                    raise MqttCaptureInterrupted(messages, error) from error
                 last_ping = time.monotonic()
             if deadline is not None:
                 remaining = deadline - time.monotonic()
@@ -456,17 +592,17 @@ def subscribe_and_capture(
                     timeout_seconds=poll,
                     cancel_check=cancel_check,
                 )
-            except (OSError, MqttTransportError):
-                # Broker dropped mid-capture (between keepalive pings): return
-                # the partial capture instead of discarding evidence already
-                # collected — the honesty layer reports live_capture_timeout
-                # naming the still-missing topics. CONSTRAINT: only this
-                # in-loop read degrades to a partial return; connect/subscribe
-                # failures above still raise, since no message could exist yet
-                # and a real broker error must surface as one.
-                break
+            except (OSError, MqttTransportError) as error:
+                raise MqttCaptureInterrupted(messages, error) from error
             if message is not None:
-                messages.append(message)
+                if stop_when is None:
+                    messages.append(message)
+                elif message.topic in topic_positions:
+                    index = topic_positions[message.topic]
+                    messages[index] = message
+                else:
+                    topic_positions[message.topic] = len(messages)
+                    messages.append(message)
                 if stop_when is not None and stop_when(messages):
                     break
             # No message this slice: keep looping (re-check cancel/deadline)

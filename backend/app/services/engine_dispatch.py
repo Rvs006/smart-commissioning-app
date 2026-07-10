@@ -26,6 +26,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
+from smart_commissioning_core.engines.bacnet_discovery import resolve_bacnet_backend_name
 
 # make_cancel_checker re-exported from core (single impl in engines.base) so the
 # API routes keep importing it from here.
@@ -101,16 +102,14 @@ BACNET_BACKEND_KEY = "bacnet_backend"
 def resolve_bacnet_backend(parameters: dict[str, Any]) -> None:
     """Default an AUTHORIZED, non-dry-run BACnet scan to the real bacpypes3 backend.
 
-    Honesty: a real scan must ATTEMPT real discovery. Simulated stays an explicit
-    opt-in (``bacnet_backend='simulated'``) and remains the dry-run plan default.
-    ``setdefault`` so an operator/demo override wins; dry runs are left untouched
-    (side-effect-free preview -> engine default 'simulated' plan). If bacpypes3 is
-    unavailable at scan time the engine records a real failed run — it never falls
-    back to simulated data for an authorized real run.
+    Honesty: a real scan must ATTEMPT real discovery. Simulated is accepted only
+    for dry-run previews; unknown selectors and live simulated requests fail
+    closed. If bacpypes3 is unavailable, the engine records a failed run.
     """
-    if is_dry_run(parameters):
-        return
-    parameters.setdefault(BACNET_BACKEND_KEY, "bacpypes3")
+    dry_run = is_dry_run(parameters)
+    selector = resolve_bacnet_backend_name(parameters, dry_run=dry_run)
+    if not dry_run or BACNET_BACKEND_KEY in parameters:
+        parameters[BACNET_BACKEND_KEY] = selector
 
 
 def resolve_ip_enrichment(parameters: dict[str, Any]) -> None:

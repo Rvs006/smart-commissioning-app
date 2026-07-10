@@ -14,11 +14,9 @@ DiscoveredPoint records in the DiscoveryRepository row shapes.
 
 HONESTY / TESTABILITY (read this before trusting any "it works" claim):
 
-    * :class:`SimulatedBacnetBackend` is a deterministic in-memory fixture. It
-      is the DEFAULT backend, so the engine runs end-to-end OFFLINE with NO
-      network access and produces sample data for tests and demos. Results from
-      it are explicitly labelled ``result_summary["backend"] == "simulated"`` so
-      simulated data is never mistaken for a real scan.
+    * :class:`SimulatedBacnetBackend` is a deterministic in-memory fixture used
+      only for dry-run previews and explicitly injected tests. Results from it
+      are labelled ``result_summary["backend"] == "simulated"``.
     * :class:`Bacpypes3Backend` is the real BACnet/IP path. It has NEVER been
       integration-tested in this environment (there is no BACnet device or
       building network here). It REQUIRES on-site validation against real
@@ -489,20 +487,47 @@ class Bacpypes3Backend:
 # -- backend selection ------------------------------------------------------
 
 
+def resolve_bacnet_backend_name(
+    parameters: Mapping[str, Any],
+    *,
+    dry_run: bool,
+) -> str:
+    """Return the allowed backend name, failing closed on unsafe selectors."""
+    default = BACKEND_SIMULATED if dry_run else BACKEND_BACPYPES3
+    raw_selector = parameters.get("bacnet_backend")
+    selector = (
+        default
+        if raw_selector is None or (isinstance(raw_selector, str) and not raw_selector.strip())
+        else str(raw_selector).strip().casefold()
+    )
+    if selector == BACKEND_SIMULATED and not dry_run:
+        raise ValueError("The simulated BACnet backend is only available for dry runs.")
+    if selector in {BACKEND_BACPYPES3, BACKEND_SIMULATED}:
+        return selector
+    raise ValueError(
+        "Unsupported BACnet backend. Use 'bacpypes3' for live scans or "
+        "'simulated' for dry runs."
+    )
+
+
 def _select_backend(
     parameters: Mapping[str, Any],
     backend: BacnetDiscoveryBackend | None,
+    *,
+    dry_run: bool,
 ) -> BacnetDiscoveryBackend:
     """Resolve the backend to use for a run.
 
     Precedence: an explicitly injected ``backend`` wins (used by tests/wiring).
-    Otherwise ``parameters["bacnet_backend"]`` selects ``"simulated"`` (default)
-    or ``"bacpypes3"``. Unknown values fall back to simulated to stay safe and
-    offline; the chosen backend's name is reflected in the result summary.
+    Otherwise ``parameters["bacnet_backend"]`` selects ``"simulated"`` or
+    ``"bacpypes3"``. Dry runs default to simulated; real runs default to
+    bacpypes3 so an omitted selector can never return fixture data.
     """
     if backend is not None:
         return backend
-    selector = str(parameters.get("bacnet_backend") or BACKEND_SIMULATED).lower()
+    selector = resolve_bacnet_backend_name(parameters, dry_run=dry_run)
+    if selector == BACKEND_SIMULATED:
+        return SimulatedBacnetBackend()
     if selector == BACKEND_BACPYPES3:
         # Construct here so an unavailable bacpypes3 raises the clear RuntimeError
         # (from _ensure_app) only when the real backend is actually used.
@@ -510,7 +535,7 @@ def _select_backend(
             local_address=parameters.get("local_address"),
             timeout_s=float(parameters.get("connect_timeout_s") or 5.0),
         )
-    return SimulatedBacnetBackend()
+    raise AssertionError(f"unhandled BACnet backend: {selector}")
 
 
 def _backend_name(backend: BacnetDiscoveryBackend) -> str:
@@ -715,7 +740,14 @@ def make_bacnet_discovery_engine(
         # and the safety module's documented dry-run convention. A real scan
         # (BACnet Who-Is is a broadcast that can disrupt fragile field buses)
         # still requires explicit authorization, gated AFTER the dry-run branch.
-        chosen = _select_backend(ctx.parameters, backend)
+        try:
+            chosen = _select_backend(ctx.parameters, backend, dry_run=ctx.dry_run)
+        except ValueError as error:
+            return EngineResult(
+                status_override="failed",
+                error_message=str(error),
+                result_summary_extra={"device_count": 0, "point_count": 0},
+            )
         if ctx.dry_run:
             return _dry_run_result(ctx, chosen)
         require_scan_authorization(ctx.parameters)
@@ -759,17 +791,16 @@ def process_bacnet_discovery_run(
 ) -> Any:
     """Synchronous processor entrypoint mirroring the other ``process_*_run`` jobs.
 
-    Builds the :class:`EngineContext`, selects the backend (default
-    :class:`SimulatedBacnetBackend`, OFFLINE), and drives the engine via
+    Builds the :class:`EngineContext`, selects the backend (bacpypes3 for real
+    runs; simulated only for dry runs), and drives the engine via
     :func:`run_engine`. Authorization is enforced inside the engine; on an
     unauthorized run the framework records a sanitized ``failed`` status.
 
     Args:
         run_id / parameters / run_store / execution_mode: standard run context.
-        backend: optional explicit backend (else selected from parameters;
-            default simulated). Inject :class:`SimulatedBacnetBackend` for
-            offline use; select ``parameters["bacnet_backend"] = "bacpypes3"``
-            (or pass a :class:`Bacpypes3Backend`) for the real, UNVALIDATED path.
+        backend: optional explicit backend (else selected from parameters).
+            Inject :class:`SimulatedBacnetBackend` for offline tests; real runs
+            default to the real, UNVALIDATED bacpypes3 path.
         throttle: optional :class:`ThrottleConfig` (defaults applied otherwise).
         dry_run: when True, returns the planned Who-Is window WITHOUT broadcasting.
         persist_records: optional structured-record persister (e.g. backed by

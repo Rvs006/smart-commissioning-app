@@ -6,8 +6,11 @@ missing version, or unknown ruleset is reported as an explicit issue, and a
 skipped structural check is never presented as a pass.
 """
 
+import json
 import unittest
+from pathlib import Path
 
+from smart_commissioning_core import mqtt_transport, udmi_schema
 from smart_commissioning_core.mqtt_transport import MqttMessage
 from smart_commissioning_core.udmi_run_processor import (
     INLINE_INDEFINITE_CEILING_SECONDS,
@@ -44,7 +47,13 @@ def _state(**overrides: object) -> dict:
     payload: dict[str, object] = {
         "version": "1.5.2",
         "timestamp": "2026-07-09T10:00:00Z",
-        "system": {},
+        "system": {
+            "serial_no": "SN-1",
+            "last_config": "2026-07-09T09:59:00Z",
+            "hardware": {"make": "Acme", "model": "Meter"},
+            "software": {},
+            "operation": {"operational": True},
+        },
     }
     payload.update(overrides)
     return payload
@@ -129,6 +138,37 @@ class SchemaVersionMatchTests(unittest.TestCase):
 
 
 class StructuralCheckTests(unittest.TestCase):
+    def test_canonical_fixtures_are_valid_and_all_local_refs_are_vendored(self) -> None:
+        for payload_type, payload in (
+            ("state", _state()),
+            ("metadata", _metadata()),
+            ("pointset", _pointset()),
+        ):
+            with self.subTest(payload_type=payload_type):
+                self.assertEqual(structural_issues(payload_type, payload), [])
+
+        schema_directory = (
+            Path(udmi_schema.__file__).resolve().parent / "schemas" / "udmi" / "1.5.2"
+        )
+
+        def local_refs(value: object) -> list[str]:
+            if isinstance(value, dict):
+                refs = [value["$ref"]] if isinstance(value.get("$ref"), str) else []
+                return refs + [ref for child in value.values() for ref in local_refs(child)]
+            if isinstance(value, list):
+                return [ref for child in value for ref in local_refs(child)]
+            return []
+
+        for schema_path in schema_directory.glob("*.json"):
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            for ref in local_refs(schema):
+                if ref.startswith("file:"):
+                    target = ref.removeprefix("file:").split("#", 1)[0]
+                    self.assertTrue(
+                        (schema_directory / target).is_file(),
+                        f"{schema_path.name} references missing vendored schema {target}",
+                    )
+
     def test_missing_required_fields_are_flagged(self) -> None:
         findings = structural_issues("pointset", {"version": "1.5.2"})
         described = " ".join(finding.description for finding in findings)
@@ -152,6 +192,44 @@ class StructuralCheckTests(unittest.TestCase):
             }
         )
         self.assertIn("does not match the UDMI point-name pattern", descriptions)
+
+    def test_canonical_schema_rejects_nested_additional_property(self) -> None:
+        findings = structural_issues(
+            "metadata",
+            _metadata(
+                pointset={
+                    "points": {
+                        "phase_1_line_current_sensor": {
+                            "units": "amperes",
+                            "not_in_udmi_schema": True,
+                        }
+                    }
+                }
+            ),
+        )
+
+        self.assertIn(
+            "not allowed by the canonical UDMI 1.5.2 metadata schema",
+            " ".join(finding.description for finding in findings),
+        )
+
+    def test_canonical_schema_requires_nested_state_fields(self) -> None:
+        state = _state()
+        del state["system"]["serial_no"]
+
+        self.assertIn(
+            "Required canonical field 'system.serial_no' is missing",
+            " ".join(finding.description for finding in structural_issues("state", state)),
+        )
+
+    def test_canonical_schema_checks_nested_date_time(self) -> None:
+        state = _state()
+        state["system"]["last_config"] = "yesterday"
+
+        self.assertIn(
+            "Field 'system.last_config' is not an RFC 3339 date-time string",
+            " ".join(finding.description for finding in structural_issues("state", state)),
+        )
 
     def test_non_object_system_and_points_are_flagged_without_crashing(self) -> None:
         descriptions = _descriptions(
@@ -214,6 +292,20 @@ class StructuralCheckTests(unittest.TestCase):
         # The nested points are still matched against the register.
         self.assertNotIn("was not received in the pointset payload", descriptions)
 
+    def test_legacy_nested_pointset_does_not_hide_other_root_properties(self) -> None:
+        descriptions = _descriptions(
+            {
+                "expected_schedule": _schedule(),
+                "pointset_payload": {
+                    "version": "1.5.2",
+                    "timestamp": "2026-07-09T10:00:00Z",
+                    "pointset": {"points": {"phase_1_line_current_sensor": {"present_value": 1.2}}},
+                    "rogue": 123,
+                },
+            }
+        )
+        self.assertIn("'rogue' was unexpected", descriptions)
+
     def test_metadata_point_names_are_pattern_checked(self) -> None:
         descriptions = _descriptions(
             {
@@ -259,6 +351,21 @@ class UnitMatchTests(unittest.TestCase):
             }
         )
         self.assertIn("not a supported UDMI unit", descriptions)
+
+    def test_expected_metadata_unit_must_be_present(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"phase_1_line_current_sensor": {}}}
+                ),
+            }
+        )
+
+        missing = [issue for issue in issues if "does not declare units" in issue.description]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0].expected_value, "amperes")
+        self.assertEqual(missing[0].observed_value, "missing")
 
     def test_explicit_no_units_metadata_still_mismatches_a_numeric_register_unit(self) -> None:
         # "no_units" is a real observed declaration, not an absent unit: a
@@ -424,6 +531,53 @@ class CaptureRunTimeTests(unittest.TestCase):
         # The legacy event/pointset alias satisfies the same pointset slot as
         # events/pointset — either convention completes the capture.
         self.assertTrue(stop_when([_msg("a/b/state"), _msg("a/b/metadata"), _msg("a/b/event/pointset")]))
+
+    def test_stop_when_requires_each_topic_to_carry_a_json_object(self) -> None:
+        capture = RecordingCapture(
+            [
+                _msg("a/b/state", b"not-json"),
+                _msg("a/b/metadata", b"[]"),
+                _msg("a/b/events/pointset"),
+            ]
+        )
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 1},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        stop_when = capture.calls[-1]["stop_when"]
+        self.assertFalse(stop_when(capture.messages))
+        self.assertEqual(result.result_summary["broker_status_detail"], "live_capture_timeout")
+        self.assertEqual(result.result_summary["captured_topics"], ["a/b/events/pointset"])
+        invalid = [issue for issue in result.issues if issue.issue_type == "payload_error"]
+        self.assertEqual(len(invalid), 1)
+        self.assertIn("valid JSON objects", invalid[0].description)
+
+    def test_stale_retained_pointset_exceeds_register_reporting_interval(self) -> None:
+        capture = RecordingCapture(
+            [
+                MqttMessage("a/b/state", json.dumps(_state(timestamp="2020-01-01T00:00:00Z")).encode(), retained=True),
+                MqttMessage("a/b/metadata", json.dumps(_metadata(timestamp="2020-01-01T00:00:00Z")).encode(), retained=True),
+                MqttMessage("a/b/events/pointset", json.dumps(_pointset(timestamp="2020-01-01T00:00:00Z")).encode(), retained=True),
+            ]
+        )
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                **_TOPICS,
+                "capture_seconds": 1,
+                "expected_schedule": _schedule(reporting_interval_seconds="20"),
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        stale = [issue for issue in result.issues if "reporting interval" in issue.description]
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0].issue_type, "pointset_validation")
+        self.assertIn("retained", stale[0].description)
+        self.assertTrue(result.result_summary["payload_views"][0]["payload_types"][2]["retained"])
 
     def test_numeric_capture_seconds_is_a_bounded_window(self) -> None:
         capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
@@ -602,9 +756,129 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         self.assertEqual(capture.calls[-1]["timeout_seconds"], 7.0)
         self.assertFalse(store.summaries[-1]["indefinite_bounded_inline"])
 
+    def test_live_capture_timeout_marks_the_run_failed(self) -> None:
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-timeout",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=RecordingCapture([]),
+        )
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("did not complete", record["error_message"])
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "live_capture_timeout")
+        self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
+
+    def test_live_broker_error_marks_the_run_failed(self) -> None:
+        store = _FakeRunStore()
+
+        def unavailable(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise OSError("connection refused")
+
+        record = process_udmi_validation_run(
+            "run-broker-error",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=unavailable,
+        )
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("broker_unreachable", record["error_message"])
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "broker_unreachable")
+
+    def test_unexpected_failure_does_not_expose_exception_text(self) -> None:
+        store = _FakeRunStore()
+
+        def unexpected(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise RuntimeError("broker password=hunter2")
+
+        record = process_udmi_validation_run(
+            "run-unexpected-error",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=unexpected,
+        )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["error_message"], "UDMI validation failed; see server logs.")
+        self.assertNotIn("hunter2", str(record))
+
+    def test_mid_capture_broker_drop_fails_and_keeps_partial_evidence(self) -> None:
+        store = _FakeRunStore()
+        partial = [_msg("a/b/state")]
+
+        def interrupted(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise mqtt_transport.MqttCaptureInterrupted(
+                partial,
+                ConnectionResetError("broker dropped password=hunter2"),
+            )
+
+        record = process_udmi_validation_run(
+            "run-partial-drop",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=interrupted,
+        )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "authentication_error")
+        self.assertEqual(store.summaries[-1]["captured_topics"], ["a/b/state"])
+        self.assertNotIn("hunter2", str(store.summaries[-1]))
+        self.assertNotIn("hunter2", str(store.issues))
+
+    def test_multi_asset_broker_drop_fails_and_keeps_partial_evidence(self) -> None:
+        store = _FakeRunStore()
+        partial = [_msg("site/a1/state")]
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 1,
+            "assets": [
+                {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+            ],
+        }
+
+        def interrupted(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise mqtt_transport.MqttCaptureInterrupted(partial, ConnectionResetError("broker dropped"))
+
+        record = process_udmi_validation_run(
+            "run-multi-partial-drop",
+            parameters,
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=interrupted,
+        )
+
+        summary = store.summaries[-1]
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(summary["broker_status_detail"], "broker_unreachable")
+        self.assertEqual(summary["captured_topics"], ["site/a1/state"])
+        self.assertEqual(summary["message_count"], 1)
+        self.assertEqual(summary["payload_view_source"], "live_capture")
+
+    def test_valid_pasted_payloads_still_succeed(self) -> None:
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-pasted",
+            {
+                "expected_schedule": _schedule(),
+                "state_payload": _state(),
+                "metadata_payload": _metadata(),
+                "pointset_payload": _pointset(),
+            },
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=None,
+        )
+        self.assertEqual(record["status"], "succeeded")
+        self.assertFalse(store.summaries[-1]["broker_capture_attempted"])
+
     def test_cancel_observed_marks_the_run_cancelled(self) -> None:
         store = _FakeRunStore(cancel=True)
-        capture = RecordingCapture([])
+        capture = RecordingCapture([_msg("a/b/state")])
         record = process_udmi_validation_run(
             "run-4", dict(_PROCESSOR_PARAMS), run_store=store,
             execution_mode="dramatiq_worker", live_capture=capture,
@@ -613,6 +887,8 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         self.assertTrue(capture.calls[-1]["cancel_check"]())
         # … and the run finishes under a real cancelled status, not succeeded.
         self.assertEqual(record["status"], "cancelled")
+        self.assertEqual(store.summaries[-1]["captured_topics"], ["a/b/state"])
+        self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
 
     def test_store_without_cancel_api_falls_back_to_bounded(self) -> None:
         store = _FakeRunStore(cancellable=False)

@@ -112,6 +112,7 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
         "site": row.get("Site"),
         "room": row.get("Room"),
         "udmi_version": row.get("Expected schema version"),
+        "reporting_interval_seconds": row.get("Expected reporting interval"),
     }
     schedule = {key: value for key, value in fields.items() if value}
     units_map = {point: (units[index] if index < len(units) else "") for index, point in enumerate(points)}
@@ -120,7 +121,7 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
     return schedule
 
 
-def _capture_topics_from_expected(expected_topic: object) -> dict:
+def _capture_topics_from_expected(expected_topic: object, payload_type: object = None) -> dict:
     """Derive state/metadata/pointset capture topics from a register Expected topic.
 
     Accepts a ``prefix/#`` wildcard (covers all three), an explicit per-type topic,
@@ -130,30 +131,56 @@ def _capture_topics_from_expected(expected_topic: object) -> dict:
     """
     topics: dict[str, object] = {}
     extra_topics: list[str] = []
+    roots: set[str] = set()
+    requested_type = str(payload_type or "").strip().casefold()
     for part in str(expected_topic or "").split(","):
         topic = part.strip()
         if not topic:
             continue
-        if topic.endswith("/#") or topic.endswith("/+"):
+        if topic.endswith("/#"):
             prefix = topic[:-2].rstrip("/")
+            roots.add(prefix)
+            if requested_type in {"", "state"}:
+                topics.setdefault("state_topic", prefix + "/state")
+            if requested_type in {"", "metadata"}:
+                topics.setdefault("metadata_topic", prefix + "/metadata")
+            if requested_type in {"", "pointset"}:
+                topics.setdefault("pointset_topic", prefix + "/events/pointset")
+                extra_topics.append(prefix + "/event/pointset")
+        elif topic.endswith("/state") and requested_type in {"", "state"}:
+            roots.add(topic.removesuffix("/state"))
+            topics["state_topic"] = topic
+        elif topic.endswith("/metadata") and requested_type in {"", "metadata"}:
+            roots.add(topic.removesuffix("/metadata"))
+            topics["metadata_topic"] = topic
+        elif topic.endswith("/events/pointset") and requested_type in {"", "pointset"}:
+            roots.add(topic.removesuffix("/events/pointset"))
+            topics["pointset_topic"] = topic
+        elif topic.endswith("/event/pointset") and requested_type in {"", "pointset"}:
+            roots.add(topic.removesuffix("/event/pointset"))
+            topics["pointset_topic"] = topic
+
+    # Pete's register contract: blank Payload type represents one WHOLE asset,
+    # so even one explicit sibling topic must require all three payload slots.
+    required_slots = {"state_topic", "metadata_topic", "pointset_topic"}
+    if not requested_type and roots and not required_slots.issubset(topics):
+        if len(roots) == 1:
+            prefix = next(iter(roots))
             topics.setdefault("state_topic", prefix + "/state")
             topics.setdefault("metadata_topic", prefix + "/metadata")
             topics.setdefault("pointset_topic", prefix + "/events/pointset")
             extra_topics.append(prefix + "/event/pointset")
-        elif topic.endswith("/state"):
-            topics["state_topic"] = topic
-        elif topic.endswith("/metadata"):
-            topics["metadata_topic"] = topic
-        elif topic.endswith("/pointset"):
-            topics["pointset_topic"] = topic
     if extra_topics:
-        topics["extra_capture_topics"] = extra_topics
+        topics["extra_capture_topics"] = list(dict.fromkeys(extra_topics))
     return topics
 
 
 def _asset_entry_from_row(row: dict) -> dict:
     """One UDMI `assets` fan-out entry: expected_schedule + per-asset capture topics."""
-    return {"expected_schedule": _expected_schedule_from_register_row(row), **_capture_topics_from_expected(row.get("Expected topic"))}
+    return {
+        "expected_schedule": _expected_schedule_from_register_row(row),
+        **_capture_topics_from_expected(row.get("Expected topic"), row.get("Payload type")),
+    }
 
 
 def _expected_assets_from_register(project_id: str, site_id: str) -> list[dict]:

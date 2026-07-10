@@ -67,6 +67,7 @@ class UdmiRegisterFlowTests(ApiTestCase):
         entry = assets[0]
         self.assertEqual(entry["expected_schedule"]["asset_id"], "EM-1")
         self.assertEqual(entry["expected_schedule"]["udmi_version"], "1.5.2")
+        self.assertEqual(entry["expected_schedule"]["reporting_interval_seconds"], "60")
         self.assertEqual(entry["state_topic"], "hv/ems/01/em/EM-1/state")
         self.assertEqual(entry["pointset_topic"], "hv/ems/01/em/EM-1/events/pointset")
         self.assertEqual(entry["extra_capture_topics"], ["hv/ems/01/em/EM-1/event/pointset"])

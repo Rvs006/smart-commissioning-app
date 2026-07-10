@@ -190,6 +190,11 @@ if ($SkipFreeze) {
         # freeze would omit it and an authorized real scan would RuntimeError in
         # the exe even after core[bacnet] is installed on the build box.
         "--collect-all", "bacpypes3",
+        # Canonical UDMI JSON schemas are package data loaded at runtime by
+        # smart_commissioning_core.udmi_schema. The assembled bundle also ships
+        # the core source tree, but collect them into the freeze for parity with
+        # wheel-only execution and to prevent a future source-layout regression.
+        "--collect-data", "smart_commissioning_core",
         "--distpath", (Join-Path $RepoRoot "dist"),
         "--workpath", (Join-Path $RepoRoot "build\pyinstaller"),
         "--specpath", (Join-Path $RepoRoot "build\pyinstaller")

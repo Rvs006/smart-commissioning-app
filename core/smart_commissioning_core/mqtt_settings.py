@@ -81,10 +81,21 @@ def _resolve_use_tls(parameters: dict[str, object], mqtt_values: dict[str, objec
     """
     explicit = parameters.get("use_tls")
     if explicit is not None:
-        return parse_bool(explicit)
+        if isinstance(explicit, bool):
+            return explicit
+        explicit_text = str(explicit).strip().casefold()
+        if explicit_text in {"1", "true", "yes", "enabled", "on"}:
+            return True
+        if explicit_text in {"0", "false", "no", "disabled", "off"}:
+            return False
+        raise ValueError("use_tls must be a boolean value.")
     configured = _string(mqtt_values.get("Use TLS"))
     if configured:
-        return parse_bool(configured)
+        if configured.casefold() == "enabled":
+            return True
+        if configured.casefold() == "disabled":
+            return False
+        raise ValueError("Use TLS must be Enabled or Disabled.")
     return port == 8883
 
 

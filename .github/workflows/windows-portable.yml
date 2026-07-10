@@ -85,7 +85,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Boot smoke - exe answers /api/v1/health and froze psutil + bacpypes3
+      - name: Boot smoke - health, frozen dependencies, and canonical UDMI validation
         shell: pwsh
         run: |
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
@@ -173,6 +173,63 @@ jobs:
                 $ok = $false
               }
             }
+
+            # The canonical validator depends on jsonschema + referencing and
+            # 34 runtime JSON schema files. A health-only smoke can stay green
+            # when PyInstaller drops those data files, so assert the frozen
+            # root and execute a nested-schema rejection through the live exe.
+            if ($ok) {
+              $frozenUdmiSchema = Join-Path $bundle '_internal\smart_commissioning_core\schemas\udmi\1.5.2\state.json'
+              if (Test-Path -LiteralPath $frozenUdmiSchema) {
+                Write-Host "UDMI SCHEMA FROZEN OK: $frozenUdmiSchema"
+              } else {
+                Write-Host "UDMI SCHEMA SMOKE FAILED: $frozenUdmiSchema missing."
+                $ok = $false
+              }
+            }
+
+            if ($ok) {
+              $apiBase = $healthUrl -replace '/health$', ''
+              $validationBody = @{
+                project_id = 'portable-smoke-project'
+                site_id = 'portable-smoke-site'
+                job_type = 'udmi_validation'
+                parameters = @{
+                  requested_from = 'windows_portable_ci'
+                  expected_schedule = @{ asset_id = 'SMOKE-1'; udmi_version = '1.5.2'; units = @{} }
+                  state_payload = @{
+                    version = '1.5.2'
+                    timestamp = '2026-07-10T00:00:00Z'
+                    system = @{
+                      serial_no = 'SMOKE-1'
+                      last_config = '2026-07-10T00:00:00Z'
+                      hardware = @{ make = 'Smoke'; model = 'Portable' }
+                      software = @{}
+                      operation = @{ operational = $true }
+                      not_in_udmi_schema = $true
+                    }
+                  }
+                }
+              } | ConvertTo-Json -Depth 10 -Compress
+              try {
+                $created = Invoke-RestMethod -Uri "$apiBase/validation/udmi/runs" -Method Post `
+                  -ContentType 'application/json' -Body $validationBody -TimeoutSec 15
+                if (-not $created.run_id) { throw 'validation response omitted run_id' }
+                $issues = Invoke-RestMethod -Uri "$apiBase/validation/runs/$($created.run_id)/issues" `
+                  -TimeoutSec 15
+                $canonicalIssue = @($issues.issues) | Where-Object {
+                  $_.description -match 'canonical UDMI 1\.5\.2 state schema'
+                }
+                if ($canonicalIssue.Count -gt 0) {
+                  Write-Host 'UDMI CANONICAL VALIDATION OK: running exe rejected nested extra property.'
+                } else {
+                  throw 'running exe returned no canonical nested-schema issue'
+                }
+              } catch {
+                Write-Host "UDMI CANONICAL VALIDATION FAILED: $($_.Exception.Message)"
+                $ok = $false
+              }
+            }
           }
           finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -185,7 +242,7 @@ jobs:
               ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
           }
           if (-not $ok) {
-            Write-Error 'Boot smoke failed: no /api/v1/health 200 within the deadline, or psutil/bacpypes3 missing from the frozen bundle.'
+            Write-Error 'Boot smoke failed: health, frozen dependency, or canonical UDMI validation check failed.'
             exit 1
           }
 

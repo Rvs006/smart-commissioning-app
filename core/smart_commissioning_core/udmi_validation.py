@@ -1,7 +1,8 @@
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from smart_commissioning_core.mqtt_settings import (
     parse_int,
 )
 from smart_commissioning_core.mqtt_transport import (
+    MqttCaptureInterrupted,
     MqttMessage,
     MqttTransportError,
     _topic_matches_filter,
@@ -325,12 +327,13 @@ def _review_all_payload_issues(
     """
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
-        issues: list[ValidationIssueRecord] = []
+        issues = [*existing_issues]
+        first_new_issue = len(issues)
         for entry in assets:
             if not isinstance(entry, dict):
                 continue
-            issues.extend(_review_payload_issues(entry, [*existing_issues, *issues]))
-        return issues
+            issues.extend(_review_payload_issues(entry, issues))
+        return issues[first_new_issue:]
     return _review_payload_issues(parameters, existing_issues)
 
 
@@ -342,7 +345,8 @@ def _review_payload_issues(
     if not expected:
         return []
 
-    issues: list[ValidationIssueRecord] = []
+    issues = [*existing_issues]
+    first_new_issue = len(issues)
     asset_id = str(expected.get("asset_id") or "UDMI asset")
     state_payload = _dict_or_empty(parameters.get("state_payload"))
     metadata_payload = _dict_or_empty(parameters.get("metadata_payload"))
@@ -355,12 +359,12 @@ def _review_payload_issues(
     # is NOT checked against the wrong schema; on a match (or when the register
     # carries no version) the structure is checked against the declared version.
     expected_version = str(expected.get("udmi_version") or expected.get("schema_version") or "").strip()
-    for payload_type, payload in (
-        ("state", state_payload),
-        ("metadata", metadata_payload),
-        ("pointset", pointset_payload),
+    for payload_type, payload, present in (
+        ("state", state_payload, "state_payload" in parameters),
+        ("metadata", metadata_payload, "metadata_payload" in parameters),
+        ("pointset", pointset_payload, "pointset_payload" in parameters),
     ):
-        if not payload:
+        if not present:
             continue
         issue_type = _PAYLOAD_ISSUE_TYPES[payload_type]
         payload_version = declared_version(payload)
@@ -368,7 +372,7 @@ def _review_payload_issues(
             if expected_version:
                 issues.append(
                     _issue(
-                        [*existing_issues, *issues],
+                        issues,
                         asset_id=asset_id,
                         issue_type=issue_type,
                         severity="high",
@@ -386,7 +390,7 @@ def _review_payload_issues(
         if expected_version and not versions_match(expected_version, payload_version):
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type=issue_type,
                     severity="critical",
@@ -405,7 +409,7 @@ def _review_payload_issues(
         for finding in structural_issues(payload_type, payload):
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type=issue_type,
                     severity=finding.severity,
@@ -426,7 +430,7 @@ def _review_payload_issues(
         if expected_value and observed_value and expected_value != observed_value:
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type=issue_type,
                     severity=severity,
@@ -452,10 +456,29 @@ def _review_payload_issues(
         # be a recognisable UDMI unit.
         expected_canonical = _canonical_unit(expected_unit)
         observed_canonical = _canonical_unit(metadata_unit)
+        if expected_canonical and metadata_payload and point_name in metadata_points and not observed_canonical:
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type="metadata_validation",
+                    severity="high",
+                    description=(
+                        f"Metadata point {point_name} does not declare units; "
+                        f"the register expects {expected_unit}."
+                    ),
+                    point_name=str(point_name),
+                    expected_value=str(expected_unit),
+                    observed_value="missing",
+                    suggested_action="Add the expected units to the device metadata point definition.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+
         if expected_canonical and observed_canonical and expected_canonical != observed_canonical:
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type="metadata_validation",
                     severity="high",
@@ -472,7 +495,7 @@ def _review_payload_issues(
         if canonical_to_check and canonical_to_check not in _KNOWN_CANONICAL_UNITS:
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type="metadata_validation",
                     severity="high",
@@ -489,7 +512,7 @@ def _review_payload_issues(
         if canonical_to_check in _NUMERIC_CANONICAL_UNITS and present_value is not None and not isinstance(present_value, int | float):
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type="pointset_validation",
                     severity="critical",
@@ -502,12 +525,23 @@ def _review_payload_issues(
                 )
             )
 
+    freshness_issue = _pointset_freshness_issue(
+        parameters=parameters,
+        expected=expected,
+        pointset_payload=pointset_payload,
+        issues=issues,
+        asset_id=asset_id,
+        raw_evidence_uri=raw_evidence_uri,
+    )
+    if freshness_issue is not None:
+        issues.append(freshness_issue)
+
     expected_points = set(str(point) for point in expected_units)
     observed_points = set(str(point) for point in pointset_points)
     for point_name in sorted(expected_points - observed_points):
         issues.append(
             _issue(
-                [*existing_issues, *issues],
+                issues,
                 asset_id=asset_id,
                 issue_type="pointset_validation",
                 severity="high",
@@ -522,7 +556,7 @@ def _review_payload_issues(
     for point_name in sorted(observed_points - expected_points):
         issues.append(
             _issue(
-                [*existing_issues, *issues],
+                issues,
                 asset_id=asset_id,
                 issue_type="pointset_validation",
                 severity="medium",
@@ -544,7 +578,7 @@ def _review_payload_issues(
         for point_name in sorted(expected_points - metadata_point_names):
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type="metadata_validation",
                     severity="high",
@@ -559,7 +593,7 @@ def _review_payload_issues(
         for point_name in sorted(metadata_point_names - expected_points):
             issues.append(
                 _issue(
-                    [*existing_issues, *issues],
+                    issues,
                     asset_id=asset_id,
                     issue_type="metadata_validation",
                     severity="medium",
@@ -572,7 +606,68 @@ def _review_payload_issues(
                 )
             )
 
-    return issues
+    return issues[first_new_issue:]
+
+
+def _pointset_freshness_issue(
+    *,
+    parameters: dict[str, object],
+    expected: dict[str, Any],
+    pointset_payload: dict[str, Any],
+    issues: list[ValidationIssueRecord],
+    asset_id: str,
+    raw_evidence_uri: str,
+) -> ValidationIssueRecord | None:
+    """Enforce the register cadence against the captured pointset timestamp."""
+    try:
+        interval_seconds = float(expected.get("reporting_interval_seconds", 0))
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(interval_seconds) or interval_seconds <= 0 or not pointset_payload:
+        return None
+
+    timestamp = pointset_payload.get("timestamp")
+    if not isinstance(timestamp, str):
+        return None  # Structural validation reports missing/invalid timestamps.
+    try:
+        normalized_timestamp = timestamp[:-1] + "+00:00" if timestamp.endswith(("Z", "z")) else timestamp
+        payload_time = datetime.fromisoformat(normalized_timestamp)
+        observed_raw = parameters.get("pointset_payload_received_at") or parameters.get(
+            "capture_observed_at"
+        )
+        observed_time = (
+            datetime.fromisoformat((str(observed_raw)[:-1] + "+00:00") if str(observed_raw).endswith(("Z", "z")) else str(observed_raw))
+            if observed_raw
+            else datetime.now(UTC)
+        )
+    except ValueError:
+        return None
+    if payload_time.tzinfo is None or observed_time.tzinfo is None:
+        return None
+
+    age_seconds = (observed_time.astimezone(UTC) - payload_time.astimezone(UTC)).total_seconds()
+    if age_seconds < -interval_seconds or age_seconds <= interval_seconds:
+        if age_seconds < -interval_seconds:
+            return _issue(issues, asset_id=asset_id, issue_type="pointset_validation", severity="high", description="Pointset payload timestamp is too far in the future for the capture clock.", expected_value="current device time", observed_value=f"{age_seconds:.1f}s age", suggested_action="Synchronize device and commissioning host clocks.", raw_evidence_uri=raw_evidence_uri)
+        return None
+
+    retained = parse_bool(parameters.get("pointset_payload_retained"))
+    retained_detail = " It was delivered as a retained MQTT message." if retained else ""
+    return _issue(
+        issues,
+        asset_id=asset_id,
+        issue_type="pointset_validation",
+        severity="high",
+        description=(
+            "Pointset payload timestamp exceeds the register's Expected reporting interval "
+            f"({age_seconds:.1f}s old; expected at most {interval_seconds:g}s)."
+            f"{retained_detail}"
+        ),
+        expected_value=f"at most {interval_seconds:g} seconds old",
+        observed_value=f"{age_seconds:.1f} seconds old" + (" (retained)" if retained else ""),
+        suggested_action="Wait for a fresh pointset publish and verify the device reporting cadence.",
+        raw_evidence_uri=raw_evidence_uri,
+    )
 
 
 def _capture_window(parameters: dict[str, object], cancel_check: CancelCheck | None) -> tuple[float | None, str]:
@@ -628,9 +723,36 @@ def _capture_stop_when(groups: list[list[str]]) -> Callable[[list[MqttMessage]],
     """
 
     def _complete(messages: list[MqttMessage]) -> bool:
-        return not _unseen_groups(groups, {message.topic for message in messages})
+        return not _unseen_groups(groups, _valid_payload_topics(messages))
 
     return _complete
+
+
+def _valid_payload_messages(messages: list[MqttMessage]) -> list[MqttMessage]:
+    """Messages usable as UDMI evidence: UTF-8 JSON objects, not scalars/lists."""
+    return [message for message in messages if isinstance(message.json_payload(), dict)]
+
+
+def _route_latest_payloads(parameters: dict[str, object], messages: list[MqttMessage]) -> None:
+    latest: dict[str, MqttMessage] = {}
+    for message in messages:
+        if not isinstance(message.json_payload(), dict):
+            continue
+        key = _payload_key_for_topic(message.topic)
+        if key and (key not in latest or message.received_at >= latest[key].received_at):
+            latest[key] = message
+    for key, message in latest.items():
+        parameters[key] = message.json_payload()
+        parameters[f"{key}_retained"] = message.retained
+        parameters[f"{key}_received_at"] = message.received_at.isoformat()
+
+
+def _valid_payload_topics(messages: list[MqttMessage]) -> set[str]:
+    return {message.topic for message in _valid_payload_messages(messages)}
+
+
+def _ordered_valid_payload_topics(messages: list[MqttMessage]) -> list[str]:
+    return list(dict.fromkeys(message.topic for message in _valid_payload_messages(messages)))
 
 
 def _missing_topics_issue(*, asset_id: str, missing: list[list[str]], got_any: bool) -> ValidationIssueRecord:
@@ -649,6 +771,41 @@ def _missing_topics_issue(*, asset_id: str, missing: list[list[str]], got_any: b
         severity="high",
         description=description,
         suggested_action="Confirm the device is publishing and widen the capture window if needed.",
+    )
+
+
+def _capture_error_issue(*, asset_id: str, status_detail: str) -> ValidationIssueRecord:
+    return _issue(
+        [],
+        asset_id=asset_id,
+        issue_type="payload_error",
+        severity="critical",
+        description=f"Live MQTT capture failed ({status_detail}).",
+        suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
+    )
+
+
+def _invalid_payload_issue(
+    *,
+    asset_id: str,
+    messages: list[MqttMessage],
+    missing: list[list[str]],
+) -> ValidationIssueRecord:
+    invalid_topics = sorted(
+        {message.topic for message in messages if not isinstance(message.json_payload(), dict)}
+    )
+    required_topics = ", ".join(group[0] for group in missing)
+    return _issue(
+        [],
+        asset_id=asset_id,
+        issue_type="payload_error",
+        severity="critical",
+        description=(
+            "MQTT messages arrived but were not valid JSON objects on: "
+            f"{', '.join(invalid_topics)}. Required payload group(s) remain unusable: "
+            f"{required_topics}."
+        ),
+        suggested_action="Fix the publisher so every required UDMI topic carries a JSON object.",
     )
 
 
@@ -703,6 +860,7 @@ def _capture_live_payloads(
 
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
     groups = _capture_topic_groups(topics)
+    capture_error_status: str | None = None
     try:
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
@@ -713,6 +871,9 @@ def _capture_live_payloads(
             cancel_check=cancel_check,
             stop_when=_capture_stop_when(groups),
         )
+    except MqttCaptureInterrupted as error:
+        messages = error.messages
+        capture_error_status = _broker_error_status(error.cause)
     except (MqttTransportError, OSError, ValueError) as error:
         # Use the coarse status label only; the raw exception text may carry
         # credentials (connection URL / auth detail) and this description is
@@ -723,41 +884,69 @@ def _capture_live_payloads(
             "status_detail": broker_status_detail,
             "capture_mode": capture_mode,
             "captured_topics": [],
-            "issue": _issue(
-                [],
+            "issue": _capture_error_issue(
                 asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
-                issue_type="payload_error",
-                severity="critical",
-                description=f"Live MQTT capture failed ({broker_status_detail}).",
-                suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
+                status_detail=broker_status_detail,
             ),
         }
 
+    capture_observed_at = datetime.now(UTC).isoformat()
+    parameters["capture_observed_at"] = capture_observed_at
     parameters["messages"] = [
-        {"topic": message.topic, "payload": message.json_payload()} for message in messages
+        {
+            "topic": message.topic,
+            "payload": message.json_payload(),
+            "retained": message.retained,
+            "received_at": message.received_at.isoformat(),
+        }
+        for message in messages
     ]
-    for message in messages:
-        payload = message.json_payload()
-        if not isinstance(payload, dict):
-            continue
-        key = _payload_key_for_topic(message.topic)
-        if key:
-            parameters[key] = payload
+    _route_latest_payloads(parameters, messages)
 
-    # Honesty: "captured" is only claimed when EVERY expected topic reported;
-    # a partial capture is still a timeout, with the gaps named in the issue.
-    missing = _unseen_groups(groups, {message.topic for message in messages})
+    # Without a transport failure, "captured" is claimed only when EVERY
+    # expected topic supplied a usable JSON object; malformed/scalar payloads
+    # remain raw evidence but cannot satisfy completion or canonical checks.
+    valid_messages = _valid_payload_messages(messages)
+    valid_topics = _ordered_valid_payload_topics(messages)
+    missing = _unseen_groups(groups, {message.topic for message in valid_messages})
+    if capture_error_status:
+        return {
+            "attempted": True,
+            "status_detail": capture_error_status,
+            "capture_mode": capture_mode,
+            "captured_topics": valid_topics,
+            "issue": _capture_error_issue(
+                asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
+                status_detail=capture_error_status,
+            ),
+        }
     return {
         "attempted": True,
-        "status_detail": "live_payloads_captured" if messages and not missing else "live_capture_timeout",
+        "status_detail": (
+            "live_payloads_captured" if valid_messages and not missing else "live_capture_timeout"
+        ),
         "capture_mode": capture_mode,
-        "captured_topics": [message.topic for message in messages],
+        "captured_topics": valid_topics,
         "issue": None
-        if messages and not missing
-        else _missing_topics_issue(
-            asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
-            missing=missing,
-            got_any=bool(messages),
+        if valid_messages and not missing
+        else (
+            _invalid_payload_issue(
+                asset_id=str(
+                    _dict_or_empty(parameters.get("expected_schedule")).get("asset_id")
+                    or "UDMI asset"
+                ),
+                messages=messages,
+                missing=missing,
+            )
+            if len(valid_messages) != len(messages)
+            else _missing_topics_issue(
+                asset_id=str(
+                    _dict_or_empty(parameters.get("expected_schedule")).get("asset_id")
+                    or "UDMI asset"
+                ),
+                missing=missing,
+                got_any=bool(valid_messages),
+            )
         ),
     }
 
@@ -820,6 +1009,7 @@ def _capture_live_payloads_per_asset(
     for entry_topics in per_entry_topics:
         groups.extend(_capture_topic_groups(entry_topics))
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
+    capture_error_status: str | None = None
     try:
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
@@ -830,6 +1020,9 @@ def _capture_live_payloads_per_asset(
             cancel_check=cancel_check,
             stop_when=_capture_stop_when(groups),
         )
+    except MqttCaptureInterrupted as error:
+        messages = error.messages
+        capture_error_status = _broker_error_status(error.cause)
     except (MqttTransportError, OSError, ValueError) as error:
         # Coarse status label only — raw broker error text may carry credentials.
         broker_status_detail = _broker_error_status(error)
@@ -838,44 +1031,64 @@ def _capture_live_payloads_per_asset(
             "status_detail": broker_status_detail,
             "capture_mode": capture_mode,
             "captured_topics": [],
-            "issue": _issue(
-                [],
-                asset_id="UDMI assets",
-                issue_type="payload_error",
-                severity="critical",
-                description=f"Live MQTT capture failed ({broker_status_detail}).",
-                suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
-            ),
+            "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=broker_status_detail),
         }
+
+    capture_observed_at = datetime.now(UTC).isoformat()
 
     # Route every message back to each entry whose subscribed topics match it,
     # mirroring the single-asset routing (last payload per slot wins).
     for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
+        entry["capture_observed_at"] = capture_observed_at
         entry_messages = [
             message
             for message in messages
             if any(_topic_matches_filter(message.topic, topic) for topic in entry_topics)
         ]
         entry["messages"] = [
-            {"topic": message.topic, "payload": message.json_payload()} for message in entry_messages
+            {
+                "topic": message.topic,
+                "payload": message.json_payload(),
+                "retained": message.retained,
+                "received_at": message.received_at.isoformat(),
+            }
+            for message in entry_messages
         ]
-        for message in entry_messages:
-            payload = message.json_payload()
-            if not isinstance(payload, dict):
-                continue
-            key = _payload_key_for_topic(message.topic)
-            if key:
-                entry[key] = payload
+        _route_latest_payloads(entry, entry_messages)
 
-    missing = _unseen_groups(groups, {message.topic for message in messages})
+    valid_messages = _valid_payload_messages(messages)
+    valid_topics = _ordered_valid_payload_topics(messages)
+    missing = _unseen_groups(groups, {message.topic for message in valid_messages})
+    if capture_error_status:
+        return {
+            "attempted": True,
+            "status_detail": capture_error_status,
+            "capture_mode": capture_mode,
+            "captured_topics": valid_topics,
+            "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=capture_error_status),
+        }
     return {
         "attempted": True,
-        "status_detail": "live_payloads_captured" if messages and not missing else "live_capture_timeout",
+        "status_detail": (
+            "live_payloads_captured" if valid_messages and not missing else "live_capture_timeout"
+        ),
         "capture_mode": capture_mode,
-        "captured_topics": [message.topic for message in messages],
+        "captured_topics": valid_topics,
         "issue": None
-        if messages and not missing
-        else _missing_topics_issue(asset_id="UDMI assets", missing=missing, got_any=bool(messages)),
+        if valid_messages and not missing
+        else (
+            _invalid_payload_issue(
+                asset_id="UDMI assets",
+                messages=messages,
+                missing=missing,
+            )
+            if len(valid_messages) != len(messages)
+            else _missing_topics_issue(
+                asset_id="UDMI assets",
+                missing=missing,
+                got_any=bool(valid_messages),
+            )
+        ),
     }
 
 
@@ -1026,7 +1239,11 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
     elif payload_type == "metadata":
         facet = {key: expected[key] for key in ("guid", "units") if expected.get(key) is not None}
     elif payload_type == "pointset":
-        facet = {key: expected[key] for key in ("units",) if expected.get(key) is not None}
+        facet = {
+            key: expected[key]
+            for key in ("units", "reporting_interval_seconds")
+            if expected.get(key) is not None
+        }
     else:
         facet = {}
     # The version check applies to every payload type, so surface it in each facet.
@@ -1035,7 +1252,11 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
     return facet or None
 
 
-def _asset_payload_view(expected: dict[str, Any], observed_by_type: dict[str, dict]) -> dict[str, object] | None:
+def _asset_payload_view(
+    expected: dict[str, Any],
+    observed_by_type: dict[str, dict],
+    retained_by_type: dict[str, bool],
+) -> dict[str, object] | None:
     """Build ONE asset's per-payload-type expected-vs-observed view, or None.
 
     A payload type is omitted when neither an expected facet nor an observed
@@ -1053,6 +1274,7 @@ def _asset_payload_view(expected: dict[str, Any], observed_by_type: dict[str, di
                 "expected": expected_facet,
                 "observed": observed or None,
                 "observed_present": bool(observed),
+                "retained": retained_by_type[payload_type],
             }
         )
     if not payload_types:
@@ -1066,6 +1288,13 @@ def _observed_by_type(source: dict[str, object]) -> dict[str, dict]:
         "state": _dict_or_empty(source.get("state_payload")),
         "metadata": _dict_or_empty(source.get("metadata_payload")),
         "pointset": _dict_or_empty(source.get("pointset_payload")),
+    }
+
+
+def _retained_by_type(source: dict[str, object]) -> dict[str, bool]:
+    return {
+        payload_type: parse_bool(source.get(f"{payload_type}_payload_retained"))
+        for payload_type in ("state", "metadata", "pointset")
     }
 
 
@@ -1091,12 +1320,20 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
         for entry in assets:
             if not isinstance(entry, dict):
                 continue
-            view = _asset_payload_view(_dict_or_empty(entry.get("expected_schedule")), _observed_by_type(entry))
+            view = _asset_payload_view(
+                _dict_or_empty(entry.get("expected_schedule")),
+                _observed_by_type(entry),
+                _retained_by_type(entry),
+            )
             if view is not None:
                 views.append(view)
         return views
 
-    view = _asset_payload_view(_dict_or_empty(parameters.get("expected_schedule")), _observed_by_type(parameters))
+    view = _asset_payload_view(
+        _dict_or_empty(parameters.get("expected_schedule")),
+        _observed_by_type(parameters),
+        _retained_by_type(parameters),
+    )
     return [view] if view is not None else []
 
 

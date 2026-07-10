@@ -25,13 +25,15 @@ dependencies = [
   "pydantic==2.12.5",
   "sqlalchemy==2.0.49",
   "alembic==1.18.4",
+  "jsonschema==4.26.0",
+  "referencing==0.37.0",
 ]
 
 [project.optional-dependencies]
 # Real BACnet/IP discovery transport (Bacpypes3Backend). NOT a hard dependency:
-# the BACnet engine defaults to a simulated, offline backend and only needs
-# bacpypes3 when the real backend is selected. The real path REQUIRES on-site
-# validation against actual BACnet devices and has never been integration-tested.
+# dry runs default to the simulated backend; authorized non-dry runs default to
+# bacpypes3. The real path REQUIRES on-site validation against actual BACnet
+# devices and has never been integration-tested.
 bacnet = ["bacpypes3>=0.0.98"]
 # Optional tooling for generating an SBOM / license inventory with the
 # off-the-shelf tools (the in-repo scripts/generate_sbom.py uses only the
@@ -46,7 +48,12 @@ include = ["smart_commissioning_core*"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-smart_commissioning_core = ["fixtures/*.json"]
+smart_commissioning_core = [
+  "fixtures/*.json",
+  "schemas/udmi/LICENSE",
+  "schemas/udmi/UPSTREAM.md",
+  "schemas/udmi/1.5.2/*.json",
+]
 
 # The Alembic migration environment (alembic.ini + alembic/**) lives at the
 # project root, not inside the smart_commissioning_core package, because the

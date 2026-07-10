@@ -8,10 +8,10 @@ TestClient.
 HONESTY: there is NO real building network, BACnet device, or MQTT broker here.
 The only real I/O exercised is an IP TCP-connect sweep against an ephemeral
 loopback listener this test opens itself (127.0.0.1) — the honest, environment-
-safe slice of the IP engine's real path. BACnet discovery runs against the
-OFFLINE SimulatedBacnetBackend (the engine default), and the validation/
-comparison/mqtt-config tests use inline parameters / fakes. No assertion in this
-file depends on real hardware.
+safe slice of the IP engine's real path. BACnet dry runs use the OFFLINE
+SimulatedBacnetBackend; non-dry tests assert that live simulation is rejected or
+patch the unvalidated bacpypes3 path. Validation/comparison/mqtt-config tests use
+inline parameters / fakes. No assertion in this file depends on real hardware.
 """
 
 import importlib.util
@@ -190,36 +190,40 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
 
 
 class BacnetDiscoveryApiTests(_EngineApiTestCase):
-    def test_simulated_backend_end_to_end_persists_devices_and_points(self) -> None:
+    def test_non_dry_run_rejects_simulated_backend(self) -> None:
         response = self._post(
             "/api/v1/discovery/bacnet/runs",
             {**_AUTH, "bacnet_backend": "simulated"},
             "bacnet_discovery",
         )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["status"], "succeeded")
-        run_id = response.json()["run_id"]
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("only available for dry runs", response.json()["detail"])
 
-        results = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
-        self.assertEqual(results["result_summary"]["backend"], "simulated")
-        self.assertGreaterEqual(len(results["devices"]), 1)
-        self.assertGreaterEqual(len(results["points"]), 1)
-        self.assertTrue(all(d["device_type"] == "bacnet_device" for d in results["devices"]))
-
-        # The points view endpoint returns the same persisted points.
-        points = self.client.get(f"/api/v1/discovery/runs/{run_id}/points").json()
-        self.assertEqual(len(points["points"]), len(results["points"]))
+    def test_unknown_bacnet_backend_returns_400(self) -> None:
+        response = self._post(
+            "/api/v1/discovery/bacnet/runs",
+            {**_AUTH, "bacnet_backend": "not-a-backend"},
+            "bacnet_discovery",
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("Unsupported BACnet backend", response.json()["detail"])
 
     def test_bacnet_dry_run_emits_no_broadcast(self) -> None:
         response = self._post(
             "/api/v1/discovery/bacnet/runs",
-            {**_AUTH, "dry_run": True, "device_instance_low": 1000, "device_instance_high": 2000},
+            {
+                **_AUTH,
+                "dry_run": True,
+                "device_instance_low": 1000,
+                "device_instance_high": 2000,
+            },
             "bacnet_discovery",
         )
         self.assertEqual(response.status_code, 200, response.text)
         run_id = response.json()["run_id"]
         results = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertIn("dry_run_plan", results["result_summary"])
+        self.assertEqual(results["result_summary"]["backend"], "simulated")
         self.assertEqual(results["devices"], [])
 
     def test_authorized_run_defaults_bacnet_backend_to_bacpypes3(self) -> None:
@@ -247,9 +251,11 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
         # The exe-today case: an authorized real run selects bacpypes3, which is
         # not installed, so the inline run must terminate FAILED and expose NO
         # simulated devices/points — never the "Acme Controls"/"Globex BMS" fakes.
+        # local_address is explicit so this reaches the missing-dependency failure
+        # instead of stopping first at the Source Interface guard.
         response = self._post(
             "/api/v1/discovery/bacnet/runs",
-            {**_AUTH},
+            {**_AUTH, "local_address": "192.0.2.10/24"},
             "bacnet_discovery",
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -258,6 +264,7 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
 
         results = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertEqual(results["status"], "failed")
+        self.assertNotIn("Source Interface", str(results.get("error_message")))
         self.assertEqual(results["devices"], [])
         self.assertEqual(results["points"], [])
         self.assertEqual(results["discovered_assets"], [])

@@ -131,9 +131,12 @@ const defaultStatePayload = JSON.stringify(
         make: "Schneider",
         model: "PM5111",
       },
+      last_config: "2026-04-01T10:45:00.000+01:00",
       operation: {
         operational: true,
       },
+      serial_no: "PM5111-1000001",
+      software: {},
     },
     timestamp: "2026-04-01T10:47:38.697+01:00",
     version: "1.5.2",
@@ -154,6 +157,7 @@ const defaultMetadataPayload = JSON.stringify(
       physical_tag: {
         asset: {
           guid: "ifc://expected-ahu-1000001",
+          name: "AHU-1000001",
         },
       },
     },
@@ -428,10 +432,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     onSuccess: (summary) => {
       setImportOutcome(summary);
-      // An accepted MQTT register flips the UDMI workbench into register-driven
-      // validation so Run checks the uploaded rows, not the pasted sample.
+      // Default accepted MQTT registers to uploaded-row validation against live
+      // broker payloads; both options remain editable.
       if (summary.import_type === "mqtt_register" && summary.status !== "rejected") {
         setUdmiUseRegister(true);
+        setUdmiUseLiveBroker(true);
       }
     },
   });
@@ -1681,33 +1686,40 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </label>
 
           {udmiUseLiveBroker && (
-            <div className="publish-grid">
-              {!udmiUseRegister && (
-                <>
-                  <label>
-                    State topic
-                    <input onChange={(event) => setUdmiStateTopic(event.target.value)} value={udmiStateTopic} />
-                  </label>
-                  <label>
-                    Metadata topic
-                    <input onChange={(event) => setUdmiMetadataTopic(event.target.value)} value={udmiMetadataTopic} />
-                  </label>
-                  <label>
-                    Pointset topic
-                    <input onChange={(event) => setUdmiPointsetTopic(event.target.value)} value={udmiPointsetTopic} />
-                  </label>
-                </>
-              )}
-              <label>
-                Run time (seconds — blank = run until all expected topics are captured or you stop the run)
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
-                  placeholder="blank = until every topic reports"
-                  value={udmiCaptureSeconds}
-                />
-              </label>
-            </div>
+            <>
+              <div className="publish-grid">
+                {!udmiUseRegister && (
+                  <>
+                    <label>
+                      State topic
+                      <input onChange={(event) => setUdmiStateTopic(event.target.value)} value={udmiStateTopic} />
+                    </label>
+                    <label>
+                      Metadata topic
+                      <input onChange={(event) => setUdmiMetadataTopic(event.target.value)} value={udmiMetadataTopic} />
+                    </label>
+                    <label>
+                      Pointset topic
+                      <input onChange={(event) => setUdmiPointsetTopic(event.target.value)} value={udmiPointsetTopic} />
+                    </label>
+                  </>
+                )}
+                <label>
+                  Run time (seconds — blank = all required topics or Cancel)
+                  <input
+                    inputMode="numeric"
+                    onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
+                    placeholder="blank = all required topics or Cancel"
+                    value={udmiCaptureSeconds}
+                  />
+                </label>
+              </div>
+              <p className="section-copy">
+                Blank runs until all required topics report or you press Cancel run. Worker captures are capped at 1
+                hour; inline/portable captures at 240 seconds. The completion-driven safety limit is 500 distinct
+                concrete topics.
+              </p>
+            </>
           )}
 
           <div className="inline-actions execute-row">

@@ -334,9 +334,9 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
         self.assertEqual(failed["observed_value"], {})
         self.assertEqual(failed["attributes"]["read_error"], "present_value_read_failed")
 
-    def test_process_entrypoint_defaults_to_simulated_backend(self) -> None:
-        # process_bacnet_discovery_run with NO backend must default to the
-        # offline simulated backend and run end-to-end.
+    def test_non_dry_run_defaults_to_real_backend_and_never_returns_fixtures(self) -> None:
+        # A direct non-dry processor call follows the same honesty rule as the
+        # public API: no selector means bacpypes3, never the offline fixtures.
         store = FakeRunStore()
         result = process_bacnet_discovery_run(
             "run_default",
@@ -345,9 +345,41 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
             execution_mode="inline_local_fallback",
             throttle=ThrottleConfig(rate_limit_per_sec=None),
         )
-        self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(store.summary_calls[-1]["backend"], BACKEND_SIMULATED)
-        self.assertEqual(store.summary_calls[-1]["device_count"], 3)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Source Interface", str(result["error_message"]))
+        self.assertNotIn("backend", store.summary_calls[-1])
+        self.assertEqual(store.summary_calls[-1]["device_count"], 0)
+
+    def test_non_dry_run_rejects_explicit_simulated_backend(self) -> None:
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        result = process_bacnet_discovery_run(
+            "run_simulated_live",
+            {**_AUTHORIZED, "bacnet_backend": "simulated"},
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            throttle=ThrottleConfig(rate_limit_per_sec=None),
+            persist_records=lambda run_id, records: persisted.append((run_id, list(records))),
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("only available for dry runs", str(result["error_message"]))
+        self.assertEqual(persisted, [])
+
+    def test_non_dry_run_rejects_unknown_backend(self) -> None:
+        store = FakeRunStore()
+
+        result = process_bacnet_discovery_run(
+            "run_unknown_backend",
+            {**_AUTHORIZED, "bacnet_backend": "not-a-backend"},
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            throttle=ThrottleConfig(rate_limit_per_sec=None),
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Unsupported BACnet backend", str(result["error_message"]))
 
 
 class Bacpypes3BackendGuardTests(unittest.TestCase):

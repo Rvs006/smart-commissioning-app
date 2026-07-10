@@ -13,42 +13,64 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Added
 
+- **Security: patched Python runtime dependencies** — pinned Starlette 1.3.1,
+  cryptography 48.0.1, pydantic-settings 2.14.2, and python-multipart 0.0.31 to
+  clear the current published advisory ranges. Starlette now includes the
+  Windows `StaticFiles` UNC-path protection and `FormParser` field/part-size
+  enforcement missing from 1.0.0. The frozen Windows smoke also proves the
+  canonical UDMI schema files are present and exercises nested schema
+  validation through the running executable.
+
 - **UDMI workbench: run until every register topic reports (or a set run time)** —
   the workbench Setup stage's capture field is now **Run time (seconds)**: blank
-  (or 0) runs the live capture until a payload has been seen for **every**
-  expected topic from the imported register (distinct topics, wildcard-aware —
-  duplicate publishes on one chatty topic no longer end the capture early), the
-  operator presses **Cancel run**, or a safety ceiling is hit; a positive number
-  bounds the run to that many seconds. Multi-asset runs now use **one shared
-  broker subscription** across all assets' topics (messages route back to each
+  runs the live capture until a payload has been seen for **every** required
+  topic group from the imported register (distinct topics, wildcard-aware), or
+  the operator presses **Cancel run**. Worker captures are capped at 1h and 500
+  distinct concrete-topic slots (duplicates reuse a slot); inline blank captures
+  are capped at 240s. A positive number bounds the run to that many seconds.
+  Multi-asset runs now use **one shared
+  broker subscription** across all assets' topics, encoded as one MQTT
+  SUBSCRIBE packet before the broker can deliver retained payloads (messages route back to each
   asset's state/metadata/pointset evidence) instead of sequential per-asset
   windows, so quiet assets are no longer starved behind chatty ones. Cancel is
   wired end-to-end for UDMI validation (Cancel run → cooperative flag → capture
   stops within ~1s → run finishes as `cancelled` with its real partial results).
-  Honesty: a capture that ends with expected topics still silent is reported as
-  `live_capture_timeout` with a `not_publishing` issue naming the missing
-  topics; `live_payloads_captured` is only claimed when every expected topic
-  reported; an indefinite request with no reachable cancel path (or on the
-  inline/portable-exe path, where no Cancel button can render mid-request) is
-  bounded and flagged (`capture_mode` / `indefinite_bounded_inline`) rather than
-  hanging unkillably.
-- **UDMI workbench: real schema-version + structural validation** — the register
+  Honesty: a non-cancelled capture that ends with required topics still silent is
+  terminal `failed` and retains `live_capture_timeout` plus a `not_publishing`
+  issue naming the missing topics; `live_payloads_captured` is only claimed when
+  every required topic group reported. A broker drop after messages arrive keeps
+  those partial payloads but records a coarse broker failure and terminal
+  `failed`. A topic only satisfies completion after its payload decodes to a
+  JSON object; malformed/scalar messages remain evidence but produce a critical
+  issue instead of a false complete capture. Bounded fallbacks remain visible through `capture_mode` /
+  `indefinite_bounded_inline` rather than hanging unkillably.
+- **UDMI workbench: canonical schema-version validation** — the register
   template's **Expected schema version** now flows into the UDMI validator and is
   compared against each captured/pasted payload's declared top-level `version`
   (mismatch → immediate critical issue; missing version flagged). On a match the
-  payload structure is checked against a field-level ruleset for that version
-  (`udmi_schema.py`, `1.5.2` pinned from the published UDMI schemas: required
-  `timestamp`/`version`/`system` or `points`, RFC 3339 timestamps, point-name
-  pattern, `present_value` per pointset entry, string `units` in metadata).
+  payload structure is checked offline against the complete recursive Draft 7
+  schema closure for state, metadata, and events/pointset vendored verbatim from
+  the official UDMI `1.5.2` tag. This validates nested objects, required fields,
+  formats, enums, patterns, limits, and additional-property rules as well as the
+  existing focused operator checks.
   Expected register units must now **match** the metadata payload units (with
   `kwh`→`kilowatt_hours`-style alias normalisation, and an explicit `no_units`
   declaration treated as a real observed value) instead of only being
-  "a known unit", expected points are checked in the **metadata** pointset as
+  "a known unit"; an expected unit missing from metadata is now an error, and
+  imports reject point/unit lists that cannot pair one-to-one. Expected points
+  are checked in the **metadata** pointset as
   well as the live pointset events, and a register wildcard topic additionally
   captures the legacy `…/event/pointset` convention. The workbench gained a
-  **register-driven mode** (auto-enabled after an accepted `mqtt_register`
-  import): Run sends no pasted schedule/payloads and the backend fans out one
+  **register-driven live mode** (both register and broker capture auto-enabled
+  after an accepted `mqtt_register` import, while remaining operator-editable):
+  Run sends no pasted schedule/payloads and the backend fans out one
   expected asset per register row — a single row keeps its capture topics, and
+  a blank **Payload type** means the row requires the whole asset trio even when
+  only one explicit sibling topic was supplied. The register's **Expected
+  reporting interval** now flags stale pointset timestamps (including retained
+  MQTT evidence, whose RETAIN flag is preserved), and invalid bare wildcards or
+  unknown payload types are rejected during import. Failed MQTT/UDMI live runs
+  carry a sanitized operator-facing `error_message`, and
   a register-driven run with no register import is refused (400) instead of
   silently validating the packaged sample fixture. The workbench Results table
   now renders **real per-asset, per-payload rows** from the run's payload views
@@ -225,6 +247,11 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
 
 ### Fixed
 
+- **Live MQTT outcome and configuration honesty.** Saved MQTT **Use TLS** values
+  must be Enabled or Disabled, and malformed per-run `use_tls` overrides are
+  rejected instead of silently disabling TLS. Non-cancelled broker, discovery,
+  and incomplete live-UDMI outcomes now finish `failed`; mid-capture broker drops
+  retain real partial evidence, and operator cancellation remains `cancelled`.
 - **Medium/low audit backlog: honesty and safety fixes (2026-07-09).** A batch of
   smaller audit findings, all now honest or fail-closed: MQTT **fails closed when
   a configured CA file is missing** (no silent fallback to system trust); the
@@ -266,8 +293,9 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   explicit **Use TLS** (Enabled/Disabled) control so a secure (8883/TLS) vs
   non-secure (1883/plain) broker connection can be chosen directly rather than
   inferred only from the port. `build_mqtt_connection_settings` honours the
-  persisted `Use TLS` selection (explicit `use_tls` run parameter still wins);
-  configs saved before the control keep the port-based default (8883 = TLS).
+  persisted `Use TLS` selection (a valid explicit `use_tls` run parameter still
+  wins; malformed overrides fail closed); configs saved before the control keep
+  the port-based default (8883 = TLS).
 - **Real BACnet discovery in the portable exe (field bug, on-site 2026-07-09).**
   The exe returned *simulated* devices ("Acme Controls"/"Globex BMS") for every
   BACnet scan because (a) `bacpypes3` was not bundled, (b) the route never
@@ -276,8 +304,8 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   `bacpypes3` backend (`bacpypes3` is bundled with `--collect-all` + a frozen
   hidden-import + a `_internal\bacpypes3` boot-smoke assert); if the real stack
   or the NIC bind is unavailable the run records a **real failed status** — it
-  never silently returns simulated data. Dry-run stays a simulated *plan*, and
-  an explicit `bacnet_backend="simulated"` remains the demo escape hatch. The
+  never silently returns simulated data. Dry-run stays a simulated *plan*;
+  explicit simulated or unknown backends on a live run are rejected with 400. The
   discovery results view now shows a prominent **"SIMULATED — demo data"**
   banner vs a **"Live bacpypes3 scan"** confirmation, driven by
   `result_summary.backend`. NOTE: the real bacpypes3 path is validated by frozen

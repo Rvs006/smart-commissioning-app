@@ -2,28 +2,32 @@
 
 ## Generated inventory
 
-Generated: 2026-06-12T16:09:03.854053+00:00
+Generated: 2026-07-10T08:58:44.069295+00:00
 
 ### Direct (declared) dependencies
 
 | Package | Version | License | Purpose | Required by |
 | --- | --- | --- | --- | --- |
 | alembic | 1.18.4 | MIT | Database schema migrations (applied on API startup). | smart-commissioning-core |
-| bacpypes3 | (not installed) | UNKNOWN | OPTIONAL: real BACnet/IP transport (UNVALIDATED extra). | smart-commissioning-core[bacnet] |
-| cryptography | 46.0.7 | Apache-2.0 OR BSD-3-Clause | Fernet encryption of secret material at rest. | smart-commissioning-api |
+| bacpypes3 | 0.0.106 | MIT | OPTIONAL: real BACnet/IP transport (UNVALIDATED extra). | smart-commissioning-core[bacnet] |
+| cryptography | 48.0.1 | Apache-2.0 OR BSD-3-Clause | Fernet encryption of secret material at rest. | smart-commissioning-api |
 | cyclonedx-bom | (not installed) | UNKNOWN |  | smart-commissioning-api[sbom], smart-commissioning-core[sbom], smart-commissioning-worker[sbom] |
 | dramatiq | 1.18.0 | GNU Lesser General Public License v3 or later (LGPLv3+) | Background job queue (worker actors over Redis). | smart-commissioning-api, smart-commissioning-worker |
 | fastapi | 0.135.3 | MIT | HTTP API framework (routing, validation, OpenAPI). | smart-commissioning-api |
 | httpx | 0.28.1 | BSD-3-Clause | HTTP client used by the API/tests. | smart-commissioning-api |
+| jsonschema | 4.26.0 | MIT | Offline validation against the vendored canonical UDMI schemas. | smart-commissioning-core |
 | openpyxl | 3.1.5 | MIT | XLSX import parsing and report generation. | smart-commissioning-api |
 | pip-licenses | (not installed) | UNKNOWN |  | smart-commissioning-api[sbom], smart-commissioning-core[sbom], smart-commissioning-worker[sbom] |
 | prometheus_client | 0.25.0 | Apache-2.0 AND BSD-2-Clause | Metrics exposition for the /metrics endpoint. | dramatiq, smart-commissioning-api |
+| psutil | 7.2.2 | BSD-3-Clause |  | smart-commissioning-api |
 | psycopg | 3.3.4 | LGPL-3.0-only | PostgreSQL driver (hosted profile DATABASE_URL). | smart-commissioning-api, smart-commissioning-worker |
 | pydantic | 2.12.5 | MIT | Typed request/response and domain models. | fastapi, pydantic-settings, smart-commissioning-core |
-| pydantic-settings | 2.13.1 | MIT | Environment-variable settings loading (Settings). | smart-commissioning-api, smart-commissioning-worker |
-| python-multipart | 0.0.26 | Apache-2.0 | multipart/form-data parsing for file uploads. | smart-commissioning-api |
+| pydantic-settings | 2.14.2 | MIT | Environment-variable settings loading (Settings). | smart-commissioning-api |
+| python-multipart | 0.0.31 | Apache-2.0 | multipart/form-data parsing for file uploads. | smart-commissioning-api |
 | redis | 5.3.1 | MIT | Redis client for the Dramatiq broker + readiness ping. | smart-commissioning-api |
+| referencing | 0.37.0 | MIT | Offline JSON-Schema $ref registry for the vendored UDMI closure. | jsonschema, jsonschema-specifications, smart-commissioning-core |
 | SQLAlchemy | 2.0.49 | MIT | ORM / database access layer for runs, imports, configuration. | alembic, smart-commissioning-api, smart-commissioning-core, smart-commissioning-worker |
+| starlette | 1.3.1 | BSD-3-Clause | ASGI toolkit underlying FastAPI (middleware, routing). | fastapi, smart-commissioning-api |
 | uvicorn | 0.44.0 | BSD-3-Clause | ASGI server that runs the FastAPI app. | smart-commissioning-api |
 
 ### Transitive dependencies
@@ -32,31 +36,32 @@ Generated: 2026-06-12T16:09:03.854053+00:00
 | --- | --- | --- | --- |
 | annotated-doc | 0.0.4 | MIT | fastapi |
 | annotated-types | 0.7.0 | MIT License | pydantic |
-| anyio | 4.13.0 | MIT | httpx, starlette |
+| anyio | 4.14.1 | MIT | httpx, starlette |
 | async-timeout | (not installed) | UNKNOWN | redis |
-| certifi | 2026.2.25 | MPL-2.0 | httpcore, httpx |
-| cffi | 2.0.0 | MIT | cryptography |
-| click | 8.3.2 | BSD-3-Clause | uvicorn |
+| attrs | 26.1.0 | MIT | jsonschema, referencing |
+| certifi | 2026.6.17 | MPL-2.0 | httpcore, httpx |
+| cffi | 2.1.0 | MIT-0 | cryptography |
+| click | 8.4.2 | BSD-3-Clause | uvicorn |
 | colorama | 0.4.6 | BSD License | click |
 | et_xmlfile | 2.0.0 | MIT | openpyxl |
-| exceptiongroup | 1.3.1 | MIT License | anyio |
-| greenlet | 3.4.0 | MIT AND PSF-2.0 | sqlalchemy |
+| exceptiongroup | (not installed) | UNKNOWN | anyio |
+| greenlet | 3.5.3 | MIT AND PSF-2.0 | sqlalchemy |
 | h11 | 0.16.0 | MIT | httpcore, uvicorn |
 | httpcore | 1.0.9 | BSD-3-Clause | httpx |
-| idna | 3.11 | BSD-3-Clause | anyio, httpx |
-| importlib_metadata | 8.7.1 | Apache-2.0 | sqlalchemy |
-| Mako | 1.3.10 | MIT | alembic |
+| idna | 3.18 | BSD-3-Clause | anyio, httpx |
+| importlib-metadata | (not installed) | UNKNOWN | sqlalchemy |
+| jsonschema-specifications | 2025.9.1 | MIT | jsonschema |
+| Mako | 1.3.12 | MIT | alembic |
 | MarkupSafe | 3.0.3 | BSD-3-Clause | mako |
 | pycparser | 3.0 | BSD-3-Clause | cffi |
 | pydantic_core | 2.41.5 | MIT | pydantic |
-| PyJWT | 2.12.1 | MIT | redis |
+| PyJWT | 2.13.0 | MIT | redis |
 | python-dotenv | 1.2.2 | BSD-3-Clause | pydantic-settings |
-| starlette | 1.0.0 | BSD-3-Clause | fastapi |
+| rpds-py | 2026.6.3 | MIT | jsonschema, referencing |
 | tomli | (not installed) | UNKNOWN | alembic |
-| typing_extensions | 4.15.0 | PSF-2.0 | alembic, annotated-types, anyio, cryptography, exceptiongroup, fastapi, psycopg, pydantic, pydantic-core, pyjwt, sqlalchemy, starlette, typing-inspection, uvicorn |
+| typing_extensions | 4.16.0 | PSF-2.0 | alembic, annotated-types, anyio, cryptography, fastapi, psycopg, pydantic, pydantic-core, pyjwt, referencing, sqlalchemy, starlette, typing-inspection, uvicorn |
 | typing-inspection | 0.4.2 | MIT | fastapi, pydantic, pydantic-settings |
-| tzdata | 2026.1 | Apache-2.0 | psycopg |
-| zipp | 3.23.0 | MIT | importlib-metadata |
+| tzdata | 2026.2 | Apache-2.0 | psycopg |
 
 ### License check
 

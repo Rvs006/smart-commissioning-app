@@ -14,25 +14,24 @@ rules in `udmi_schema.py`). It validates expected MQTT assets against UDMI-style
 `state`, `metadata`, and `pointset` contracts and emits the shared normalized
 issue record. The register's **Expected schema version** is compared against
 each payload's declared top-level `version` (mismatch → immediate critical
-issue), and on a match the payload structure is checked against a
-**field-level structural ruleset for that version** (currently pinned:
-`1.5.2`, grounded in the published github.com/faucetsdn/udmi schemas). This is
-deliberate field-level checking, not a full JSON-Schema evaluation; an unknown
-declared version reports "structural checks skipped" rather than silently
-passing.
+issue), and on a match the payload structure is checked offline against the
+complete recursive canonical schema closure for that payload type (currently
+the official `faucetsdn/udmi` `1.5.2` Draft 7 state, metadata, and
+events/pointset schemas). An unknown declared version reports "structural
+checks skipped" rather than silently passing.
 
 Validated features (each exercised by unit tests with inline/fixture payloads):
 
 | UDMI feature | What is checked | Status |
 | --- | --- | --- |
 | Schema version match | register `Expected schema version` vs each payload's top-level `version`; missing payload version flagged; mismatch is a critical issue and blocks structural checks against the wrong schema. | Tested |
-| Structural checks (per declared version, 1.5.2 pinned) | required top-level fields (`timestamp`/`version`/`system` for state+metadata, `timestamp`/`version`/`points` for pointset); RFC 3339 timestamp; `system` is an object; pointset point names match the UDMI pattern and entries carry `present_value`; metadata point `units` are strings. | Tested |
+| Canonical schema checks (per declared version, 1.5.2 pinned) | complete offline validation through the official recursive state, metadata, and events/pointset schema closure: nested required fields, types, RFC 3339 formats, patterns, enums, numeric limits, and additional-property rules. Focused checks retain clearer point-name/shape messages where useful. | Tested |
 | `state` payload | manufacturer (`system.hardware.make`) and model (`system.hardware.model`) match the asset register; offline/error states. | Tested (inline payloads) |
 | `metadata` payload | asset GUID (`system.physical_tag.asset.guid`) matches the register; point units sourced from `metadata.pointset.points`; expected points must be defined in the metadata pointset (missing/extra flagged). | Tested |
 | `pointset` payload | expected points present; unexpected points flagged; `present_value` is numeric for numeric units. | Tested |
-| Units | the register's expected unit must **match** the metadata payload unit after normalisation (case, `-`/`_`, and shorthand aliases such as `kwh` → `kilowatt_hours`); the unit must also be a known UDMI unit (`degrees_celsius`, `parts_per_million`, `percent`, `volts`, `amperes`, `hertz`, `kilowatts`, `kilowatt_hours`, `kilovolt_amperes`, `kilovolt_amperes_reactive`, plus `no_units`/`boolean`/`enum`); numeric units require numeric values. | Tested |
+| Units | the register's expected unit must be present in metadata and **match** it after normalisation (case, `-`/`_`, and shorthand aliases such as `kwh` → `kilowatt_hours`); imported point/unit lists must pair one-to-one; the unit must also be a known UDMI unit (`degrees_celsius`, `parts_per_million`, `percent`, `volts`, `amperes`, `hertz`, `kilowatts`, `kilowatt_hours`, `kilovolt_amperes`, `kilovolt_amperes_reactive`, plus `no_units`/`boolean`/`enum`); numeric units require numeric values. | Tested |
 | Schedule / expected-asset input | a supplied expected schedule (`expected_schedule` with `asset_id`, `manufacturer`, `model`, `guid`, `udmi_version`, `units`) drives the per-point checks; the backend fills it from the imported `mqtt_register` (including `Expected schema version` and wildcard `Expected topic` expansion, plus the legacy `…/event/pointset` capture alias). | Tested |
-| Silent / not-publishing device | devices in `DevicesNotPublishing`, and (live) an empty **or partial** capture window, raise `not_publishing` — a partial capture names each expected topic that never reported. | Tested (fixture/inline); live capture is live-untested |
+| Silent / not-publishing device | devices in `DevicesNotPublishing`, and (live) an empty **or partial** capture window, raise `not_publishing` — a partial capture names each expected topic that never reported. A non-cancelled incomplete live run is terminal `failed`; operator cancellation remains terminal `cancelled` and keeps partial evidence. | Tested (fixture/inline); live capture is live-untested |
 | Missing vs unexpected points | expected-but-absent points and received-but-unexpected points are classified separately. | Tested |
 | Full-report fixture mode | normalizes a `full_report.json` (DeviceList, PayloadErrors, PointsetErrors, StateErrors, ...) into issues. | Tested (packaged fixture) |
 
@@ -65,12 +64,14 @@ remaining-length varint encoding/decoding.
 | Protocol level 3.1.1 (`MQTT`, level `0x04`) | Tested | CONNECT variable header is hard-coded to 3.1.1. |
 | Packet framing (remaining-length varint, UTF-8 string fields) | Tested | Encode/decode exercised with a fake socket. |
 | CONNECT + CONNACK return codes | Tested | Codes 1–5 mapped to clear errors (e.g. "bad username or password", "not authorised"). |
-| SUBSCRIBE + SUBACK (incl. failure 0x80) | Tested | Rejected subscription raises. |
+| SUBSCRIBE + SUBACK (incl. failure 0x80) | Tested | All filters are encoded in one SUBSCRIBE before retained payloads can arrive; packet id, grant count, and rejection codes are checked. This fixes the real-broker ordering where a retained PUBLISH was mistaken for the next per-topic SUBACK. |
 | PUBLISH send / receive, topic filter match | Tested | `read_publish` / `read_publish_any` with a fake socket; `#` and `prefix/#` filters match concrete publish topics. |
 | Username / password auth | Tested (framing) | Credentials placed in the CONNECT payload; real broker auth is live-untested. |
 | TLS (CA cert, client cert, private key, SNI) | Live-untested | `_wrap_tls` builds an SSL context and loads cert/key from file paths; not exercised against a real TLS broker here. |
 | Config-publish + wait-for-next-pointset | Tested (flow with fake); live-untested | `publish_config_and_wait_for_pointset`; live broker write requires authorization (`docs/security-posture.md`). |
-| QoS > 0, retained-message semantics, keep-alive PINGREQ | Not implemented | The client uses QoS 0 framing and does not maintain keep-alive pings; sufficient for capture/publish, not a general-purpose client. |
+| Retained-message evidence | Tested | Incoming RETAIN is preserved on `MqttMessage` and payload views. A retained pointset older than the register's Expected reporting interval is a validation issue, never current commissioning evidence. |
+| Keep-alive PINGREQ | Tested (framing); live-untested | Long/indefinite captures ping at half the configured keep-alive; broker-drop errors preserve partial evidence. |
+| QoS > 0 PUBLISH acknowledgement | Not implemented | SUBSCRIBE requests the configured maximum QoS, but outbound config PUBLISH remains QoS0 and the client is not a general-purpose QoS1/2 session implementation. Validate Niagara publishes at QoS0 (as in Pete's 2026-07-10 broker log) or set subscribe QoS0 until this is implemented. |
 
 Connection settings (`mqtt_settings.py`) parse broker host/port, client id,
 keep-alive, username/password, and TLS material; `secret://` references are not
@@ -82,12 +83,12 @@ imports cleanly with stdlib only.
 BACnet discovery (`engines/bacnet_discovery.py`) is behind a swappable backend
 abstraction with two implementations:
 
-- **`SimulatedBacnetBackend` (DEFAULT).** A deterministic in-memory fixture
+- **`SimulatedBacnetBackend` (DRY-RUN/TEST ONLY).** A deterministic in-memory fixture
   (a few fake AHU/VAV/chiller devices with objects and present-values). Performs
-  **no network I/O**, so the engine runs end-to-end **offline** and produces
-  sample data. Results are stamped `result_summary["backend"] == "simulated"` so
-  simulated data is never mistaken for a real scan. **Tested.**
-- **`Bacpypes3Backend` (REAL, UNVALIDATED).** The real BACnet/IP path using the
+  **no network I/O** and produces sample data only for previews and explicitly
+  injected tests. A non-dry run requesting simulation is rejected. Results are
+  stamped `result_summary["backend"] == "simulated"`. **Tested.**
+- **`Bacpypes3Backend` (LIVE DEFAULT, UNVALIDATED).** The real BACnet/IP path using the
   optional `bacpypes3` dependency (Who-Is + ReadProperty). It has **never been
   integration-tested** — there is no BACnet device or building network in this
   environment. The `bacpypes3` import is **lazy and guarded**: importing the
@@ -130,7 +131,7 @@ requires on-site/live validation, not asserted here.
 
 | Device class | Status | Notes |
 | --- | --- | --- |
-| Simulated AHU / VAV / chiller controllers | Simulated (tested) | The default fixture; analog-input/value, binary-output objects. |
+| Simulated AHU / VAV / chiller controllers | Simulated (tested) | Dry-run/test fixture; analog-input/value, binary-output objects. |
 | Real BACnet/IP controllers (any vendor) | Untested (live) | `Bacpypes3Backend` — UNVALIDATED, requires on-site validation. |
 | BACnet MS/TP (serial) | Not supported | Only BACnet/IP is modelled. |
 | Devices needing APDU-chunked object-list reads | Untested (live) | Flagged UNVERIFIED in the real backend. |
