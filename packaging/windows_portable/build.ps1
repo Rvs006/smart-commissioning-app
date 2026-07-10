@@ -182,6 +182,8 @@ if ($SkipFreeze) {
         # cryptography ships native extension modules + dynamic imports (e.g.
         # cryptography.fernet) PyInstaller misses by default -> bundle all of it.
         "--collect-all", "cryptography",
+        "--collect-all", "jsonschema",
+        "--collect-all", "referencing",
         # bacpypes3 (real BACnet/IP backend) is imported lazily via a string
         # import inside Bacpypes3Backend._ensure_app, so PyInstaller's static
         # analysis never sees it from the launcher. --collect-all (mirroring the
