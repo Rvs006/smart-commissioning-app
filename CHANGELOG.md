@@ -9,6 +9,12 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- **UDMI expected payload templates.** Expected-versus-observed evidence now
+  renders complete state, metadata, and pointset UDMI shapes. Known register
+  values are embedded at their UDMI paths; explicit placeholders identify
+  device-supplied values rather than copying broker observations into an
+  expectation.
+
 - **UDMI live-result readability and identity checks.** Expected payload evidence
   now uses the same UDMI field paths as captured payloads (`version`,
   `system.hardware.make`, and `system.hardware.model`) instead of internal

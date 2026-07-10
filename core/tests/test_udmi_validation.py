@@ -493,8 +493,45 @@ class MetadataPointCoverageTests(unittest.TestCase):
         )
         self.assertEqual(
             expected_by_type["pointset"]["points"],
-            {"unitless_status": {}, "phase_1_line_current_sensor": {}},
+            {
+                "unitless_status": {"present_value": "<device-reported value>"},
+                "phase_1_line_current_sensor": {"present_value": "<device-reported value>"},
+            },
         )
+
+    def test_payload_views_show_udmi_templates_with_register_constraints(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(
+                    asset_id="EM-1002001",
+                    manufacturer="Schneider",
+                    model="PM5121",
+                    serial="SN-1",
+                    firmware="1.2.3",
+                    guid="ifc://changeMe0123",
+                    site="GB-LON-IES",
+                    room="METER_ROOM_R093",
+                    points=["primary_ratio_sensor"],
+                    units={"primary_ratio_sensor": "no_units"},
+                ),
+                "state_payload": _state(),
+                "metadata_payload": _metadata(),
+                "pointset_payload": _pointset(),
+            },
+            live_capture=None,
+        )
+        expected_by_type = {
+            entry["payload_type"]: entry["expected"]
+            for entry in result.result_summary["payload_views"][0]["payload_types"]
+        }
+        self.assertEqual(expected_by_type["state"]["timestamp"], "<RFC 3339 timestamp>")
+        self.assertEqual(expected_by_type["state"]["system"]["serial_no"], "SN-1")
+        self.assertEqual(expected_by_type["state"]["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
+        self.assertEqual(expected_by_type["state"]["system"]["software"], {"firmware": "1.2.3"})
+        self.assertEqual(expected_by_type["metadata"]["system"]["physical_tag"]["asset"], {"guid": "ifc://changeMe0123", "name": "EM-1002001"})
+        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "GB-LON-IES", "section": "METER_ROOM_R093"})
+        self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
+        self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": "<device-reported value>"}})
 
     def test_points_without_units_are_independently_required_in_both_payloads(self) -> None:
         issues = _issues(

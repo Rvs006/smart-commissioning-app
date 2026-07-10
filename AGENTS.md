@@ -73,6 +73,18 @@ collection order is alphabetical — keep it so.
 - **Honesty**: engines never fake success — unreachable broker / unauthorized
   scan record a real status, not a fabricated result.
 
+## UDMI payload views
+
+- **Expected payload panels are templates, not observations.** Render the real
+  UDMI state/metadata/pointset shape; use the register's values where known and
+  explicit `<...>` placeholders for values supplied by the device. Never copy
+  observed broker values into the expected side.
+- **Point contract**: expected points appear in both `metadata.pointset.points`
+  and `pointset.points`; expected units apply only to metadata point definitions.
+- **Schema and register checks are independent.** A payload can match the
+  register yet still fail canonical UDMI structural validation, and both results
+  must remain visible to the operator.
+
 ## Gotchas
 
 - **Worktree + editable install**: in a `git worktree`, `import

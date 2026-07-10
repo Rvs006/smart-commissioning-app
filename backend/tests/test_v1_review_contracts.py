@@ -470,12 +470,12 @@ class UdmiReviewTests(unittest.TestCase):
         by_type = {pt["payload_type"]: pt for pt in views[0]["payload_types"]}
         self.assertEqual(set(by_type), {"state", "metadata", "pointset"})
         self.assertTrue(all(pt["observed_present"] for pt in by_type.values()))
-        # observed payload passes through verbatim; expected facet is sliced.
+        # Observed payload passes through verbatim; expected is a UDMI-shaped
+        # template with register constraints and explicit device placeholders.
         self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
-        self.assertEqual(
-            by_type["state"]["expected"],
-            {"system": {"hardware": {"make": "ExpectedCo", "model": "Model-A"}}},
-        )
+        self.assertEqual(by_type["state"]["expected"]["timestamp"], "<RFC 3339 timestamp>")
+        self.assertEqual(by_type["state"]["expected"]["system"]["hardware"], {"make": "ExpectedCo", "model": "Model-A"})
+        self.assertEqual(by_type["state"]["expected"]["system"]["serial_no"], "<device serial number>")
         self.assertEqual(
             by_type["metadata"]["expected"]["system"]["physical_tag"]["asset"]["guid"],
             "ifc://expected",
