@@ -199,19 +199,17 @@ def _validate_mqtt_point_unit_pairs(row: dict[str, str], row_number: int) -> lis
     if not points_value or not units_value:
         return []  # Required-field validation already reports blanks.
     point_count = len([value for value in points_value.split(",") if value.strip()])
-    unit_count = len([value for value in units_value.split(",") if value.strip()])
-    if point_count == unit_count:
+    unit_slots = [value.strip() for value in units_value.split(",")]
+    last_unit_index = max((index for index, value in enumerate(unit_slots) if value), default=-1)
+    if last_unit_index < point_count:
         return []
-    point_label = "point" if point_count == 1 else "points"
-    unit_label = "unit" if unit_count == 1 else "units"
     return [
         ImportErrorRecord(
             row_number=row_number,
             field="Expected units",
-            code="point_unit_count_mismatch",
+            code="unit_without_point",
             message=(
-                "Expected points and Expected units must pair one-to-one "
-                f"({point_count} {point_label} and {unit_count} {unit_label} provided)."
+                "Expected units has an entry without a corresponding Expected point."
             ),
         )
     ]

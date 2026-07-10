@@ -95,13 +95,13 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
     """Map an mqtt_register row to the UDMI matcher's expected_schedule.
 
     Make/Model/GUID/Serial/Firmware/Site/Room feed the metadata/state identity
-    checks; comma-separated Expected points + Expected units become the per-point
-    units map; Expected schema version drives the payload version match and the
-    per-version structural checks. Blank fields are dropped so the matcher only
-    checks what's set.
+    checks; comma-separated Expected points apply to both metadata and pointset,
+    while Expected units apply only to metadata. Expected schema version drives
+    the payload version match and the per-version structural checks. Blank
+    fields are dropped so the matcher only checks what's set.
     """
     points = [p.strip() for p in str(row.get("Expected points", "")).split(",") if p.strip()]
-    units = [u.strip() for u in str(row.get("Expected units", "")).split(",") if u.strip()]
+    units = [u.strip() for u in str(row.get("Expected units", "")).split(",")]
     fields = {
         "asset_id": row.get("Asset ID") or row.get("Asset name"),
         "manufacturer": row.get("Make"),
@@ -115,7 +115,9 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
         "reporting_interval_seconds": row.get("Expected reporting interval"),
     }
     schedule = {key: value for key, value in fields.items() if value}
-    units_map = {point: (units[index] if index < len(units) else "") for index, point in enumerate(points)}
+    if points:
+        schedule["points"] = points
+    units_map = {point: units[index] for index, point in enumerate(points) if index < len(units) and units[index]}
     if units_map:
         schedule["units"] = units_map
     return schedule

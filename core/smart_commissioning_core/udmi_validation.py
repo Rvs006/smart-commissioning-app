@@ -525,16 +525,16 @@ def _review_payload_issues(
             )
 
         present_value = _dict_or_empty(pointset_points.get(point_name)).get("present_value")
-        if canonical_to_check in _NUMERIC_CANONICAL_UNITS and present_value is not None and not isinstance(present_value, int | float):
+        if observed_canonical in _NUMERIC_CANONICAL_UNITS and present_value is not None and not isinstance(present_value, int | float):
             issues.append(
                 _issue(
                     issues,
                     asset_id=asset_id,
                     issue_type="pointset_validation",
                     severity="critical",
-                    description=f"Pointset payload value for {point_name} should be numeric for unit {canonical_to_check}.",
+                    description=f"Pointset payload value for {point_name} should be numeric for unit {observed_canonical}.",
                     point_name=str(point_name),
-                    expected_value=f"numeric {canonical_to_check}",
+                    expected_value=f"numeric {observed_canonical}",
                     observed_value=f"{type(present_value).__name__}: {present_value}",
                     suggested_action="Fix the publisher so present_value type matches the expected unit.",
                     raw_evidence_uri=raw_evidence_uri,
@@ -552,7 +552,9 @@ def _review_payload_issues(
     if freshness_issue is not None:
         issues.append(freshness_issue)
 
-    expected_points = set(str(point) for point in expected_units)
+    # ``points`` is the register's Expected points column. Older API callers
+    # supplied only ``units``, whose keys remain a compatible point fallback.
+    expected_points = set(str(point) for point in expected.get("points", expected_units))
     observed_points = set(str(point) for point in pointset_points)
     for point_name in sorted(expected_points - observed_points):
         issues.append(
@@ -1257,7 +1259,7 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
 
     Mirrors the facets _review_payload_issues compares so the per-type view's
     "expected" column stays consistent with the issue logic: manufacturer/model
-    -> state, guid/units -> metadata, units -> pointset.
+    -> state, guid/points/units -> metadata, points -> pointset.
     """
     facet: dict[str, Any] = {}
     if expected.get("udmi_version") is not None:
@@ -1283,10 +1285,16 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
             system["location"] = location
         if system:
             facet["system"] = system
-        if expected.get("units") is not None:
-            facet["pointset"] = {"points": {name: {"units": unit} for name, unit in expected["units"].items()}}
-    elif payload_type == "pointset" and expected.get("units") is not None:
-        facet["points"] = {name: {"units": unit} for name, unit in expected["units"].items()}
+        expected_points = expected.get("points", expected.get("units", {}))
+        if expected_points:
+            expected_units = _dict_or_empty(expected.get("units"))
+            facet["pointset"] = {
+                "points": {name: ({"units": expected_units[name]} if name in expected_units else {}) for name in expected_points}
+            }
+    elif payload_type == "pointset":
+        expected_points = expected.get("points", expected.get("units", {}))
+        if expected_points:
+            facet["points"] = {name: {} for name in expected_points}
     return facet or None
 
 

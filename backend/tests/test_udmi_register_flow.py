@@ -25,7 +25,7 @@ _SITE = "udmi-register-flow-site"
 _REGISTER_CSV = (
     "Project/site,System,Asset ID,Expected topic,Expected schema version,"
     "Expected points,Expected units,Expected reporting interval,Source protocol\n"
-    'Site A,BMS,EM-1,hv/ems/01/em/EM-1/#,1.5.2,"energy_sensor,power_sensor","kwh,kw",60,MQTT\n'
+    'Site A,BMS,EM-1,hv/ems/01/em/EM-1/#,1.5.2,"energy_sensor,status_flag,power_sensor","kwh,,kw",60,MQTT\n'
 )
 
 
@@ -66,6 +66,8 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(len(assets), 1)
         entry = assets[0]
         self.assertEqual(entry["expected_schedule"]["asset_id"], "EM-1")
+        self.assertEqual(entry["expected_schedule"]["points"], ["energy_sensor", "status_flag", "power_sensor"])
+        self.assertEqual(entry["expected_schedule"]["units"], {"energy_sensor": "kwh", "power_sensor": "kw"})
         self.assertEqual(entry["expected_schedule"]["udmi_version"], "1.5.2")
         self.assertEqual(entry["expected_schedule"]["reporting_interval_seconds"], "60")
         self.assertEqual(entry["state_topic"], "hv/ems/01/em/EM-1/state")

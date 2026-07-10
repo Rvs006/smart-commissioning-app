@@ -176,14 +176,19 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
         errors = self._mqtt(**{"Asset ID": "MTR-9", "Payload type": "telemetry"})
         self.assertIn("invalid_payload_type", [error.code for error in errors])
 
-    def test_expected_points_and_units_must_pair_one_to_one(self) -> None:
-        errors = self._mqtt(**{"Asset ID": "MTR-9", "Expected units": "kwh"})
+    def test_expected_units_may_be_blank_per_point_but_not_exceed_points(self) -> None:
+        self.assertEqual(self._mqtt(**{"Asset ID": "MTR-9", "Expected units": "kwh"}), [])
+        self.assertEqual(
+            self._mqtt(**{"Asset ID": "MTR-9", "Expected points": "energy_sensor,status_flag,power_sensor", "Expected units": "kwh,,kw"}),
+            [],
+        )
+        errors = self._mqtt(**{"Asset ID": "MTR-9", "Expected units": "kwh,kw,volts"})
 
         self.assertEqual(len(errors), 1)
         self.assertEqual(errors[0].row_number, 2)
         self.assertEqual(errors[0].field, "Expected units")
-        self.assertEqual(errors[0].code, "point_unit_count_mismatch")
-        self.assertIn("2 points and 1 unit", errors[0].message)
+        self.assertEqual(errors[0].code, "unit_without_point")
+        self.assertIn("without a corresponding Expected point", errors[0].message)
 
     def test_mqtt_template_exposes_metadata_columns(self) -> None:
         columns = PROFILES["mqtt_register"].template_columns
@@ -577,8 +582,10 @@ class UdmiReviewTests(unittest.TestCase):
                     {
                         "expected_schedule": {
                             "asset_id": "AHU-2",
+                            "points": ["co2"],
                             "units": {"co2": "parts_per_million"},
                         },
+                        "metadata_payload": {"pointset": {"points": {"co2": {}}}},
                         "pointset_payload": {"points": {"co2": {"present_value": "high"}}},
                     },
                 ]
@@ -589,7 +596,7 @@ class UdmiReviewTests(unittest.TestCase):
         self.assertIn("AHU-2", flagged_assets)
         descriptions = " ".join(issue.description for issue in result.issues)
         self.assertIn("manufacturer does not match", descriptions)
-        self.assertIn("should be numeric", descriptions)
+        self.assertIn("does not declare units", descriptions)
 
 
 class MqttConfigPublishReviewTests(unittest.TestCase):

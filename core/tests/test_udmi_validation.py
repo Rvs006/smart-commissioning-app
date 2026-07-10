@@ -433,6 +433,80 @@ class UnitMatchTests(unittest.TestCase):
 
 
 class MetadataPointCoverageTests(unittest.TestCase):
+    def test_expected_points_are_checked_independently_of_expected_units(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(
+                    points=["unitless_status", "phase_1_line_current_sensor"],
+                    units={"phase_1_line_current_sensor": "amperes"},
+                ),
+                "metadata_payload": _metadata(
+                    pointset={
+                        "points": {
+                            "unitless_status": {},
+                            "phase_1_line_current_sensor": {"units": "amperes"},
+                        }
+                    }
+                ),
+                "pointset_payload": _pointset(
+                    points={
+                        "unitless_status": {"present_value": "ok"},
+                        "phase_1_line_current_sensor": {"present_value": 1.2},
+                    }
+                ),
+            }
+        )
+        self.assertFalse([issue for issue in issues if issue.point_name == "unitless_status"])
+        self.assertFalse([issue for issue in issues if "does not declare units" in issue.description])
+
+    def test_payload_views_show_units_only_for_metadata(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(
+                    points=["unitless_status", "phase_1_line_current_sensor"],
+                    units={"phase_1_line_current_sensor": "amperes"},
+                ),
+                "metadata_payload": _metadata(
+                    pointset={
+                        "points": {
+                            "unitless_status": {},
+                            "phase_1_line_current_sensor": {"units": "amperes"},
+                        }
+                    }
+                ),
+                "pointset_payload": _pointset(
+                    points={
+                        "unitless_status": {"present_value": "ok"},
+                        "phase_1_line_current_sensor": {"present_value": 1.2},
+                    }
+                ),
+            },
+            live_capture=None,
+        )
+        expected_by_type = {
+            entry["payload_type"]: entry["expected"]
+            for entry in result.result_summary["payload_views"][0]["payload_types"]
+        }
+        self.assertEqual(
+            expected_by_type["metadata"]["pointset"]["points"],
+            {"unitless_status": {}, "phase_1_line_current_sensor": {"units": "amperes"}},
+        )
+        self.assertEqual(
+            expected_by_type["pointset"]["points"],
+            {"unitless_status": {}, "phase_1_line_current_sensor": {}},
+        )
+
+    def test_points_without_units_are_independently_required_in_both_payloads(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(points=["unitless_status"], units={}),
+                "metadata_payload": _metadata(pointset={"points": {}}),
+                "pointset_payload": _pointset(points={}),
+            }
+        )
+        missing = [issue for issue in issues if issue.point_name == "unitless_status"]
+        self.assertEqual({issue.issue_type for issue in missing}, {"metadata_validation", "pointset_validation"})
+
     def test_expected_point_missing_from_metadata_pointset(self) -> None:
         issues = _issues(
             {
