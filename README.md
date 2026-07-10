@@ -322,4 +322,5 @@ see it in the running app.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the exact commands CI runs (tests, lint, type
 checks), the npm-lockfile lesson, and branch/PR conventions. Change history is in
-[CHANGELOG.md](CHANGELOG.md); third-party notices in [NOTICE](NOTICE).
+[CHANGELOG.md](CHANGELOG.md); third-party notices in [NOTICE](NOTICE). Verified feature-branch
+commits are pushed before handoff; merge and release remain explicit decisions.

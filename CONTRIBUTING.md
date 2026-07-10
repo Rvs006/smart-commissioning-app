@@ -109,6 +109,8 @@ failures.
   `fix/secret-corruption`).
 - Keep commits focused and write imperative-mood subjects ("Add edge-to-hub run
   synchronization"), consistent with the existing history.
+- Push each verified feature-branch commit so the remote is the shared source
+  of truth; merging and releasing remain separate deliberate actions.
 - Open a pull request using the PR template and complete its checklist.
 - Update `CHANGELOG.md` (the `[Unreleased]` section) and any affected `docs/`
   when your change is user- or operator-visible.
