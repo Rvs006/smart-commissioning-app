@@ -1111,6 +1111,9 @@ def _capture_topics(parameters: dict[str, object]) -> list[str]:
     extra = parameters.get("extra_capture_topics")
     if isinstance(extra, list):
         topics.extend(_string(topic) for topic in extra)
+    register_filter = _string(parameters.get("register_topic_filter"))
+    if register_filter:
+        topics.append(register_filter)
     unique: list[str] = []
     for topic in topics:
         if topic and topic not in unique:
