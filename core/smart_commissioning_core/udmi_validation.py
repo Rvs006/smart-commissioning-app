@@ -175,6 +175,7 @@ def validate_udmi_full_report(
         # indefinite request had to be bounded for lack of a cancel path.
         "capture_mode": capture_summary.get("capture_mode"),
         "captured_topics": capture_summary["captured_topics"],
+        "subscribed_topics": capture_summary.get("subscribed_topics", []),
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
             captured_topics=capture_summary["captured_topics"],
@@ -860,6 +861,7 @@ def _capture_live_payloads(
 
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
     groups = _capture_topic_groups(topics)
+    parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
     try:
         messages = live_capture(
@@ -915,6 +917,7 @@ def _capture_live_payloads(
             "status_detail": capture_error_status,
             "capture_mode": capture_mode,
             "captured_topics": valid_topics,
+            "subscribed_topics": list(topics),
             "issue": _capture_error_issue(
                 asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
                 status_detail=capture_error_status,
@@ -927,6 +930,7 @@ def _capture_live_payloads(
         ),
         "capture_mode": capture_mode,
         "captured_topics": valid_topics,
+        "subscribed_topics": list(topics),
         "issue": None
         if valid_messages and not missing
         else (
@@ -1009,6 +1013,7 @@ def _capture_live_payloads_per_asset(
     for entry_topics in per_entry_topics:
         groups.extend(_capture_topic_groups(entry_topics))
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
+    parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
     try:
         messages = live_capture(
@@ -1065,6 +1070,7 @@ def _capture_live_payloads_per_asset(
             "status_detail": capture_error_status,
             "capture_mode": capture_mode,
             "captured_topics": valid_topics,
+            "subscribed_topics": list(topics),
             "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=capture_error_status),
         }
     return {
@@ -1074,6 +1080,7 @@ def _capture_live_payloads_per_asset(
         ),
         "capture_mode": capture_mode,
         "captured_topics": valid_topics,
+        "subscribed_topics": list(topics),
         "issue": None
         if valid_messages and not missing
         else (

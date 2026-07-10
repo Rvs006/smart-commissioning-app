@@ -638,6 +638,7 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         result = validate_udmi_full_report(parameters, live_capture=capture, cancel_check=lambda: False)
         self.assertEqual(len(capture.calls), 1)
         self.assertEqual(capture.calls[0]["topics"], ["site/a1/state", "site/a2/state"])
+        self.assertEqual(result.result_summary["subscribed_topics"], ["site/a1/state", "site/a2/state"])
         entries = result.result_summary["payload_views"]
         self.assertEqual([view["asset_id"] for view in entries], ["A1", "A2"])
         self.assertEqual(result.result_summary["broker_status_detail"], "live_payloads_captured")
