@@ -53,6 +53,16 @@ them and chooses which adapter to scan from.
 time each started/finished, its type, status, and how long it took. Sort or
 filter it, and hit **Export CSV** for the whole list — no digging through files.
 
+## Pete MQTT/UDMI field check (v0.1.1 or later)
+
+1. Download the zip from the repository's [latest GitHub release](https://github.com/Rvs006/smart-commissioning-app/releases/latest), extract it, and start `SmartCommissioningApp.exe`.
+2. Import the three-asset MQTT register with the scoped wildcard filters (for example, `MNVRHS/EM-1002001/#`). In **Configuration**, set the broker, port, TLS, and credentials; save.
+3. Run **MQTT Discovery** and confirm it displays the broker's concrete topics and payloads.
+4. Run **UDMI Workbench** against that same broker with **Run time = 120 seconds**. It should wait for state, metadata, and pointset evidence for each imported asset, then show expected-versus-observed results.
+5. If it fails, copy/export the run's `subscribed_topics`, `captured_topics`, and `broker_status_detail`, plus the matching broker-log interval. Do not include broker credentials in the export or message.
+
+This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
+
 ## If something looks wrong
 
 - **Scan finds nothing and no firewall popup appeared** → Windows Firewall is the

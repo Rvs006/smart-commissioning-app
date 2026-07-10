@@ -7,6 +7,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-10
+
+### Fixed
+
+- **Live MQTT/UDMI commissioning capture.** Register wildcard filters are retained
+  alongside derived state, metadata, and pointset topics; capture subscriptions are
+  batched so retained publishes cannot interrupt setup. Results now retain subscribed
+  filters, captured topics, retained/timestamp evidence, and sanitized broker details
+  for field diagnosis.
+
 This is the pre-1.0 development line. Entries below summarize the program by
 theme and are derived from the actual git history (`git log --oneline`), from
 the MVP scaffold baseline through the phase 0–4b production-hardening work.
@@ -456,3 +466,4 @@ See [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) for the
 full checklist.
 
 [Unreleased]: https://github.com/Rvs006/smart-commissioning-app/commits/main
+[0.1.1]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.1

@@ -6,7 +6,7 @@
 
 ![CI](https://github.com/Rvs006/smart-commissioning-app/actions/workflows/ci.yml/badge.svg)
 ![status](https://img.shields.io/badge/status-pre--production%20(pending%20on--site%20validation)-orange)
-![version](https://img.shields.io/badge/version-0.1.0-blue)
+![version](https://img.shields.io/badge/version-0.1.1-blue)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
@@ -28,6 +28,8 @@
    launcher picks the next free port and prints the correct URL in the console; use that URL.
 5. That's it — no API key, no sign-in. The app trusts your own laptop (loopback), so
    Run / Publish / Export and the certificate/key **Replace** buttons are enabled automatically.
+
+For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#pete-mqttudmi-field-check-v011-or-later) after startup. The **latest release** link above is the single supported download location.
 
 > ⚠️ **Windows SmartScreen may warn** — this is an internal unsigned build. Choose
 > **More info → Run anyway**, only if you got the zip from the project owner or the releases page
