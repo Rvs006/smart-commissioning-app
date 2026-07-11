@@ -37,6 +37,11 @@
     Python launcher to use for PyInstaller. Default: "python" (build box needs 3.12
     with PyInstaller + all runtime deps installed; see the runbook section 1).
 
+.PARAMETER Version
+    Optional release version shown in the portable README and Windows executable
+    properties (for example, ``v0.1.6``). Defaults to ``git describe`` so local
+    builds remain identifiable.
+
 .PARAMETER SkipFrontend
     Reuse an existing frontend/dist instead of running npm ci && npm run build.
     Fails if frontend/dist/index.html is absent.
@@ -68,6 +73,7 @@
 param(
     [string]$OutputDir,
     [string]$Python = "python",
+    [string]$Version,
     [switch]$SkipFrontend,
     [switch]$SkipFreeze,
     [string[]]$ExtraPyInstallerArgs = @(),
@@ -81,6 +87,36 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $AppName   = "SmartCommissioningApp"
+$Git = Get-Command git -ErrorAction SilentlyContinue
+$BuildVersion = $Version.Trim()
+if (-not $BuildVersion -and $Git) {
+    $BuildVersion = (& $Git.Source -C $RepoRoot describe --tags --always --dirty 2>$null | Select-Object -First 1).Trim()
+}
+if ([string]::IsNullOrWhiteSpace($BuildVersion)) { $BuildVersion = "unversioned" }
+$VersionParts = if ($BuildVersion -match '^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?') {
+    @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]($Matches[4] ?? 0))
+} else {
+    @(0, 0, 0, 0)
+}
+$VersionInfoPath = Join-Path $RepoRoot "build\pyinstaller\$AppName-version-info.txt"
+New-Item -ItemType Directory -Path (Split-Path -Parent $VersionInfoPath) -Force | Out-Null
+@"
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=($($VersionParts -join ', ')), prodvers=($($VersionParts -join ', ')), mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[
+    StringFileInfo([StringTable('040904B0', [
+      StringStruct('CompanyName', 'Smart Commissioning App'),
+      StringStruct('FileDescription', 'Smart Commissioning App portable desktop launcher'),
+      StringStruct('FileVersion', '$BuildVersion'),
+      StringStruct('InternalName', '$AppName'),
+      StringStruct('OriginalFilename', '$AppName.exe'),
+      StringStruct('ProductName', 'Smart Commissioning App'),
+      StringStruct('ProductVersion', '$BuildVersion')
+    ])]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+"@ | Set-Content -LiteralPath $VersionInfoPath -Encoding UTF8
 
 if (-not $OutputDir) {
     $OutputDir = Join-Path $RepoRoot "build\Smart_Commissioning_App_Windows_Portable"
@@ -126,6 +162,8 @@ function Remove-PythonCaches([string]$Root) {
 }
 
 Write-Host "Smart Commissioning App - Windows portable bundle (Option A)" -ForegroundColor Green
+Write-Host "  version   : $BuildVersion"
+Write-Host "  file info : $VersionInfoPath"
 Write-Host "  repo root : $RepoRoot"
 Write-Host "  output    : $OutputDir"
 Write-Host "  python    : $Python"
@@ -171,6 +209,10 @@ if ($SkipFreeze) {
     if (-not (Test-Path -LiteralPath $FreezeDist)) {
         throw "dist\$AppName missing but -SkipFreeze was set."
     }
+    $ExistingProductVersion = (Get-Item -LiteralPath (Join-Path $FreezeDist "$AppName.exe")).VersionInfo.ProductVersion
+    if ($ExistingProductVersion -ne $BuildVersion) {
+        throw "-SkipFreeze would package EXE version '$ExistingProductVersion' with README version '$BuildVersion'. Rebuild without -SkipFreeze."
+    }
 } else {
     Write-Step "PyInstaller: freeze launcher -> dist\$AppName"
     $piArgs = @(
@@ -179,6 +221,7 @@ if ($SkipFreeze) {
         "--clean",
         "--name", $AppName,
         "--console",
+        "--version-file", $VersionInfoPath,
         # cryptography ships native extension modules + dynamic imports (e.g.
         # cryptography.fernet) PyInstaller misses by default -> bundle all of it.
         "--collect-all", "cryptography",
@@ -250,8 +293,14 @@ Copy-Item -Path $FrontendDistSrc -Destination $FrontendDistDst -Recurse -Force
 # 3e. operator note (unsigned tester build)
 $ReadmePath = Join-Path $OutputDir "README_FIRST.txt"
 @"
-Smart Commissioning App - Windows portable (tester build)
+Smart Commissioning App $BuildVersion - Windows portable (tester build)
 =========================================================
+
+Build identification:
+  Version: $BuildVersion
+  Executable: SmartCommissioningApp.exe
+  Description: Smart Commissioning App portable desktop launcher
+  Windows details: right-click SmartCommissioningApp.exe -> Properties -> Details
 
 To run:
   1. Double-click SmartCommissioningApp.exe (or run it from a terminal).

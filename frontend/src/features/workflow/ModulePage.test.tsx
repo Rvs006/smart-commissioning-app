@@ -672,7 +672,7 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
     fireEvent.click(screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0]);
     expect(screen.getByText("Expected UDMI template")).toBeInTheDocument();
-    expect(screen.getByText(/angle-bracket values are required device-supplied fields/i)).toBeInTheDocument();
+    expect(screen.getByText(/schema-valid sentinel values identify device-supplied fields/i)).toBeInTheDocument();
   });
 
   it("register-driven mode sends no pasted schedule or payloads so the backend uses the imported register", async () => {

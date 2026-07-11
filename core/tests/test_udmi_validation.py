@@ -494,8 +494,8 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(
             expected_by_type["pointset"]["points"],
             {
-                "unitless_status": {"present_value": "<device-reported value>"},
-                "phase_1_line_current_sensor": {"present_value": "<device-reported value>"},
+                "unitless_status": {"present_value": None},
+                "phase_1_line_current_sensor": {"present_value": None},
             },
         )
 
@@ -510,7 +510,7 @@ class MetadataPointCoverageTests(unittest.TestCase):
                     firmware="1.2.3",
                     guid="ifc://changeMe0123",
                     site="GB-LON-IES",
-                    room="METER_ROOM_R093",
+                    room="METER-ROOM-R093",
                     points=["primary_ratio_sensor"],
                     units={"primary_ratio_sensor": "no_units"},
                 ),
@@ -524,14 +524,37 @@ class MetadataPointCoverageTests(unittest.TestCase):
             entry["payload_type"]: entry["expected"]
             for entry in result.result_summary["payload_views"][0]["payload_types"]
         }
-        self.assertEqual(expected_by_type["state"]["timestamp"], "<RFC 3339 timestamp>")
+        for payload_type, expected_payload in expected_by_type.items():
+            self.assertEqual(
+                structural_issues(payload_type, expected_payload),
+                [],
+                f"{payload_type} expected template must be structurally valid",
+            )
+        self.assertEqual(expected_by_type["state"]["timestamp"], "1970-01-01T00:00:00Z")
         self.assertEqual(expected_by_type["state"]["system"]["serial_no"], "SN-1")
         self.assertEqual(expected_by_type["state"]["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
         self.assertEqual(expected_by_type["state"]["system"]["software"], {"firmware": "1.2.3"})
         self.assertEqual(expected_by_type["metadata"]["system"]["physical_tag"]["asset"], {"guid": "ifc://changeMe0123", "name": "EM-1002001"})
-        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "GB-LON-IES", "section": "METER_ROOM_R093"})
+        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "GB-LON-IES", "section": "METER-ROOM-R093"})
         self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
-        self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": "<device-reported value>"}})
+        self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": None}})
+
+    def test_invalid_register_value_is_reported_instead_of_being_a_valid_expected_template(self) -> None:
+        descriptions = _descriptions(
+            {
+                "expected_schedule": _schedule(site="GB-LON-IES", room="METER_ROOM_R093"),
+            }
+        )
+
+        self.assertIn("Expected register values cannot form a valid UDMI metadata template", descriptions)
+        self.assertIn("system.location.section", descriptions)
+
+    def test_expected_template_tolerates_malformed_point_constraints(self) -> None:
+        result = validate_udmi_full_report({"expected_schedule": _schedule(points=42)})
+        payload_types = result.result_summary["payload_views"][0]["payload_types"]
+        pointset = next(entry for entry in payload_types if entry["payload_type"] == "pointset")
+
+        self.assertEqual(pointset["expected"]["points"], {})
 
     def test_points_without_units_are_independently_required_in_both_payloads(self) -> None:
         issues = _issues(

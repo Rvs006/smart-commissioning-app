@@ -2195,7 +2195,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                         <div className="payload-compare">
                                           <div>
                                             <h6>Expected UDMI template</h6>
-                                            <p className="section-copy">Registered values are shown where known; angle-bracket values are required device-supplied fields.</p>
+                                            <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
                                             <pre className="payload-cell">
                                               {entry.expected
                                                 ? JSON.stringify(entry.expected, null, 2)

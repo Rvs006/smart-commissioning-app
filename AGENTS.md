@@ -68,6 +68,12 @@ collection order is alphabetical — keep it so.
 
 - **Commits**: Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`,
   `test:`). Log notable changes in `CHANGELOG.md`. See `CONTRIBUTING.md`.
+- **Sync**: after a verified commit, push its feature branch unless the user
+  explicitly asks to keep it local or the remote is unavailable. Never merge or
+  publish a release without the user's authorization.
+- **Portable releases**: give `packaging/windows_portable/build.ps1` an explicit
+  `-Version vX.Y.Z` when producing a release. It writes that version into both
+  `README_FIRST.txt` and the Windows EXE Properties → Details metadata.
 - **Style**: smallest correct change, reuse before adding, stdlib before deps.
   Deliberate shortcuts carry a `ponytail:` comment naming the ceiling.
 - **Honesty**: engines never fake success — unreachable broker / unauthorized
@@ -77,8 +83,8 @@ collection order is alphabetical — keep it so.
 
 - **Expected payload panels are templates, not observations.** Render the real
   UDMI state/metadata/pointset shape; use the register's values where known and
-  explicit `<...>` placeholders for values supplied by the device. Never copy
-  observed broker values into the expected side.
+  schema-valid sentinel values for device-supplied fields. Never copy observed
+  broker values into the expected side.
 - **Point contract**: expected points appear in both `metadata.pointset.points`
   and `pointset.points`; expected units apply only to metadata point definitions.
 - **Schema and register checks are independent.** A payload can match the
