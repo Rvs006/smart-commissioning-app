@@ -294,40 +294,97 @@ def _nested(payload: object, *keys: str) -> object:
 
 
 # Register field -> (observed UDMI location, issue type, severity, description,
-# action). manufacturer/model/serial/firmware read the STATE payload; guid/site/
-# room read METADATA. Paths follow UDMI conventions (system.hardware.*,
-# system.serial_no, system.software.firmware, system.physical_tag.asset.guid,
-# system.location.{site,section}); confirm on a real device if one never matches.
-_IDENTITY_CHECKS: tuple[tuple[str, Callable[[dict, dict], object], str, str, str, str], ...] = (
+# action, observed leaf key(s), canonical dot-path). manufacturer/model/serial/
+# firmware read the STATE payload; guid/site/room read METADATA. Paths follow
+# UDMI conventions (system.hardware.*, system.serial_no, system.software.firmware,
+# system.physical_tag.asset.guid, system.location.{site,section,room}). The leaf
+# keys + canonical path drive the misplaced-value diagnostic: when the value is
+# absent at the canonical path but present elsewhere (on-site 2026-07-13 a
+# publisher nested a second 'system' inside 'system', so every identity read
+# "missing" while plainly visible in MQTT Explorer), the issue names WHERE it
+# was found instead of claiming it is absent.
+_IDENTITY_CHECKS: tuple[tuple[str, Callable[[dict, dict], object], str, str, str, str, tuple[str, ...], str], ...] = (
     ("manufacturer", lambda state, metadata: _nested(state, "system", "hardware", "make"),
      "state_validation", "high",
      "State payload manufacturer does not match the asset register.",
-     "Confirm the manufacturer in the MSI schedule and the UDMI state payload."),
+     "Confirm the manufacturer in the MSI schedule and the UDMI state payload.",
+     ("make",), "system.hardware.make"),
     ("model", lambda state, metadata: _nested(state, "system", "hardware", "model"),
      "state_validation", "medium",
      "State payload model does not match the asset register.",
-     "Check device metadata or update the asset register if the installed model changed."),
+     "Check device metadata or update the asset register if the installed model changed.",
+     ("model",), "system.hardware.model"),
     ("serial", lambda state, metadata: _nested(state, "system", "serial_no"),
      "state_validation", "medium",
      "State payload serial number does not match the asset register.",
-     "Confirm the device serial number in the schedule and the UDMI state payload."),
+     "Confirm the device serial number in the schedule and the UDMI state payload.",
+     ("serial_no",), "system.serial_no"),
     ("firmware", lambda state, metadata: _nested(state, "system", "software", "firmware"),
      "state_validation", "low",
      "State payload firmware version does not match the asset register.",
-     "Confirm the expected firmware version or update the device firmware."),
+     "Confirm the expected firmware version or update the device firmware.",
+     ("firmware",), "system.software.firmware"),
     ("guid", lambda state, metadata: _nested(metadata, "system", "physical_tag", "asset", "guid"),
      "metadata_validation", "high",
      "Metadata GUID does not match the asset register.",
-     "Correct the UDMI metadata asset GUID or the imported register."),
+     "Correct the UDMI metadata asset GUID or the imported register.",
+     ("guid",), "system.physical_tag.asset.guid"),
     ("site", lambda state, metadata: _nested(metadata, "system", "location", "site"),
      "metadata_validation", "low",
      "Metadata site does not match the asset register.",
-     "Confirm the site in the schedule and the UDMI metadata location."),
-    ("room", lambda state, metadata: _nested(metadata, "system", "location", "section"),
+     "Confirm the site in the schedule and the UDMI metadata location.",
+     ("site",), "system.location.site"),
+    # Devices legitimately publish the room under location.section OR
+    # location.room (both exist in the UDMI system model), so the register's
+    # Room column matches either.
+    ("room", lambda state, metadata: (
+        _nested(metadata, "system", "location", "section")
+        or _nested(metadata, "system", "location", "room")
+    ),
      "metadata_validation", "low",
      "Metadata room/section does not match the asset register.",
-     "Confirm the room/section in the schedule and the UDMI metadata location."),
+     "Confirm the room/section in the schedule and the UDMI metadata location.",
+     ("section", "room"), "system.location.section (or system.location.room)"),
 )
+
+
+def _find_key_paths(
+    node: object,
+    keys: tuple[str, ...],
+    prefix: tuple[str, ...] = (),
+    depth: int = 6,
+) -> list[str]:
+    """Dot-paths of scalar values stored under any of ``keys``, at any nesting.
+
+    Powers the misplaced-value diagnostic: a publisher that wraps UDMI content
+    one level too deep still holds the real value somewhere — naming that path
+    beats reporting the field as missing.
+    """
+    if depth < 0 or not isinstance(node, dict):
+        return []
+    paths: list[str] = []
+    for key, value in node.items():
+        path = (*prefix, str(key))
+        if str(key) in keys and not isinstance(value, (dict, list)):
+            paths.append(".".join(path))
+        paths.extend(_find_key_paths(value, keys, path, depth - 1))
+    return paths
+
+
+def _misplaced_value_detail(
+    payload: dict,
+    leaf_keys: tuple[str, ...],
+    canonical_path: str,
+) -> str:
+    """One sentence naming where a canonical field's value actually sits, or ''."""
+    found = [path for path in _find_key_paths(payload, leaf_keys) if path not in canonical_path]
+    if not found:
+        return ""
+    locations = ", ".join(found[:2])
+    return (
+        f" A '{'/'.join(leaf_keys)}' value was found at {locations} — UDMI expects it at "
+        f"{canonical_path}; fix the publisher's payload nesting."
+    )
 
 
 def _review_all_payload_issues(
@@ -470,18 +527,26 @@ def _review_payload_issues(
 
     # manufacturer/model/serial/firmware/guid/site/room: flag missing or
     # differing expected values when the corresponding payload was captured.
-    for expected_key, observed_getter, issue_type, severity, description, action in _IDENTITY_CHECKS:
+    for expected_key, observed_getter, issue_type, severity, description, action, leaf_keys, canonical_path in _IDENTITY_CHECKS:
         expected_value = expected.get(expected_key)
         observed_value = observed_getter(state_payload, metadata_payload)
-        payload_present = bool(state_payload) if issue_type == "state_validation" else bool(metadata_payload)
+        source_payload = state_payload if issue_type == "state_validation" else metadata_payload
+        payload_present = bool(source_payload)
         if expected_value and payload_present and not observed_value:
+            # "Missing" alone misleads when the value sits at a wrong path
+            # (e.g. a second 'system' nesting level): name where it was found.
+            misplaced_detail = _misplaced_value_detail(source_payload, leaf_keys, canonical_path)
             issues.append(
                 _issue(
                     issues,
                     asset_id=asset_id,
                     issue_type=issue_type,
                     severity=severity,
-                    description=f"Expected {expected_key} is missing from the {issue_type.removesuffix('_validation')} payload.",
+                    description=(
+                        f"Expected {expected_key} is missing from the "
+                        f"{issue_type.removesuffix('_validation')} payload at {canonical_path}."
+                        f"{misplaced_detail}"
+                    ),
                     expected_value=str(expected_value),
                     observed_value="missing",
                     suggested_action=action,
@@ -1472,6 +1537,28 @@ def _template_metadata_value(expected: dict[str, Any], register_key: str) -> str
     return value if pattern.match(value) else placeholder
 
 
+# model_system.json location.room — laxer than section (mixed case, underscores),
+# so a free-text-ish register Room like "2-09_Meter_Room" is still canonical UDMI.
+_ROOM_FIELD_PATTERN = re.compile(r"^[-_a-zA-Z0-9]+$")
+
+
+def _template_location(expected: dict[str, Any]) -> dict[str, str]:
+    """The template's system.location: site plus the register Room where it fits.
+
+    The Room value lands in ``section`` when it fits the strict section pattern,
+    in ``room`` when it fits only the laxer room pattern (real devices publish
+    either field), and as the section placeholder otherwise.
+    """
+    location = {"site": _template_metadata_value(expected, "site")}
+    room_value = str(expected.get("room") or "")
+    section_pattern = _METADATA_REGISTER_FIELDS["room"][2]
+    if room_value and not section_pattern.match(room_value) and _ROOM_FIELD_PATTERN.match(room_value):
+        location["room"] = room_value
+    else:
+        location["section"] = _template_metadata_value(expected, "room")
+    return location
+
+
 def _register_canonical_notes(
     expected: dict[str, Any],
     issues: list[ValidationIssueRecord],
@@ -1494,6 +1581,15 @@ def _register_canonical_notes(
         value = str(raw)
         if pattern.match(value):
             continue
+        if register_key == "room" and _ROOM_FIELD_PATTERN.match(value):
+            # Not canonical as location.section, but perfectly canonical as
+            # location.room — the template embeds it there, nothing to report.
+            continue
+        room_alternative = (
+            f" or as system.location.room ({_ROOM_FIELD_PATTERN.pattern})"
+            if register_key == "room"
+            else ""
+        )
         notes.append(
             _issue(
                 [*issues, *notes],
@@ -1502,8 +1598,8 @@ def _register_canonical_notes(
                 severity="low",
                 description=(
                     f"Register {label} '{value}' cannot appear in canonical UDMI metadata "
-                    f"({path} must match {pattern.pattern}); the expected template shows "
-                    f"the placeholder '{placeholder}' instead."
+                    f"({path} must match {pattern.pattern}{room_alternative}); the expected "
+                    f"template shows the placeholder '{placeholder}' instead."
                 ),
                 expected_value=pattern.pattern,
                 observed_value=value,
@@ -1551,10 +1647,7 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
         return {
             **header,
             "system": {
-                "location": {
-                    "site": _template_metadata_value(expected, "site"),
-                    "section": _template_metadata_value(expected, "room"),
-                },
+                "location": _template_location(expected),
                 "physical_tag": {
                     "asset": {
                         "guid": _template_metadata_value(expected, "guid"),

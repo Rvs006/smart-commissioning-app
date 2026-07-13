@@ -175,6 +175,7 @@ def structural_issues(payload_type: str, payload: dict) -> list[StructuralFindin
     findings.extend(_timestamp_findings(payload_type, payload))
     if payload_type in ("state", "metadata"):
         findings.extend(_object_field_findings(payload_type, payload, "system"))
+        findings.extend(_double_nested_system_findings(payload_type, payload))
     if payload_type == "pointset":
         findings.extend(_pointset_points_findings(payload))
     if payload_type == "metadata":
@@ -351,6 +352,33 @@ def _object_field_findings(payload_type: str, payload: dict, field: str) -> list
             expected_value="object",
             observed_value=type(value).__name__,
             suggested_action=f"Fix the publisher so '{field}' is a JSON object.",
+        )
+    ]
+
+
+def _double_nested_system_findings(payload_type: str, payload: dict) -> list[StructuralFinding]:
+    """One clear finding when a publisher wraps a second 'system' inside 'system'.
+
+    Seen on site 2026-07-13: metadata carried system.system.location.* — every
+    identity value read "missing" while plainly present one level too deep, and
+    the canonical additional-properties error alone did not tell the operator
+    the one-move fix.
+    """
+    system = payload.get("system")
+    if not isinstance(system, dict) or not isinstance(system.get("system"), dict):
+        return []
+    inner_keys = ", ".join(sorted(str(key) for key in system["system"])) or "(empty)"
+    return [
+        StructuralFinding(
+            description=(
+                f"The {payload_type} payload nests a second 'system' object inside 'system' "
+                f"(holding: {inner_keys}); UDMI expects those fields directly under the "
+                "top-level 'system'."
+            ),
+            severity="high",
+            expected_value="system.location / system.physical_tag / ... at one level",
+            observed_value="system.system.*",
+            suggested_action="Move the inner system's contents up one level in the publisher.",
         )
     ]
 
