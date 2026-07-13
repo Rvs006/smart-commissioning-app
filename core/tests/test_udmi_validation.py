@@ -544,24 +544,16 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
         self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": None}})
 
-    def test_non_canonical_register_value_gets_placeholder_and_named_note(self) -> None:
-        # On-site 2026-07-13: embedding the raw register Room made the whole
-        # metadata template fail canonical validation with an opaque message.
-        # Now the template stays schema-valid with a placeholder and one clear
-        # low-severity note names the register column, value, and pattern.
+    def test_room_that_fits_location_room_is_embedded_without_a_note(self) -> None:
+        # "METER_ROOM_R093" fails the strict section pattern (underscores) but
+        # is perfectly canonical as system.location.room — real devices publish
+        # either field (on-site 2026-07-13: location.room = "2-09_Meter_Room").
         result = validate_udmi_full_report(
             {"expected_schedule": _schedule(site="GB-LON-IES", room="METER_ROOM_R093")},
             live_capture=None,
         )
-        notes = [
-            issue for issue in result.issues
-            if "cannot appear in canonical UDMI metadata" in issue.description
-        ]
-        self.assertEqual(len(notes), 1)
-        self.assertEqual(notes[0].severity, "low")
-        self.assertIn("Register Room 'METER_ROOM_R093'", notes[0].description)
-        self.assertIn("system.location.section", notes[0].description)
         descriptions = " ".join(issue.description for issue in result.issues)
+        self.assertNotIn("cannot appear in canonical UDMI metadata", descriptions)
         self.assertNotIn("cannot form a valid UDMI metadata template", descriptions)
         expected_metadata = next(
             entry["expected"]
@@ -571,8 +563,122 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(structural_issues("metadata", expected_metadata), [])
         self.assertEqual(
             expected_metadata["system"]["location"],
-            {"site": "GB-LON-IES", "section": "UNSPECIFIED"},
+            {"site": "GB-LON-IES", "room": "METER_ROOM_R093"},
         )
+
+    def test_register_room_matches_metadata_location_room(self) -> None:
+        # A device publishing the room under location.room (not section) must
+        # satisfy the register comparison — both fields are canonical UDMI.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(room="2-09_Meter_Room"),
+                "metadata_payload": _metadata(
+                    system={"location": {"room": "2-09_Meter_Room"}},
+                ),
+            }
+        )
+        room_issues = [issue for issue in issues if "room" in issue.description.casefold()]
+        self.assertEqual([issue.description for issue in room_issues], [])
+
+    def test_register_room_matches_when_section_holds_a_different_subdivision(self) -> None:
+        # A device may populate BOTH fields (section = building subdivision,
+        # room = the register's room): matching either must pass — comparing
+        # against section alone would emit a false mismatch.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(room="2-09_Meter_Room"),
+                "metadata_payload": _metadata(
+                    system={"location": {"section": "LEVEL-2", "room": "2-09_Meter_Room"}},
+                ),
+            }
+        )
+        room_issues = [issue for issue in issues if "room" in issue.description.casefold()]
+        self.assertEqual([issue.description for issue in room_issues], [])
+
+    def test_register_room_matching_neither_field_is_a_single_mismatch(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(room="2-09_Meter_Room"),
+                "metadata_payload": _metadata(
+                    system={"location": {"section": "LEVEL-2", "room": "OTHER_ROOM"}},
+                ),
+            }
+        )
+        mismatches = [issue for issue in issues if "does not match the asset register" in issue.description and "room" in issue.description.casefold()]
+        self.assertEqual(len(mismatches), 1)
+        # Both observed candidates are shown so the operator sees what the
+        # device actually published in each field.
+        self.assertEqual(mismatches[0].observed_value, "LEVEL-2 / OTHER_ROOM")
+
+    def test_misplaced_metadata_pointset_reported_once_and_content_still_checked(self) -> None:
+        # On-site 2026-07-13 (afternoon): metadata nested the whole pointset
+        # under 'system' — every register point read "not defined in the
+        # metadata pointset" while plainly visible in MQTT Explorer, and a real
+        # device-side typo (phas2_line_current_sensor) hid among the noise.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(
+                    points=["phase1_power_sensor", "phase2_line_current_sensor"],
+                    units={"phase1_power_sensor": "kilowatts"},
+                ),
+                "metadata_payload": {
+                    "version": "1.5.2",
+                    "timestamp": "2026-07-13T16:44:19Z",
+                    "system": {
+                        "pointset": {
+                            "points": {
+                                "phase1_power_sensor": {"units": "kilowatts"},
+                                "phas2_line_current_sensor": {"units": "amperes"},
+                            }
+                        },
+                    },
+                },
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        misplaced = [
+            issue for issue in issues
+            if "nests its pointset at system.pointset.points" in issue.description
+        ]
+        self.assertEqual(len(misplaced), 1)
+        self.assertEqual(misplaced[0].severity, "high")
+        # Content is compared against the nested copy: the point present there
+        # is NOT falsely missing, while the device's typo IS reported both ways.
+        self.assertNotIn("Expected point phase1_power_sensor is not defined", descriptions)
+        self.assertIn("Expected point phase2_line_current_sensor is not defined", descriptions)
+        self.assertIn("Metadata defines point phas2_line_current_sensor", descriptions)
+
+    def test_misplaced_identity_value_names_where_it_was_found(self) -> None:
+        # On-site 2026-07-13: the publisher nested a second 'system' inside
+        # 'system' (system.system.location.site), so identity checks read
+        # "missing" while the value was plainly visible in MQTT Explorer. The
+        # issue must name the wrong path, and the structural check must call
+        # out the double-nested system with the one-move fix.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(site="GB-LON-1ES", room="2-09_Meter_Room"),
+                "metadata_payload": _metadata(
+                    system={
+                        "last_config": {},
+                        "system": {
+                            "location": {"site": "GB-LON-1ES", "room": "2-09_Meter_Room"},
+                        },
+                    },
+                ),
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertIn(
+            "Expected site is missing from the metadata payload at system.location.site.",
+            descriptions,
+        )
+        self.assertIn("found at system.system.location.site", descriptions)
+        self.assertIn("fix the publisher's payload nesting", descriptions)
+        self.assertIn("found at system.system.location.room", descriptions)
+        self.assertIn("nests a second 'system' object inside 'system'", descriptions)
+        self.assertIn("Move the inner system's contents up one level", " ".join(
+            issue.suggested_action or "" for issue in issues
+        ))
 
     def test_numeric_asset_id_and_free_text_room_keep_template_valid(self) -> None:
         # Pete's site register: asset IDs like "2001" and free-text rooms can

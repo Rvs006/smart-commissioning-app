@@ -7,6 +7,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- **UDMI misplaced-field diagnostics and location.room support.** When an
+  identity value (site, room, serial, GUID, …) is absent at its canonical UDMI
+  path but present elsewhere in the payload — e.g. a publisher nesting a second
+  `system` object inside `system` — the issue now names where the value was
+  found and the exact expected path instead of claiming it is missing, and a
+  dedicated finding calls out the double-nested `system` with the one-move fix.
+  The register Room column now matches `system.location.section` **or**
+  `system.location.room` (both canonical UDMI; a device carrying both fields
+  passes when either equals the register value), and the expected template
+  embeds the room value under `location.room` when it only fits that field's
+  laxer pattern instead of degrading to a placeholder. A metadata pointset
+  nested at the wrong level (e.g. under `system`) is reported once with its
+  actual path, and the register point/unit comparison runs against the nested
+  copy — real content differences (missing points, device-side typos, wrong
+  units) surface instead of one false "not defined" per register point.
+
 ### Added
 
 - **UDMI run monitor shows the actual capture window.** After a UDMI validation
