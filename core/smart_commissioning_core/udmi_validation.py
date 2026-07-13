@@ -378,6 +378,36 @@ def _find_key_paths(
     return paths
 
 
+def _find_misplaced_metadata_points(
+    payload: dict,
+    prefix: tuple[str, ...] = (),
+    depth: int = 5,
+) -> tuple[str, dict]:
+    """First NON-canonical ``pointset.points`` map anywhere in the metadata.
+
+    The canonical location is the payload top level (empty prefix — that case
+    is read directly by the caller); anything deeper is a publisher nesting
+    error whose dot-path is returned alongside the points map so the register
+    comparison can still run against the real content.
+    """
+    if depth < 0 or not isinstance(payload, dict):
+        return "", {}
+    for key, value in payload.items():
+        path = (*prefix, str(key))
+        if (
+            key == "pointset"
+            and prefix
+            and isinstance(value, dict)
+            and isinstance(value.get("points"), dict)
+        ):
+            return ".".join((*path, "points")), value["points"]
+        if isinstance(value, dict):
+            found_path, found_points = _find_misplaced_metadata_points(value, path, depth - 1)
+            if found_points:
+                return found_path, found_points
+    return "", {}
+
+
 def _misplaced_value_detail(
     payload: dict,
     leaf_keys: tuple[str, ...],
@@ -583,6 +613,33 @@ def _review_payload_issues(
     # Tolerate malformed shapes (pointset/points as a non-object) so a bad
     # payload yields structural issues above instead of crashing the run.
     metadata_points = _dict_or_empty(_dict_or_empty(metadata_payload.get("pointset")).get("points")) if metadata_payload else {}
+    if metadata_payload and not metadata_points:
+        # On-site 2026-07-13: a publisher nested the whole pointset under
+        # 'system', so every register point read "not defined in the metadata
+        # pointset" while plainly visible in MQTT Explorer. Report the wrong
+        # nesting ONCE, then compare against the misplaced copy so the
+        # per-point issues below reflect real content differences (missing
+        # points, typos, wrong units) instead of one false "missing" per point.
+        misplaced_path, misplaced_points = _find_misplaced_metadata_points(metadata_payload)
+        if misplaced_points:
+            metadata_points = misplaced_points
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type="metadata_validation",
+                    severity="high",
+                    description=(
+                        f"The metadata payload nests its pointset at {misplaced_path} — UDMI "
+                        "expects 'pointset.points' at the payload top level. The register "
+                        "point/unit comparison used the nested copy so content is still checked."
+                    ),
+                    expected_value="pointset.points at the payload top level",
+                    observed_value=misplaced_path,
+                    suggested_action="Move the pointset object to the metadata payload's top level in the publisher.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
     pointset_points = _dict_or_empty(pointset_payload.get("points")) or _dict_or_empty(
         _dict_or_empty(pointset_payload.get("pointset")).get("points")
     )

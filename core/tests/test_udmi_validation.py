@@ -610,6 +610,44 @@ class MetadataPointCoverageTests(unittest.TestCase):
         # device actually published in each field.
         self.assertEqual(mismatches[0].observed_value, "LEVEL-2 / OTHER_ROOM")
 
+    def test_misplaced_metadata_pointset_reported_once_and_content_still_checked(self) -> None:
+        # On-site 2026-07-13 (afternoon): metadata nested the whole pointset
+        # under 'system' — every register point read "not defined in the
+        # metadata pointset" while plainly visible in MQTT Explorer, and a real
+        # device-side typo (phas2_line_current_sensor) hid among the noise.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(
+                    points=["phase1_power_sensor", "phase2_line_current_sensor"],
+                    units={"phase1_power_sensor": "kilowatts"},
+                ),
+                "metadata_payload": {
+                    "version": "1.5.2",
+                    "timestamp": "2026-07-13T16:44:19Z",
+                    "system": {
+                        "pointset": {
+                            "points": {
+                                "phase1_power_sensor": {"units": "kilowatts"},
+                                "phas2_line_current_sensor": {"units": "amperes"},
+                            }
+                        },
+                    },
+                },
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        misplaced = [
+            issue for issue in issues
+            if "nests its pointset at system.pointset.points" in issue.description
+        ]
+        self.assertEqual(len(misplaced), 1)
+        self.assertEqual(misplaced[0].severity, "high")
+        # Content is compared against the nested copy: the point present there
+        # is NOT falsely missing, while the device's typo IS reported both ways.
+        self.assertNotIn("Expected point phase1_power_sensor is not defined", descriptions)
+        self.assertIn("Expected point phase2_line_current_sensor is not defined", descriptions)
+        self.assertIn("Metadata defines point phas2_line_current_sensor", descriptions)
+
     def test_misplaced_identity_value_names_where_it_was_found(self) -> None:
         # On-site 2026-07-13: the publisher nested a second 'system' inside
         # 'system' (system.system.location.site), so identity checks read
