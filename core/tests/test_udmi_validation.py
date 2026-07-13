@@ -711,6 +711,25 @@ class RegisterDrivenAssetsTests(unittest.TestCase):
         )
         self.assertFalse([issue for issue in result.issues if issue.issue_type == "register_import"])
 
+    def test_duplicate_asset_id_collision_is_reported(self) -> None:
+        # Backend detected two register rows sharing one Asset ID but pointing
+        # at different device topic roots (2026-07-13: one device looked
+        # missing, its neighbour carried a doubled issue list).
+        result = validate_udmi_full_report(
+            {
+                "assets": [{"expected_schedule": _schedule()}],
+                "register_duplicate_asset_ids": [
+                    {"asset_id": "EM-1002002", "topic_roots": ["MNVRHS/EM-1002001", "MNVRHS/EM-1002002"]},
+                ],
+            },
+            live_capture=None,
+        )
+        collisions = [issue for issue in result.issues if issue.issue_type == "register_import"]
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(collisions[0].severity, "high")
+        self.assertIn("multiple rows with Asset ID 'EM-1002002'", collisions[0].description)
+        self.assertIn("MNVRHS/EM-1002001, MNVRHS/EM-1002002", collisions[0].description)
+
 
 class CaptureTopicTests(unittest.TestCase):
     def test_extra_capture_topics_are_included_and_deduplicated(self) -> None:

@@ -38,6 +38,17 @@ _PER_TYPE_REGISTER_CSV = (
     'Site A,BMS,EM-9,mn/em/EM-9/events/pointset,1.5.2,"energy_sensor,power_sensor","kwh,kw",60,MQTT,pointset\n'
 )
 
+# On-site 2026-07-13 screenshot scenario: 3 rows all accepted, but one row
+# reuses another asset's ID for a different device's topics (copy-paste error).
+# Those two rows must NOT merge, and the run must name the collision.
+_DUPLICATE_ID_REGISTER_CSV = (
+    "Project/site,System,Asset ID,Expected topic,Expected schema version,"
+    "Expected points,Expected units,Expected reporting interval,Source protocol\n"
+    'Site A,BMS,EM-1002002,MNVRHS/EM-1002001/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
+    'Site A,BMS,EM-1002002,MNVRHS/EM-1002002/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
+    'Site A,BMS,FCU-1008888,MNVRHS/FCU-1008888/#,1.5.2,supply_air_temperature_sensor,degrees_celsius,60,MQTT\n'
+)
+
 # Second row's topic has no recognised payload suffix, so the import rejects it
 # (partial import) — the run must then say the asset was dropped.
 _PARTIAL_REGISTER_CSV = (
@@ -133,6 +144,42 @@ class UdmiRegisterFlowTests(ApiTestCase):
         # Exactly one payload view / issue set for the asset — not one per row.
         views = run["result_summary"]["payload_views"]
         self.assertEqual([view["asset_id"] for view in views], ["EM-9"])
+
+    def test_duplicate_asset_id_rows_stay_separate_and_are_reported(self) -> None:
+        # Two different device topic roots under one Asset ID: merging them
+        # would fuse two devices' evidence, and the UI's per-asset grouping
+        # would hide one device entirely (the 2026-07-13 missing-device case).
+        project, site = f"{_PROJECT}-dupid", f"{_SITE}-dupid"
+        upload = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={"file": ("register.csv", io.BytesIO(_DUPLICATE_ID_REGISTER_CSV.encode()), "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        self.assertEqual(upload.json()["status"], "accepted", upload.text)
+
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 200, response.text)
+        run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+
+        assets = run["parameters"]["assets"]
+        # Three entries survive: the two same-ID rows are NOT merged.
+        self.assertEqual(len(assets), 3)
+        roots = sorted(
+            entry.get("register_topic_filter", "") for entry in assets
+        )
+        self.assertEqual(
+            roots,
+            ["MNVRHS/EM-1002001/#", "MNVRHS/EM-1002002/#", "MNVRHS/FCU-1008888/#"],
+        )
+        collisions = [
+            issue for issue in run["issues"] if issue["issue_type"] == "register_import"
+        ]
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(collisions[0]["severity"], "high")
+        self.assertIn("multiple rows with Asset ID 'EM-1002002'", collisions[0]["description"])
+        self.assertIn("MNVRHS/EM-1002001", collisions[0]["description"])
+        self.assertIn("MNVRHS/EM-1002002", collisions[0]["description"])
 
     def test_rejected_register_rows_are_reported_by_the_run(self) -> None:
         # On-site 2026-07-13: a publishing device was missing from the results

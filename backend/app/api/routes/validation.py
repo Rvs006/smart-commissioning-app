@@ -191,18 +191,42 @@ def _asset_entry_from_row(row: dict) -> dict:
     }
 
 
-def _merge_asset_rows(rows: list[dict]) -> list[dict]:
-    """One assets entry per register asset, merging per-payload-type rows.
+def _entry_topic_root(entry: dict) -> str:
+    """The asset's topic prefix, used to tell per-payload-type rows of ONE
+    device apart from same-Asset-ID rows that point at DIFFERENT devices
+    (a register copy-paste error)."""
+    for slot, suffix in (
+        ("state_topic", "/state"),
+        ("metadata_topic", "/metadata"),
+        ("pointset_topic", "/events/pointset"),
+        ("pointset_topic", "/event/pointset"),
+    ):
+        topic = str(entry.get(slot) or "")
+        if topic.endswith(suffix):
+            return topic.removesuffix(suffix)
+    return str(entry.get("register_topic_filter") or "").removesuffix("/#").rstrip("/")
+
+
+def _merge_asset_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(entries, duplicate_id_records): one assets entry per register asset.
 
     A register may carry several rows for the same asset (one per payload type,
     or one per topic convention). Each row previously became its OWN assets[]
     entry with the same asset_id, so a payload captured through a shared
     wildcard was reviewed once per row and every issue appeared N times
-    (on-site 2026-07-13: one asset showed triplicated issue lists). Merging
-    keeps one entry per asset: first-wins for singular fields, union for
-    topics, points, and units.
+    (on-site 2026-07-13: one asset showed duplicated issue lists). Rows sharing
+    an Asset ID AND a topic root merge into one entry: first-wins for singular
+    fields, union for topics, points, and units.
+
+    Rows sharing an Asset ID but pointing at DIFFERENT topic roots are two
+    different devices mislabelled with one ID — merging them would silently fuse
+    two devices' evidence, and the UI's per-asset grouping already hides one of
+    them. They are kept as separate entries and reported via the returned
+    duplicate records so the run can name the register error.
     """
     merged: dict[str, dict] = {}
+    separate: list[dict] = []
+    collisions: dict[str, list[str]] = {}
     for row in rows:
         entry = _asset_entry_from_row(row)
         schedule = entry["expected_schedule"]
@@ -210,6 +234,14 @@ def _merge_asset_rows(rows: list[dict]) -> list[dict]:
         existing = merged.get(key)
         if existing is None:
             merged[key] = entry
+            continue
+        existing_root = _entry_topic_root(existing)
+        entry_root = _entry_topic_root(entry)
+        if existing_root and entry_root and existing_root != entry_root:
+            roots = collisions.setdefault(key, [existing_root])
+            if entry_root not in roots:
+                roots.append(entry_root)
+            separate.append(entry)
             continue
         for slot in ("state_topic", "metadata_topic", "pointset_topic", "register_topic_filter"):
             if entry.get(slot) and not existing.get(slot):
@@ -227,7 +259,10 @@ def _merge_asset_rows(rows: list[dict]) -> list[dict]:
                 existing_schedule["units"] = {**value, **existing_schedule.get("units", {})}
             elif not existing_schedule.get(field):
                 existing_schedule[field] = value
-    return list(merged.values())
+    duplicate_records = [
+        {"asset_id": asset_id, "topic_roots": roots} for asset_id, roots in collisions.items()
+    ]
+    return [*merged.values(), *separate], duplicate_records
 
 
 def _register_rejection_info(record: dict) -> dict:
@@ -264,7 +299,11 @@ def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[
     for record in imports:  # newest-first
         rows = record.get("accepted_rows", [])
         if rows:
-            return _merge_asset_rows(rows), _register_rejection_info(record)
+            entries, duplicate_records = _merge_asset_rows(rows)
+            register_info = _register_rejection_info(record)
+            if duplicate_records:
+                register_info["register_duplicate_asset_ids"] = duplicate_records
+            return entries, register_info
     return [], {}
 
 

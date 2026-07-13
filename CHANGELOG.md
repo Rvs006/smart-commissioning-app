@@ -22,7 +22,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   Register rows for the same asset (one per payload type) now merge into a
   single validation entry instead of duplicating every issue per row, and rows
   rejected at import are reported as a run issue — a dropped register row can no
-  longer silently remove a device from the results.
+  longer silently remove a device from the results. Rows that reuse one Asset ID
+  for different device topics (a register copy-paste error that makes one device
+  vanish and doubles its neighbour's issue list) stay separate and the run
+  reports the collision with both topic roots.
 
 - **UDMI expected payload templates.** Expected-versus-observed evidence now
   renders complete state, metadata, and pointset UDMI shapes. Known register

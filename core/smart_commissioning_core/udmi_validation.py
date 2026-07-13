@@ -152,6 +152,7 @@ def validate_udmi_full_report(
     register_rejection = _register_rejection_issue(parameters, issues)
     if register_rejection is not None:
         issues.append(register_rejection)
+    issues.extend(_register_duplicate_id_issues(parameters, issues))
     issues.extend(_review_all_payload_issues(parameters or {}, issues))
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
@@ -1293,6 +1294,48 @@ def _register_rejection_issue(
             "and run the validation again."
         ),
     )
+
+
+def _register_duplicate_id_issues(
+    parameters: dict[str, object],
+    issues: list[ValidationIssueRecord],
+) -> list[ValidationIssueRecord]:
+    """Report register rows that reuse one Asset ID for different device topics.
+
+    Two devices mislabelled with one ID group under a single asset in the
+    results, so one device looks missing while the other shows a doubled issue
+    list (on-site 2026-07-13: a publishing device was absent and its neighbour
+    carried two payload sets). The backend detects the collision when building
+    the assets list and passes it through for honest reporting.
+    """
+    raw = parameters.get("register_duplicate_asset_ids")
+    if not isinstance(raw, list):
+        return []
+    duplicates: list[ValidationIssueRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("asset_id") or "register asset")
+        roots = [str(root) for root in item.get("topic_roots") or [] if root]
+        duplicates.append(
+            _issue(
+                [*issues, *duplicates],
+                asset_id=asset_id,
+                issue_type="register_import",
+                severity="high",
+                description=(
+                    f"The register has multiple rows with Asset ID '{asset_id}' pointing at "
+                    f"different device topics ({', '.join(roots)}). Results grouped under "
+                    f"'{asset_id}' mix those devices and one of them looks missing."
+                ),
+                observed_value=", ".join(roots) or None,
+                suggested_action=(
+                    "Give each device row a unique Asset ID in the register, re-upload it, "
+                    "and run the validation again."
+                ),
+            )
+        )
+    return duplicates
 
 
 def _asset_capture_detail(entry: dict) -> str:
