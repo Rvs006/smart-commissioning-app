@@ -473,7 +473,11 @@ class UdmiReviewTests(unittest.TestCase):
         # Observed payload passes through verbatim; expected is a UDMI-shaped
         # template with register constraints and explicit device placeholders.
         self.assertEqual(by_type["state"]["observed"]["system"]["hardware"]["make"], "ExpectedCo")
-        self.assertEqual(by_type["state"]["expected"]["timestamp"], "1970-01-01T00:00:00Z")
+        # Template timestamp is the build time (RFC 3339), not the old epoch
+        # sentinel that read as a broken device clock on site.
+        template_timestamp = by_type["state"]["expected"]["timestamp"]
+        self.assertRegex(template_timestamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertFalse(template_timestamp.startswith("1970"))
         self.assertEqual(by_type["state"]["expected"]["system"]["hardware"], {"make": "ExpectedCo", "model": "Model-A"})
         self.assertEqual(by_type["state"]["expected"]["system"]["serial_no"], "<device serial number>")
         self.assertEqual(

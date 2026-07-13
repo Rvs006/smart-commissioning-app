@@ -9,6 +9,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- **UDMI workbench on-site follow-ups (2026-07-13).** Expected-template
+  timestamps (`timestamp`, state `last_config`) now show the template build time
+  instead of the 1970 epoch sentinel that read as a broken clock. Register
+  identity values that can never fit canonical UDMI patterns (numeric Asset IDs,
+  free-text Rooms/Sites, bare GUIDs) no longer invalidate the whole expected
+  metadata template: the template embeds a schema-valid placeholder and a
+  low-severity note names the register column, value, and required pattern.
+  Per-asset "did not publish" issues now say which topics were subscribed and
+  what actually arrived (unrecognised topic path, non-JSON payload, or nothing),
+  and the result summary records the capture window that was actually used.
+
 - **UDMI expected payload templates.** Expected-versus-observed evidence now
   renders complete state, metadata, and pointset UDMI shapes. Known register
   values are embedded at their UDMI paths; schema-valid sentinel values identify
