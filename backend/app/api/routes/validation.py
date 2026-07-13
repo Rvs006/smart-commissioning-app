@@ -191,16 +191,128 @@ def _asset_entry_from_row(row: dict) -> dict:
     }
 
 
-def _expected_assets_from_register(project_id: str, site_id: str) -> list[dict]:
-    """One fan-out entry per row of the newest mqtt_register import (empty if none)."""
+def _entry_topic_root(entry: dict) -> str:
+    """The asset's topic prefix, used to tell per-payload-type rows of ONE
+    device apart from same-Asset-ID rows that point at DIFFERENT devices
+    (a register copy-paste error)."""
+    for slot, suffix in (
+        ("state_topic", "/state"),
+        ("metadata_topic", "/metadata"),
+        ("pointset_topic", "/events/pointset"),
+        ("pointset_topic", "/event/pointset"),
+    ):
+        topic = str(entry.get(slot) or "")
+        if topic.endswith(suffix):
+            return topic.removesuffix(suffix)
+    return str(entry.get("register_topic_filter") or "").removesuffix("/#").rstrip("/")
+
+
+def _merge_entry_into(existing: dict, entry: dict) -> None:
+    """Fold one register row's entry into an existing same-device entry:
+    first-wins for singular fields, union for topics, points, and units."""
+    for slot in ("state_topic", "metadata_topic", "pointset_topic", "register_topic_filter"):
+        if entry.get(slot) and not existing.get(slot):
+            existing[slot] = entry[slot]
+    extra = [*existing.get("extra_capture_topics", []), *entry.get("extra_capture_topics", [])]
+    if extra:
+        existing["extra_capture_topics"] = list(dict.fromkeys(extra))
+    existing_schedule = existing["expected_schedule"]
+    for field, value in entry["expected_schedule"].items():
+        if field == "points":
+            existing_schedule["points"] = list(
+                dict.fromkeys([*existing_schedule.get("points", []), *value])
+            )
+        elif field == "units":
+            existing_schedule["units"] = {**value, **existing_schedule.get("units", {})}
+        elif not existing_schedule.get(field):
+            existing_schedule[field] = value
+
+
+def _merge_asset_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(entries, duplicate_id_records): one assets entry per register DEVICE.
+
+    A register may carry several rows for the same asset (one per payload type,
+    or one per topic convention). Each row previously became its OWN assets[]
+    entry with the same asset_id, so a payload captured through a shared
+    wildcard was reviewed once per row and every issue appeared N times
+    (on-site 2026-07-13: one asset showed duplicated issue lists). Rows are
+    bucketed per (identity, topic root): a row joins the identity's first
+    bucket whose root matches (or where either side has no root yet).
+
+    An identity that ends up with MORE THAN ONE bucket is two different devices
+    mislabelled with one ID — merging them would silently fuse two devices'
+    evidence, and the UI's per-asset grouping already hides one of them. Each
+    device still coalesces its own per-payload-type rows into one entry (also
+    for legacy imports that predate the upload-time conflict gate), and the
+    collision is reported via the returned duplicate records.
+    """
+    entries: list[dict] = []
+    buckets_by_identity: dict[str, list[list]] = {}  # identity -> [[root, entry], ...]
+    for index, row in enumerate(rows):
+        entry = _asset_entry_from_row(row)
+        identity = str(entry["expected_schedule"].get("asset_id") or "") or f"__row_{index}"
+        root = _entry_topic_root(entry)
+        buckets = buckets_by_identity.setdefault(identity, [])
+        for bucket in buckets:
+            if not bucket[0] or not root or bucket[0] == root:
+                _merge_entry_into(bucket[1], entry)
+                if root and not bucket[0]:
+                    bucket[0] = root
+                break
+        else:
+            buckets.append([root, entry])
+            entries.append(entry)
+    duplicate_records = [
+        {
+            "asset_id": identity,
+            "topic_roots": [bucket[0] for bucket in buckets if bucket[0]],
+        }
+        for identity, buckets in buckets_by_identity.items()
+        if len(buckets) > 1
+    ]
+    return entries, duplicate_records
+
+
+def _register_rejection_info(record: dict) -> dict:
+    """Rejected-row facts for the import a run is based on.
+
+    A partial import silently narrowed the expected asset list (on-site
+    2026-07-13: a publishing device was absent from the results with no
+    explanation). The run parameters carry the rejection count and the first
+    few row errors so the validator can report them as a real issue.
+    """
+    errors = [error for error in record.get("errors") or [] if isinstance(error, dict)]
+    if not errors:
+        return {}
+    details = [
+        f"row {error.get('row_number')}: {error.get('field')} — {error.get('message')}"
+        for error in errors[:5]
+    ]
+    return {
+        "register_rejected_rows": len({error.get("row_number") for error in errors}),
+        "register_rejected_details": details,
+        "register_import_filename": record.get("original_filename"),
+    }
+
+
+def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[dict], dict]:
+    """(assets, register_info) from the newest mqtt_register import.
+
+    One merged fan-out entry per register asset (empty list if no import), plus
+    the rejected-row info for that same import so dropped rows are reportable.
+    """
     imports = ImportRepository(service.engine).list(
         project_id=project_id, site_id=site_id, import_type="mqtt_register"
     )
     for record in imports:  # newest-first
         rows = record.get("accepted_rows", [])
         if rows:
-            return [_asset_entry_from_row(row) for row in rows]
-    return []
+            entries, duplicate_records = _merge_asset_rows(rows)
+            register_info = _register_rejection_info(record)
+            if duplicate_records:
+                register_info["register_duplicate_asset_ids"] = duplicate_records
+            return entries, register_info
+    return [], {}
 
 
 @router.post("/udmi/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
@@ -214,7 +326,7 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     parameters = dict(request.parameters)
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     if not parameters.get("expected_schedule") and not parameters.get("assets"):
-        assets = _expected_assets_from_register(request.project_id, request.site_id)
+        assets, register_info = _expected_assets_from_register(request.project_id, request.site_id)
         asset_id = str(parameters.get("asset_id") or "").strip()
         if asset_id and assets:
             chosen = next((a for a in assets if asset_id == a["expected_schedule"].get("asset_id")), assets[0])
@@ -227,6 +339,9 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
                     if parameters.get(key) is not None:
                         assets[0].setdefault(key, parameters[key])
             parameters["assets"] = assets
+            # Rejected rows from the SAME import: the validator reports them so
+            # an asset dropped at import time is never silently "not a result".
+            parameters.update(register_info)
         elif parameters.get("use_register"):
             # The operator explicitly asked to validate against the imported
             # register and there is none: refuse rather than silently falling

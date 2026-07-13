@@ -150,6 +150,31 @@ def _validate_positive_numeric(row: dict[str, str], row_number: int, field: str)
     return []
 
 
+# Recognised trailing payload suffixes of an asset topic; stripping one yields
+# the asset's topic root (its device prefix).
+_ASSET_TOPIC_SUFFIXES = ("/#", "/state", "/metadata", "/event/pointset", "/events/pointset")
+
+
+def _topic_roots(value: str) -> frozenset[str]:
+    """Topic roots for a comma-separated topic cell.
+
+    Strips exactly ONE trailing payload suffix per topic — never chained, so a
+    root that itself ends in a payload-like level (e.g. ``a/metadata/state`` ->
+    ``a/metadata``) keeps that level.
+    """
+    roots: set[str] = set()
+    for part in value.split(","):
+        topic = part.strip()
+        if not topic:
+            continue
+        for suffix in _ASSET_TOPIC_SUFFIXES:
+            if topic.endswith(suffix):
+                topic = topic.removesuffix(suffix)
+                break
+        roots.add(topic)
+    return frozenset(roots)
+
+
 def _validate_mqtt_asset_topic(
     row: dict[str, str], row_number: int, field: str
 ) -> list[ImportErrorRecord]:
@@ -157,13 +182,11 @@ def _validate_mqtt_asset_topic(
     if not value or _validate_topic(row, row_number, field):
         return []
     topics = [topic.strip() for topic in value.split(",") if topic.strip()]
-    supported_suffixes = ("/#", "/state", "/metadata", "/event/pointset", "/events/pointset")
     if not any("+" in topic.split("/") for topic in topics) and all(
-        topic.endswith(supported_suffixes) for topic in topics
+        topic.endswith(_ASSET_TOPIC_SUFFIXES) for topic in topics
     ):
         if not row.get("Payload type", "").strip():
-            roots = {topic.removesuffix("/#").removesuffix("/state").removesuffix("/metadata").removesuffix("/event/pointset").removesuffix("/events/pointset") for topic in topics}
-            if len(roots) != 1:
+            if len(_topic_roots(value)) != 1:
                 return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_topic", message=f"{field} blank payload type must reference one asset root.")]
         return []
     return [
@@ -227,6 +250,52 @@ def _validate_asset_identity(row: dict[str, str], row_number: int) -> list[Impor
             message="Provide an Asset ID or an Asset name (at least one is required).",
         )
     ]
+
+
+def _conflicting_asset_topic_error(
+    row: dict[str, str],
+    row_number: int,
+    roots_by_identity: dict[str, frozenset[str]],
+) -> ImportErrorRecord | None:
+    """Cross-row mqtt_register rule: one asset identity means ONE device.
+
+    On-site 2026-07-13 a register row reused another asset's ID for a different
+    device's topics; the import accepted every row and the run then grouped two
+    devices under one ID — one looked missing, its neighbour doubled its issue
+    list. The first errorless row registers the identity's topic root(s); a
+    later row whose roots share nothing with them points at a different device
+    and is rejected, naming both roots so the operator can tell which row is
+    the copy-paste error. Rows sharing identity AND a root (e.g. one row per
+    payload type) stay accepted — the run-time merge relies on them.
+    """
+    identity = row.get("Asset ID", "").strip() or row.get("Asset name", "").strip()
+    if not identity:
+        return None  # Row already rejected by _validate_asset_identity.
+    identity_label = "Asset ID" if row.get("Asset ID", "").strip() else "Asset name"
+    roots = _topic_roots(row.get("Expected topic", ""))
+    if not roots:
+        return None
+    known_roots = roots_by_identity.get(identity)
+    if known_roots is None:
+        roots_by_identity[identity] = roots
+        return None
+    if known_roots & roots:
+        # Same device: widen the registered set so a multi-root topic list
+        # cannot smuggle a new root past later rows or falsely reject a
+        # follow-up row that matches only the newly-listed root.
+        roots_by_identity[identity] = known_roots | roots
+        return None
+    return ImportErrorRecord(
+        row_number=row_number,
+        field="Expected topic",
+        code="conflicting_asset_topic",
+        message=(
+            f"{identity_label} '{identity}' is already registered for topic root "
+            f"'{', '.join(sorted(known_roots))}' but this row points at "
+            f"'{', '.join(sorted(roots))}' — a different device. "
+            "Give each device its own unique Asset ID."
+        ),
+    )
 
 
 def _base_row_validation(required_columns: tuple[str, ...], row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
@@ -582,6 +651,9 @@ class ImportService:
             )
         else:
             seen_keys: set[tuple[str, ...]] = set()
+            # Cross-row mqtt_register state: identity -> topic roots of its
+            # first errorless row (per batch, so nothing leaks across imports).
+            mqtt_roots_by_identity: dict[str, frozenset[str]] = {}
             for row_number, row in enumerate(mapped_rows, start=2):
                 row_errors = profile.validate_row(row, row_number)
                 duplicate_key = tuple(row.get(field, "").strip() for field in profile.duplicate_key_fields)
@@ -596,6 +668,10 @@ class ImportService:
                         )
                     else:
                         seen_keys.add(duplicate_key)
+                if import_type == "mqtt_register" and not row_errors:
+                    conflict = _conflicting_asset_topic_error(row, row_number, mqtt_roots_by_identity)
+                    if conflict is not None:
+                        row_errors.append(conflict)
                 if row_errors:
                     errors.extend(row_errors)
                 else:

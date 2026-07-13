@@ -7,7 +7,42 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- **UDMI run monitor shows the actual capture window.** After a UDMI validation
+  run, the run monitor (and the live-results banner) reports the capture window
+  the run really used — "120 s (bounded)", "until all topics reported
+  (indefinite)", or the capped no-cancel fallback — so an operator can tell why
+  a capture stopped when it did.
+
 ### Fixed
+
+- **MQTT register import rejects conflicting Asset ID reuse.** A register row
+  that reuses an already-registered asset identity (Asset ID, or Asset name
+  when the ID is blank) for a different device's topic root is now rejected at
+  upload (first row wins) with a per-row error naming both topic roots —
+  previously the upload reported every row accepted and one device later
+  vanished from the grouped validation results (on-site 2026-07-13). Same-ID
+  rows sharing a topic root (one row per payload type) import unchanged, and
+  the run-time collision guard still covers imports accepted before this rule.
+
+- **UDMI workbench on-site follow-ups (2026-07-13).** Expected-template
+  timestamps (`timestamp`, state `last_config`) now show the template build time
+  instead of the 1970 epoch sentinel that read as a broken clock. Register
+  identity values that can never fit canonical UDMI patterns (numeric Asset IDs,
+  free-text Rooms/Sites, bare GUIDs) no longer invalidate the whole expected
+  metadata template: the template embeds a schema-valid placeholder and a
+  low-severity note names the register column, value, and required pattern.
+  Per-asset "did not publish" issues now say which topics were subscribed and
+  what actually arrived (unrecognised topic path, non-JSON payload, or nothing),
+  and the result summary records the capture window that was actually used.
+  Register rows for the same asset (one per payload type) now merge into a
+  single validation entry instead of duplicating every issue per row, and rows
+  rejected at import are reported as a run issue — a dropped register row can no
+  longer silently remove a device from the results. Rows that reuse one Asset ID
+  for different device topics (a register copy-paste error that makes one device
+  vanish and doubles its neighbour's issue list) stay separate and the run
+  reports the collision with both topic roots.
 
 - **UDMI expected payload templates.** Expected-versus-observed evidence now
   renders complete state, metadata, and pointset UDMI shapes. Known register

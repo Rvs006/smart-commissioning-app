@@ -1,5 +1,6 @@
 import json
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -148,6 +149,10 @@ def validate_udmi_full_report(
 
     issues = _normalise_issues(full_report)
     issues.extend(capture_issues)
+    register_rejection = _register_rejection_issue(parameters, issues)
+    if register_rejection is not None:
+        issues.append(register_rejection)
+    issues.extend(_register_duplicate_id_issues(parameters, issues))
     issues.extend(_review_all_payload_issues(parameters or {}, issues))
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
@@ -174,6 +179,9 @@ def validate_udmi_full_report(
         # runs; None when no capture was attempted. Surfaces honestly when an
         # indefinite request had to be bounded for lack of a cancel path.
         "capture_mode": capture_summary.get("capture_mode"),
+        # The window the capture actually ran with (None = indefinite), so an
+        # operator-entered duration that was defaulted or bounded is visible.
+        "capture_window_seconds": capture_summary.get("capture_window_seconds"),
         "captured_topics": capture_summary["captured_topics"],
         "subscribed_topics": capture_summary.get("subscribed_topics", []),
         "payload_views": payload_views,
@@ -210,14 +218,20 @@ def _resolve_report_path(parameters: dict[str, object]) -> Path:
 def _normalise_issues(full_report: dict[str, Any]) -> list[ValidationIssueRecord]:
     issues: list[ValidationIssueRecord] = []
 
+    capture_details = _dict_value(full_report, "DeviceCaptureDetails")
     for asset_id in _list_value(full_report, "DevicesNotPublishing"):
+        description = f"Expected device {asset_id} did not publish during the validation window."
+        detail = capture_details.get(asset_id)
+        if isinstance(detail, str) and detail:
+            description = f"{description} {detail}"
         issues.append(
             _issue(
                 issues,
                 asset_id=asset_id,
                 issue_type="not_publishing",
                 severity="high",
-                description=f"Expected device {asset_id} did not publish during the validation window.",
+                description=description,
+                suggested_action="Confirm the device publishes on the expected topics and widen the capture window if needed.",
             )
         )
 
@@ -353,6 +367,13 @@ def _review_payload_issues(
     metadata_payload = _dict_or_empty(parameters.get("metadata_payload"))
     pointset_payload = _dict_or_empty(parameters.get("pointset_payload"))
     raw_evidence_uri = str(parameters.get("raw_evidence_uri") or "runtime://udmi-validation/review-payloads")
+
+    # Register identity values that can never fit canonical UDMI are reported
+    # by name; the template embeds a schema-valid placeholder for them instead
+    # of failing wholesale (see _METADATA_REGISTER_FIELDS).
+    issues.extend(
+        _register_canonical_notes(expected, issues, asset_id=asset_id, raw_evidence_uri=raw_evidence_uri)
+    )
 
     # The expected side is a real UDMI-shaped template, not a copy of an
     # observation. Report invalid register constraints before comparing a
@@ -933,6 +954,7 @@ def _capture_live_payloads(
             "attempted": True,
             "status_detail": broker_status_detail,
             "capture_mode": capture_mode,
+            "capture_window_seconds": timeout_seconds,
             "captured_topics": [],
             "issue": _capture_error_issue(
                 asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
@@ -964,6 +986,7 @@ def _capture_live_payloads(
             "attempted": True,
             "status_detail": capture_error_status,
             "capture_mode": capture_mode,
+            "capture_window_seconds": timeout_seconds,
             "captured_topics": valid_topics,
             "subscribed_topics": list(topics),
             "issue": _capture_error_issue(
@@ -977,6 +1000,7 @@ def _capture_live_payloads(
             "live_payloads_captured" if valid_messages and not missing else "live_capture_timeout"
         ),
         "capture_mode": capture_mode,
+        "capture_window_seconds": timeout_seconds,
         "captured_topics": valid_topics,
         "subscribed_topics": list(topics),
         "issue": None
@@ -1083,6 +1107,7 @@ def _capture_live_payloads_per_asset(
             "attempted": True,
             "status_detail": broker_status_detail,
             "capture_mode": capture_mode,
+            "capture_window_seconds": timeout_seconds,
             "captured_topics": [],
             "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=broker_status_detail),
         }
@@ -1093,6 +1118,10 @@ def _capture_live_payloads_per_asset(
     # mirroring the single-asset routing (last payload per slot wins).
     for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
         entry["capture_observed_at"] = capture_observed_at
+        # Kept for the per-asset not-publishing diagnostics: an asset with no
+        # payload can then say WHICH topics were subscribed and what (if
+        # anything) actually arrived under them.
+        entry["subscribed_topics"] = list(entry_topics)
         entry_messages = [
             message
             for message in messages
@@ -1117,6 +1146,7 @@ def _capture_live_payloads_per_asset(
             "attempted": True,
             "status_detail": capture_error_status,
             "capture_mode": capture_mode,
+            "capture_window_seconds": timeout_seconds,
             "captured_topics": valid_topics,
             "subscribed_topics": list(topics),
             "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=capture_error_status),
@@ -1127,6 +1157,7 @@ def _capture_live_payloads_per_asset(
             "live_payloads_captured" if valid_messages and not missing else "live_capture_timeout"
         ),
         "capture_mode": capture_mode,
+        "capture_window_seconds": timeout_seconds,
         "captured_topics": valid_topics,
         "subscribed_topics": list(topics),
         "issue": None
@@ -1196,6 +1227,9 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
         "DevicesStateErrors": {},
         "DevicesPointsetValid": [],
         "DevicesStateValid": [],
+        # asset_id -> one-line capture diagnostic for a not-publishing asset
+        # (subscribed topics vs what actually arrived), appended to its issue.
+        "DeviceCaptureDetails": {},
     }
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
@@ -1216,11 +1250,132 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
             )
             if capture_attempted and not has_payload:
                 report["DevicesNotPublishing"].append(asset_id)  # type: ignore[union-attr]
+                detail = _asset_capture_detail(entry)
+                if detail:
+                    report["DeviceCaptureDetails"][asset_id] = detail  # type: ignore[index]
         return report
     expected = _dict_or_empty(parameters.get("expected_schedule"))
     asset_id = str(expected.get("asset_id") or "UDMI asset") if expected else "UDMI asset"
     report["DeviceList"] = [asset_id]
     return report
+
+
+def _register_rejection_issue(
+    parameters: dict[str, object],
+    issues: list[ValidationIssueRecord],
+) -> ValidationIssueRecord | None:
+    """Report register rows the import rejected — those assets are NOT validated.
+
+    Without this a partial import silently narrows the expected asset list and
+    a publishing device simply never appears in the results (on-site
+    2026-07-13). The backend passes the rejection facts from the import record
+    the run was built on.
+    """
+    rejected = parse_int(parameters.get("register_rejected_rows"), default=0)
+    if rejected <= 0:
+        return None
+    details = parameters.get("register_rejected_details")
+    detail_text = ""
+    if isinstance(details, list) and details:
+        detail_text = " " + "; ".join(str(detail) for detail in details) + "."
+    filename = str(parameters.get("register_import_filename") or "").strip()
+    source = f" '{filename}'" if filename else ""
+    return _issue(
+        issues,
+        asset_id="MQTT register",
+        issue_type="register_import",
+        severity="high",
+        description=(
+            f"The MQTT register import{source} rejected {rejected} row(s); those assets were "
+            f"not validated and do not appear in these results.{detail_text}"
+        ),
+        suggested_action=(
+            "Open the Imports page, fix the rejected register rows, re-upload the register, "
+            "and run the validation again."
+        ),
+    )
+
+
+def _register_duplicate_id_issues(
+    parameters: dict[str, object],
+    issues: list[ValidationIssueRecord],
+) -> list[ValidationIssueRecord]:
+    """Report register rows that reuse one Asset ID for different device topics.
+
+    Two devices mislabelled with one ID group under a single asset in the
+    results, so one device looks missing while the other shows a doubled issue
+    list (on-site 2026-07-13: a publishing device was absent and its neighbour
+    carried two payload sets). The backend detects the collision when building
+    the assets list and passes it through for honest reporting.
+    """
+    raw = parameters.get("register_duplicate_asset_ids")
+    if not isinstance(raw, list):
+        return []
+    duplicates: list[ValidationIssueRecord] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("asset_id") or "register asset")
+        roots = [str(root) for root in item.get("topic_roots") or [] if root]
+        duplicates.append(
+            _issue(
+                [*issues, *duplicates],
+                asset_id=asset_id,
+                issue_type="register_import",
+                severity="high",
+                description=(
+                    f"The register has multiple rows with Asset ID '{asset_id}' pointing at "
+                    f"different device topics ({', '.join(roots)}). Results grouped under "
+                    f"'{asset_id}' mix those devices and one of them looks missing."
+                ),
+                observed_value=", ".join(roots) or None,
+                suggested_action=(
+                    "Give each device row a unique Asset ID in the register, re-upload it, "
+                    "and run the validation again."
+                ),
+            )
+        )
+    return duplicates
+
+
+def _asset_capture_detail(entry: dict) -> str:
+    """Why one asset ended up with no payloads after a real capture.
+
+    Three honest cases, in decreasing specificity: messages arrived on a
+    state/metadata/pointset topic but were not JSON objects; messages arrived
+    only on unrecognised topics (register topic does not match the device's
+    actual payload topics); nothing arrived at all on the subscribed topics.
+    On site this is the difference between "2001 is not publishing" and
+    knowing WHICH topic string to compare against MQTT Explorer.
+    """
+    subscribed = [str(topic) for topic in entry.get("subscribed_topics") or [] if str(topic)]
+    if not subscribed:
+        return ""
+    raw_messages = entry.get("messages")
+    observed = list(
+        dict.fromkeys(
+            str(message.get("topic"))
+            for message in (raw_messages if isinstance(raw_messages, list) else [])
+            if isinstance(message, dict) and message.get("topic")
+        )
+    )
+    if observed:
+        slot_topics = [topic for topic in observed if _payload_key_for_topic(topic)]
+        if slot_topics:
+            return (
+                f"Messages arrived on {', '.join(slot_topics)} but their payloads "
+                "were not JSON objects."
+            )
+        return (
+            f"Messages arrived on {', '.join(observed)} but none is a recognised UDMI "
+            "payload topic (ending /state, /metadata, or /pointset); check the "
+            "register's Expected topic against the device's actual topics."
+        )
+    return (
+        f"Nothing arrived on the subscribed topics ({', '.join(subscribed)}) during the "
+        "capture window. MQTT topics are case-sensitive — compare these against the "
+        "broker (e.g. MQTT Explorer) and widen the capture window for slow publishers."
+    )
 
 
 def _issue(
@@ -1243,6 +1398,7 @@ def _issue(
         "pointset_validation": "UDMI-PS",
         "state_validation": "UDMI-ST",
         "metadata_validation": "UDMI-MD",
+        "register_import": "UDMI-RG",
     }.get(issue_type, "UDMI-IS")
     return make_issue(
         issues,
@@ -1285,9 +1441,85 @@ def _state_severity(message: str) -> str:
     return "high" if "offline" in message.lower() else "medium"
 
 
+def _template_timestamp() -> str:
+    """Template-build time as RFC 3339. The old epoch-zero sentinel read as a
+    broken device clock on site (operators saw "1970" and assumed the tool was
+    not pulling the correct time); build time conveys "a current timestamp
+    belongs here" while staying schema-valid."""
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Canonical UDMI 1.5.2 patterns for the register-supplied metadata identity
+# fields (mirrors the vendored schemas/udmi/1.5.2/model_system.json). The
+# expected template embeds the register value only when it fits the canonical
+# pattern; otherwise a schema-valid placeholder keeps the template valid and a
+# targeted note names the misfit. Previously the raw value was embedded and the
+# whole template failed canonical validation with an opaque "cannot form a
+# valid UDMI metadata template" message (on-site 2026-07-13).
+_METADATA_REGISTER_FIELDS: dict[str, tuple[str, str, re.Pattern[str], str]] = {
+    # register key -> (register label, UDMI metadata path, pattern, placeholder)
+    "site": ("Site", "system.location.site", re.compile(r"^[A-Z]{2}-[A-Z]{3,4}-[A-Z0-9]{2,9}$"), "ZZ-TEST-000"),
+    "room": ("Room", "system.location.section", re.compile(r"^[A-Z0-9-]+$"), "UNSPECIFIED"),
+    "guid": ("GUID", "system.physical_tag.asset.guid", re.compile(r"^[a-z]+://[-0-9a-zA-Z_$]+$"), "placeholder://asset"),
+    "asset_id": ("Asset ID", "system.physical_tag.asset.name", re.compile(r"^[A-Z]{2,6}-[1-9][0-9]*$"), "ASSET-1"),
+}
+
+
+def _template_metadata_value(expected: dict[str, Any], register_key: str) -> str:
+    """The register value when it can appear in canonical UDMI, else the placeholder."""
+    _label, _path, pattern, placeholder = _METADATA_REGISTER_FIELDS[register_key]
+    value = str(expected.get(register_key) or "")
+    return value if pattern.match(value) else placeholder
+
+
+def _register_canonical_notes(
+    expected: dict[str, Any],
+    issues: list[ValidationIssueRecord],
+    *,
+    asset_id: str,
+    raw_evidence_uri: str,
+) -> list[ValidationIssueRecord]:
+    """Name each register identity value that can never appear in canonical UDMI.
+
+    These replace the opaque template-invalid errors: the operator learns WHICH
+    register column, its value, and the canonical pattern it must fit, while the
+    displayed expected template stays schema-valid with a placeholder. The
+    register-vs-observed identity comparison still uses the raw register value.
+    """
+    notes: list[ValidationIssueRecord] = []
+    for register_key, (label, path, pattern, placeholder) in _METADATA_REGISTER_FIELDS.items():
+        raw = expected.get(register_key)
+        if not raw:
+            continue
+        value = str(raw)
+        if pattern.match(value):
+            continue
+        notes.append(
+            _issue(
+                [*issues, *notes],
+                asset_id=asset_id,
+                issue_type="metadata_validation",
+                severity="low",
+                description=(
+                    f"Register {label} '{value}' cannot appear in canonical UDMI metadata "
+                    f"({path} must match {pattern.pattern}); the expected template shows "
+                    f"the placeholder '{placeholder}' instead."
+                ),
+                expected_value=pattern.pattern,
+                observed_value=value,
+                suggested_action=(
+                    f"Use a canonical UDMI value for {label} in the register (or accept that "
+                    "this field is compared against the device but never schema-valid)."
+                ),
+                raw_evidence_uri=raw_evidence_uri,
+            )
+        )
+    return notes
+
+
 def _expected_payload_header(expected: dict[str, Any]) -> dict[str, Any]:
     """Schema-valid fields shared by display-only UDMI templates."""
-    header: dict[str, Any] = {"timestamp": "1970-01-01T00:00:00Z"}
+    header: dict[str, Any] = {"timestamp": _template_timestamp()}
     if version := expected.get("udmi_version"):
         header["version"] = version
     return header
@@ -1320,13 +1552,13 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
             **header,
             "system": {
                 "location": {
-                    "site": expected.get("site") or "ZZ-TEST-000",
-                    "section": expected.get("room") or "UNSPECIFIED",
+                    "site": _template_metadata_value(expected, "site"),
+                    "section": _template_metadata_value(expected, "room"),
                 },
                 "physical_tag": {
                     "asset": {
-                        "guid": expected.get("guid") or "placeholder://asset",
-                        "name": expected.get("asset_id") or "<asset name>",
+                        "guid": _template_metadata_value(expected, "guid"),
+                        "name": _template_metadata_value(expected, "asset_id"),
                     }
                 },
             },

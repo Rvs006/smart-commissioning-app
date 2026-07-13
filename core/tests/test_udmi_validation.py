@@ -530,7 +530,12 @@ class MetadataPointCoverageTests(unittest.TestCase):
                 [],
                 f"{payload_type} expected template must be structurally valid",
             )
-        self.assertEqual(expected_by_type["state"]["timestamp"], "1970-01-01T00:00:00Z")
+        # Template timestamps are the build time (RFC 3339), never the epoch
+        # sentinel operators read as "the tool is not pulling the correct time".
+        template_timestamp = expected_by_type["state"]["timestamp"]
+        self.assertRegex(template_timestamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertFalse(template_timestamp.startswith("1970"))
+        self.assertEqual(expected_by_type["state"]["system"]["last_config"], template_timestamp)
         self.assertEqual(expected_by_type["state"]["system"]["serial_no"], "SN-1")
         self.assertEqual(expected_by_type["state"]["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
         self.assertEqual(expected_by_type["state"]["system"]["software"], {"firmware": "1.2.3"})
@@ -539,15 +544,57 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
         self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": None}})
 
-    def test_invalid_register_value_is_reported_instead_of_being_a_valid_expected_template(self) -> None:
-        descriptions = _descriptions(
-            {
-                "expected_schedule": _schedule(site="GB-LON-IES", room="METER_ROOM_R093"),
-            }
+    def test_non_canonical_register_value_gets_placeholder_and_named_note(self) -> None:
+        # On-site 2026-07-13: embedding the raw register Room made the whole
+        # metadata template fail canonical validation with an opaque message.
+        # Now the template stays schema-valid with a placeholder and one clear
+        # low-severity note names the register column, value, and pattern.
+        result = validate_udmi_full_report(
+            {"expected_schedule": _schedule(site="GB-LON-IES", room="METER_ROOM_R093")},
+            live_capture=None,
+        )
+        notes = [
+            issue for issue in result.issues
+            if "cannot appear in canonical UDMI metadata" in issue.description
+        ]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].severity, "low")
+        self.assertIn("Register Room 'METER_ROOM_R093'", notes[0].description)
+        self.assertIn("system.location.section", notes[0].description)
+        descriptions = " ".join(issue.description for issue in result.issues)
+        self.assertNotIn("cannot form a valid UDMI metadata template", descriptions)
+        expected_metadata = next(
+            entry["expected"]
+            for entry in result.result_summary["payload_views"][0]["payload_types"]
+            if entry["payload_type"] == "metadata"
+        )
+        self.assertEqual(structural_issues("metadata", expected_metadata), [])
+        self.assertEqual(
+            expected_metadata["system"]["location"],
+            {"site": "GB-LON-IES", "section": "UNSPECIFIED"},
         )
 
-        self.assertIn("Expected register values cannot form a valid UDMI metadata template", descriptions)
-        self.assertIn("system.location.section", descriptions)
+    def test_numeric_asset_id_and_free_text_room_keep_template_valid(self) -> None:
+        # Pete's site register: asset IDs like "2001" and free-text rooms can
+        # never fit canonical UDMI patterns; each gets a named note and a
+        # schema-valid placeholder in the template.
+        result = validate_udmi_full_report(
+            {"expected_schedule": _schedule(asset_id="2001", room="Meter Room 2")},
+            live_capture=None,
+        )
+        descriptions = " ".join(issue.description for issue in result.issues)
+        self.assertIn("Register Asset ID '2001' cannot appear in canonical UDMI metadata", descriptions)
+        self.assertIn("system.physical_tag.asset.name", descriptions)
+        self.assertIn("Register Room 'Meter Room 2' cannot appear in canonical UDMI metadata", descriptions)
+        self.assertNotIn("cannot form a valid UDMI metadata template", descriptions)
+        expected_metadata = next(
+            entry["expected"]
+            for entry in result.result_summary["payload_views"][0]["payload_types"]
+            if entry["payload_type"] == "metadata"
+        )
+        self.assertEqual(structural_issues("metadata", expected_metadata), [])
+        self.assertEqual(expected_metadata["system"]["physical_tag"]["asset"]["name"], "ASSET-1")
+        self.assertEqual(expected_metadata["system"]["location"]["section"], "UNSPECIFIED")
 
     def test_expected_template_tolerates_malformed_point_constraints(self) -> None:
         result = validate_udmi_full_report({"expected_schedule": _schedule(points=42)})
@@ -635,6 +682,53 @@ class RegisterDrivenAssetsTests(unittest.TestCase):
         self.assertEqual(captured_nothing.result_summary["not_publishing"], 1)
         descriptions = " ".join(issue.description for issue in captured_nothing.issues)
         self.assertIn("did not publish during the validation window", descriptions)
+
+    def test_rejected_register_rows_become_a_visible_issue(self) -> None:
+        # A partial register import silently narrowed the expected asset list on
+        # site (2026-07-13): the dropped device never appeared in any result.
+        result = validate_udmi_full_report(
+            {
+                "assets": [{"expected_schedule": _schedule()}],
+                "register_rejected_rows": 2,
+                "register_rejected_details": [
+                    "row 3: Expected topic — must use a fixed asset prefix",
+                ],
+                "register_import_filename": "register.csv",
+            },
+            live_capture=None,
+        )
+        rejections = [issue for issue in result.issues if issue.issue_type == "register_import"]
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(rejections[0].severity, "high")
+        self.assertIn("'register.csv' rejected 2 row(s)", rejections[0].description)
+        self.assertIn("row 3: Expected topic", rejections[0].description)
+        self.assertIn("do not appear in these results", rejections[0].description)
+
+    def test_no_rejection_issue_without_rejected_rows(self) -> None:
+        result = validate_udmi_full_report(
+            {"assets": [{"expected_schedule": _schedule()}]},
+            live_capture=None,
+        )
+        self.assertFalse([issue for issue in result.issues if issue.issue_type == "register_import"])
+
+    def test_duplicate_asset_id_collision_is_reported(self) -> None:
+        # Backend detected two register rows sharing one Asset ID but pointing
+        # at different device topic roots (2026-07-13: one device looked
+        # missing, its neighbour carried a doubled issue list).
+        result = validate_udmi_full_report(
+            {
+                "assets": [{"expected_schedule": _schedule()}],
+                "register_duplicate_asset_ids": [
+                    {"asset_id": "EM-1002002", "topic_roots": ["MNVRHS/EM-1002001", "MNVRHS/EM-1002002"]},
+                ],
+            },
+            live_capture=None,
+        )
+        collisions = [issue for issue in result.issues if issue.issue_type == "register_import"]
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(collisions[0].severity, "high")
+        self.assertIn("multiple rows with Asset ID 'EM-1002002'", collisions[0].description)
+        self.assertIn("MNVRHS/EM-1002001, MNVRHS/EM-1002002", collisions[0].description)
 
 
 class CaptureTopicTests(unittest.TestCase):
@@ -768,6 +862,7 @@ class CaptureRunTimeTests(unittest.TestCase):
         )
         self.assertEqual(capture.calls[-1]["timeout_seconds"], 45.0)
         self.assertEqual(result.result_summary["capture_mode"], "bounded")
+        self.assertEqual(result.result_summary["capture_window_seconds"], 45.0)
 
     def test_indefinite_without_cancel_path_is_bounded_and_labelled(self) -> None:
         # No cancel mechanism reachable => an indefinite request would be
@@ -868,6 +963,45 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         self.assertEqual(result.result_summary["broker_status_detail"], "live_capture_timeout")
         missing_issues = [issue for issue in result.issues if issue.issue_type == "not_publishing"]
         self.assertTrue(any("site/a2/state" in issue.description for issue in missing_issues))
+
+    def test_not_publishing_issue_names_subscribed_and_observed_topics(self) -> None:
+        # On-site 2026-07-13: a device visible in MQTT Explorer was reported
+        # "not found" with no way to see why. The per-asset issue now says
+        # which topics were subscribed and what actually arrived: A2's wildcard
+        # saw traffic on an unrecognised topic; A3 saw nothing at all.
+        capture = RecordingCapture(
+            [
+                _msg("site/a1/state"),
+                _msg("site/a2/events/system"),
+            ]
+        )
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 1,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {
+                        "expected_schedule": {"asset_id": "A2"},
+                        "state_topic": "site/a2/state",
+                        "register_topic_filter": "site/a2/#",
+                    },
+                    {"expected_schedule": {"asset_id": "A3"}, "state_topic": "site/a3/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        by_asset = {
+            issue.asset_id: issue.description
+            for issue in result.issues
+            if issue.issue_type == "not_publishing" and issue.asset_id in {"A1", "A2", "A3"}
+        }
+        self.assertEqual(set(by_asset), {"A2", "A3"})
+        self.assertIn("site/a2/events/system", by_asset["A2"])
+        self.assertIn("none is a recognised UDMI payload topic", by_asset["A2"])
+        self.assertIn("Nothing arrived on the subscribed topics", by_asset["A3"])
+        self.assertIn("site/a3/state", by_asset["A3"])
 
     def test_register_wildcard_is_subscribed_alongside_derived_topics(self) -> None:
         capture = RecordingCapture([_msg("site/a1/state")])
