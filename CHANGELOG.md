@@ -19,6 +19,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   Per-asset "did not publish" issues now say which topics were subscribed and
   what actually arrived (unrecognised topic path, non-JSON payload, or nothing),
   and the result summary records the capture window that was actually used.
+  Register rows for the same asset (one per payload type) now merge into a
+  single validation entry instead of duplicating every issue per row, and rows
+  rejected at import are reported as a run issue — a dropped register row can no
+  longer silently remove a device from the results.
 
 - **UDMI expected payload templates.** Expected-versus-observed evidence now
   renders complete state, metadata, and pointset UDMI shapes. Known register

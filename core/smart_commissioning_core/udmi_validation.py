@@ -149,6 +149,9 @@ def validate_udmi_full_report(
 
     issues = _normalise_issues(full_report)
     issues.extend(capture_issues)
+    register_rejection = _register_rejection_issue(parameters, issues)
+    if register_rejection is not None:
+        issues.append(register_rejection)
     issues.extend(_review_all_payload_issues(parameters or {}, issues))
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
@@ -1256,6 +1259,42 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
     return report
 
 
+def _register_rejection_issue(
+    parameters: dict[str, object],
+    issues: list[ValidationIssueRecord],
+) -> ValidationIssueRecord | None:
+    """Report register rows the import rejected — those assets are NOT validated.
+
+    Without this a partial import silently narrows the expected asset list and
+    a publishing device simply never appears in the results (on-site
+    2026-07-13). The backend passes the rejection facts from the import record
+    the run was built on.
+    """
+    rejected = parse_int(parameters.get("register_rejected_rows"), default=0)
+    if rejected <= 0:
+        return None
+    details = parameters.get("register_rejected_details")
+    detail_text = ""
+    if isinstance(details, list) and details:
+        detail_text = " " + "; ".join(str(detail) for detail in details) + "."
+    filename = str(parameters.get("register_import_filename") or "").strip()
+    source = f" '{filename}'" if filename else ""
+    return _issue(
+        issues,
+        asset_id="MQTT register",
+        issue_type="register_import",
+        severity="high",
+        description=(
+            f"The MQTT register import{source} rejected {rejected} row(s); those assets were "
+            f"not validated and do not appear in these results.{detail_text}"
+        ),
+        suggested_action=(
+            "Open the Imports page, fix the rejected register rows, re-upload the register, "
+            "and run the validation again."
+        ),
+    )
+
+
 def _asset_capture_detail(entry: dict) -> str:
     """Why one asset ended up with no payloads after a real capture.
 
@@ -1316,6 +1355,7 @@ def _issue(
         "pointset_validation": "UDMI-PS",
         "state_validation": "UDMI-ST",
         "metadata_validation": "UDMI-MD",
+        "register_import": "UDMI-RG",
     }.get(issue_type, "UDMI-IS")
     return make_issue(
         issues,

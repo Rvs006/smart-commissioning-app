@@ -683,6 +683,34 @@ class RegisterDrivenAssetsTests(unittest.TestCase):
         descriptions = " ".join(issue.description for issue in captured_nothing.issues)
         self.assertIn("did not publish during the validation window", descriptions)
 
+    def test_rejected_register_rows_become_a_visible_issue(self) -> None:
+        # A partial register import silently narrowed the expected asset list on
+        # site (2026-07-13): the dropped device never appeared in any result.
+        result = validate_udmi_full_report(
+            {
+                "assets": [{"expected_schedule": _schedule()}],
+                "register_rejected_rows": 2,
+                "register_rejected_details": [
+                    "row 3: Expected topic — must use a fixed asset prefix",
+                ],
+                "register_import_filename": "register.csv",
+            },
+            live_capture=None,
+        )
+        rejections = [issue for issue in result.issues if issue.issue_type == "register_import"]
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(rejections[0].severity, "high")
+        self.assertIn("'register.csv' rejected 2 row(s)", rejections[0].description)
+        self.assertIn("row 3: Expected topic", rejections[0].description)
+        self.assertIn("do not appear in these results", rejections[0].description)
+
+    def test_no_rejection_issue_without_rejected_rows(self) -> None:
+        result = validate_udmi_full_report(
+            {"assets": [{"expected_schedule": _schedule()}]},
+            live_capture=None,
+        )
+        self.assertFalse([issue for issue in result.issues if issue.issue_type == "register_import"])
+
 
 class CaptureTopicTests(unittest.TestCase):
     def test_extra_capture_topics_are_included_and_deduplicated(self) -> None:
