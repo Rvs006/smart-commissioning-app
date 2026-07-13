@@ -580,6 +580,36 @@ class MetadataPointCoverageTests(unittest.TestCase):
         room_issues = [issue for issue in issues if "room" in issue.description.casefold()]
         self.assertEqual([issue.description for issue in room_issues], [])
 
+    def test_register_room_matches_when_section_holds_a_different_subdivision(self) -> None:
+        # A device may populate BOTH fields (section = building subdivision,
+        # room = the register's room): matching either must pass — comparing
+        # against section alone would emit a false mismatch.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(room="2-09_Meter_Room"),
+                "metadata_payload": _metadata(
+                    system={"location": {"section": "LEVEL-2", "room": "2-09_Meter_Room"}},
+                ),
+            }
+        )
+        room_issues = [issue for issue in issues if "room" in issue.description.casefold()]
+        self.assertEqual([issue.description for issue in room_issues], [])
+
+    def test_register_room_matching_neither_field_is_a_single_mismatch(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(room="2-09_Meter_Room"),
+                "metadata_payload": _metadata(
+                    system={"location": {"section": "LEVEL-2", "room": "OTHER_ROOM"}},
+                ),
+            }
+        )
+        mismatches = [issue for issue in issues if "does not match the asset register" in issue.description and "room" in issue.description.casefold()]
+        self.assertEqual(len(mismatches), 1)
+        # Both observed candidates are shown so the operator sees what the
+        # device actually published in each field.
+        self.assertEqual(mismatches[0].observed_value, "LEVEL-2 / OTHER_ROOM")
+
     def test_misplaced_identity_value_names_where_it_was_found(self) -> None:
         # On-site 2026-07-13: the publisher nested a second 'system' inside
         # 'system' (system.system.location.site), so identity checks read

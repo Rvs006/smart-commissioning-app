@@ -336,11 +336,18 @@ _IDENTITY_CHECKS: tuple[tuple[str, Callable[[dict, dict], object], str, str, str
      ("site",), "system.location.site"),
     # Devices legitimately publish the room under location.section OR
     # location.room (both exist in the UDMI system model), so the register's
-    # Room column matches either.
-    ("room", lambda state, metadata: (
-        _nested(metadata, "system", "location", "section")
-        or _nested(metadata, "system", "location", "room")
-    ),
+    # Room column matches either: the getter returns ALL present candidates and
+    # the check passes when ANY equals the register value — a device carrying
+    # both fields (section = building subdivision, room = the register's room)
+    # must not read as a mismatch against section alone.
+    ("room", lambda state, metadata: [
+        value
+        for value in (
+            _nested(metadata, "system", "location", "section"),
+            _nested(metadata, "system", "location", "room"),
+        )
+        if value
+    ],
      "metadata_validation", "low",
      "Metadata room/section does not match the asset register.",
      "Confirm the room/section in the schedule and the UDMI metadata location.",
@@ -529,10 +536,15 @@ def _review_payload_issues(
     # differing expected values when the corresponding payload was captured.
     for expected_key, observed_getter, issue_type, severity, description, action, leaf_keys, canonical_path in _IDENTITY_CHECKS:
         expected_value = expected.get(expected_key)
-        observed_value = observed_getter(state_payload, metadata_payload)
+        observed = observed_getter(state_payload, metadata_payload)
+        # A getter may return one value or a list of candidate values (the
+        # register value matches when ANY candidate equals it — e.g. room in
+        # location.section or location.room).
+        candidates = [value for value in (observed if isinstance(observed, list) else [observed]) if value]
+        observed_value = candidates[0] if len(candidates) == 1 else " / ".join(str(value) for value in candidates)
         source_payload = state_payload if issue_type == "state_validation" else metadata_payload
         payload_present = bool(source_payload)
-        if expected_value and payload_present and not observed_value:
+        if expected_value and payload_present and not candidates:
             # "Missing" alone misleads when the value sits at a wrong path
             # (e.g. a second 'system' nesting level): name where it was found.
             misplaced_detail = _misplaced_value_detail(source_payload, leaf_keys, canonical_path)
@@ -553,7 +565,7 @@ def _review_payload_issues(
                     raw_evidence_uri=raw_evidence_uri,
                 )
             )
-        elif expected_value and observed_value and expected_value != observed_value:
+        elif expected_value and candidates and expected_value not in candidates:
             issues.append(
                 _issue(
                     issues,
