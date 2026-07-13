@@ -38,9 +38,11 @@ _PER_TYPE_REGISTER_CSV = (
     'Site A,BMS,EM-9,mn/em/EM-9/events/pointset,1.5.2,"energy_sensor,power_sensor","kwh,kw",60,MQTT,pointset\n'
 )
 
-# On-site 2026-07-13 screenshot scenario: 3 rows all accepted, but one row
-# reuses another asset's ID for a different device's topics (copy-paste error).
-# Those two rows must NOT merge, and the run must name the collision.
+# On-site 2026-07-13 screenshot scenario: one row reuses another asset's ID for
+# a different device's topics (copy-paste error). The import now rejects the
+# later conflicting row (first row wins) naming both topic roots, so the
+# operator learns about the collision at upload time instead of a device
+# silently vanishing from the validation results.
 _DUPLICATE_ID_REGISTER_CSV = (
     "Project/site,System,Asset ID,Expected topic,Expected schema version,"
     "Expected points,Expected units,Expected reporting interval,Source protocol\n"
@@ -123,7 +125,10 @@ class UdmiRegisterFlowTests(ApiTestCase):
             files={"file": ("register.csv", io.BytesIO(_PER_TYPE_REGISTER_CSV.encode()), "text/csv")},
         )
         self.assertEqual(upload.status_code, 200, upload.text)
+        # Same Asset ID + same topic root is ONE device split per payload type:
+        # the import-time conflicting-Asset-ID gate must accept every row.
         self.assertEqual(upload.json()["status"], "accepted", upload.text)
+        self.assertEqual(upload.json()["accepted_rows"], 3)
 
         response = self._post_run(project, site)
         self.assertEqual(response.status_code, 200, response.text)
@@ -145,10 +150,11 @@ class UdmiRegisterFlowTests(ApiTestCase):
         views = run["result_summary"]["payload_views"]
         self.assertEqual([view["asset_id"] for view in views], ["EM-9"])
 
-    def test_duplicate_asset_id_rows_stay_separate_and_are_reported(self) -> None:
-        # Two different device topic roots under one Asset ID: merging them
-        # would fuse two devices' evidence, and the UI's per-asset grouping
-        # would hide one device entirely (the 2026-07-13 missing-device case).
+    def test_duplicate_asset_id_rows_are_rejected_at_import_and_reported(self) -> None:
+        # Two different device topic roots under one Asset ID is a register
+        # copy-paste error: the import rejects the later conflicting row (first
+        # row wins — here the WRONG row, so the error must carry both roots),
+        # and the run reports the rejection instead of silently narrowing.
         project, site = f"{_PROJECT}-dupid", f"{_SITE}-dupid"
         upload = self.client.post(
             "/api/v1/imports",
@@ -156,7 +162,75 @@ class UdmiRegisterFlowTests(ApiTestCase):
             files={"file": ("register.csv", io.BytesIO(_DUPLICATE_ID_REGISTER_CSV.encode()), "text/csv")},
         )
         self.assertEqual(upload.status_code, 200, upload.text)
-        self.assertEqual(upload.json()["status"], "accepted", upload.text)
+        summary = upload.json()
+        self.assertEqual(summary["status"], "partial", upload.text)
+        self.assertEqual(summary["accepted_rows"], 2)
+        self.assertEqual(summary["rejected_rows"], 1)
+
+        errors = self.client.get(f"/api/v1/imports/{summary['import_id']}/errors").json()["errors"]
+        self.assertEqual(len(errors), 1)
+        error = errors[0]
+        self.assertEqual(error["row_number"], 3)
+        self.assertEqual(error["field"], "Expected topic")
+        self.assertEqual(error["code"], "conflicting_asset_topic")
+        self.assertIn("EM-1002002", error["message"])
+        self.assertIn("MNVRHS/EM-1002001", error["message"])
+        self.assertIn("MNVRHS/EM-1002002", error["message"])
+        self.assertIn("unique Asset ID", error["message"])
+
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 200, response.text)
+        run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+
+        assets = run["parameters"]["assets"]
+        roots = sorted(entry.get("register_topic_filter", "") for entry in assets)
+        self.assertEqual(roots, ["MNVRHS/EM-1002001/#", "MNVRHS/FCU-1008888/#"])
+        rejections = [
+            issue for issue in run["issues"] if issue["issue_type"] == "register_import"
+        ]
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(rejections[0]["severity"], "high")
+        self.assertIn("rejected 1 row(s)", rejections[0]["description"])
+        self.assertIn("MNVRHS/EM-1002002", rejections[0]["description"])
+
+    def test_preexisting_conflicting_rows_stay_separate_and_are_reported(self) -> None:
+        # Imports accepted BEFORE the import-time conflicting-Asset-ID gate can
+        # still hold same-ID/different-root rows in the database. The run-time
+        # merge guard is the defence in depth for them: entries stay separate
+        # and the run names the collision with both topic roots.
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.repositories import ImportRepository
+
+        project, site = f"{_PROJECT}-legacy-dupid", f"{_SITE}-legacy-dupid"
+
+        def register_row(asset_id: str, topic: str, point: str) -> dict[str, str]:
+            return {
+                "Project/site": "Site A",
+                "System": "BMS",
+                "Asset ID": asset_id,
+                "Expected topic": topic,
+                "Expected schema version": "1.5.2",
+                "Expected points": point,
+                "Expected units": "kwh",
+                "Expected reporting interval": "60",
+                "Source protocol": "MQTT",
+            }
+
+        # Seed the repository directly (no upload) to model a pre-gate import.
+        ImportRepository(get_engine()).create(
+            import_id="imp_legacy_conflicting_rows",
+            import_type="mqtt_register",
+            project_id=project,
+            site_id=site,
+            original_filename="legacy-register.csv",
+            stored_file_path="legacy-register.csv",
+            summary={"status": "accepted"},
+            accepted_rows=[
+                register_row("EM-1002002", "MNVRHS/EM-1002001/#", "energy_sensor"),
+                register_row("EM-1002002", "MNVRHS/EM-1002002/#", "energy_sensor"),
+                register_row("FCU-1008888", "MNVRHS/FCU-1008888/#", "supply_air_temperature_sensor"),
+            ],
+        )
 
         response = self._post_run(project, site)
         self.assertEqual(response.status_code, 200, response.text)

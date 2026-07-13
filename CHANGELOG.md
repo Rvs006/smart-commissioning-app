@@ -7,7 +7,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- **UDMI run monitor shows the actual capture window.** After a UDMI validation
+  run, the run monitor (and the live-results banner) reports the capture window
+  the run really used — "120 s (bounded)", "until all topics reported
+  (indefinite)", or the capped no-cancel fallback — so an operator can tell why
+  a capture stopped when it did.
+
 ### Fixed
+
+- **MQTT register import rejects conflicting Asset ID reuse.** A register row
+  that reuses an already-registered asset identity (Asset ID, or Asset name
+  when the ID is blank) for a different device's topic root is now rejected at
+  upload (first row wins) with a per-row error naming both topic roots —
+  previously the upload reported every row accepted and one device later
+  vanished from the grouped validation results (on-site 2026-07-13). Same-ID
+  rows sharing a topic root (one row per payload type) import unchanged, and
+  the run-time collision guard still covers imports accepted before this rule.
 
 - **UDMI workbench on-site follow-ups (2026-07-13).** Expected-template
   timestamps (`timestamp`, state `last_config`) now show the template build time

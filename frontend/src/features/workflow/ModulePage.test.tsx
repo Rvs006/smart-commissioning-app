@@ -576,6 +576,8 @@ describe("ModulePage UDMI workbench live results", () => {
       message_count: 3,
       source: "schedule_payload_inputs",
       payload_view_source: "direct_inputs",
+      capture_mode: "bounded",
+      capture_window_seconds: 120,
       payload_views: [
         {
           asset_id: "EM-1",
@@ -661,6 +663,8 @@ describe("ModulePage UDMI workbench live results", () => {
     // the version-mismatch verdict and the run's asset id, not the sample rows.
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
+    // The run monitor shows the capture window the run ACTUALLY used.
+    expect(screen.getByText("120 s (bounded)")).toBeInTheDocument();
     expect(screen.getAllByText("EM-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
     // Row cells also render in the selected-result detail aside, so match >=1.

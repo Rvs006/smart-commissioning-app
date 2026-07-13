@@ -622,6 +622,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? (validationRunQuery.data?.result_summary?.payload_view_source as string | undefined)
       : undefined;
 
+  // The capture window the run ACTUALLY used (capture_mode +
+  // capture_window_seconds, stamped by the UDMI engine at run end). null until
+  // the terminal summary lands and for runs that never attempt a capture
+  // (discovery, config publish, pasted-payload-only runs).
+  const captureWindow =
+    activeRun?.kind === "validation" && validationRunQuery.data
+      ? formatCaptureWindow(validationRunQuery.data.result_summary)
+      : null;
+
   // Merge issue groups with payload views so an asset with payloads but no
   // issues still shows, and each payload type can reveal expected vs observed.
   const mergedAssetGroups = useMemo(() => {
@@ -1270,6 +1279,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <dt>Issues</dt>
                   <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}</dd>
                 </div>
+                {captureWindow !== null && (
+                  <div>
+                    <dt>Capture window</dt>
+                    <dd>{captureWindow}</dd>
+                  </div>
+                )}
               </dl>
 
               <div className="inline-actions">
@@ -2008,7 +2023,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     payloadViewSource === "live_capture"
                       ? "captured from the MQTT broker"
                       : "supplied directly (pasted), not captured from a broker"
-                  }.`}
+                  }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}`}
             </div>
           )}
           {bacnetBackend &&
@@ -2503,6 +2518,29 @@ function formatSummaryValue(value: unknown): string {
     return String(value);
   }
   return "Pending";
+}
+
+// The capture window a UDMI run actually used, from result_summary
+// capture_mode + capture_window_seconds (stamped by the engine at run end).
+// NOT formatSummaryValue: a null capture_window_seconds means an INDEFINITE
+// window, not a pending value. Returns null ("render nothing") when no capture
+// was attempted or the summary has not landed yet.
+function formatCaptureWindow(summary: Record<string, unknown>): string | null {
+  const mode = summary.capture_mode;
+  const seconds = summary.capture_window_seconds;
+  if (mode === "indefinite") {
+    return "until all topics reported (indefinite)";
+  }
+  if (typeof seconds !== "number") {
+    return null;
+  }
+  if (mode === "bounded") {
+    return `${seconds} s (bounded)`;
+  }
+  if (mode === "indefinite_bounded_no_cancel") {
+    return `capped at ${seconds} s (indefinite requested; no cancel path)`;
+  }
+  return null;
 }
 
 function renderCell(
