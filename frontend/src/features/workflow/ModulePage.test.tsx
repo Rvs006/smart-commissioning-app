@@ -578,6 +578,9 @@ describe("ModulePage UDMI workbench live results", () => {
       payload_view_source: "direct_inputs",
       capture_mode: "bounded",
       capture_window_seconds: 120,
+      // False = genuinely bounded; true renders the inline-cap wording
+      // ("capped at N s (indefinite requested; inline run)") instead.
+      indefinite_bounded_inline: false,
       payload_views: [
         {
           asset_id: "EM-1",

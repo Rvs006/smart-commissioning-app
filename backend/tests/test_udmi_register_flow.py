@@ -227,7 +227,12 @@ class UdmiRegisterFlowTests(ApiTestCase):
             summary={"status": "accepted"},
             accepted_rows=[
                 register_row("EM-1002002", "MNVRHS/EM-1002001/#", "energy_sensor"),
-                register_row("EM-1002002", "MNVRHS/EM-1002002/#", "energy_sensor"),
+                # The SECOND device under the duplicated ID arrives as legacy
+                # per-payload-type rows: they must coalesce into ONE entry even
+                # though their shared root is not the identity's first-seen root.
+                register_row("EM-1002002", "MNVRHS/EM-1002002/state", "energy_sensor"),
+                register_row("EM-1002002", "MNVRHS/EM-1002002/metadata", "energy_sensor"),
+                register_row("EM-1002002", "MNVRHS/EM-1002002/events/pointset", "energy_sensor"),
                 register_row("FCU-1008888", "MNVRHS/FCU-1008888/#", "supply_air_temperature_sensor"),
             ],
         )
@@ -237,15 +242,23 @@ class UdmiRegisterFlowTests(ApiTestCase):
         run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
 
         assets = run["parameters"]["assets"]
-        # Three entries survive: the two same-ID rows are NOT merged.
+        # Three entries survive: one per DEVICE — the conflicting-root rows are
+        # not merged with each other, but each device's own rows coalesce.
         self.assertEqual(len(assets), 3)
-        roots = sorted(
-            entry.get("register_topic_filter", "") for entry in assets
-        )
+        state_topics = sorted(entry.get("state_topic", "") for entry in assets)
         self.assertEqual(
-            roots,
-            ["MNVRHS/EM-1002001/#", "MNVRHS/EM-1002002/#", "MNVRHS/FCU-1008888/#"],
+            state_topics,
+            [
+                "MNVRHS/EM-1002001/state",
+                "MNVRHS/EM-1002002/state",
+                "MNVRHS/FCU-1008888/state",
+            ],
         )
+        second_device = next(
+            entry for entry in assets if entry.get("state_topic") == "MNVRHS/EM-1002002/state"
+        )
+        self.assertEqual(second_device["metadata_topic"], "MNVRHS/EM-1002002/metadata")
+        self.assertEqual(second_device["pointset_topic"], "MNVRHS/EM-1002002/events/pointset")
         collisions = [
             issue for issue in run["issues"] if issue["issue_type"] == "register_import"
         ]

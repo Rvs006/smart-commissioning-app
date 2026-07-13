@@ -2534,6 +2534,12 @@ function formatCaptureWindow(summary: Record<string, unknown>): string | null {
   if (typeof seconds !== "number") {
     return null;
   }
+  // The inline fallback rewrites a blank/0 (indefinite) request to its safety
+  // ceiling BEFORE the engine runs, so capture_mode reads "bounded" — the
+  // indefinite_bounded_inline flag is the only honest record of the cap.
+  if (summary.indefinite_bounded_inline === true) {
+    return `capped at ${seconds} s (indefinite requested; inline run)`;
+  }
   if (mode === "bounded") {
     return `${seconds} s (bounded)`;
   }

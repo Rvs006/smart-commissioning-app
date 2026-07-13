@@ -207,62 +207,70 @@ def _entry_topic_root(entry: dict) -> str:
     return str(entry.get("register_topic_filter") or "").removesuffix("/#").rstrip("/")
 
 
+def _merge_entry_into(existing: dict, entry: dict) -> None:
+    """Fold one register row's entry into an existing same-device entry:
+    first-wins for singular fields, union for topics, points, and units."""
+    for slot in ("state_topic", "metadata_topic", "pointset_topic", "register_topic_filter"):
+        if entry.get(slot) and not existing.get(slot):
+            existing[slot] = entry[slot]
+    extra = [*existing.get("extra_capture_topics", []), *entry.get("extra_capture_topics", [])]
+    if extra:
+        existing["extra_capture_topics"] = list(dict.fromkeys(extra))
+    existing_schedule = existing["expected_schedule"]
+    for field, value in entry["expected_schedule"].items():
+        if field == "points":
+            existing_schedule["points"] = list(
+                dict.fromkeys([*existing_schedule.get("points", []), *value])
+            )
+        elif field == "units":
+            existing_schedule["units"] = {**value, **existing_schedule.get("units", {})}
+        elif not existing_schedule.get(field):
+            existing_schedule[field] = value
+
+
 def _merge_asset_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """(entries, duplicate_id_records): one assets entry per register asset.
+    """(entries, duplicate_id_records): one assets entry per register DEVICE.
 
     A register may carry several rows for the same asset (one per payload type,
     or one per topic convention). Each row previously became its OWN assets[]
     entry with the same asset_id, so a payload captured through a shared
     wildcard was reviewed once per row and every issue appeared N times
-    (on-site 2026-07-13: one asset showed duplicated issue lists). Rows sharing
-    an Asset ID AND a topic root merge into one entry: first-wins for singular
-    fields, union for topics, points, and units.
+    (on-site 2026-07-13: one asset showed duplicated issue lists). Rows are
+    bucketed per (identity, topic root): a row joins the identity's first
+    bucket whose root matches (or where either side has no root yet).
 
-    Rows sharing an Asset ID but pointing at DIFFERENT topic roots are two
-    different devices mislabelled with one ID — merging them would silently fuse
-    two devices' evidence, and the UI's per-asset grouping already hides one of
-    them. They are kept as separate entries and reported via the returned
-    duplicate records so the run can name the register error.
+    An identity that ends up with MORE THAN ONE bucket is two different devices
+    mislabelled with one ID — merging them would silently fuse two devices'
+    evidence, and the UI's per-asset grouping already hides one of them. Each
+    device still coalesces its own per-payload-type rows into one entry (also
+    for legacy imports that predate the upload-time conflict gate), and the
+    collision is reported via the returned duplicate records.
     """
-    merged: dict[str, dict] = {}
-    separate: list[dict] = []
-    collisions: dict[str, list[str]] = {}
-    for row in rows:
+    entries: list[dict] = []
+    buckets_by_identity: dict[str, list[list]] = {}  # identity -> [[root, entry], ...]
+    for index, row in enumerate(rows):
         entry = _asset_entry_from_row(row)
-        schedule = entry["expected_schedule"]
-        key = str(schedule.get("asset_id") or "") or f"__row_{len(merged)}"
-        existing = merged.get(key)
-        if existing is None:
-            merged[key] = entry
-            continue
-        existing_root = _entry_topic_root(existing)
-        entry_root = _entry_topic_root(entry)
-        if existing_root and entry_root and existing_root != entry_root:
-            roots = collisions.setdefault(key, [existing_root])
-            if entry_root not in roots:
-                roots.append(entry_root)
-            separate.append(entry)
-            continue
-        for slot in ("state_topic", "metadata_topic", "pointset_topic", "register_topic_filter"):
-            if entry.get(slot) and not existing.get(slot):
-                existing[slot] = entry[slot]
-        extra = [*existing.get("extra_capture_topics", []), *entry.get("extra_capture_topics", [])]
-        if extra:
-            existing["extra_capture_topics"] = list(dict.fromkeys(extra))
-        existing_schedule = existing["expected_schedule"]
-        for field, value in schedule.items():
-            if field == "points":
-                existing_schedule["points"] = list(
-                    dict.fromkeys([*existing_schedule.get("points", []), *value])
-                )
-            elif field == "units":
-                existing_schedule["units"] = {**value, **existing_schedule.get("units", {})}
-            elif not existing_schedule.get(field):
-                existing_schedule[field] = value
+        identity = str(entry["expected_schedule"].get("asset_id") or "") or f"__row_{index}"
+        root = _entry_topic_root(entry)
+        buckets = buckets_by_identity.setdefault(identity, [])
+        for bucket in buckets:
+            if not bucket[0] or not root or bucket[0] == root:
+                _merge_entry_into(bucket[1], entry)
+                if root and not bucket[0]:
+                    bucket[0] = root
+                break
+        else:
+            buckets.append([root, entry])
+            entries.append(entry)
     duplicate_records = [
-        {"asset_id": asset_id, "topic_roots": roots} for asset_id, roots in collisions.items()
+        {
+            "asset_id": identity,
+            "topic_roots": [bucket[0] for bucket in buckets if bucket[0]],
+        }
+        for identity, buckets in buckets_by_identity.items()
+        if len(buckets) > 1
     ]
-    return [*merged.values(), *separate], duplicate_records
+    return entries, duplicate_records
 
 
 def _register_rejection_info(record: dict) -> dict:
