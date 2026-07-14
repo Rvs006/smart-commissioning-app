@@ -1821,7 +1821,60 @@ input.field-expired {
   text-transform: uppercase;
 }
 
+/* Boolean pass/fail shading for live UDMI validation result rows. Subtle tints
+   via the --green-bg / --red-bg tokens so the [data-theme="dark"] overrides in
+   electracom-theme.css apply automatically; declared after the tr:hover rule so
+   the verdict colour stays put under the pointer. */
+.data-table tr.row-pass td {
+  background: var(--green-bg);
+}
+
+.data-table tr.row-fail td {
+  background: var(--red-bg);
+}
+
+/* Matching tone for the per-asset payload sections (state/metadata/pointset),
+   so scrolling the groups draws the eye to red without re-reading the table. */
+.payload-type-group.section-pass,
+.payload-type-group.section-fail {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+}
+
+.payload-type-group.section-pass {
+  background: var(--green-bg);
+}
+
+.payload-type-group.section-fail {
+  background: var(--red-bg);
+}
+
+/* The short PASS / FAIL verdict line under each payload-type heading. */
+.payload-verdict {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+}
+
+.payload-verdict.pass {
+  color: var(--green);
+}
+
+.payload-verdict.fail {
+  color: var(--red);
+}
+
 /* Inline report-linking confirmation in the run monitor. */
+/* Report format lives inline with the run-monitor actions (field ask
+   2026-07-14: PDF/Word handover exports). */
+.report-format-picker {
+  align-items: center;
+  display: inline-flex;
+  font-size: 0.85rem;
+  gap: 0.4rem;
+}
+
 .run-monitor-note {
   color: var(--accent);
   font-size: 12px;

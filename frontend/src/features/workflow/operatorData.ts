@@ -174,6 +174,65 @@ export function mergeAssetGroups(
   });
 }
 
+// Single source of truth for the per-payload-type UDMI verdict, shared by the
+// results-table rows, the row "View" detail, and the per-asset payload sections
+// so the three surfaces can never disagree. Boolean pass/fail per the field ask:
+// "Pass with notes" (minor issues only) still counts green; "Not received"
+// (nothing observed, nothing flagged) is neutral — no shade either way.
+export type UdmiVerdictKind = "pass" | "pass-notes" | "fail" | "none";
+
+export type UdmiVerdict = {
+  verdict: UdmiVerdictKind;
+  label: string;
+};
+
+export function udmiPayloadVerdict(input: {
+  criticalCount: number;
+  majorCount: number;
+  totalIssues: number;
+  observedPresent: boolean;
+}): UdmiVerdict {
+  const { criticalCount, majorCount, totalIssues, observedPresent } = input;
+  if (criticalCount > 0) {
+    return {
+      label: `Fail — ${totalIssues} issue${totalIssues === 1 ? "" : "s"} (${criticalCount} critical)`,
+      verdict: "fail",
+    };
+  }
+  if (majorCount > 0) {
+    return {
+      label: `Fail — ${totalIssues} issue${totalIssues === 1 ? "" : "s"}`,
+      verdict: "fail",
+    };
+  }
+  if (totalIssues > 0) {
+    return { label: "Pass with notes", verdict: "pass-notes" };
+  }
+  return observedPresent
+    ? { label: "Pass", verdict: "pass" }
+    : { label: "Not received", verdict: "none" };
+}
+
+// Boolean shading tone for a verdict: green for pass / pass-notes, red for
+// fail, and null (no shade) for "Not received".
+export function udmiVerdictTone(verdict: UdmiVerdictKind): "pass" | "fail" | null {
+  if (verdict === "fail") {
+    return "fail";
+  }
+  return verdict === "none" ? null : "pass";
+}
+
+// Convenience for callers holding an issue list: counts by severity, then
+// delegates to udmiPayloadVerdict.
+export function udmiVerdictForIssues(issues: IssueRow[], observedPresent: boolean): UdmiVerdict {
+  return udmiPayloadVerdict({
+    criticalCount: issues.filter((issue) => issue.severity === "critical").length,
+    majorCount: issues.filter((issue) => issue.severity === "major").length,
+    observedPresent,
+    totalIssues: issues.length,
+  });
+}
+
 export type WorkflowStage = {
   name: string;
   state: HealthState;

@@ -4,6 +4,7 @@ import {
   cancelRun,
   createImport,
   createReport,
+  deleteUdmiSchemaSet,
   downloadFile,
   getDiscoveryResults,
   getDiscoveryRun,
@@ -17,18 +18,30 @@ import {
   ImportType,
   listImportProfiles,
   listReports,
+  listUdmiSchemaSets,
   rollbackMqttConfigPublish,
   startMqttConfigPublishRun,
   startDiscoveryRun,
   startValidationRun,
+  uploadUdmiSchemaSet,
   DiscoveryRowRecord,
   ReportSummary,
+  ReportFormat,
   ReportType,
   UdmiAssetPayloadView,
   ValidationIssueRecord,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
-import { groupIssuesByAsset, mergeAssetGroups, moduleWorkspaces, type IssueRow } from "./operatorData";
+import {
+  groupIssuesByAsset,
+  mergeAssetGroups,
+  moduleWorkspaces,
+  udmiVerdictForIssues,
+  udmiVerdictTone,
+  type IssueRow,
+  type MergedAssetGroup,
+  type UdmiVerdict,
+} from "./operatorData";
 import {
   bacnetBackendLabel,
   discoveryMetrics,
@@ -230,6 +243,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Blank (the default) = run until every expected topic has reported a
   // payload or the run is cancelled; a positive number bounds the run time.
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("");
+  // Field ask 2026-07-14: real-world reporting intervals are hours-scale
+  // (metadata commonly every 24h), so the run-time control carries a unit.
+  // The wire value stays SECONDS — only the control converts.
+  const [udmiCaptureUnit, setUdmiCaptureUnit] = useState<"seconds" | "minutes" | "hours">(
+    "seconds",
+  );
+  // Non-published UDMI schema set upload (nonpub.N): version label + .json
+  // files for the multipart POST; the uploaded-set list below it is GET-backed.
+  const [schemaSetLabel, setSchemaSetLabel] = useState("");
+  const [schemaSetFiles, setSchemaSetFiles] = useState<File[]>([]);
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
   // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
   // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
@@ -242,6 +265,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
   const [reportToast, setReportToast] = useState<string | null>(null);
+  // PDF default: the field deliverable is a human-readable handover document
+  // (ask 2026-07-14); Word/Excel/zip remain for editable/evidence workflows.
+  const [reportExportFormat, setReportExportFormat] = useState<ReportFormat>("pdf");
   // MQTT Explorer-like capture inputs (mq9nhbzu). The live broker capture itself
   // is on-site-untested; this drives the existing mqtt discovery run + topics.
   const [captureTopicFilter, setCaptureTopicFilter] = useState("#");
@@ -345,6 +371,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["reports-list"],
   });
 
+  // Uploaded non-published UDMI schema sets, shown on the UDMI workbench only.
+  const udmiSchemaSetsQuery = useQuery({
+    enabled: module.route === "udmi-validation",
+    queryFn: listUdmiSchemaSets,
+    queryKey: ["udmi-schema-sets"],
+  });
+
   // When SSE reports the run terminal but polling is paused, the polled record
   // (and its result_summary) may still be mid-run. Trigger a single refetch so
   // the terminal-gated issues/results queries fire against fresh data.
@@ -381,6 +414,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setScanAuthorized(false);
     setScanDryRun(false);
     setScanTarget("");
+    setSchemaSetLabel("");
+    setSchemaSetFiles([]);
+    // The capture-window control only renders on udmi-validation, but the
+    // over-cap guard also blocks data-validation's UDMI run action — clear it
+    // so a stale hours-scale window never disables a Run button on a page with
+    // no visible input or error.
+    setUdmiCaptureSeconds("");
+    setUdmiCaptureUnit("seconds");
     setStep("setup");
     resetTemplateDownload();
     resetReportDownload();
@@ -441,6 +482,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
+  // Non-published UDMI schema set upload/delete. Engineer-gated in the UI; a
+  // 400 (bad label / missing roots / invalid JSON) surfaces via isError below.
+  const schemaUploadMutation = useMutation({
+    mutationFn: () =>
+      uploadUdmiSchemaSet({ files: schemaSetFiles, versionLabel: schemaSetLabel.trim() }),
+    onSuccess: () => {
+      void udmiSchemaSetsQuery.refetch();
+    },
+  });
+
+  const schemaDeleteMutation = useMutation({
+    mutationFn: (versionLabel: string) => deleteUdmiSchemaSet(versionLabel),
+    onSuccess: () => {
+      void udmiSchemaSetsQuery.refetch();
+    },
+  });
+
   const runMutation = useMutation({
     mutationFn: async (actionIndex: number) => {
       const action = module.runActions[actionIndex];
@@ -472,7 +530,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           parameters:
             action.runKind === "udmi"
               ? buildUdmiValidationParameters({
-                  captureSeconds: udmiCaptureSeconds,
+                  captureSeconds: udmiCaptureSecondsEffective,
                   expectedSchedule: udmiExpectedSchedule,
                   metadataPayload: udmiMetadataPayload,
                   metadataTopic: udmiMetadataTopic,
@@ -558,9 +616,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   // Generate a report off the back of a completed run (mqautz9j), scoped to the
   // originating run via source_run_ids so the report actually traces to it.
+  // Format is operator-chosen (field ask 2026-07-14: PDF and Word exports).
   const reportFromRunMutation = useMutation({
     mutationFn: ({ reportType, runId }: { reportType: ReportType; runId: string }) =>
-      createReport({ format: "zip", reportType, sourceRunIds: [runId] }),
+      createReport({ format: reportExportFormat, reportType, sourceRunIds: [runId] }),
     onSuccess: (result) => {
       setReportToast(
         `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
@@ -575,6 +634,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     (profile) => profile.import_type === selectedImportType,
   );
 
+  const udmiCaptureUnitSeconds = { hours: 3600, minutes: 60, seconds: 1 }[udmiCaptureUnit];
+  // Blank and non-numeric values pass through untouched — the existing
+  // downstream parsing (blank = indefinite) keeps handling them.
+  const udmiCaptureSecondsEffective =
+    udmiCaptureSeconds.trim() === "" || !Number.isFinite(Number(udmiCaptureSeconds))
+      ? udmiCaptureSeconds
+      : String(Number(udmiCaptureSeconds) * udmiCaptureUnitSeconds);
+  // 48h is the queued worker's hard time limit — a longer window would be
+  // killed mid-run, so refuse it up front instead of failing after two days.
+  const udmiCaptureOverCap = Number(udmiCaptureSecondsEffective) > 172_800;
+
   // Index of the UDMI validation run action, used by the Schedule & Payload
   // Evidence "Execute capture" button so it triggers the same run as the Run
   // Controls card (mq9n7pbe). Defaults to 0 if the action shape ever changes.
@@ -583,6 +653,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     module.runActions.findIndex(
       (action) => action.kind === "validation" && action.runKind === "udmi",
     ),
+  );
+
+  // Verdicts derive from the run's issues list, so an empty list only means
+  // "no issues" once the issues query has actually SUCCEEDED. Payload views
+  // can land first (they ride the run record), so until then — and permanently
+  // if the issues fetch fails — every verdict surface (results-table rows, the
+  // row View detail, the per-asset payload sections) must stay neutral instead
+  // of deriving a false green "Pass" from the empty array. Reuses the 'none'
+  // verdict kind, which carries no tone class.
+  const udmiIssuesSettled = validationIssuesQuery.isSuccess;
+  const gatedUdmiVerdict = useCallback(
+    (issues: IssueRow[], observedPresent: boolean): UdmiVerdict =>
+      udmiIssuesSettled
+        ? udmiVerdictForIssues(issues, observedPresent)
+        : { label: "Verdict pending", verdict: "none" },
+    [udmiIssuesSettled],
   );
 
   // Live issues for ANY terminal validation run (UDMI, BACnet, mapping), not
@@ -661,27 +747,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     const rows = mergedAssetGroups.flatMap((group) =>
       group.payloadTypes.map((entry) => {
-        const critical = entry.issues.filter((issue) => issue.severity === "critical").length;
-        const major = entry.issues.filter((issue) => issue.severity === "major").length;
-        const total = entry.issues.length;
         const observed = entry.hasPayloadView ? (entry.observedPresent ? "Yes" : "No") : "—";
-        const result =
-          critical > 0
-            ? `Fail — ${total} issue${total === 1 ? "" : "s"} (${critical} critical)`
-            : major > 0
-              ? `Fail — ${total} issue${total === 1 ? "" : "s"}`
-              : total > 0
-                ? "Pass with notes"
-                : entry.observedPresent
-                  ? "Pass"
-                  : "Not received";
+        // Shared (issues-gated) verdict helper so the row, its View detail,
+        // and the per-asset payload sections can never disagree on pass/fail.
+        const { label, verdict } = gatedUdmiVerdict(entry.issues, entry.observedPresent);
         return {
           Asset: group.assetId,
           Payload: `UDMI ${entry.payloadType}`,
           Observed: observed,
-          Issues: String(total),
+          Issues: String(entry.issues.length),
           "Raw Payload": entry.observed ? JSON.stringify(entry.observed) : "",
-          Result: result,
+          Result: label,
+          // Hidden row-shading tone (not in `columns`, so it never renders as a
+          // cell): "pass" | "fail" | "" — sample/discovery rows never carry it.
+          __tone: udmiVerdictTone(verdict) ?? "",
         };
       }),
     );
@@ -689,7 +768,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return null;
     }
     return { columns: ["Asset", "Payload", "Observed", "Issues", "Raw Payload", "Result"], rows };
-  }, [module.route, mergedAssetGroups, validationRunQuery.data]);
+  }, [module.route, mergedAssetGroups, validationRunQuery.data, gatedUdmiVerdict]);
 
   // Reset the row selection when the live UDMI view replaces the sample rows so
   // the inspector never shows a stale sample-row selection against live results.
@@ -732,7 +811,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? workspace?.rows ?? [];
   const selectedResult = resultRows[selectedResultIndex] ?? resultRows[0] ?? null;
   const resultDetails = selectedResult
-    ? buildResultDetailItems(module.route, selectedResult, usingLiveResults)
+    ? buildResultDetailItems(module.route, selectedResult, usingLiveResults, mergedAssetGroups)
     : [];
 
   // Honest headline metrics: real numbers derived from the latest terminal run
@@ -1159,14 +1238,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             {module.runActions.length > 0 ? (
               module.runActions.map((action, index) => {
                 const scanBlocked = action.kind === "discovery" && discoveryBlocked;
-                const blocked = scanBlocked || !canEngineer;
+                const overCapBlocked =
+                  udmiCaptureOverCap && action.kind === "validation" && action.runKind === "udmi";
+                const blocked = scanBlocked || !canEngineer || overCapBlocked;
                 // Role gate takes priority in the tooltip; otherwise the existing
                 // scan-authorization hint is shown for a blocked real scan.
                 const blockedTooltip = !canEngineer
                   ? ENGINEER_REQUIRED_TOOLTIP
                   : scanBlocked
                     ? "Confirm scan authorization (or enable dry run) before starting a real scan."
-                    : undefined;
+                    : overCapBlocked
+                      ? "Run time exceeds the 48-hour capture limit."
+                      : undefined;
                 return (
                   <div className="run-card" key={action.label}>
                     <div>
@@ -1279,6 +1362,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <dt>Issues</dt>
                   <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}</dd>
                 </div>
+                {typeof validationRunQuery.data?.result_summary.blocking_issue_count === "number" && (
+                  <div>
+                    <dt>Blocking issues</dt>
+                    <dd>{formatSummaryValue(validationRunQuery.data.result_summary.blocking_issue_count)}</dd>
+                  </div>
+                )}
                 {captureWindow !== null && (
                   <div>
                     <dt>Capture window</dt>
@@ -1312,15 +1401,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </button>
                   )}
                 {canEngineer && activeRunTerminal && (
-                  <button
-                    className="secondary-button compact"
-                    disabled={reportFromRunMutation.isPending}
-                    onClick={handleGenerateReportFromRun}
-                    title="Generate a report for this run type, then find it in the Reports tab."
-                    type="button"
-                  >
-                    {reportFromRunMutation.isPending ? "Generating..." : "Generate report from this run"}
-                  </button>
+                  <>
+                    <label className="report-format-picker">
+                      Report format
+                      <select
+                        aria-label="Report format"
+                        onChange={(event) =>
+                          setReportExportFormat(event.target.value as ReportFormat)
+                        }
+                        value={reportExportFormat}
+                      >
+                        <option value="pdf">PDF (.pdf)</option>
+                        <option value="docx">Word (.docx)</option>
+                        <option value="xlsx">Excel (.xlsx)</option>
+                        <option value="zip">Evidence pack (.zip)</option>
+                      </select>
+                    </label>
+                    <button
+                      className="secondary-button compact"
+                      disabled={reportFromRunMutation.isPending}
+                      onClick={handleGenerateReportFromRun}
+                      title="Generate a report for this run type, then find it in the Reports tab."
+                      type="button"
+                    >
+                      {reportFromRunMutation.isPending ? "Generating..." : "Generate report from this run"}
+                    </button>
+                  </>
                 )}
               </div>
 
@@ -1346,6 +1452,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <span className="error-text">
                   Could not load discovery results: {discoveryResultsQuery.error instanceof Error
                     ? discoveryResultsQuery.error.message
+                    : "request failed"}
+                </span>
+              )}
+
+              {activeRun.kind === "validation" && validationIssuesQuery.isError && (
+                <span className="error-text">
+                  Could not load validation issues — verdicts stay pending: {validationIssuesQuery.error instanceof Error
+                    ? validationIssuesQuery.error.message
                     : "request failed"}
                 </span>
               )}
@@ -1632,6 +1746,125 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Validation inputs</span>
+              <h3>Non-Published UDMI Schema Sets</h3>
+            </div>
+          </div>
+          <p className="section-copy">
+            Payloads declaring a non-published UDMI version (e.g. nonpub.1) are validated against
+            the uploaded schema set with that label.
+          </p>
+          <div className="form-stack">
+            <label>
+              Version label
+              <input
+                onChange={(event) => setSchemaSetLabel(event.target.value)}
+                placeholder="nonpub.1"
+                type="text"
+                value={schemaSetLabel}
+              />
+            </label>
+            <label>
+              Schema JSON files
+              <input
+                accept=".json"
+                multiple
+                onChange={(event) => setSchemaSetFiles(Array.from(event.target.files ?? []))}
+                type="file"
+              />
+            </label>
+            <button
+              className="primary-button"
+              disabled={
+                schemaSetLabel.trim() === "" ||
+                schemaSetFiles.length === 0 ||
+                schemaUploadMutation.isPending ||
+                !canEngineer
+              }
+              onClick={() => schemaUploadMutation.mutate()}
+              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+              type="button"
+            >
+              {schemaUploadMutation.isPending ? "Uploading..." : "Upload schema set"}
+            </button>
+
+            {schemaUploadMutation.isError && (
+              <div className="state-panel error">
+                <strong>Schema set upload failed</strong>
+                <span>{schemaUploadMutation.error.message}</span>
+              </div>
+            )}
+
+            {schemaUploadMutation.isSuccess && (
+              <div className="state-panel success">
+                <strong>ACCEPTED</strong>
+                <span>
+                  {schemaUploadMutation.data.version_label} ·{" "}
+                  {schemaUploadMutation.data.filenames.length} file
+                  {schemaUploadMutation.data.filenames.length === 1 ? "" : "s"} stored
+                </span>
+              </div>
+            )}
+
+            {(udmiSchemaSetsQuery.data ?? []).length > 0 ? (
+              <div className="data-table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Version label</th>
+                      <th>Files</th>
+                      <th>Uploaded</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(udmiSchemaSetsQuery.data ?? []).map((set) => (
+                      <tr key={set.version_label}>
+                        <td>{set.version_label}</td>
+                        <td>{set.filenames.join(", ")}</td>
+                        <td>{set.uploaded_at}</td>
+                        <td>
+                          <button
+                            className="secondary-button compact"
+                            disabled={schemaDeleteMutation.isPending || !canEngineer}
+                            onClick={() => schemaDeleteMutation.mutate(set.version_label)}
+                            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                            type="button"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="section-copy">
+                No non-published schema sets uploaded yet. Canonical published UDMI versions need no
+                upload.
+              </p>
+            )}
+
+            {schemaDeleteMutation.isError && (
+              <span className="error-text">{schemaDeleteMutation.error.message}</span>
+            )}
+            {udmiSchemaSetsQuery.isError && (
+              <span className="error-text">
+                Could not load uploaded schema sets:{" "}
+                {udmiSchemaSetsQuery.error instanceof Error
+                  ? udmiSchemaSetsQuery.error.message
+                  : "request failed"}
+              </span>
+            )}
+          </div>
+        </section>
+      )}
+
+      {module.route === "udmi-validation" && (
+        <section className="surface" data-stepgroup="setup">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Validation inputs</span>
               <h3>Schedule and Payload Evidence</h3>
             </div>
           </div>
@@ -1720,7 +1953,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   </>
                 )}
                 <label>
-                  Run time (seconds — blank = all required topics or Cancel)
+                  Run time (blank = all required topics or Cancel)
                   <input
                     inputMode="numeric"
                     onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
@@ -1728,11 +1961,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     value={udmiCaptureSeconds}
                   />
                 </label>
+                <label>
+                  Run time unit
+                  <select
+                    onChange={(event) =>
+                      setUdmiCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
+                    }
+                    value={udmiCaptureUnit}
+                  >
+                    <option value="seconds">seconds</option>
+                    <option value="minutes">minutes</option>
+                    <option value="hours">hours</option>
+                  </select>
+                </label>
               </div>
+              {udmiCaptureOverCap && (
+                <span className="error-text">
+                  Run time exceeds the 48-hour capture limit — shorten the window.
+                </span>
+              )}
               <p className="section-copy">
-                Blank runs until all required topics report or you press Cancel run. Worker captures are capped at 1
-                hour; inline/portable captures at 240 seconds. The completion-driven safety limit is 500 distinct
-                concrete topics.
+                Blank runs until all required topics report or you press Cancel run. Worker captures are capped at 48
+                hours (real-world reporting intervals: metadata is often daily); inline/portable captures are bounded
+                at 240 seconds when blank — hour-scale windows need the hosted worker profile. The completion-driven
+                safety limit is 500 distinct concrete topics.
               </p>
             </>
           )}
@@ -1740,9 +1992,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="inline-actions execute-row">
             <button
               className="primary-button compact"
-              disabled={runMutation.isPending || !canEngineer}
+              disabled={runMutation.isPending || !canEngineer || udmiCaptureOverCap}
               onClick={() => runMutation.mutate(udmiRunActionIndex)}
-              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+              title={
+                !canEngineer
+                  ? ENGINEER_REQUIRED_TOOLTIP
+                  : udmiCaptureOverCap
+                    ? "Run time exceeds the 48-hour capture limit."
+                    : undefined
+              }
               type="button"
             >
               {runMutation.isPending ? "Executing..." : "Execute capture"}
@@ -2050,7 +2308,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </thead>
                 <tbody>
                   {resultRows.map((row, rowIndex) => (
-                    <tr key={rowIndex}>
+                    // Boolean row shading (live UDMI rows only): a pass shades
+                    // green, a fail red; "Not received" and every sample or
+                    // discovery row stays neutral (no __tone key).
+                    <tr className={row.__tone ? `row-${row.__tone}` : undefined} key={rowIndex}>
                       {tableColumns.map((column) => (
                         <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
                       ))}
@@ -2110,7 +2371,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </button>
               </div>
               <div className="detail-list">
-                {buildResultDetailItems(module.route, detailRow, usingLiveResults).map((item) => (
+                {buildResultDetailItems(module.route, detailRow, usingLiveResults, mergedAssetGroups).map((item) => (
                   <div className="detail-row" key={item.label}>
                     <span>{item.label}</span>
                     <strong>{item.value}</strong>
@@ -2182,9 +2443,27 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             {group.payloadTypes.map((entry) => {
                               const payloadKey = `${group.assetId}:${entry.payloadType}`;
                               const payloadOpen = expandedPayloadKey === payloadKey;
+                              // Same shared (issues-gated) verdict as the
+                              // results-table row for this asset x payload type,
+                              // so scrolling the sections draws the eye to red
+                              // without re-reading the table. "Not received"
+                              // and a pending/failed issues fetch stay neutral.
+                              const sectionTone = udmiVerdictTone(
+                                gatedUdmiVerdict(entry.issues, entry.observedPresent).verdict,
+                              );
                               return (
-                                <div className="payload-type-group" key={entry.payloadType}>
+                                <div
+                                  className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
+                                  key={entry.payloadType}
+                                >
                                   <h5>{entry.payloadType}</h5>
+                                  {sectionTone && (
+                                    <p className={`payload-verdict ${sectionTone}`}>
+                                      {sectionTone === "pass"
+                                        ? "PASS — UDMI Compliant"
+                                        : "FAIL — please see details below"}
+                                    </p>
+                                  )}
                                   {entry.issues.map((issue) => (
                                     <div className={`issue-card ${issue.severity}`} key={issue.id}>
                                       <div className="issue-card-body">
@@ -2731,6 +3010,9 @@ function buildResultDetailItems(
   route: string,
   row: Record<string, string>,
   live: boolean,
+  // Live UDMI only: the merged issue/payload groups the row was built from, so
+  // the detail can show the actual issue text instead of a bare count.
+  assetGroups: MergedAssetGroup[] | null = null,
 ): DetailItem[] {
   if (route === "ip-scanner") {
     // The per-host detail surfaced by the results "View" button. MAC/Hostname are
@@ -2796,16 +3078,39 @@ function buildResultDetailItems(
 
   if (route === "udmi-validation") {
     if (live) {
+      // The row only carries formatted strings; the actual issue text lives in
+      // the merged groups. Rows were built as Asset=assetId and
+      // Payload=`UDMI ${payloadType}`, so both joins are exact-match safe.
+      const issues =
+        assetGroups
+          ?.find((group) => group.assetId === row.Asset)
+          ?.payloadTypes.find((entry) => `UDMI ${entry.payloadType}` === row.Payload)?.issues ?? [];
+      // 1-2 issues: show the text inline so a View answers "what failed" without
+      // more digging. More: point at the per-asset issue detail below the table.
+      const issueItems: DetailItem[] =
+        issues.length === 0
+          ? [
+              {
+                label: "Live data view",
+                value:
+                  "Derived from the validation run's real payload views and issues — expand the asset in the issues panel for expected-vs-observed detail.",
+              },
+            ]
+          : issues.length <= 2
+            ? issues.map((issue) => ({ label: issue.id, value: issue.message }))
+            : [
+                {
+                  label: "Issue detail",
+                  value: `${issues.length} issues — see the issue details below the table.`,
+                },
+              ];
       return [
         { label: "Asset", value: row.Asset ?? "Selected MQTT asset" },
         { label: "Payload type", value: row.Payload ?? "—" },
         { label: "Observed", value: row.Observed ?? "—" },
         { label: "Issues", value: row.Issues ?? "0" },
         { label: "Result", value: row.Result ?? "Pending" },
-        {
-          label: "Live data view",
-          value: "Derived from the validation run's real payload views and issues — expand the asset in the issues panel for expected-vs-observed detail.",
-        },
+        ...issueItems,
       ];
     }
     return [

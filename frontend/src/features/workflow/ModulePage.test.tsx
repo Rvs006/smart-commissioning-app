@@ -141,6 +141,9 @@ describe("ModulePage discovery wiring", () => {
     expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
     // Live banner is shown, not a fabricated "Result" verdict column.
     expect(screen.getByText(/Live discovery observations/i)).toBeInTheDocument();
+    // Pass/fail row shading is a UDMI-validation verdict; discovery rows carry
+    // no verdict, so they must never be shaded.
+    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
 
     // Headline metric now reflects the real run (hosts_responsive: 1), never the
     // old hardcoded "118" sample.
@@ -642,6 +645,9 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
           return jsonResponse(udmiAccepted);
         }
@@ -682,6 +688,198 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getByText(/schema-valid sentinel values identify device-supplied fields/i)).toBeInTheDocument();
   });
 
+  // Shared stub for the verdict-focused tests below — the same endpoints as the
+  // live-results test above, parameterised on the issues payload. An optional
+  // issuesResponse factory overrides the whole issues Response (never-settling
+  // or failing fetches for the verdict-gating tests).
+  function stubUdmiRunFetch(
+    issuesPayload: unknown,
+    issuesResponse?: () => Response | Promise<Response>,
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return issuesResponse ? issuesResponse() : jsonResponse(issuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("shades live UDMI rows red on fail and green on pass, leaving sample rows unshaded", async () => {
+    stubUdmiRunFetch(udmiIssuesPayload);
+    renderModule("udmi-validation");
+
+    // Sample preview rows carry no verdict shading.
+    expect(await screen.findByText(/Sample preview/i)).toBeInTheDocument();
+    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    // Wait for the issues query to merge in (the live banner can render from
+    // payload views alone, a beat before the fail verdict lands on the row).
+    await screen.findAllByText("Fail — 1 issue (1 critical)");
+
+    // pointset (1 critical issue) shades red; metadata (observed, no issues)
+    // shades green. The payload-type text also renders in the aside detail, so
+    // pick the occurrence inside a table row.
+    const pointsetRow = screen
+      .getAllByText("UDMI pointset")
+      .map((cell) => cell.closest("tr"))
+      .find((row) => row !== null);
+    expect(pointsetRow).toHaveClass("row-fail");
+    const metadataRow = screen
+      .getAllByText("UDMI metadata")
+      .map((cell) => cell.closest("tr"))
+      .find((row) => row !== null);
+    expect(metadataRow).toHaveClass("row-pass");
+  });
+
+  it("shows the actual issue text in the View detail for a row with 1-2 issues", async () => {
+    stubUdmiRunFetch(udmiIssuesPayload);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+    // Ensure the issues query has merged before opening the detail.
+    await screen.findAllByText("Fail — 1 issue (1 critical)");
+
+    // First View = the pointset row, which carries the run's single critical
+    // issue; the modal shows its id and full message inline.
+    fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("UDMI-PS-001")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/Expected schema version does not match the pointset payload version/i),
+    ).toBeInTheDocument();
+  });
+
+  it("summarises 3+ issues in the View detail instead of dumping every message", async () => {
+    const manyIssues = {
+      run_id: "run-udmi-1",
+      issues: [1, 2, 3].map((n) => ({
+        issue_id: `UDMI-PS-00${n}`,
+        asset_id: "EM-1",
+        issue_type: "pointset_validation",
+        severity: n === 1 ? "critical" : "medium",
+        description: `Pointset problem ${n}.`,
+        point_name: null,
+        expected_value: null,
+        observed_value: null,
+        suggested_action: null,
+        status_detail: null,
+        raw_evidence_uri: null,
+      })),
+    };
+    stubUdmiRunFetch(manyIssues);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+    // Ensure the issues query has merged before opening the detail.
+    await screen.findAllByText("Fail — 3 issues (1 critical)");
+
+    fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText("3 issues — see the issue details below the table."),
+    ).toBeInTheDocument();
+    // The full message text stays in the issue panel below, not the modal.
+    expect(within(dialog).queryByText(/Pointset problem 1\./)).not.toBeInTheDocument();
+  });
+
+  it("stamps the shared PASS/FAIL verdict on the per-asset payload sections", async () => {
+    stubUdmiRunFetch(udmiIssuesPayload);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+    // Ensure the issues query has merged before expanding the asset group.
+    await screen.findAllByText("Fail — 1 issue (1 critical)");
+
+    fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
+    const fail = await screen.findByText("FAIL — please see details below");
+    expect(fail).toHaveClass("payload-verdict", "fail");
+    expect(fail.closest(".payload-type-group")).toHaveClass("section-fail");
+    const pass = screen.getByText("PASS — UDMI Compliant");
+    expect(pass).toHaveClass("payload-verdict", "pass");
+    expect(pass.closest(".payload-type-group")).toHaveClass("section-pass");
+  });
+
+  it("keeps verdicts neutral (Verdict pending, no green Pass) while the issues query is loading", async () => {
+    // The issues fetch never settles: the payload views land first (they ride
+    // the run record), and an empty issues array must NOT read as a green
+    // "Pass" — every verdict surface stays neutral until issues arrive.
+    stubUdmiRunFetch(null, () => new Promise<Response>(() => {}));
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    // Rows render from the payload views with a neutral pending verdict...
+    expect((await screen.findAllByText("Verdict pending")).length).toBeGreaterThan(0);
+    // ...and no pass/fail shading or PASS text anywhere.
+    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    expect(screen.queryByText("Pass")).not.toBeInTheDocument();
+    expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a visible error and keeps verdicts neutral when the issues fetch fails", async () => {
+    // A failed issues fetch previously left the empty issues array in place —
+    // PERMANENTLY rendering green Pass verdicts. It must instead surface the
+    // failure near the results and keep every verdict surface neutral.
+    stubUdmiRunFetch(null, () =>
+      ({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        json: async () => ({ detail: "issues backend unavailable" }),
+      }) as unknown as Response,
+    );
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    expect(
+      await screen.findByText(/Could not load validation issues.*issues backend unavailable/i),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
+    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    expect(screen.queryByText("Pass")).not.toBeInTheDocument();
+    expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
+  });
+
   it("register-driven mode sends no pasted schedule or payloads so the backend uses the imported register", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(
@@ -693,6 +891,9 @@ describe("ModulePage UDMI workbench live results", () => {
         }
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
         }
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
           postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
@@ -735,6 +936,9 @@ describe("ModulePage UDMI workbench live results", () => {
         const url = String(input);
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
         }
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse([
@@ -822,6 +1026,9 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
@@ -833,7 +1040,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getByText(/Blank runs until all required topics report or you press Cancel run/i)).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Worker captures are capped at 1 hour.*inline\/portable captures at 240 seconds.*500 distinct concrete topics/i,
+        /Worker captures are capped at 48\s*hours.*inline\/portable captures are bounded\s*at 240 seconds when blank.*500 distinct\s*concrete topics/i,
       ),
     ).toBeInTheDocument();
   });
@@ -849,6 +1056,9 @@ describe("ModulePage UDMI workbench live results", () => {
         }
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
         }
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
           postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
@@ -868,7 +1078,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // The run-time input renders once live broker capture is ticked.
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.change(await screen.findByLabelText(/Run time \(seconds/i), { target: { value: "45" } });
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "45" } });
     fireEvent.click(await screen.findByRole("button", { name: "Run" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
@@ -888,6 +1098,9 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
           posted = true;
           return jsonResponse(udmiAccepted);
@@ -899,12 +1112,287 @@ describe("ModulePage UDMI workbench live results", () => {
     renderModule("udmi-validation");
 
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.change(await screen.findByLabelText(/Run time \(seconds/i), { target: { value: "45s" } });
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "45s" } });
     fireEvent.click(await screen.findByRole("button", { name: "Run" }));
 
     // "45s" must not silently coerce to the 0 = indefinite sentinel: the run is
     // rejected client-side with a visible error and no parameters are posted.
     expect(await screen.findByText(/Run time must be a positive number of seconds/i)).toBeInTheDocument();
     expect(posted).toBe(false);
+  });
+
+  it("converts an hours run time to seconds on the wire", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "2" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.capture_seconds).toBe(7200);
+  });
+
+  it("refuses a run time over the 48-hour worker cap without posting", async () => {
+    let posted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          posted = true;
+          return jsonResponse(udmiAccepted);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "49" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
+
+    expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
+    // BOTH triggers of the UDMI run action refuse the over-cap window: the Run
+    // Controls card's Run button and the Schedule section's Execute capture.
+    const runButton = screen.getByRole("button", { name: "Run" });
+    const executeButton = screen.getByRole("button", { name: "Execute capture" });
+    expect(runButton).toBeDisabled();
+    expect(executeButton).toBeDisabled();
+    fireEvent.click(runButton);
+    fireEvent.click(executeButton);
+    expect(posted).toBe(false);
+  });
+
+  it("clears a stale over-cap capture window when navigating to another module", async () => {
+    stubUdmiRunFetch(udmiIssuesPayload);
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    setApiKey("engineer-key");
+    const tree = (route: string) => (
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>
+          <MemoryRouter>
+            <ModulePage moduleRoute={route} />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>
+    );
+    const view = render(tree("udmi-validation"));
+
+    // Type an hours-scale window over the 48h cap on the UDMI workbench.
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "49" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
+    expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
+
+    // Navigate to data-validation: the run-time control does not render there,
+    // so a leaked over-cap window would disable its UDMI run action with no
+    // visible input or error. The module-change reset must clear it.
+    view.rerender(tree("data-validation"));
+    const runButtons = await screen.findAllByRole("button", { name: "Run" });
+    expect(runButtons).toHaveLength(3);
+    for (const button of runButtons) {
+      await waitFor(() => expect(button).toBeEnabled());
+    }
+  });
+
+  it("generates a report from the run in the chosen format (PDF default)", async () => {
+    let reportBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+          reportBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse({
+            file_name: "udmi_validation_rep-9.pdf",
+            output_format: "pdf",
+            report_id: "rep-9",
+            report_type: "udmi_validation",
+            status: "succeeded",
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    // Terminal run -> the report affordance appears with the PDF default.
+    fireEvent.click(await screen.findByRole("button", { name: /Generate report from this run/i }));
+    await waitFor(() => expect(reportBody).not.toBeNull());
+    expect((reportBody as unknown as Record<string, unknown>).output_format).toBe("pdf");
+  });
+});
+
+describe("ModulePage UDMI schema set uploads", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  const existingSet = {
+    version_label: "nonpub.1",
+    filenames: ["state.json", "pointset.json"],
+    uploaded_at: "2026-07-14T09:00:00Z",
+  };
+
+  // 204 No Content (DELETE success) carries no JSON body; request() must not
+  // try to parse one.
+  function noContentResponse(): Response {
+    return {
+      ok: true,
+      status: 204,
+      statusText: "No Content",
+      json: async () => {
+        throw new Error("204 has no body");
+      },
+    } as unknown as Response;
+  }
+
+  it("lists uploaded sets and uploads a new one as multipart FormData", async () => {
+    const posted: FormData[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas") && init?.method === "POST") {
+          posted.push(init.body as FormData);
+          return jsonResponse({
+            version_label: "nonpub.2",
+            filenames: ["state.json"],
+            uploaded_at: "2026-07-14T10:00:00Z",
+          });
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([existingSet]);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    // The card renders on the UDMI route with the GET-backed list of sets.
+    expect(await screen.findByText("Non-Published UDMI Schema Sets")).toBeInTheDocument();
+    expect(await screen.findByText("nonpub.1")).toBeInTheDocument();
+    expect(screen.getByText("state.json, pointset.json")).toBeInTheDocument();
+
+    // Upload needs both a version label and at least one .json file.
+    const uploadButton = screen.getByRole("button", { name: "Upload schema set" });
+    expect(uploadButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/Version label/i), { target: { value: "nonpub.2" } });
+    fireEvent.change(screen.getByLabelText(/Schema JSON files/i), {
+      target: {
+        files: [new File(['{"title":"state"}'], "state.json", { type: "application/json" })],
+      },
+    });
+    await waitFor(() => expect(uploadButton).toBeEnabled());
+    fireEvent.click(uploadButton);
+
+    // The POST is multipart FormData carrying the label plus the file.
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].get("version_label")).toBe("nonpub.2");
+    expect((posted[0].get("files") as File).name).toBe("state.json");
+    expect(await screen.findByText("ACCEPTED")).toBeInTheDocument();
+  });
+
+  it("deletes an uploaded set via DELETE on its version label", async () => {
+    let deletedUrl: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas/nonpub.1") && init?.method === "DELETE") {
+          deletedUrl = url;
+          return noContentResponse();
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([existingSet]);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    const deleteButton = await screen.findByRole("button", { name: "Delete" });
+    await waitFor(() => expect(deleteButton).toBeEnabled());
+    fireEvent.click(deleteButton);
+    await waitFor(() => expect(deletedUrl).toMatch(/\/api\/v1\/udmi\/schemas\/nonpub\.1$/));
   });
 });
