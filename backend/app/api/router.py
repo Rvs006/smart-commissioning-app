@@ -12,6 +12,7 @@ from app.api.routes import (
     reports,
     runs,
     system,
+    udmi_schemas,
     users,
     validation,
 )
@@ -48,6 +49,10 @@ protected_router.include_router(
 )
 protected_router.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 protected_router.include_router(validation.router, prefix="/validation", tags=["validation"])
+# Operator-uploaded non-published UDMI schema sets (viewer reads, engineer
+# writes; gated per-route). UDMI run creation embeds the stored sets into run
+# parameters so the worker validates from the shared database alone.
+protected_router.include_router(udmi_schemas.router, prefix="/udmi/schemas", tags=["udmi-schemas"])
 protected_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 # Evidence integrity (verify), backup, and retention. Verify stays behind auth
 # too: it can regenerate report artifacts, so it is not treated as public.

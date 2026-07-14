@@ -28,6 +28,7 @@ VALIDATION_JOB_TYPES: set[JobType] = {
 REPORT_JOB_TYPES: set[JobType] = {"report_generation"}
 REPORT_FORMAT_EXTENSIONS = {
     "docx": "docx",
+    "pdf": "pdf",
     "xlsx": "xlsx",
     "zip": "zip",
 }

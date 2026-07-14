@@ -15,6 +15,21 @@ _SECRET_SENTINEL = "********"
 # the real values. This closes the hole where a broker password / inline private
 # key passed as a run parameter was echoed to any viewer via GET .../runs/{id}.
 _SENSITIVE_PARAM_SUBSTRINGS = ("password", "private_key", "client_certificate", "ca_certificate")
+# UDMI runs embed every uploaded nonpub schema set into their parameters (so the
+# Dramatiq worker validates from the shared database alone). Serializing that
+# content back out would re-serve every schema body to any viewer on every
+# 1.5s status poll, so API responses carry a filenames-only summary instead.
+_NONPUB_SCHEMA_SETS_KEY = "nonpub_schema_sets"
+
+
+def _nonpub_schema_sets_summary(value: object) -> object:
+    """``{label: sorted(filenames)}`` view of the embedded nonpub schema sets."""
+    if not isinstance(value, dict):
+        return value
+    return {
+        str(label): sorted(str(name) for name in files) if isinstance(files, dict) else files
+        for label, files in value.items()
+    }
 
 
 def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, object]:
@@ -22,7 +37,9 @@ def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, obje
     redacted: dict[str, object] = {}
     for key, value in parameters.items():
         lowered = key.casefold()
-        if any(token in lowered for token in _SENSITIVE_PARAM_SUBSTRINGS) and value not in (None, ""):
+        if key == _NONPUB_SCHEMA_SETS_KEY:
+            redacted[key] = _nonpub_schema_sets_summary(value)
+        elif any(token in lowered for token in _SENSITIVE_PARAM_SUBSTRINGS) and value not in (None, ""):
             redacted[key] = _SECRET_SENTINEL
         elif isinstance(value, str) and "-----BEGIN" in value:
             redacted[key] = _SECRET_SENTINEL  # inline PEM material
@@ -43,7 +60,7 @@ JobType = Literal[
 ]
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
-ReportFormat = Literal["zip", "xlsx", "docx"]
+ReportFormat = Literal["zip", "xlsx", "docx", "pdf"]
 
 
 class JobCreateRequest(BaseModel):

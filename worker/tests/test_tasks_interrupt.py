@@ -64,7 +64,7 @@ class UdmiInterruptTests(unittest.TestCase):
         self.assertEqual(update["status"], "failed")
         self.assertEqual(update["stage"], "udmi_fixture_validation_failed")
         self.assertEqual(update["progress_percent"], 100)
-        self.assertEqual(update["error_message"], "live capture exceeded the 1h worker time limit")
+        self.assertEqual(update["error_message"], "live capture exceeded the worker time limit")
 
     def test_shutdown_interrupt_gets_honest_generic_message(self) -> None:
         store = self._run(Shutdown("worker shutdown"))
@@ -96,7 +96,7 @@ class MqttDiscoveryInterruptTests(unittest.TestCase):
         self.assertEqual(update["run_id"], "run-mqtt-1")
         self.assertEqual(update["status"], "failed")
         self.assertEqual(update["stage"], "engine_failed")
-        self.assertEqual(update["error_message"], "live capture exceeded the 1h worker time limit")
+        self.assertEqual(update["error_message"], "live capture exceeded the worker time limit")
 
 
 if __name__ == "__main__":
