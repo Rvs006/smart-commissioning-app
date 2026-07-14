@@ -9,6 +9,32 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- **Source Interface dropdown lists virtual adapters again (ranked last)
+  instead of hiding them.** On Hyper-V vSwitch / NIC-team hosts (e.g. a
+  supervisor server) the machine's only routable IPv4 rides an adapter Windows
+  flags *Virtual*; the hard virtual-adapter filter introduced with NIC UX v2
+  (and unmasked when the net-facts timeout fix made classification actually
+  succeed inside the exe) left the dropdown Auto-only with no way to bind the
+  real egress NIC (field report, 2026-07-14). Virtual adapters now appear at
+  the bottom of the list with an explicit "pick only if this adapter carries
+  the site network" tag; the wired-first auto-default and the multi-adapter
+  Auto hint still ignore them.
+
+- **Portable exe settings survive upgrading to a new release.** All app state
+  (configuration, MQTT credentials, encrypted certificates and their key,
+  imports, run history, edge identity, crash logs) now lives in
+  `%LOCALAPPDATA%\SmartCommissioning` instead of `runtime\` beside the exe —
+  per-hash allowlisting (ThreatLocker) forces every release into a fresh
+  folder, which silently reset the whole site configuration on each upgrade
+  ("re-enter broker credentials, certs and NIC every time we open it", field
+  report 2026-07-14). On first launch the new exe migrates state forward from
+  an older release's exe-adjacent `runtime\` folders when it finds them (the
+  originals stay behind as a rollback copy), and it never overwrites an
+  existing stable-dir database. `SMART_COMMISSIONING_DATA_DIR` overrides the
+  location; the unfrozen dev layout keeps `<repo>/runtime`. The Windows
+  portable CI boot smoke now asserts state lands in the stable dir and nothing
+  leaks back beside the exe.
+
 - **UDMI misplaced-field diagnostics and location.room support.** When an
   identity value (site, room, serial, GUID, …) is absent at its canonical UDMI
   path but present elsewhere in the payload — e.g. a publisher nesting a second

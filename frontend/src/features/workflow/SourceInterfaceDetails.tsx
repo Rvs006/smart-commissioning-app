@@ -1,8 +1,8 @@
 import { SystemInterface } from "../../api/client";
 
-// Human-readable adapter-type captions for the details panel. "virtual" never
-// reaches this component (eligible interfaces are pre-filtered), but the map
-// stays total over AdapterType so an unexpected value still renders sensibly.
+// Human-readable adapter-type captions for the details panel. "virtual" IS
+// listed since 2026-07-14 (ranked last, labelled in the dropdown) — on
+// Hyper-V vSwitch hosts it can be the machine's only routable adapter.
 const ADAPTER_TYPE_LABELS: Record<string, string> = {
   ethernet: "Ethernet",
   usb_ethernet: "USB Ethernet",
@@ -15,7 +15,7 @@ const AUTO_SENTINEL = "auto (os default route)";
 type SourceInterfaceDetailsProps = {
   // The stored Source Interface value (cidr, bare IP, Auto sentinel, or "").
   value: string;
-  // Eligible (non-virtual) interfaces from GET /system/interfaces, API order.
+  // Enumerated interfaces from GET /system/interfaces (incl. virtual), API order.
   interfaces: SystemInterface[];
   enumerationFailed: boolean;
   enumerationPending: boolean;
@@ -66,17 +66,15 @@ export function SourceInterfaceDetails({
             Adapter details unavailable (interface enumeration failed on the backend host).
           </small>
         ) : enumerationPending ? null : (
-          // Honest about BOTH not-listed cases: the adapter may be genuinely
-          // gone (dispatch then fails with a clear error), or it may still be
-          // present but ineligible — e.g. a virtual adapter saved before
-          // virtual NICs were excluded, which scans would still send from.
-          // This component only sees the eligible list, so it cannot tell the
-          // two apart and must not promise either outcome.
+          // Virtual adapters are enumerated too (since 2026-07-14), so a
+          // stored value missing from this list means the adapter is really
+          // absent right now: unplugged, disabled, removed, or its IP changed
+          // (e.g. DHCP renewal — the stored value is an address, not an
+          // adapter identity). Dispatch would fail with a clear error.
           <small>
-            This interface is not in the list of eligible adapters on this machine — it may be
-            unplugged or disabled, or it may be a virtual adapter, which is not a valid scan
-            source. Pick a listed adapter, or set Source Interface back to Auto (OS default
-            route).
+            This interface is not in the list of adapters on this machine — it may be unplugged
+            or disabled, or its IP address may have changed since it was saved. Pick a listed
+            adapter, or set Source Interface back to Auto (OS default route).
           </small>
         )}
       </div>

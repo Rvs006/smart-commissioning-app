@@ -159,21 +159,24 @@ class ListUsableInterfacesTests(unittest.TestCase):
         ):
             return list_usable_interfaces()
 
-    def test_virtual_excluded_ordering_and_details_attached(self) -> None:
+    def test_virtual_listed_last_ordering_and_details_attached(self) -> None:
         interfaces = self._list(_FACTS)
         names = [interface.name for interface in interfaces]
         self.assertEqual(
             names,
-            ["Ethernet 3", "Ethernet 4", "Mystery", "Wi-Fi", "Ethernet 2"],
-            "up-first, then ethernet < usb_ethernet < unknown < wifi, then name",
+            ["Ethernet 3", "Ethernet 4", "Mystery", "Wi-Fi", "vEthernet (WSL)", "Ethernet 2"],
+            "up-first, then ethernet < usb_ethernet < unknown < wifi < virtual, then name",
         )
-        self.assertNotIn("vEthernet (WSL)", names, "virtual adapters are excluded, not just flagged")
 
         by_name = {interface.name: interface for interface in interfaces}
         self.assertEqual(by_name["Ethernet 3"].adapter_type, "ethernet")
         self.assertEqual(by_name["Ethernet 4"].adapter_type, "usb_ethernet")
         self.assertEqual(by_name["Mystery"].adapter_type, "unknown")
         self.assertEqual(by_name["Wi-Fi"].adapter_type, "wifi")
+        # Virtual adapters are LISTED and honestly classified (ranked last),
+        # not hidden: on Hyper-V vSwitch hosts they can be the only routable
+        # NIC, and hiding them made the real egress unselectable (2026-07-14).
+        self.assertEqual(by_name["vEthernet (WSL)"].adapter_type, "virtual")
         self.assertFalse(by_name["Ethernet 2"].is_up)
 
         self.assertEqual(by_name["Ethernet 3"].subnet_mask, "255.255.255.0")

@@ -5,7 +5,13 @@ import sys
 from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_ROOT = BACKEND_ROOT / "runtime"
+# Overridable so the portable launcher can anchor ALL backend-derived state
+# (default sqlite path, imports, edge identity, secrets default) to one
+# machine-stable folder that survives per-release exe folders. Unset (dev,
+# hosted compose) keeps the historical backend-local layout.
+RUNTIME_ROOT = Path(
+    os.getenv("SMART_COMMISSIONING_RUNTIME_ROOT", str(BACKEND_ROOT / "runtime"))
+).expanduser()
 IMPORTS_ROOT = RUNTIME_ROOT / "imports"
 IMPORT_FILES_ROOT = IMPORTS_ROOT / "files"
 SECRETS_ROOT = Path(os.getenv("SMART_COMMISSIONING_SECRETS_ROOT", str(RUNTIME_ROOT / "secrets"))).expanduser()

@@ -41,10 +41,12 @@ not terminate TLS itself.
 ### Edge (portable Windows executable)
 
 The portable build under `packaging/windows_portable/` runs uvicorn bound to
-`127.0.0.1`, uses a local SQLite database under the runtime root, executes jobs
-inline (no Redis/worker), and defaults to `AUTH_MODE=local`. No `.env` is
-required for a single-operator laptop; the SQLite file and secret material live
-under the bundled runtime directory. Migrations auto-run on first start.
+`127.0.0.1`, uses a local SQLite database, executes jobs inline (no
+Redis/worker), and defaults to `AUTH_MODE=local`. No `.env` is required for a
+single-operator laptop; the SQLite file and secret material live under
+`%LOCALAPPDATA%\SmartCommissioning` (overridable via
+`SMART_COMMISSIONING_DATA_DIR`; dev checkouts keep `<repo>/runtime`), so they
+survive upgrading to a new release folder. Migrations auto-run on first start.
 
 ## 2. Required environment
 
@@ -61,7 +63,7 @@ required one is missing). The edge profile uses the built-in defaults from
 | `API_KEY` | yes (api_key mode) | Shared key clients send when `AUTH_MODE=api_key`. `openssl rand -hex 32`. | — |
 | `AUTH_MODE` | — | `api_key` (compose default) or `local` (edge default). | `local` (code default); compose sets `api_key` |
 | `CORS_ORIGINS` | — | Comma-separated browser origins for direct cross-origin API access. Same-origin traffic via the nginx `/api` proxy needs no CORS. | `http://localhost:5173,http://127.0.0.1:5173` (code); compose sets `http://127.0.0.1:8080,...` |
-| `DATABASE_URL` | assembled | `postgresql+psycopg://...`. **Assembled inside compose** from `POSTGRES_*`; set explicitly only outside compose. | SQLite under runtime root (edge) |
+| `DATABASE_URL` | assembled | `postgresql+psycopg://...`. **Assembled inside compose** from `POSTGRES_*`; set explicitly only outside compose. | SQLite under the app data dir (edge; `%LOCALAPPDATA%\SmartCommissioning` when frozen) |
 | `REDIS_URL` | assembled | `redis://:<pw>@redis:6379/0`. **Assembled inside compose** from `REDIS_PASSWORD`. | `redis://localhost:6379/0` (code) |
 | `AUTO_MIGRATE` | — | API applies Alembic migrations on startup. Set `false` only if migrating out of band. | `true` |
 | `JOB_EXECUTION_MODE` | — | `auto` / `queue` / `inline`. `inline` skips Redis. | `auto` |
@@ -134,8 +136,9 @@ set — the correlation ids `request_id` and `run_id`. Extra fields passed via
   `docker compose -f infra/docker-compose.yml logs -f api` (or `worker`,
   `frontend`, `postgres`, `redis`) and ship them to your log aggregator.
 - **Edge/portable:** logs go to the console / the portable launcher's captured
-  output. The portable crash log is written under the bundled runtime directory
-  (see `docs/observability.md` for the exact crash-log location).
+  output. The portable crash log is written under
+  `%LOCALAPPDATA%\SmartCommissioning\logs\` (see `docs/observability.md` for
+  the exact crash-log location).
 - The request-id middleware accepts an inbound `X-Request-ID` (or mints a
   uuid4), binds it for the whole request, and echoes it on the response — so a
   client-supplied id correlates frontend, API, and worker log lines.

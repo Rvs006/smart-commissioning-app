@@ -2,10 +2,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-# Best-effort adapter classification for the Source Interface picker. The
-# server NEVER returns "virtual" (virtual adapters are filtered out of the
-# list like loopback/APIPA); it stays in the union so clients can defensively
-# filter. Classification failures degrade to "unknown", never an error.
+# Best-effort adapter classification for the Source Interface picker. Virtual
+# adapters ARE returned (ranked last, since 2026-07-14 they can be the host's
+# only routable NIC on Hyper-V vSwitch / NIC-team machines) — clients label
+# them as a pick-with-care option rather than hiding them. Classification
+# failures degrade to "unknown", never an error.
 AdapterType = Literal["ethernet", "wifi", "usb_ethernet", "virtual", "unknown"]
 
 

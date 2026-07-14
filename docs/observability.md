@@ -58,14 +58,18 @@ asyncio task / per worker message and never leak across concurrent requests.
 
 For the portable edge build, an unhandled crash (the kind that would otherwise
 vanish when the console window closes) is captured to a crash log **under the
-portable runtime root** — alongside the SQLite database and secrets. The
-portable launcher in `packaging/windows_portable/` (`install_crash_logging`)
-writes timestamped files under `runtime/logs/`:
-`runtime/logs/crash-<timestamp>.log` for uncaught Python exceptions and
-`runtime/logs/faulthandler-<timestamp>.log` for interpreter-level faults. When
-triaging a portable crash, collect those files together with the runtime bundle
-(see `docs/backup-restore.md`). They are the edge equivalent of `docker logs`
-for a process with no attached console.
+app data directory** — alongside the SQLite database and secrets. The portable
+launcher in `packaging/windows_portable/` (`install_crash_logging`) writes
+timestamped files under `%LOCALAPPDATA%\SmartCommissioning\logs\` for the
+frozen exe (`<SMART_COMMISSIONING_DATA_DIR>\logs\` when that override is set;
+`<repo>/runtime/logs/` for unfrozen dev runs):
+`crash-<timestamp>.log` for uncaught Python exceptions and
+`faulthandler-<timestamp>.log` for interpreter-level faults. When triaging a
+portable crash, collect those files together with the runtime bundle (see
+`docs/backup-restore.md`). Note: after an in-place upgrade, an exe-adjacent
+`runtime\logs\` folder is a pre-upgrade rollback copy — it holds only old
+logs, so do not triage current crashes from it. They are the edge equivalent
+of `docker logs` for a process with no attached console.
 
 ## 2. Prometheus metrics surface
 

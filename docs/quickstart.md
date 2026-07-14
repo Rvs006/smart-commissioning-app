@@ -123,8 +123,10 @@ a free port starting at 8000, applies migrations on startup, opens a browser,
 and prints the chosen URL in the console, e.g. `http://127.0.0.1:8000/` — always
 use the printed URL.
 
-**From source (developers):** run the same launcher directly (identical
-behaviour to the packaged `.exe`):
+**From source (developers):** run the same launcher directly (same startup
+flow as the packaged `.exe`, except state location: the frozen exe stores app
+data in `%LOCALAPPDATA%\SmartCommissioning`, while a source run keeps it in
+`<repo>/runtime` — set `SMART_COMMISSIONING_DATA_DIR` to override either):
 
 ```sh
 python packaging/windows_portable/run_smart_commissioning_app.py

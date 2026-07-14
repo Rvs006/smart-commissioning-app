@@ -179,8 +179,14 @@ and is what the launcher's `core_root` check already anticipates.
 ## 5. Offline smoke against the bundle (no broker)
 
 Start the bundle (it sets `AUTH_MODE=local`, `JOB_EXECUTION_MODE=inline`,
-SQLite `DATABASE_URL` under `runtime/`, picks a free port from 8000 via
-`reserve_port`, runs `upgrade_to_head` on startup, opens a browser):
+SQLite `DATABASE_URL` under `%LOCALAPPDATA%\SmartCommissioning\` for the
+frozen exe — `SMART_COMMISSIONING_DATA_DIR` overrides it; unfrozen dev runs
+keep `<repo>/runtime/` — picks a free port from 8000 via `reserve_port`, runs
+`upgrade_to_head` on startup, opens a browser). To re-verify **first-launch**
+behavior (e.g. a missing-Alembic regression), point
+`SMART_COMMISSIONING_DATA_DIR` at an empty folder or remove
+`%LOCALAPPDATA%\SmartCommissioning` first — an existing stable-dir DB is
+reused and would mask it:
 
 ```
 build\Smart_Commissioning_App_Windows_Portable\SmartCommissioningApp.exe
