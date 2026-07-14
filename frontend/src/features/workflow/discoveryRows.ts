@@ -81,6 +81,20 @@ export const forbiddenOpenPorts = (statusDetail: string | undefined | null): str
 export const unexpectedOpenPorts = (statusDetail: string | undefined | null): string =>
   portsFromDetail(statusDetail, "UNEXPECTED");
 
+// The engine's expected-port coverage verdicts (the register's "Expected
+// services/ports" are now genuinely probed): "MISSING EXPECTED PORTS: <ports>"
+// lists expected ports that did not answer, and "EXPECTED PORTS OK: <n>/<n>
+// open" is the explicit all-clear when every expected port is open and nothing
+// forbidden/unexpected fired. Both return "" when the verdict is absent.
+export const missingExpectedPorts = (statusDetail: string | undefined | null): string => {
+  const match = /MISSING EXPECTED PORTS:\s*([^|]+)/.exec(statusDetail ?? "");
+  return match ? match[1].trim() : "";
+};
+export const expectedPortsOk = (statusDetail: string | undefined | null): string => {
+  const match = /EXPECTED PORTS OK:\s*([^|]+)/.exec(statusDetail ?? "");
+  return match ? match[1].trim() : "";
+};
+
 // IP discovery rows come from discovered_assets (DiscoveryAssetObservation).
 export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<string, string>[] {
   return results.discovered_assets.map((asset: DiscoveryAssetObservation) => ({
