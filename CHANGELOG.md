@@ -7,7 +7,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **IP scan flags hostname mismatches against the register's "Expected
+  hostname".** When reverse DNS is enabled and returns a name for a responsive
+  host that the IP register also carries a hostname for, the scan compares the
+  two (case-insensitively, on the short name — the reverse-DNS domain suffix is
+  stripped) and appends `HOSTNAME MISMATCH: expected <x>, got <y>` to the
+  host's detailed status, with a `hosts_with_hostname_mismatch` count in the
+  run summary. Warning-only: a blank on either side (no PTR record, site DNS
+  not configured, reverse DNS disabled, register row without a hostname) never
+  counts as a mismatch, since commissioning networks often run without DNS.
 
 ## [0.1.9] - 2026-07-14
 

@@ -537,6 +537,117 @@ class LoopbackSocketTests(unittest.TestCase):
         self.assertIsNone(store.summary_calls[-1]["discovered_assets"][0]["mac_address"])
 
 
+class ExpectedHostnameTests(unittest.TestCase):
+    """Reverse-DNS name vs the register's "Expected hostname" — warning-only:
+    a blank on EITHER side (no PTR record, site DNS not configured, reverse_dns
+    disabled, host absent from the register) must NEVER count as a mismatch,
+    because commissioning networks often run without DNS."""
+
+    def test_matching_hostname_not_flagged(self) -> None:
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_host_match",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
+             "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            reverse_lookup=lambda ip: "ahu-l03-017",
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_hostname_mismatch"], 0)
+        self.assertNotIn("HOSTNAME MISMATCH", summary["discovered_assets"][0]["status_detail"])
+
+    def test_mismatched_hostname_flagged_with_counter(self) -> None:
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_host_mismatch",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
+             "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            reverse_lookup=lambda ip: "boiler-b1-002",
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_hostname_mismatch"], 1)
+        self.assertIn(
+            "HOSTNAME MISMATCH: expected ahu-l03-017, got boiler-b1-002",
+            summary["discovered_assets"][0]["status_detail"],
+        )
+        # The register's expectation is persisted alongside the observation.
+        self.assertEqual(persisted[0][1][0]["attributes"]["expected_hostname"], "ahu-l03-017")
+        self.assertEqual(persisted[0][1][0]["attributes"]["hostname"], "boiler-b1-002")
+
+    def test_domain_suffix_and_case_ignored(self) -> None:
+        # Reverse DNS returns an FQDN while the register carries the short name;
+        # the comparison strips the domain suffix and case, so this is a MATCH.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_host_fqdn",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
+             "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            reverse_lookup=lambda ip: "AHU-L03-017.site.example.com",
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_hostname_mismatch"], 0)
+        self.assertNotIn("HOSTNAME MISMATCH", summary["discovered_assets"][0]["status_detail"])
+
+    def test_missing_reverse_dns_result_never_mismatches(self) -> None:
+        # PTR lookup failed (no DNS on the commissioning network) -> hostname is
+        # None; an expected hostname alone must not flag a mismatch.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_host_noptr",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
+             "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            reverse_lookup=lambda ip: None,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_hostname_mismatch"], 0)
+        self.assertNotIn("HOSTNAME MISMATCH", summary["discovered_assets"][0]["status_detail"])
+
+    def test_host_absent_from_register_never_mismatches(self) -> None:
+        # Reverse DNS produced a name, but this host has no registered expected
+        # hostname -> nothing to compare against.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_host_unregistered",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
+             "expected_hostname_by_address": {"10.0.0.9": "other-asset"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            reverse_lookup=lambda ip: "rogue-host.site.example.com",
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_hostname_mismatch"], 0)
+        self.assertNotIn("HOSTNAME MISMATCH", summary["discovered_assets"][0]["status_detail"])
+
+
 class ArpLookupUnitTests(unittest.TestCase):
     """Pure ARP-cache parsing / normalisation (subprocess + /proc mocked)."""
 

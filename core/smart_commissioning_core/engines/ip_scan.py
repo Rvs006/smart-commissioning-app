@@ -322,6 +322,16 @@ def _reverse_lookup(ip: str) -> str | None:
         return None
 
 
+def _short_hostname(name: str) -> str:
+    """Lower-cased short (first-label) form of a hostname, for comparison.
+
+    Reverse DNS usually returns an FQDN (``ahu-l03-017.site.example``) while the
+    register's "Expected hostname" carries short names, so mismatch detection
+    compares first labels case-insensitively.
+    """
+    return name.split(".", 1)[0].strip().lower()
+
+
 # A MAC token in OS ARP-cache output: six hex octets separated by ':' (Linux
 # /proc, ``ip neigh``) or '-' (Windows ``arp -a``).
 _MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
@@ -508,6 +518,17 @@ async def _run_ip_discovery(
     asset_by_address = ctx.parameters.get("asset_id_by_address")
     if not isinstance(asset_by_address, dict):
         asset_by_address = {}
+    # Registered "Expected hostname" per host (short names like "ahu-l03-017"),
+    # filled by the route from the IP register. Blanks are dropped here so a
+    # register row without a hostname can never produce a mismatch.
+    raw_hostnames = ctx.parameters.get("expected_hostname_by_address")
+    expected_hostname_by_address: dict[str, str] = {}
+    if isinstance(raw_hostnames, dict):
+        expected_hostname_by_address = {
+            str(address): text
+            for address, value in raw_hostnames.items()
+            if (text := str(value).strip())
+        }
 
     # DRY RUN: enumerate the (ip, port) target list, perform NO I/O.
     if ctx.dry_run:
@@ -560,6 +581,7 @@ async def _run_ip_discovery(
     hosts_scanned = 0
     hosts_with_forbidden = 0
     hosts_with_unexpected = 0
+    hosts_with_hostname_mismatch = 0
     # Sweep host-by-host so cancellation can stop between hosts (and the
     # throttle stops between port dispatches within a host). Each host's ports
     # are dispatched as throttled units.
@@ -599,6 +621,16 @@ async def _run_ip_discovery(
         # checked when the host has a registered expected set.
         host_expected = expected_by_address.get(host)
         unexpected = [port for port in open_ports if port not in host_expected] if host_expected is not None else []
+        # Reverse-DNS name vs the register's "Expected hostname" — WARNING-ONLY:
+        # a blank on EITHER side (no PTR record, site DNS not configured,
+        # reverse_dns disabled, host absent from the register) is never a
+        # mismatch, because commissioning networks often run without DNS.
+        expected_hostname = expected_hostname_by_address.get(host)
+        hostname_mismatch = bool(
+            hostname
+            and expected_hostname
+            and _short_hostname(hostname) != _short_hostname(expected_hostname)
+        )
         status_detail = "responsive: " + ",".join(str(p) for p in open_ports)
         if flagged:
             status_detail += " | FORBIDDEN PORTS OPEN: " + ",".join(str(p) for p in flagged)
@@ -606,6 +638,9 @@ async def _run_ip_discovery(
         if unexpected:
             status_detail += " | UNEXPECTED PORTS OPEN: " + ",".join(str(p) for p in unexpected)
             hosts_with_unexpected += 1
+        if hostname_mismatch:
+            status_detail += f" | HOSTNAME MISMATCH: expected {expected_hostname}, got {hostname}"
+            hosts_with_hostname_mismatch += 1
         discovered_assets.append(
             {
                 "asset_id": asset_by_address.get(host),
@@ -631,6 +666,7 @@ async def _run_ip_discovery(
                     "forbidden_open_ports": flagged,
                     "unexpected_open_ports": unexpected,
                     "hostname": hostname,
+                    "expected_hostname": expected_hostname,
                     "mac_address": mac,
                 },
             }
@@ -646,5 +682,6 @@ async def _run_ip_discovery(
             "forbidden_ports": sorted(forbidden_ports),
             "hosts_with_forbidden_open": hosts_with_forbidden,
             "hosts_with_unexpected_open": hosts_with_unexpected,
+            "hosts_with_hostname_mismatch": hosts_with_hostname_mismatch,
         },
     )

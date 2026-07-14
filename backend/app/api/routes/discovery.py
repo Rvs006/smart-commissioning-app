@@ -241,6 +241,17 @@ def _resolve_expected_ports(project_id: str, site_id: str, parameters: dict) -> 
             parameters["expected_ports_by_address"] = by_address
 
 
+def _resolve_expected_hostnames(project_id: str, site_id: str, parameters: dict) -> None:
+    """Fill ``expected_hostname_by_address`` from the register's "Expected hostname"
+    so the engine can flag a reverse-DNS result that contradicts the register
+    (rows with a blank hostname are skipped by the map builder, so they can never
+    mismatch). Operator-supplied value wins.
+    """
+    if not parameters.get("expected_hostname_by_address"):
+        if by_address := _ip_register_by_address(project_id, site_id, "Expected hostname"):
+            parameters["expected_hostname_by_address"] = by_address
+
+
 def _resolve_asset_ids(project_id: str, site_id: str, parameters: dict) -> None:
     """Fill ``asset_id_by_address`` from the register so the live "Asset" column
     resolves each scanned host to its registered identity — the Asset ID, else
@@ -284,6 +295,7 @@ def create_ip_discovery_run(
     _ensure_ip_targets(request.project_id, request.site_id, parameters)
     _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
     _resolve_expected_ports(request.project_id, request.site_id, parameters)
+    _resolve_expected_hostnames(request.project_id, request.site_id, parameters)
     _resolve_asset_ids(request.project_id, request.site_id, parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
