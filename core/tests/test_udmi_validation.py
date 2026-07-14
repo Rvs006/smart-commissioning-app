@@ -12,6 +12,7 @@ from pathlib import Path
 
 from smart_commissioning_core import mqtt_transport, udmi_schema
 from smart_commissioning_core.mqtt_transport import MqttMessage
+from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_run_processor import (
     INLINE_INDEFINITE_CEILING_SECONDS,
     process_udmi_validation_run,
@@ -23,7 +24,6 @@ from smart_commissioning_core.udmi_schema import (
     structural_issues,
     versions_match,
 )
-from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
     DEFAULT_MAX_MESSAGES,
