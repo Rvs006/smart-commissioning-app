@@ -14,9 +14,11 @@ What persists, by profile:
 In both profiles the **database holds only `secret://` references**, never the
 secret bytes; the encrypted secret material (and the Fernet
 `.secret_store_key`) lives on disk under the secrets root
-(`SMART_COMMISSIONING_SECRETS_ROOT`, default `backend/runtime/secrets/`). A
-database backup without the secrets root is therefore **incomplete** — restoring
-it gives you configuration that points at secrets you can no longer decrypt.
+(`SMART_COMMISSIONING_SECRETS_ROOT`; frozen portable exe:
+`%LOCALAPPDATA%\SmartCommissioning\secrets\`, dev checkout:
+`backend/runtime/secrets/`). A database backup without the secrets root is
+therefore **incomplete** — restoring it gives you configuration that points at
+secrets you can no longer decrypt.
 
 > The `python -m app.scripts.backup` CLI referenced below for the edge bundle is
 > being added in a parallel phase. The manual procedures here work today; treat
@@ -26,12 +28,20 @@ it gives you configuration that points at secrets you can no longer decrypt.
 
 ## 1. Edge / portable: SQLite bundle backup
 
-The portable profile's entire durable state is the runtime directory:
+The portable profile's entire durable state is one runtime directory. For the
+**frozen portable exe** that is `%LOCALAPPDATA%\SmartCommissioning\`
+(overridable via `SMART_COMMISSIONING_DATA_DIR`); a **dev checkout** keeps it
+in `backend/runtime/`. It contains:
 
-- the SQLite database file (default `backend/runtime/smart_commissioning.db`),
-- the secrets root (`backend/runtime/secrets/`), including `.secret_store_key`,
-- uploaded import files (`backend/runtime/imports/`),
+- the SQLite database file (`smart_commissioning.db`),
+- the secrets root (`secrets/`), including `.secret_store_key`,
+- uploaded import files (`imports/`),
 - any run/evidence artefacts under the runtime root.
+
+> **Upgraded installs:** pre-v0.1.9 builds kept state beside the exe
+> (`<exe>\runtime\` and `<exe>\backend\runtime\`). After the one-time
+> migration those folders are stale rollback copies — never use them as the
+> backup source; back up `%LOCALAPPDATA%\SmartCommissioning\`.
 
 ### Back up
 
@@ -40,9 +50,9 @@ then copy the **whole runtime root** to encrypted external media:
 
 ```powershell
 # PowerShell, portable laptop
-Stop-Process -Name smart-commissioning -ErrorAction SilentlyContinue   # or close the app
+Stop-Process -Name SmartCommissioningApp -ErrorAction SilentlyContinue   # or close the app
 $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
-Compress-Archive -Path .\backend\runtime\* -DestinationPath "D:\backups\sct-edge-$ts.zip"
+Compress-Archive -Path "$env:LOCALAPPDATA\SmartCommissioning\*" -DestinationPath "D:\backups\sct-edge-$ts.zip"
 ```
 
 The forthcoming `python -m app.scripts.backup` CLI bundles the same set
@@ -60,8 +70,8 @@ bundle on shared storage.
 ### Restore
 
 ```powershell
-# Into a clean runtime root
-Expand-Archive -Path "D:\backups\sct-edge-20260612-101500.zip" -DestinationPath .\backend\runtime\
+# Into a clean runtime root (frozen exe; dev checkout: .\backend\runtime\)
+Expand-Archive -Path "D:\backups\sct-edge-20260612-101500.zip" -DestinationPath "$env:LOCALAPPDATA\SmartCommissioning"
 # Start the app; it applies Alembic migrations on first start if the schema is older.
 ```
 
@@ -129,7 +139,8 @@ being lost, stolen, or failing mid-commissioning.
   continuous replication on the edge — RPO equals "time since your last bundle".
 - **RTO (how fast you can be working again):** target **under 30 minutes** on a
   replacement laptop: install the portable build, expand the most recent bundle
-  into a clean runtime root, start the app (auto-migrates), verify (section 5).
+  into `%LOCALAPPDATA%\SmartCommissioning`, start the app (auto-migrates),
+  verify (section 5).
 - **Confidentiality on loss:** the lost laptop holds the SQLite DB **and** the
   Fernet `.secret_store_key` and any uploaded CA/client certs and private keys.
   Mitigate with **full-disk encryption on the laptop** (so a lost device is

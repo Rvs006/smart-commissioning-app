@@ -31,7 +31,9 @@ them and chooses which adapter to scan from.
 1. Plug into the switch. Confirm Windows shows the connection up.
 2. In the app: **Configuration → Source Interface**.
    - Pick the adapter you are scanning from (wired defaults first; Wi-Fi is
-     tagged "not recommended").
+     tagged "not recommended"; virtual adapters sit at the bottom — on a
+     Hyper-V host the "vEthernet" entry can be the machine's real network
+     adapter, so pick it if it carries the site IP).
    - The read-only panel below shows that adapter's current IP / subnet /
      gateway / DNS — check it matches what you set in Windows. If it does, the
      tool is reading the right NIC.
@@ -63,6 +65,20 @@ filter it, and hit **Export CSV** for the whole list — no digging through file
 
 This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
 
+## Upgrading to a new release (settings carry over)
+
+Your settings, certificates, and run history live in
+`%LOCALAPPDATA%\SmartCommissioning` — **not** in the release folder — so
+extracting a new release and running its exe keeps everything: broker
+credentials, uploaded certs, the chosen Source Interface, run history. The
+first launch of a new version also migrates state forward automatically if it
+finds an older release's `runtime\` folder next to the exe. Moving to a
+**different laptop** (or a different Windows user on the same machine) needs a
+copy: close the app, copy the whole `%LOCALAPPDATA%\SmartCommissioning` folder
+to the same path on the new machine, then start the app there — the folder
+carries the settings, certificates, and their encryption key, so treat the
+copy as sensitive.
+
 ## If something looks wrong
 
 - **Scan finds nothing and no firewall popup appeared** → Windows Firewall is the
@@ -72,7 +88,7 @@ This is a field test: a successful portable smoke test does not prove the MSI br
 - **A device is unreachable / broker won't connect** → the tool records a real
   failure status. It never fakes a pass — a red result is real, chase the network.
 - **Anything else** → close the console window to stop the app, then send the
-  console text and the files under `runtime\logs\` (next to the exe).
+  console text and the files under `%LOCALAPPDATA%\SmartCommissioning\logs\`.
 
 ## Trust the numbers (once per site)
 
