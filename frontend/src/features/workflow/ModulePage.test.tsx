@@ -151,6 +151,68 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.queryByText("118")).not.toBeInTheDocument();
   });
 
+  it("renders import warnings as a non-blocking amber panel distinct from errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/imports") && init?.method === "POST") {
+          return jsonResponse({
+            import_id: "import-ip-1",
+            import_type: "ip_register",
+            file_name: "ip_register.csv",
+            file_type: "csv",
+            project_id: "demo-project",
+            site_id: "demo-site",
+            total_rows: 1,
+            accepted_rows: 1,
+            rejected_rows: 0,
+            status: "accepted",
+            missing_columns: [],
+            warnings: [
+              {
+                row_number: 2,
+                field: "Expected services/ports",
+                code: "udp_port_not_verified",
+                message:
+                  "47808/udp is a UDP service — the IP scan verifies TCP ports only. UDP 47808 (BACnet/IP) is verified by the BACnet discovery run.",
+              },
+            ],
+            stored_file_name: "import-ip-1.csv",
+            created_at: "2026-07-14T09:00:00Z",
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    fireEvent.change(await screen.findByLabelText(/CSV or XLSX file/i), {
+      target: { files: [new File(["reg"], "ip_register.csv")] },
+    });
+    const upload = screen.getByRole("button", { name: "Upload and validate" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
+
+    // The import itself stays ACCEPTED; the UDP note arrives as a warning.
+    expect(await screen.findByText("ACCEPTED")).toBeInTheDocument();
+    const warningPanel = screen
+      .getByText(/UDP 47808 \(BACnet\/IP\) is verified by the BACnet discovery run/i)
+      .closest(".state-panel");
+    expect(warningPanel).toHaveClass("warning");
+    expect(warningPanel).not.toHaveClass("error");
+    expect(warningPanel).not.toHaveClass("rejected");
+    expect(screen.getByText(/Row 2:/)).toBeInTheDocument();
+    expect(screen.getByText(/affected rows are still accepted/i)).toBeInTheDocument();
+  });
+
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(

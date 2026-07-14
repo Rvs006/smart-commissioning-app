@@ -46,8 +46,10 @@ import {
   bacnetBackendLabel,
   discoveryMetrics,
   discoveryViewFor,
+  expectedPortsOk,
   forbiddenOpenPorts,
   matchesTopicFilter,
+  missingExpectedPorts,
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
@@ -1026,6 +1028,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // For real (non-dry-run) discovery the operator must confirm authorization.
   const discoveryBlocked = isDiscoveryModule && !scanDryRun && !scanAuthorized;
 
+  // Import warnings are informational (their rows stay accepted), so they get
+  // their own amber panel below the outcome — never the red error styling.
+  const importWarnings = importOutcome?.warnings ?? [];
+
   return (
     <div className="app-page">
       <section className="module-hero">
@@ -1192,6 +1198,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     {importOutcome.accepted_rows} accepted ·{" "}
                     {importOutcome.rejected_rows} rejected
                   </span>
+                </div>
+              )}
+
+              {importWarnings.length > 0 && (
+                <div className="state-panel warning">
+                  <strong>
+                    {importWarnings.length} warning(s) — affected rows are still accepted
+                  </strong>
+                  <ul>
+                    {importWarnings.map((warning, index) => (
+                      <li key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}>
+                        {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
+                        {warning.message}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>
@@ -2843,12 +2865,16 @@ function renderCell(
   if (column === "Detailed Status") {
     const forbidden = forbiddenOpenPorts(row[column]);
     const unexpected = unexpectedOpenPorts(row[column]);
-    if (forbidden || unexpected) {
+    const missing = missingExpectedPorts(row[column]);
+    const expectedOk = expectedPortsOk(row[column]);
+    if (forbidden || unexpected || missing || expectedOk) {
       return (
         <>
           {row[column]}
           {forbidden && <span className="chip red"> Forbidden ports open: {forbidden}</span>}
           {unexpected && <span className="chip amber"> Unexpected ports open: {unexpected}</span>}
+          {missing && <span className="chip red"> Missing expected ports: {missing}</span>}
+          {expectedOk && <span className="chip green"> Expected ports {expectedOk}</span>}
         </>
       );
     }
@@ -3032,11 +3058,19 @@ function buildResultDetailItems(
     // mirroring the table cell chips so the detail view is self-contained.
     const forbidden = forbiddenOpenPorts(row["Detailed Status"]);
     const unexpected = unexpectedOpenPorts(row["Detailed Status"]);
+    const missing = missingExpectedPorts(row["Detailed Status"]);
+    const expectedOk = expectedPortsOk(row["Detailed Status"]);
     if (forbidden) {
       items.push({ label: "Forbidden ports open", value: forbidden });
     }
     if (unexpected) {
       items.push({ label: "Unexpected ports open", value: unexpected });
+    }
+    if (missing) {
+      items.push({ label: "Missing expected ports", value: missing });
+    }
+    if (expectedOk) {
+      items.push({ label: "Expected ports", value: expectedOk });
     }
     return items;
   }

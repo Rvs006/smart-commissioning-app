@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { DiscoveryResultsResponse } from "../../api/client";
 import {
   bacnetBackendLabel,
+  expectedPortsOk,
   forbiddenOpenPorts,
   ipRowsFromResults,
+  missingExpectedPorts,
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
@@ -109,6 +111,41 @@ describe("unexpectedOpenPorts", () => {
     expect(unexpectedOpenPorts("responsive: 80,8080 | UNEXPECTED PORTS OPEN: 8080")).toBe("8080");
     expect(unexpectedOpenPorts("responsive: 80,443")).toBe("");
     expect(unexpectedOpenPorts(undefined)).toBe("");
+  });
+});
+
+describe("missingExpectedPorts", () => {
+  it("extracts register-expected ports that did not answer", () => {
+    // Mirrors the engine marker for expected ports the probe found closed.
+    expect(
+      missingExpectedPorts("responsive: 443 | MISSING EXPECTED PORTS: 135,139,445,5985,7070"),
+    ).toBe("135,139,445,5985,7070");
+    // Stops at the next token so trailing verdicts never bleed into the list.
+    expect(
+      missingExpectedPorts(
+        "responsive: 443 | MISSING EXPECTED PORTS: 445 | HOSTNAME MISMATCH: expected a, got b",
+      ),
+    ).toBe("445");
+  });
+
+  it("returns empty string for hosts without the verdict", () => {
+    expect(missingExpectedPorts("responsive: 80,443")).toBe("");
+    expect(missingExpectedPorts("responsive: 443 | EXPECTED PORTS OK: 1/1 open")).toBe("");
+    expect(missingExpectedPorts(undefined)).toBe("");
+  });
+});
+
+describe("expectedPortsOk", () => {
+  it("extracts the explicit all-expected-ports-open pass", () => {
+    expect(expectedPortsOk("responsive: 135,443,445 | EXPECTED PORTS OK: 3/3 open")).toBe(
+      "3/3 open",
+    );
+  });
+
+  it("returns empty string when the pass verdict is absent", () => {
+    expect(expectedPortsOk("responsive: 443 | MISSING EXPECTED PORTS: 445")).toBe("");
+    expect(expectedPortsOk("responsive: 80,443")).toBe("");
+    expect(expectedPortsOk(undefined)).toBe("");
   });
 });
 

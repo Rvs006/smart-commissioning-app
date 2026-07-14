@@ -98,6 +98,17 @@ export type ImportProfileSummary = {
   duplicate_key_fields: string[];
 };
 
+// Informational note about an ACCEPTED row (e.g. a UDP port entry the
+// TCP-only IP scan can never verify). Same shape as a backend
+// ImportErrorRecord but delivered on the summary's separate warnings list,
+// so it never counts as a rejection.
+export type ImportWarningRecord = {
+  row_number: number | null;
+  field: string | null;
+  code: string;
+  message: string;
+};
+
 export type ImportBatchSummary = {
   import_id: string;
   import_type: ImportType;
@@ -110,6 +121,8 @@ export type ImportBatchSummary = {
   rejected_rows: number;
   status: ImportStatus;
   missing_columns: string[];
+  // Optional so summaries stored before the field existed remain valid.
+  warnings?: ImportWarningRecord[];
   stored_file_name: string;
   created_at: string;
 };

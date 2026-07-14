@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.schemas.configuration import SecretMaterialRequest
 from app.schemas.jobs import JobCreateRequest, ReportRequest
+from app.services import import_service as import_service_module
 from app.services.configuration_service import DEFAULT_CONFIGURATION, ConfigurationService
 from app.services.import_service import PROFILES, ImportService
 from app.services.run_service import RunService
@@ -206,6 +208,93 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
         self.assertIn(
             "missing_asset_identity",
             [e.code for e in PROFILES["ip_register"].validate_row(ip_base, 2)],
+        )
+
+
+class IpRegisterUdpWarningTests(unittest.TestCase):
+    """UDP port entries in an ip_register are accepted but warned about: the
+    IP scan engine is TCP-connect only, so a /udp entry is never verified
+    (UDP 47808 / BACnet/IP belongs to the BACnet discovery run)."""
+
+    _BASE = {
+        "Project/site": "Site A",
+        "System": "BMS",
+        "Asset ID": "AHU-1",
+        "Expected IP address": "10.10.25.117",
+        "Expected services/ports": "443/tcp",
+    }
+
+    def _warnings(self, **overrides: str) -> list:
+        row = {**self._BASE, **overrides}
+        # Warnings never reject: the row must stay error-free.
+        self.assertEqual(PROFILES["ip_register"].validate_row(row, 2), [])
+        return PROFILES["ip_register"].collect_warnings(row, 2)
+
+    def test_udp_expected_service_warns_and_names_the_bacnet_run(self) -> None:
+        warnings = self._warnings(**{"Expected services/ports": "47808/udp, 443/tcp"})
+
+        self.assertEqual(len(warnings), 1)
+        warning = warnings[0]
+        self.assertEqual(warning.row_number, 2)
+        self.assertEqual(warning.field, "Expected services/ports")
+        self.assertEqual(warning.code, "udp_port_not_verified")
+        self.assertEqual(
+            warning.message,
+            "47808/udp is a UDP service — the IP scan verifies TCP ports only. "
+            "UDP 47808 (BACnet/IP) is verified by the BACnet discovery run.",
+        )
+
+    def test_pure_tcp_rows_produce_no_warnings(self) -> None:
+        self.assertEqual(self._warnings(), [])
+        self.assertEqual(self._warnings(**{"Ports that should not be enabled": "23/tcp, 21/tcp"}), [])
+
+    def test_udp_in_ports_that_should_not_be_enabled_warns_generically(self) -> None:
+        warnings = self._warnings(**{"Ports that should not be enabled": "69/udp"})
+
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].field, "Ports that should not be enabled")
+        self.assertEqual(warnings[0].code, "udp_port_not_verified")
+        self.assertEqual(
+            warnings[0].message,
+            "69/udp is a UDP service — the IP scan verifies TCP ports only "
+            "and cannot check this entry.",
+        )
+
+    def test_udp_match_is_case_insensitive_and_whitespace_tolerant(self) -> None:
+        warnings = self._warnings(**{"Expected services/ports": "443/tcp,  47808 / UDP "})
+
+        self.assertEqual([w.code for w in warnings], ["udp_port_not_verified"])
+        self.assertIn("BACnet discovery run", warnings[0].message)
+
+    def test_create_import_accepts_udp_rows_and_reports_summary_warnings(self) -> None:
+        csv_bytes = (
+            b"Project/site,System,Asset ID,Expected IP address,"
+            b"Expected services/ports,Ports that should not be enabled\n"
+            b'Site A,BMS,AHU-1,10.10.25.117,"47808/udp, 443/tcp",23/tcp\n'
+            b"Site A,BMS,AHU-2,10.10.25.118,443/tcp,69/udp\n"
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = _temporary_engine(temp_dir)
+            try:
+                with mock.patch.object(import_service_module, "IMPORT_FILES_ROOT", Path(temp_dir)):
+                    summary, report = ImportService(engine=engine).create_import(
+                        import_type="ip_register",
+                        file_name="register.csv",
+                        file_bytes=csv_bytes,
+                        project_id=None,
+                        site_id=None,
+                    )
+            finally:
+                engine.dispose()
+
+        # Informational only: every row accepted, nothing on the error path.
+        self.assertEqual(summary.status, "accepted")
+        self.assertEqual((summary.accepted_rows, summary.rejected_rows), (2, 0))
+        self.assertEqual(report.errors, [])
+        self.assertEqual(
+            [(w.row_number, w.field) for w in summary.warnings],
+            [(2, "Expected services/ports"), (3, "Ports that should not be enabled")],
         )
 
 
