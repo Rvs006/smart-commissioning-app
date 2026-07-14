@@ -446,9 +446,11 @@ export function getHealth(): Promise<HealthStatus> {
   return request<HealthStatus>("/health");
 }
 
-// Best-effort adapter classification from the backend. "virtual" is never
-// returned by the server (virtual adapters are filtered out like loopback and
-// APIPA), but it stays in the union so the frontend can defensively filter.
+// Best-effort adapter classification from the backend. The server DOES return
+// "virtual" adapters (ranked last, since 2026-07-14): on Hyper-V vSwitch /
+// NIC-team hosts they can carry the machine's only routable IPv4, so the
+// frontend labels them pick-with-care instead of filtering them out — and
+// never auto-selects them.
 export type AdapterType = "ethernet" | "wifi" | "usb_ethernet" | "virtual" | "unknown";
 
 // A usable local network interface as enumerated by GET /system/interfaces.

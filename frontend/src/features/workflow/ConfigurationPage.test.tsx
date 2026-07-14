@@ -388,7 +388,7 @@ describe("ConfigurationPage", () => {
     expect(optionValues).toContain("172.16.0.9/24");
   });
 
-  it("excludes virtual adapters from the Source Interface options", async () => {
+  it("lists virtual adapters with a pick-with-care tag instead of hiding them", async () => {
     interfacesPayload = [
       interfaceFixture(),
       interfaceFixture({
@@ -427,7 +427,50 @@ describe("ConfigurationPage", () => {
     const optionValues = Array.from(select.options).map((option) => option.value);
     expect(optionValues).toContain("192.168.1.10/24");
     expect(optionValues).toContain("10.0.0.5/8");
-    expect(optionValues).not.toContain("172.28.0.1/20");
+    // Virtual adapters are offered (on Hyper-V vSwitch hosts they can be the
+    // only routable NIC) but carry an explicit pick-with-care label.
+    expect(optionValues).toContain("172.28.0.1/20");
+    expect(
+      screen.getByRole("option", {
+        name: /172\.28\.0\.1\/20 — vEthernet \(WSL\) \(Virtual — pick only if this adapter carries the site network/,
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("offers an only-up-virtual adapter without auto-picking it or hinting (Hyper-V host)", async () => {
+    // Pete's field case (2026-07-14): the machine's only routable adapter is
+    // a Hyper-V vEthernet flagged virtual. It must be OFFERED (the fix), but
+    // never auto-picked by the wired-first default, and the multi-adapter
+    // Auto hint must stay quiet.
+    interfacesPayload = [
+      interfaceFixture({
+        adapter_type: "virtual",
+        cidr: "10.10.90.10/24",
+        dns_servers: [],
+        gateway: "10.10.90.1",
+        ipv4: "10.10.90.10",
+        name: "vEthernet (OT)",
+        prefix_length: 24,
+        subnet_mask: "255.255.255.0",
+      }),
+    ];
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payloadWithSourceInterface(""));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("option", { name: /10\.10\.90\.10\/24 — vEthernet \(OT\)/ });
+    const sourceLabel = (await screen.findByText("Source Interface")).closest("label");
+    const select = within(sourceLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(Array.from(select.options).map((option) => option.value)).toContain("10.10.90.10/24");
+    // Never-chosen stays Auto: virtual adapters are excluded from the
+    // wired-first default even when they are the only adapter up.
+    expect(select.value).toBe("Auto (OS default route)");
+    expect(screen.queryByText(/Multiple active adapters detected/i)).not.toBeInTheDocument();
   });
 
   it("tags the Wi-Fi option as not recommended for commissioning traffic", async () => {
@@ -535,6 +578,18 @@ describe("ConfigurationPage", () => {
         ipv4: "192.168.99.4",
         is_up: false,
         name: "Ethernet 2",
+      }),
+      // An UP virtual adapter must not count toward the hint: WSL/Hyper-V
+      // laptops always have one, and the hint is about real site adapters.
+      interfaceFixture({
+        adapter_type: "virtual",
+        cidr: "172.28.0.1/20",
+        dns_servers: [],
+        gateway: null,
+        ipv4: "172.28.0.1",
+        name: "vEthernet (WSL)",
+        prefix_length: 20,
+        subnet_mask: "255.255.240.0",
       }),
     ];
     stubFetch((url) => {
@@ -725,10 +780,10 @@ describe("ConfigurationPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("flags a stored source interface that is not in the eligible list without promising a scan failure", async () => {
-    // The panel cannot tell "genuinely gone" (dispatch fails clearly) from
-    // "present but ineligible/virtual" (dispatch would still pass), so the
-    // copy must state both possibilities and promise neither outcome.
+  it("flags a stored source interface that is not in the list without promising a scan failure", async () => {
+    // Virtual adapters are enumerated too now, so "not listed" means the
+    // adapter is genuinely absent (unplugged/disabled/IP changed). The copy
+    // names the likely causes without promising a specific outcome.
     interfacesPayload = [interfaceFixture()];
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
@@ -740,7 +795,7 @@ describe("ConfigurationPage", () => {
     renderPage();
 
     expect(
-      await screen.findByText(/not in the list of eligible adapters on this machine/i),
+      await screen.findByText(/not in the list of adapters on this machine/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Scans will fail/i)).not.toBeInTheDocument();
   });

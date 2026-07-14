@@ -193,12 +193,15 @@ function isAutoSourceInterface(value: string): boolean {
 }
 
 // Human-readable adapter-type tag appended to a Source Interface option label.
-// Wi-Fi carries an explicit warning (commissioning traffic belongs on the
-// wired adapter); "unknown" gets no tag rather than a guessed one.
+// Wi-Fi and virtual carry explicit warnings (commissioning traffic belongs on
+// the wired adapter, but on Hyper-V vSwitch / NIC-team hosts the "virtual"
+// adapter IS the machine's real egress); "unknown" gets no tag rather than a
+// guessed one.
 const ADAPTER_TYPE_SUFFIX: Record<string, string> = {
   ethernet: "Ethernet",
   unknown: "",
   usb_ethernet: "USB Ethernet",
+  virtual: "Virtual — pick only if this adapter carries the site network (e.g. Hyper-V vSwitch)",
   wifi: "Wi-Fi — not recommended for commissioning traffic",
 };
 
@@ -287,29 +290,30 @@ export function ConfigurationPage() {
     queryKey: ["system-interfaces"],
   });
   // Virtual adapters (Hyper-V vEthernet, VPN/TAP, docker bridges, ...) are
-  // never offered as scan sources. The backend already filters them out; this
-  // is a defensive re-filter that also tolerates an older backend where
-  // adapter_type is undefined. API order is preserved verbatim (the server
-  // sorts up-first, then ethernet -> usb_ethernet -> unknown -> wifi).
-  const eligibleInterfaces = (systemInterfacesQuery.data ?? []).filter(
-    (iface) => iface.adapter_type !== "virtual",
-  );
+  // LISTED with a pick-with-care label rather than hidden: on Hyper-V vSwitch
+  // / NIC-team hosts the machine's only routable IPv4 rides a
+  // virtual-classified adapter, and hiding it left the dropdown Auto-only with
+  // no way to bind the real egress NIC (field regression, 2026-07-14). API
+  // order is preserved verbatim (the server sorts up-first, then ethernet ->
+  // usb_ethernet -> unknown -> wifi -> virtual).
+  const sourceInterfaces = systemInterfacesQuery.data ?? [];
   // Wired-first default (2026-07 product decision, reversing the earlier
   // "keep Auto, hint only" call): the first up wired adapter in API order.
   // Applied by the effect below only when Source Interface was never chosen.
-  const defaultWiredCidr = eligibleInterfaces.find(
+  // Virtual adapters are deliberately never auto-picked.
+  const defaultWiredCidr = sourceInterfaces.find(
     (iface) =>
       iface.is_up && (iface.adapter_type === "ethernet" || iface.adapter_type === "usb_ethernet"),
   )?.cidr;
   const sourceInterfaceOptions = [
     SOURCE_INTERFACE_AUTO,
-    ...eligibleInterfaces.map((iface) => iface.cidr),
+    ...sourceInterfaces.map((iface) => iface.cidr),
   ];
   // Option labels carry the adapter name and type tag; option VALUES stay the
   // bare cidr so the stored config value remains parseable by the backend
   // source-interface resolver.
   const sourceInterfaceOptionLabels: Record<string, string> = {};
-  for (const iface of eligibleInterfaces) {
+  for (const iface of sourceInterfaces) {
     const suffix = ADAPTER_TYPE_SUFFIX[iface.adapter_type] ?? "";
     sourceInterfaceOptionLabels[iface.cidr] =
       `${iface.cidr} — ${iface.name}${suffix ? ` (${suffix})` : ""}`;
@@ -317,8 +321,12 @@ export function ConfigurationPage() {
   // Distinct up adapters by NAME, not per-IPv4 entries: the backend emits one
   // SystemInterface per AF_INET address, so a single NIC carrying a secondary
   // static IPv4 (a common field pattern) must not trigger the Auto hint.
+  // Virtual adapters don't count toward the hint either — WSL/Hyper-V laptops
+  // always have one up, and the hint is about choosing among real adapters.
   const upAdapterCount = new Set(
-    eligibleInterfaces.filter((iface) => iface.is_up).map((iface) => iface.name),
+    sourceInterfaces
+      .filter((iface) => iface.is_up && iface.adapter_type !== "virtual")
+      .map((iface) => iface.name),
   ).size;
 
   useEffect(() => {
@@ -762,7 +770,7 @@ export function ConfigurationPage() {
                     <SourceInterfaceDetails
                       enumerationFailed={systemInterfacesQuery.isError}
                       enumerationPending={systemInterfacesQuery.isLoading}
-                      interfaces={eligibleInterfaces}
+                      interfaces={sourceInterfaces}
                       value={draft.device.values[SOURCE_INTERFACE_FIELD] ?? ""}
                     />
                   )}

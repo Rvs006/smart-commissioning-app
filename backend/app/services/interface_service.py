@@ -1,12 +1,17 @@
 """Enumerate the host's usable network interfaces for the Source Interface picker.
 
-Backs ``GET /api/v1/system/interfaces``. Returns only real egress NICs
+Backs ``GET /api/v1/system/interfaces``. Returns the host's IPv4 NICs
 (``name / ipv4 / prefix_length / cidr / is_up / adapter_type / subnet_mask /
 gateway / dns_servers``) so the Configuration page can offer a dropdown of
-source interfaces plus a read-only details panel; loopback (``127.0.0.0/8``),
-link-local APIPA (``169.254.0.0/16``) and VIRTUAL adapters (Hyper-V vEthernet,
-WSL, Docker, VPN/TAP/TUN, VMware, loopback adapters) are excluded because they
-are never a valid scan egress. Gateway and DNS are exposed per the
+source interfaces plus a read-only details panel; loopback (``127.0.0.0/8``)
+and link-local APIPA (``169.254.0.0/16``) are excluded because they are never
+a valid scan egress. VIRTUAL adapters (Hyper-V vEthernet, WSL, Docker,
+VPN/TAP/TUN, VMware) are LISTED, classified ``virtual`` and ranked last — not
+hidden: on a Hyper-V vSwitch or NIC-team host the machine's only routable IPv4
+rides a Virtual-flagged adapter, and hiding it left the dropdown Auto-only with
+no way to bind the real egress NIC (field regression, 2026-07-14). The
+frontend labels them so they are never picked by accident, and the wired-first
+auto-default still ignores them. Gateway and DNS are exposed per the
 product-owner decision (2026-07-03 meeting) REVERSING the section-5.3 omission
 in docs/proposals/nic-interface-selection.md — engineers need them to confirm
 the tool reads the NIC correctly; MAC / driver / InterfaceDescription strings
@@ -75,8 +80,14 @@ _POWERSHELL_TIMEOUT_S = 20.0
 _NET_FACTS_TTL_S = 30.0
 
 # Dropdown ordering (requirement: Ethernet first, then USB-Ethernet, then
-# unknown, Wi-Fi last with a frontend warning tag; virtual never listed).
-_TYPE_RANK: dict[str, int] = {"ethernet": 0, "usb_ethernet": 1, "unknown": 2, "wifi": 3}
+# unknown, Wi-Fi and finally virtual, both with frontend warning tags).
+_TYPE_RANK: dict[str, int] = {
+    "ethernet": 0,
+    "usb_ethernet": 1,
+    "unknown": 2,
+    "wifi": 3,
+    "virtual": 4,
+}
 
 # Absolute path to Windows PowerShell. An unqualified "powershell" would let
 # CreateProcess search the application directory and CWD before System32
@@ -388,11 +399,14 @@ def _get_net_facts() -> _NetFacts:
 def list_usable_interfaces() -> list[SystemInterface]:
     """Return the host's usable IPv4 NICs with classification + read-only details.
 
-    Keeps only ``AF_INET`` addresses and drops loopback, APIPA, and adapters
-    classified as virtual. Derives the prefix length from the interface netmask
-    via ``ipaddress``. Sorted up-first, then Ethernet < USB-Ethernet < unknown
-    < Wi-Fi, then by name. Returns ``[]`` when ``psutil`` is unavailable so the
-    endpoint degrades gracefully to ``Auto``-only.
+    Keeps only ``AF_INET`` addresses and drops loopback and APIPA. Virtual
+    adapters are listed (classified ``virtual``, ranked last) rather than
+    dropped: on Hyper-V vSwitch / NIC-team hosts they carry the machine's only
+    routable IPv4, so hiding them made the real egress NIC unselectable.
+    Derives the prefix length from the interface netmask via ``ipaddress``.
+    Sorted up-first, then Ethernet < USB-Ethernet < unknown < Wi-Fi < virtual,
+    then by name. Returns ``[]`` when ``psutil`` is unavailable so the endpoint
+    degrades gracefully to ``Auto``-only.
     """
     if psutil is None:
         return []
@@ -404,8 +418,6 @@ def list_usable_interfaces() -> list[SystemInterface]:
         adapter_type: AdapterType = (
             _classify_windows(facts.adapter.get(name, {})) if _IS_WINDOWS else _classify_linux(name)
         )
-        if adapter_type == "virtual":
-            continue
         for address in addresses:
             if address.family != socket.AF_INET:
                 continue
