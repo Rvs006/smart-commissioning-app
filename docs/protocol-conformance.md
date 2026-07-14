@@ -20,6 +20,18 @@ the official `faucetsdn/udmi` `1.5.2` Draft 7 state, metadata, and
 events/pointset schemas). An unknown declared version reports "structural
 checks skipped" rather than silently passing.
 
+**Non-published versions (2026-07-14):** projects that deliberately do not
+conform to any published UDMI version declare a version label starting with
+`nonpub` (e.g. `nonpub.1`) in both the register's Expected schema version and
+the payloads. The validator then checks payloads against an operator-uploaded
+schema set with that label (same `state.json` / `metadata.json` /
+`events_pointset.json` layout as the vendored spec, uploaded on the UDMI page
+via `POST /api/v1/udmi/schemas`; labels match case-insensitively). Only
+canonical Draft 7 validation runs for nonpub payloads — the focused checks
+encode published-1.5.2 assumptions. A declared nonpub version with no uploaded
+set is a high-severity issue telling the operator exactly what to upload,
+never a silent pass.
+
 Validated features (each exercised by unit tests with inline/fixture payloads):
 
 | UDMI feature | What is checked | Status |
