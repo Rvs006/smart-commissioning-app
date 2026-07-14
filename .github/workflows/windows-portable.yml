@@ -74,9 +74,10 @@ jobs:
       - name: Build portable bundle (frontend + freeze + assemble)
         run: pwsh packaging/windows_portable/build.ps1
 
-      # Upload BEFORE booting: the boot writes runtime\ state (SQLite, logs)
-      # beside the exe, and uploading first keeps the artifact pristine and
-      # available for debugging even when the boot smoke fails.
+      # Upload BEFORE booting: keeps the artifact available for debugging even
+      # when the boot smoke fails. (Since the stable-data-dir change the boot
+      # writes state to LOCALAPPDATA\SmartCommissioning, not beside the exe —
+      # the pristine-artifact concern is also asserted below.)
       - name: Upload bundle artifact
         uses: actions/upload-artifact@v4
         with:
@@ -154,6 +155,27 @@ jobs:
                 Write-Host "PSUTIL FROZEN OK: $frozenPsutil"
               } else {
                 Write-Host "PSUTIL SMOKE FAILED: $frozenPsutil missing - the freeze lost the NIC-enumeration dependency (launcher must import psutil)."
+                $ok = $false
+              }
+            }
+
+            # Stable-data-dir contract (2026-07-14): the frozen exe must anchor
+            # state under LOCALAPPDATA\SmartCommissioning, NOT beside the exe —
+            # per-release exe folders (forced by per-hash allowlisting) were
+            # silently resetting all site configuration in the field. Assert
+            # both directions: the DB landed in the stable dir, and nothing
+            # leaked back into the bundle.
+            if ($ok) {
+              $stableDb = Join-Path $env:LOCALAPPDATA 'SmartCommissioning\smart_commissioning.db'
+              if (Test-Path $stableDb) {
+                Write-Host "STABLE DATA DIR OK: $stableDb"
+              } else {
+                Write-Host "STABLE DATA DIR SMOKE FAILED: $stableDb missing - the frozen exe did not anchor state to LOCALAPPDATA (per-release state reset would be back)."
+                $ok = $false
+              }
+              $bundleDb = Join-Path $bundle 'runtime\smart_commissioning.db'
+              if (Test-Path $bundleDb) {
+                Write-Host "STABLE DATA DIR SMOKE FAILED: $bundleDb exists - state leaked back beside the exe."
                 $ok = $false
               }
             }
@@ -237,8 +259,8 @@ jobs:
             Get-Content -LiteralPath $out -ErrorAction SilentlyContinue
             Write-Host '--- exe stderr ---'
             Get-Content -LiteralPath $err -ErrorAction SilentlyContinue
-            Write-Host '--- crash logs (runtime\logs), if any ---'
-            Get-ChildItem -Path (Join-Path $bundle 'runtime\logs') -Filter '*.log' -ErrorAction SilentlyContinue |
+            Write-Host '--- crash logs (LOCALAPPDATA\SmartCommissioning\logs), if any ---'
+            Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'SmartCommissioning\logs') -Filter '*.log' -ErrorAction SilentlyContinue |
               ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
           }
           if (-not $ok) {

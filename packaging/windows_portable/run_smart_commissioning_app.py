@@ -4,6 +4,7 @@ import datetime as _dt
 import faulthandler
 import importlib
 import os
+import shutil
 import socket
 import sys
 import threading
@@ -21,12 +22,12 @@ DEFAULT_PORT = 8000
 _FAULTHANDLER_FILE = None
 
 
-def install_crash_logging(root: Path) -> Path | None:
+def install_crash_logging(runtime_root: Path) -> Path | None:
     """Write uncaught exceptions (and low-level faults) to a timestamped file.
 
     Field failures in the portable .exe are otherwise invisible — the console
     window closes and nothing is captured. This installs a ``sys.excepthook``
-    that appends a full traceback to ``<root>/runtime/logs/crash-*.log`` and (if
+    that appends a full traceback to ``<runtime_root>/logs/crash-*.log`` and (if
     available) enables ``faulthandler`` so even interpreter-level crashes leave a
     dump. Local file only: there is NO network upload. Fully guarded so a logging
     failure can never prevent the app from starting; returns the log directory
@@ -34,7 +35,7 @@ def install_crash_logging(root: Path) -> Path | None:
     """
     global _FAULTHANDLER_FILE
     try:
-        log_dir = root / "runtime" / "logs"
+        log_dir = runtime_root / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         crash_path = log_dir / f"crash-{stamp}.log"
@@ -104,6 +105,76 @@ def app_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def data_root(root: Path) -> Path:
+    """Machine-stable state directory, decoupled from the per-release exe folder.
+
+    ThreatLocker approves the portable exe per file hash, so every release
+    lands in a fresh folder. State anchored next to the exe (the pre-v0.1.9
+    layout) was silently reset on every upgrade — the field-reported
+    "re-enter broker credentials, certs and NIC on every open". Frozen builds
+    therefore keep state in ``%LOCALAPPDATA%\\SmartCommissioning`` (per-user,
+    survives upgrades); ``SMART_COMMISSIONING_DATA_DIR`` overrides it for
+    roaming/USB profiles. The unfrozen dev layout keeps ``<repo>/runtime`` so
+    developer state stays inside the checkout.
+    """
+    override = os.environ.get("SMART_COMMISSIONING_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    if getattr(sys, "frozen", False):
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return base / "SmartCommissioning"
+    return root / "runtime"
+
+
+def migrate_legacy_runtime(root: Path, runtime_root: Path) -> None:
+    """One-time copy-forward of pre-v0.1.9 exe-adjacent state.
+
+    Earlier portable builds kept the database and secrets in
+    ``<exe-folder>/runtime`` and import files / edge identity in
+    ``<exe-folder>/backend/runtime``. When this launcher finds such state next
+    to the exe and the stable data dir has no database yet, it copies the
+    state forward (db, secrets incl. the Fernet key, imports, edge identity;
+    logs stay behind) so an in-place upgrade keeps the site configuration.
+    Never overwrites an existing stable-dir database and never deletes the
+    legacy folders — they remain as a rollback copy. The database is copied
+    LAST because its presence is also the completed-migration marker (the
+    guard above): a failure or interrupt mid-copy leaves no stable-dir
+    database, so the next launch retries the whole migration instead of
+    stranding the not-yet-copied state. Fully best-effort: any failure is
+    reported and startup continues (a retry happens on the next launch).
+    """
+    db_name = "smart_commissioning.db"
+    legacy_roots = [root / "runtime", root / "backend" / "runtime"]
+    legacy_db = legacy_roots[0] / db_name
+    try:
+        if not legacy_db.exists():
+            return
+        if (runtime_root / db_name).exists():
+            return
+        if legacy_roots[0].resolve() == runtime_root.resolve():
+            return
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        for legacy in legacy_roots:
+            if legacy.is_dir():
+                shutil.copytree(
+                    legacy,
+                    runtime_root,
+                    # db* also skips -wal/-shm sidecars; they are copied below,
+                    # just before the db itself.
+                    ignore=shutil.ignore_patterns("logs", f"{db_name}*"),
+                    dirs_exist_ok=True,
+                )
+        for sidecar_name in (f"{db_name}-wal", f"{db_name}-shm"):
+            sidecar = legacy_roots[0] / sidecar_name
+            if sidecar.exists():
+                shutil.copy2(sidecar, runtime_root / sidecar_name)
+        shutil.copy2(legacy_db, runtime_root / db_name)
+        print(f"Migrated existing app data from {legacy_roots[0]} to {runtime_root}.")
+    except Exception as error:  # noqa: BLE001 (migration must never block startup)
+        print(f"WARNING: could not migrate previous app data from {legacy_roots[0]}: {error}")
+
+
 def reserve_port(start: int = DEFAULT_PORT, attempts: int = 50) -> int:
     for port in range(start, start + attempts):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -135,11 +206,13 @@ def _set_env_default(name: str, value: str) -> None:
     os.environ.setdefault(name, value)
 
 
-def configure_environment(root: Path) -> None:
+def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     backend_root = root / "backend"
     core_root = root / "core"
     frontend_dist = root / "frontend" / "dist"
-    runtime_root = root / "runtime"
+    if runtime_root is None:
+        # Unfrozen dev layout / legacy callers: state stays inside the checkout.
+        runtime_root = root / "runtime"
 
     if not backend_root.exists():
         raise FileNotFoundError(f"Backend folder missing: {backend_root}")
@@ -153,6 +226,10 @@ def configure_environment(root: Path) -> None:
         sys.path.insert(0, str(core_root))
     os.environ["SCT_FRONTEND_DIST"] = str(frontend_dist)
     os.environ["SMART_COMMISSIONING_SECRETS_ROOT"] = str(runtime_root / "secrets")
+    # Anchor the backend-derived paths (imports, edge identity, default sqlite
+    # location) to the same stable dir; without this app.core.runtime derives
+    # them from the per-release backend folder and they are lost on upgrade.
+    os.environ["SMART_COMMISSIONING_RUNTIME_ROOT"] = str(runtime_root)
     # Run/import/configuration records live in this SQLite file; the API
     # applies migrations on startup (AUTO_MIGRATE defaults to true).
     _set_env_default(
@@ -177,14 +254,16 @@ def open_browser_later(url: str) -> None:
 
 def main() -> int:
     root = app_root()
+    runtime_root = data_root(root)
 
     # Install local crash logging before anything else so even a failure during
     # environment setup / app import is captured to a file (the portable exe has
     # no attached console to read otherwise).
-    install_crash_logging(root)
+    install_crash_logging(runtime_root)
+    migrate_legacy_runtime(root, runtime_root)
 
     try:
-        configure_environment(root)
+        configure_environment(root, runtime_root)
         app_module = importlib.import_module("app.main")
         uvicorn = importlib.import_module("uvicorn")
     except Exception as error:
@@ -198,6 +277,7 @@ def main() -> int:
 
     print(f"{APP_NAME} is starting.")
     print(f"App URL: {url}")
+    print(f"App data (settings, certs, run history): {runtime_root}")
     print("Keep this window open while testing. Press Ctrl+C to stop the app.")
     open_browser_later(url)
 

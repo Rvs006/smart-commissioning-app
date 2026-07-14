@@ -270,6 +270,14 @@ $BackendDst = Join-Path $OutputDir "backend"
 if (Test-Path -LiteralPath $BackendDst) { Remove-Item -LiteralPath $BackendDst -Recurse -Force }
 Copy-Item -Path $BackendSrc -Destination $BackendDst -Recurse -Force
 Remove-PythonCaches $BackendDst
+# A dev checkout may hold live state in backend\runtime (SQLite DB, Fernet
+# secrets, edge identity) — pre-stable-data-dir builds silently shipped it
+# inside the bundle. Never ship state.
+$BackendRuntime = Join-Path $BackendDst "runtime"
+if (Test-Path -LiteralPath $BackendRuntime) {
+    Write-Host "    pruning dev backend\runtime from bundle (never ship state)"
+    Remove-Item -LiteralPath $BackendRuntime -Recurse -Force
+}
 
 # 3c. core source tree (carries alembic.ini + alembic/versions/*.py for migration)
 Write-Host "    copy core\ (+ alembic)"
@@ -312,10 +320,13 @@ This build is UNSIGNED. On first launch Windows SmartScreen / antivirus may
 warn ("Windows protected your PC"). Choose More info -> Run anyway, or have
 your administrator allow it.
 
-Local-only profile: binds 127.0.0.1, SQLite under runtime\, jobs run inline,
-no broker / Postgres / Redis / network required. State lives under runtime\
-beside the exe (runs, secrets, logs, smart_commissioning.db). Crash logs, if
-any, are written to runtime\logs\crash-*.log.
+Local-only profile: binds 127.0.0.1, SQLite, jobs run inline, no broker /
+Postgres / Redis / network required. Your settings, certificates, and run
+history live in %LOCALAPPDATA%\SmartCommissioning (NOT beside the exe), so
+they survive upgrading to a new release folder. Crash logs, if any, are
+written to %LOCALAPPDATA%\SmartCommissioning\logs\crash-*.log. On first launch
+this version migrates state from an older release's runtime\ folder if it
+finds one beside the exe.
 "@ | Set-Content -LiteralPath $ReadmePath -Encoding UTF8
 
 # --- done ---
