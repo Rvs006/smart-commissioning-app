@@ -5,6 +5,9 @@ What this engine does
 Given an IP target spec (a CIDR block, or an inclusive ``start``/``end`` range)
 plus a small list of TCP ports, it attempts a plain ``asyncio`` TCP connect to
 each ``(ip, port)`` pair under the shared :class:`~smart_commissioning_core.engines.base.Throttle`.
+Each host's probe list is the resolved base list UNION its register-declared
+ports (expected + forbidden, from the ``*_by_address`` maps), so the register's
+"Expected services/ports" are genuinely checked — not just used for flagging.
 A host is considered *present* if ANY of its scanned ports accepts a connection
 (connect-success liveness — we never send ICMP and never send any application
 payload). For each responsive host we emit:
@@ -300,6 +303,35 @@ def _resolve_spec_map(parameters: dict[str, Any], key: str) -> dict[str, set[int
     }
 
 
+def _host_probe_ports(
+    base_ports: Sequence[int], register_ports: set[int]
+) -> tuple[list[int], list[int]]:
+    """Per-host probe list: the resolved base list UNION the host's
+    register-declared ports (its expected + forbidden sets), ceiling-capped.
+
+    The base list keeps its order; register ports not already in it are
+    appended in ascending order, so a register-declared service is genuinely
+    probed even when the operator's port spec (or the default list) omits it —
+    previously those ports only fed the flagging maps and were never connected
+    to, so "Expected services/ports: 445" with a blank port field silently
+    probed only the defaults. Hosts with no register ports get exactly the
+    base list back.
+
+    The union is capped at ``MAX_PORTS_CEILING`` per host. The base list is
+    already validated against the same ceiling by :func:`_resolve_ports`, so
+    only appended register ports can overflow; the dropped tail is returned so
+    the caller reports the truncation honestly instead of silently skipping
+    register-declared ports.
+
+    Returns ``(ports_to_probe, dropped_register_ports)``.
+    """
+    extras = sorted(register_ports.difference(base_ports))
+    union = list(base_ports) + extras
+    if len(union) <= MAX_PORTS_CEILING:
+        return union, []
+    return union[:MAX_PORTS_CEILING], union[MAX_PORTS_CEILING:]
+
+
 def _positive_int(value: Any, *, default: int) -> int:
     try:
         parsed = int(value)
@@ -530,10 +562,19 @@ async def _run_ip_discovery(
             if (text := str(value).strip())
         }
 
-    # DRY RUN: enumerate the (ip, port) target list, perform NO I/O.
+    # DRY RUN: enumerate the (ip, port) target list, perform NO I/O. The plan
+    # uses the same per-host base-list ∪ register-ports union as the real sweep
+    # so the preview shows what would genuinely be probed.
     if ctx.dry_run:
-        targets = [{"ip": host, "port": port} for host in hosts for port in ports]
-        actions = [f"tcp-connect:{port}" for port in ports]
+        targets = [
+            {"ip": host, "port": port}
+            for host in hosts
+            for port in _host_probe_ports(
+                ports,
+                set(expected_by_address.get(host) or ()) | forbidden_by_address.get(host, set()),
+            )[0]
+        ]
+        actions = [f"tcp-connect:{port}" for port in sorted({t["port"] for t in targets})]
         if do_reverse:
             actions.append("reverse-dns")
         plan = build_dry_run_plan(
@@ -581,6 +622,7 @@ async def _run_ip_discovery(
     hosts_scanned = 0
     hosts_with_forbidden = 0
     hosts_with_unexpected = 0
+    hosts_with_missing_expected = 0
     hosts_with_hostname_mismatch = 0
     # Sweep host-by-host so cancellation can stop between hosts (and the
     # throttle stops between port dispatches within a host). Each host's ports
@@ -590,6 +632,17 @@ async def _run_ip_discovery(
             break
         hosts_scanned += 1
 
+        # This host's probe list: the base list ∪ its register-declared ports
+        # (expected + forbidden), so a register port outside the operator's
+        # spec / defaults is genuinely connected to instead of only feeding the
+        # flagging maps. Hosts absent from the register keep exactly the base
+        # list; any register ports the per-host ceiling drops are reported in
+        # status_detail below, never silently truncated.
+        host_expected = expected_by_address.get(host)
+        host_ports, dropped_register_ports = _host_probe_ports(
+            ports, set(host_expected or ()) | forbidden_by_address.get(host, set())
+        )
+
         def _factory(target_host: str, target_port: int) -> Callable[[], Awaitable[tuple[int, bool]]]:
             async def _probe_one() -> tuple[int, bool]:
                 ok = await probe(target_host, target_port, timeout)
@@ -598,7 +651,7 @@ async def _run_ip_discovery(
             return _probe_one
 
         results = await throttle.run_throttled(
-            [_factory(host, port) for port in ports], ctx
+            [_factory(host, port) for port in host_ports], ctx
         )
         open_ports = sorted({port for port, ok in results if ok})
         if not open_ports:
@@ -619,8 +672,22 @@ async def _run_ip_discovery(
         flagged = [port for port in open_ports if port in host_forbidden]
         # Open ports the asset's "Expected services/ports" did not list. Only
         # checked when the host has a registered expected set.
-        host_expected = expected_by_address.get(host)
         unexpected = [port for port in open_ports if port not in host_expected] if host_expected is not None else []
+        # Expected ports that were probed but did NOT accept a connection — the
+        # missing-service verdict. Only PROBED ports can be verdicted: an
+        # expected port dropped by the per-host ceiling is covered by the cap
+        # note instead (we never call a port we did not probe closed).
+        open_set = set(open_ports)
+        probed_set = set(host_ports)
+        missing_expected = (
+            sorted(port for port in host_expected if port in probed_set and port not in open_set)
+            if host_expected
+            else []
+        )
+        # An explicit PASS: every register-expected port is open (which also
+        # means none were cap-dropped) and no forbidden/unexpected verdict
+        # fired — a clean host is a recorded decision, not silence.
+        expected_ports_ok = bool(host_expected) and host_expected <= open_set and not flagged and not unexpected
         # Reverse-DNS name vs the register's "Expected hostname" — WARNING-ONLY:
         # a blank on EITHER side (no PTR record, site DNS not configured,
         # reverse_dns disabled, host absent from the register) is never a
@@ -638,6 +705,15 @@ async def _run_ip_discovery(
         if unexpected:
             status_detail += " | UNEXPECTED PORTS OPEN: " + ",".join(str(p) for p in unexpected)
             hosts_with_unexpected += 1
+        if missing_expected:
+            status_detail += " | MISSING EXPECTED PORTS: " + ",".join(str(p) for p in missing_expected)
+            hosts_with_missing_expected += 1
+        if expected_ports_ok:
+            status_detail += f" | EXPECTED PORTS OK: {len(host_expected or ())}/{len(host_expected or ())} open"
+        if dropped_register_ports:
+            status_detail += " | PROBE LIST CAPPED: register ports not probed: " + ",".join(
+                str(p) for p in dropped_register_ports
+            )
         if hostname_mismatch:
             status_detail += f" | HOSTNAME MISMATCH: expected {expected_hostname}, got {hostname}"
             hosts_with_hostname_mismatch += 1
@@ -662,9 +738,19 @@ async def _run_ip_discovery(
                 "name": hostname,
                 "attributes": {
                     "open_ports": open_ports,
-                    "scanned_ports": list(ports),
+                    "scanned_ports": list(host_ports),
+                    "scanned_port_count": len(host_ports),
+                    # The register's declarations for THIS host, persisted next
+                    # to the observation so the verdict is auditable. None =
+                    # host has no registered expectation (honest blank);
+                    # forbidden_ports is the set actually enforced (the host's
+                    # own register set, else the global forbidden list).
+                    "expected_ports": sorted(host_expected) if host_expected is not None else None,
+                    "forbidden_ports": sorted(host_forbidden),
                     "forbidden_open_ports": flagged,
                     "unexpected_open_ports": unexpected,
+                    "missing_expected_ports": missing_expected,
+                    "register_ports_not_probed": dropped_register_ports,
                     "hostname": hostname,
                     "expected_hostname": expected_hostname,
                     "mac_address": mac,
@@ -682,6 +768,7 @@ async def _run_ip_discovery(
             "forbidden_ports": sorted(forbidden_ports),
             "hosts_with_forbidden_open": hosts_with_forbidden,
             "hosts_with_unexpected_open": hosts_with_unexpected,
+            "hosts_with_missing_expected": hosts_with_missing_expected,
             "hosts_with_hostname_mismatch": hosts_with_hostname_mismatch,
         },
     )

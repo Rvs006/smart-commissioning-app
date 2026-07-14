@@ -648,6 +648,183 @@ class ExpectedHostnameTests(unittest.TestCase):
         self.assertNotIn("HOSTNAME MISMATCH", summary["discovered_assets"][0]["status_detail"])
 
 
+class RegisterPortUnionTests(unittest.TestCase):
+    """Per-host probe union + expected-coverage verdicts.
+
+    The ports actually probed for a host are the resolved base list (operator
+    spec or defaults) UNION that host's register-declared expected + forbidden
+    ports, so the register's "Expected services/ports" are genuinely connected
+    to — previously they only fed the flagging maps, so a register expecting
+    445/135/139/5985/7070 with a blank port field probed only the 4 defaults
+    and reported "responsive: 443" with no findings. Coverage is verdicted both
+    ways: expected-but-closed ports flag MISSING EXPECTED PORTS, and a fully
+    clean host records an explicit EXPECTED PORTS OK pass instead of silence.
+    """
+
+    def test_register_expected_port_outside_base_list_is_probed(self) -> None:
+        # Base list is just [80]; the register expects 445. The union must
+        # actually CONNECT to 445 (the field bug: it never did), and the
+        # register context is persisted next to the observation.
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+        contacted: list[tuple[str, int]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.append((host, port))
+            return port == 445
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_union",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80],
+             "expected_ports_by_address": {"10.0.0.1": "445/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIn(("10.0.0.1", 445), contacted, "register-expected port must be probed")
+        asset = store.summary_calls[-1]["discovered_assets"][0]
+        self.assertEqual([p["port"] for p in asset["observed_ports"]], [445])
+        attributes = persisted[0][1][0]["attributes"]
+        self.assertEqual(attributes["expected_ports"], [445])
+        self.assertEqual(attributes["scanned_ports"], [80, 445])
+        self.assertEqual(attributes["scanned_port_count"], 2)
+
+    def test_missing_expected_port_flagged_with_counter(self) -> None:
+        # 80 answers but the register also expects 445, which is closed ->
+        # MISSING EXPECTED PORTS verdict + run-summary counter (previously
+        # there was NO expected-port-closed verdict at all).
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return port == 80
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_missing",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80],
+             "expected_ports_by_address": {"10.0.0.1": "80/tcp, 445/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_missing_expected"], 1)
+        detail = summary["discovered_assets"][0]["status_detail"]
+        self.assertIn("MISSING EXPECTED PORTS: 445", detail)
+        self.assertNotIn("EXPECTED PORTS OK", detail)
+        self.assertEqual(persisted[0][1][0]["attributes"]["missing_expected_ports"], [445])
+
+    def test_all_expected_open_records_explicit_pass(self) -> None:
+        # Pete's field case: blank port field (-> defaults) with the register
+        # expecting 445,135,139,443,5985,7070 and forbidding 23,21. Every
+        # register port must be probed, and a fully-clean host records an
+        # explicit EXPECTED PORTS OK decision instead of silence.
+        store = FakeRunStore()
+        expected = {445, 135, 139, 443, 5985, 7070}
+        contacted: set[int] = set()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.add(port)
+            return port in expected
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_expected_ok",
+            {**_AUTH, "cidr": "10.0.0.1/32",  # no "ports" -> DEFAULT_PORTS
+             "expected_ports_by_address": {"10.0.0.1": "445,135,139,443,5985,7070"},
+             "forbidden_ports_by_address": {"10.0.0.1": "23/tcp,21/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(expected | {21, 23} <= contacted, f"register ports not all probed: {contacted}")
+        summary = store.summary_calls[-1]
+        detail = summary["discovered_assets"][0]["status_detail"]
+        self.assertIn("EXPECTED PORTS OK: 6/6 open", detail)
+        self.assertNotIn("MISSING", detail)
+        self.assertNotIn("FORBIDDEN", detail)
+        self.assertNotIn("UNEXPECTED", detail)
+        self.assertEqual(summary["hosts_with_missing_expected"], 0)
+        self.assertEqual(summary["hosts_with_forbidden_open"], 0)
+
+    def test_forbidden_port_outside_base_list_is_probed_and_flagged(self) -> None:
+        # The register forbids telnet but the base list never included 23 —
+        # the union must probe it anyway so the violation is actually caught.
+        store = FakeRunStore()
+        contacted: list[tuple[str, int]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.append((host, port))
+            return port in (80, 23)
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_forbidden_union",
+            {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80],
+             "forbidden_ports_by_address": {"10.0.0.1": "23/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIn(("10.0.0.1", 23), contacted, "register-forbidden port must be probed")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["hosts_with_forbidden_open"], 1)
+        self.assertIn("FORBIDDEN PORTS OPEN: 23", summary["discovered_assets"][0]["status_detail"])
+
+    def test_capped_union_reports_dropped_register_ports(self) -> None:
+        # The per-host union respects MAX_PORTS_CEILING, and any register-
+        # declared ports the cap drops are reported honestly (never silently
+        # truncated, and never verdicted MISSING — we did not probe them).
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+        contacted: set[int] = set()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            contacted.add(port)
+            return port in (1, 100)
+
+        with mock.patch.object(ip_scan, "MAX_PORTS_CEILING", 6):
+            result = ip_scan.process_ip_discovery_run(
+                "run_capped",
+                {**_AUTH, "cidr": "10.0.0.1/32", "ports": [1, 2, 3, 4, 5],
+                 "expected_ports_by_address": {"10.0.0.1": "100/tcp, 101/tcp"}},
+                run_store=store, execution_mode="x", connect=fake_connect,
+                persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+            )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertNotIn(101, contacted, "a cap-dropped port must not be probed")
+        detail = store.summary_calls[-1]["discovered_assets"][0]["status_detail"]
+        self.assertIn("PROBE LIST CAPPED: register ports not probed: 101", detail)
+        self.assertNotIn("MISSING EXPECTED", detail)
+        attributes = persisted[0][1][0]["attributes"]
+        self.assertEqual(attributes["register_ports_not_probed"], [101])
+        self.assertEqual(attributes["scanned_port_count"], 6)
+
+    def test_host_absent_from_register_keeps_exact_base_list(self) -> None:
+        # Only 10.0.0.1 is in the register; 10.0.0.2 must be probed with
+        # EXACTLY the base list (global behaviour unchanged) and carry no
+        # expected-port verdict either way.
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+        contacted_by_host: dict[str, set[int]] = {}
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            contacted_by_host.setdefault(host, set()).add(port)
+            return port == 80
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_unregistered_host",
+            {**_AUTH, "cidr": "10.0.0.0/30", "ports": [80],
+             "expected_ports_by_address": {"10.0.0.1": "80/tcp, 445/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(contacted_by_host["10.0.0.1"], {80, 445})
+        self.assertEqual(contacted_by_host["10.0.0.2"], {80}, "unregistered host must keep the base list")
+        details = {a["ip_address"]: a["status_detail"] for a in store.summary_calls[-1]["discovered_assets"]}
+        self.assertNotIn("EXPECTED", details["10.0.0.2"])
+        attributes = {r["address"]: r["attributes"] for r in persisted[0][1]}
+        self.assertIsNone(attributes["10.0.0.2"]["expected_ports"])
+        self.assertEqual(attributes["10.0.0.2"]["scanned_ports"], [80])
+
+
 class ArpLookupUnitTests(unittest.TestCase):
     """Pure ARP-cache parsing / normalisation (subprocess + /proc mocked)."""
 
