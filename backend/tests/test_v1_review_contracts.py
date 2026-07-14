@@ -268,11 +268,11 @@ class IpRegisterUdpWarningTests(unittest.TestCase):
 
     def test_create_import_accepts_udp_rows_and_reports_summary_warnings(self) -> None:
         csv_bytes = (
-            "Project/site,System,Asset ID,Expected IP address,"
-            "Expected services/ports,Ports that should not be enabled\n"
-            'Site A,BMS,AHU-1,10.10.25.117,"47808/udp, 443/tcp",23/tcp\n'
-            "Site A,BMS,AHU-2,10.10.25.118,443/tcp,69/udp\n"
-        ).encode("utf-8")
+            b"Project/site,System,Asset ID,Expected IP address,"
+            b"Expected services/ports,Ports that should not be enabled\n"
+            b'Site A,BMS,AHU-1,10.10.25.117,"47808/udp, 443/tcp",23/tcp\n'
+            b"Site A,BMS,AHU-2,10.10.25.118,443/tcp,69/udp\n"
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             engine = _temporary_engine(temp_dir)
