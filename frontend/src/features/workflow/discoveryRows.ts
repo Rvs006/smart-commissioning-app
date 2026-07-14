@@ -315,13 +315,28 @@ export function validationMetrics(
     if (expected === undefined) {
       return null;
     }
+    // The engine stamps an explicit null when there is nothing to score (no
+    // expected devices): that means "unscoreable", so show the neutral empty
+    // state rather than falling through to the liveness ratio's bogus 0%.
+    // Only a summary with the key absent entirely (a pre-upgrade run) keeps
+    // the ratio fallback below.
+    if (summary.payload_conformance_percent === null) {
+      return null;
+    }
+    // Prefer the engine-stamped score (already floor'd and clamped <=99 while
+    // blocking issues remain); the publishing ratio is only a fallback for
+    // pre-upgrade runs whose summary lacks payload_conformance_percent.
+    const stamped = num("payload_conformance_percent");
     const seen = num("publishing_seen") ?? 0;
-    const conformance = expected > 0 ? Math.round((seen / expected) * 100) : 0;
+    const conformance = stamped ?? (expected > 0 ? Math.round((seen / expected) * 100) : 0);
+    // blocking_issue_count is critical+high+medium; the legacy issue_count is
+    // ALL issues, so it must not be labelled "blocking".
+    const blocking = num("blocking_issue_count");
     return {
       primary: `${conformance}%`,
       primaryLabel: "payload conformance",
-      secondary: String(num("issue_count") ?? 0),
-      secondaryLabel: "blocking issues",
+      secondary: String(blocking ?? num("issue_count") ?? 0),
+      secondaryLabel: blocking === undefined ? "issues found" : "blocking issues",
     };
   }
 

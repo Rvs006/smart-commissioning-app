@@ -10,6 +10,45 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 ### Added
 
 
+- **Red/green verdicts across the UDMI validation results** (field asks,
+  2026-07-14). Result rows shade green (pass, including pass-with-notes) or
+  red (fail) so passes need zero reading time; the per-asset payload sections
+  carry the same tint plus an explicit verdict — "PASS — UDMI Compliant" /
+  "FAIL — please see details below" — so scrolling draws the eye to the red.
+  The per-row "View" panel now shows the actual issue text inline when there
+  are one or two issues, or "N issues — see the issue details below the
+  table." when more. One shared verdict helper feeds all three surfaces so
+  they can never disagree. Amber/RAG weighting was deliberately deferred.
+
+- **Non-published UDMI schema sets.** Projects that conform to no published
+  UDMI version declare a version label starting with `nonpub` (e.g.
+  `nonpub.1`) in the register and payloads; the validator then checks payloads
+  against an operator-uploaded schema set with that label (canonical Draft 7
+  only — the focused checks encode published-1.5.2 assumptions). Upload,
+  list, and delete sets on the UDMI page (engineer-gated;
+  `POST/GET/DELETE /api/v1/udmi/schemas` with root/ref/schema validation at
+  upload). A declared nonpub version with no uploaded set is a high-severity
+  issue naming exactly what to upload — never a silent pass. Re-uploads take
+  effect without a restart.
+
+- **End-to-end validation report** (field ask via Jon, 2026-07-14). Reports
+  generated from a validation run now carry three sections in every format:
+  "Summary" (per-run expected/publishing/silent/blocking counts + compliance
+  %, with a device-weighted overall line), "Failure detail" (per-point
+  findings with expected/observed values and suggested actions), and "Silent
+  systems" (devices that published nothing within the capture window —
+  neither validated nor failed). New **PDF export** joins Word/Excel/zip via
+  a dependency-free deterministic PDF writer, keeping the byte-reproducible
+  integrity verification; the run monitor gains a report-format picker
+  (PDF default).
+
+- **Hour-scale capture windows.** The UDMI run-time control takes a
+  seconds/minutes/hours unit (wire format stays seconds), the queued worker's
+  capture time limit rises from 1 hour to 48 hours (metadata commonly reports
+  daily), and windows beyond 48 h are refused up front instead of dying
+  mid-run. Validation run summaries now record the silent-device IDs, not
+  just their count.
+
 - **IP register imports now warn about UDP port entries instead of silently
   ignoring them.** The IP scan verifies TCP ports only, so entries like
   `47808/udp` in "Expected services/ports" or "Ports that should not be
@@ -31,6 +70,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   counts as a mismatch, since commissioning networks often run without DNS.
 
 ### Fixed
+
+
+- **The hero "payload conformance" score is now fed by validation outcomes.**
+  It was a publishing-liveness ratio — a device that published anything
+  counted as fully conforming, and in pasted-payload mode the score was a
+  constant 100% — so it happily showed "100%" beside a blocking issue. The
+  backend now stamps `payload_conformance_percent` (devices that published
+  AND carry no blocking-severity issue; clamped below 100 whenever any
+  blocking issue exists) plus `blocking_issue_count`, and the hero prefers
+  them (pre-upgrade runs fall back to the old ratio, labelled honestly).
+
 
 - **IP scan actually probes the register's declared ports and verdicts
   expected-port coverage both ways.** The register's "Expected services/ports"

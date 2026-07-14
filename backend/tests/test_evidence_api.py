@@ -88,7 +88,7 @@ class EvidenceVerifyApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 404, response.text)
 
     def test_generate_then_verify_true_for_each_format(self) -> None:
-        for output_format in ("zip", "xlsx", "docx"):
+        for output_format in ("zip", "xlsx", "docx", "pdf"):
             with self.subTest(output_format=output_format):
                 report_id = self._create_report(output_format)
                 download = self.client.get(f"/api/v1/reports/{report_id}/download")

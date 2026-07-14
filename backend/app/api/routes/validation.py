@@ -14,15 +14,21 @@ endpoint below.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
+from smart_commissioning_core.db.repositories import (
+    DiscoveryRepository,
+    ImportRepository,
+    UdmiSchemaSetRepository,
+)
 from smart_commissioning_core.engines.comparison import process_mapping_validation_run
 from smart_commissioning_core.engines.point_validation import process_bacnet_validation_run
 from smart_commissioning_core.mqtt_config_publish_processor import (
     process_mqtt_config_publish_run,
     process_mqtt_config_rollback_run,
 )
+from smart_commissioning_core.mqtt_settings import parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
+from smart_commissioning_core.udmi_validation import DEFAULT_CAPTURE_SECONDS
 
 from app.core.auth import require_role
 from app.core.config import get_settings
@@ -56,6 +62,13 @@ settings = get_settings()
 # is a live write, gated additionally by the scan/publish authorization consent).
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
+
+# Hard ceiling on an explicit UDMI capture window: 48 hours. Tied to the worker
+# actor's time limit (worker/app/tasks.py validate_udmi_payloads runs at 49h =
+# this cap + 1h margin, and MUST stay above it) and to the frontend's
+# udmiCaptureOverCap guard (frontend/src/features/workflow/ModulePage.tsx) —
+# the three must move together or an accepted capture gets killed at the wire.
+MAX_UDMI_CAPTURE_SECONDS = 172_800
 
 
 def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRecord:
@@ -324,6 +337,17 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     # matcher/live capture fan out per asset. An explicit asset_id narrows the
     # list to that row.
     parameters = dict(request.parameters)
+    capture_seconds = parse_capture_seconds(
+        parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS
+    )
+    if capture_seconds is not None and capture_seconds > MAX_UDMI_CAPTURE_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"capture_seconds may be at most {MAX_UDMI_CAPTURE_SECONDS} seconds "
+                "(48 hours); the worker would kill a longer capture at its time limit."
+            ),
+        )
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     if not parameters.get("expected_schedule") and not parameters.get("assets"):
         assets, register_info = _expected_assets_from_register(request.project_id, request.site_id)
@@ -354,6 +378,16 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
                     "validate pasted payloads instead."
                 ),
             )
+    # Embed every uploaded nonpub schema set into the run parameters so a
+    # declared nonpub version validates identically on the inline path and on
+    # the Dramatiq worker (which shares only the database, never a filesystem).
+    # The DB-backed store is the SOLE source: a client-supplied copy would
+    # bypass the upload route's validation (label shape, Draft 7, $ref closure,
+    # size ceilings), so it is discarded before embedding.
+    parameters.pop("nonpub_schema_sets", None)
+    nonpub_schema_sets = UdmiSchemaSetRepository(service.engine).get_all_files()
+    if nonpub_schema_sets:
+        parameters["nonpub_schema_sets"] = nonpub_schema_sets
     run = _create_run(request.model_copy(update={"parameters": parameters}), "udmi_validation")
 
     def run_inline() -> RunRecord:

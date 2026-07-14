@@ -150,7 +150,29 @@ describe("expectedPortsOk", () => {
 });
 
 describe("validationMetrics", () => {
-  it("derives UDMI payload conformance and blocking issues from a real run", () => {
+  it("prefers the engine-stamped conformance score and blocking issue count", () => {
+    // publishing_seen/expected_devices would read 100%; the stamped 91 (already
+    // floor'd and clamped server-side) must win, and blocking_issue_count (2)
+    // must drive the secondary metric instead of the all-issues count (5).
+    const metrics = validationMetrics("udmi-validation", {
+      expected_devices: 35,
+      publishing_seen: 35,
+      issue_count: 5,
+      payload_conformance_percent: 91,
+      blocking_issue_count: 2,
+    });
+    expect(metrics).toEqual({
+      primary: "91%",
+      primaryLabel: "payload conformance",
+      secondary: "2",
+      secondaryLabel: "blocking issues",
+    });
+  });
+
+  it("falls back to the publishing ratio and honest all-issues label for pre-upgrade runs", () => {
+    // A summary without payload_conformance_percent / blocking_issue_count
+    // (pre-upgrade run) keeps the old ratio, and the secondary metric is
+    // labelled "issues found" — issue_count is ALL issues, not blocking ones.
     const metrics = validationMetrics("udmi-validation", {
       expected_devices: 35,
       publishing_seen: 33,
@@ -160,8 +182,22 @@ describe("validationMetrics", () => {
       primary: "94%",
       primaryLabel: "payload conformance",
       secondary: "2",
-      secondaryLabel: "blocking issues",
+      secondaryLabel: "issues found",
     });
+  });
+
+  it("returns null when the engine stamps payload_conformance_percent as null (unscoreable)", () => {
+    // An explicit null is the engine saying "nothing to score" (no expected
+    // devices). It must yield the neutral empty state — never fall through the
+    // ?? to the liveness ratio, which would fabricate a 0% conformance.
+    expect(
+      validationMetrics("udmi-validation", {
+        expected_devices: 0,
+        publishing_seen: 0,
+        payload_conformance_percent: null,
+        blocking_issue_count: 0,
+      }),
+    ).toBeNull();
   });
 
   it("returns null for a UDMI-route run kind without expected_devices (e.g. config publish)", () => {

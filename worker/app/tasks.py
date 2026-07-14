@@ -134,8 +134,10 @@ def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) 
     polls. Callers re-raise the interrupt afterwards so dramatiq's own message
     accounting stays correct.
     """
+    # Limit-agnostic wording: each actor sets its own time_limit (15 min to
+    # 49h), so naming a specific duration here would go stale per actor.
     if isinstance(interrupt, TimeLimitExceeded):
-        message = "live capture exceeded the 1h worker time limit"
+        message = "live capture exceeded the worker time limit"
     else:
         message = f"run interrupted by the worker ({type(interrupt).__name__})"
     try:
@@ -226,10 +228,14 @@ def discover_mqtt(run_id: str, parameters: dict) -> None:
         logger.info("Finished MQTT discovery", extra={"actor": "discover_mqtt"})
 
 
-# 1h time limit (matching discover_mqtt): an indefinite "run until every
-# expected topic reports or Cancel" capture must not be killed at the shorter
-# 15 min ceiling the other validation actors keep.
-@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=3_600_000)
+# 49h time limit: the API/UI cap a capture window at 48h (field ask
+# 2026-07-14 — real-world UDMI reporting intervals are hours-to-days), and the
+# actor limit is that maximum accepted capture plus a 1h margin so a full 48h
+# capture is never killed at the wire by its own executor. MUST stay above the
+# API's MAX_UDMI_CAPTURE_SECONDS (backend routes/validation.py) and the
+# frontend's udmiCaptureOverCap constant. The other validation actors keep
+# their 15 min ceiling; discover_mqtt keeps 1h.
+@dramatiq.actor(queue_name="validation", max_retries=0, time_limit=176_400_000)
 def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting UDMI validation", extra={"actor": "validate_udmi_payloads"})
@@ -244,7 +250,7 @@ def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
             )
         except Interrupt as interrupt:
             # A fully silent broker with no cancel rides the indefinite capture
-            # into the 1h time limit; the processor's own failure path only
+            # into the actor time limit; the processor's own failure path only
             # catches Exception. Stage mirrors its failure stage.
             _fail_interrupted_run(run_id, interrupt, stage="udmi_fixture_validation_failed")
             raise

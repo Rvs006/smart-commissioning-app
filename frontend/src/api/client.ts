@@ -208,7 +208,7 @@ export type ValidationIssuesResponse = {
 export type DiscoveryRunKind = "ip" | "bacnet" | "mqtt";
 export type ValidationRunKind = "udmi" | "bacnet" | "mapping";
 export type ImportTemplateFormat = "csv" | "xlsx";
-export type ReportFormat = "zip" | "xlsx" | "docx";
+export type ReportFormat = "zip" | "xlsx" | "docx" | "pdf";
 
 export type ReportType =
   | "ip_discovery"
@@ -364,6 +364,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     throw new ApiError(await parseApiError(response), response.status);
+  }
+
+  // 204 No Content (e.g. DELETE /udmi/schemas/{label}) carries no body to parse.
+  if (response.status === 204) {
+    return undefined as T;
   }
 
   return (await response.json()) as T;
@@ -671,6 +676,43 @@ export function createImport(input: {
   return request<ImportBatchSummary>("/imports", {
     body,
     method: "POST",
+  });
+}
+
+// One uploaded non-published UDMI schema set: payloads that declare this
+// version label (e.g. "nonpub.1") are validated against these schema files
+// instead of a published canonical UDMI release.
+export type UdmiSchemaSet = {
+  version_label: string;
+  filenames: string[];
+  uploaded_at: string;
+};
+
+export function listUdmiSchemaSets(): Promise<UdmiSchemaSet[]> {
+  return request<UdmiSchemaSet[]>("/udmi/schemas");
+}
+
+// Multipart upload mirroring createImport: version_label plus one or more
+// .json schema files under the repeated "files" field. The backend 400s with
+// an actionable detail on a bad label, missing schema roots, or invalid JSON.
+export function uploadUdmiSchemaSet(input: {
+  versionLabel: string;
+  files: File[];
+}): Promise<UdmiSchemaSet> {
+  const body = new FormData();
+  body.append("version_label", input.versionLabel);
+  for (const file of input.files) {
+    body.append("files", file);
+  }
+  return request<UdmiSchemaSet>("/udmi/schemas", {
+    body,
+    method: "POST",
+  });
+}
+
+export function deleteUdmiSchemaSet(versionLabel: string): Promise<void> {
+  return request<void>(`/udmi/schemas/${encodeURIComponent(versionLabel)}`, {
+    method: "DELETE",
   });
 }
 

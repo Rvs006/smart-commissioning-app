@@ -22,10 +22,21 @@ strictness additions around upstream schema quirks:
 
 Unknown declared versions are reported honestly as "structural checks skipped",
 never silently passed.
+
+Non-published versions (field ask, 2026-07-14): some projects deliberately do
+not conform to any published UDMI version. A version whose normalised form
+starts with ``nonpub`` (e.g. ``nonpub.1``) is resolved against an
+operator-UPLOADED schema set — the same ``state.json`` / ``metadata.json`` /
+``events_pointset.json`` root layout as the vendored spec — passed in by the
+caller. Only canonical Draft 7 validation runs for nonpub payloads (the focused
+checks encode published-1.5.2 assumptions); a declared nonpub version with no
+uploaded set is a high-severity finding telling the operator to upload it.
 """
 
+import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cache
@@ -74,7 +85,18 @@ _SCHEMA_ROOTS = {
         "pointset": "events_pointset.json",
     }
 }
+# Uploaded nonpub sets mirror the vendored layout, so the root filenames are
+# fixed regardless of the operator's version label.
+NONPUB_SCHEMA_ROOTS = {
+    "state": "state.json",
+    "metadata": "metadata.json",
+    "pointset": "events_pointset.json",
+}
 _SCHEMA_DIRECTORY = Path(__file__).resolve().parent / "schemas" / "udmi"
+
+# Accepts "nonpub", "nonpub.1", "nonpub-siteA" etc. after _normalise_version
+# (strip + leading v removed); matching is case-insensitive.
+_NONPUB_PATTERN = re.compile(r"^nonpub([.\-_].+)?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -105,24 +127,74 @@ def declared_version(payload: dict) -> str | None:
 
 
 def versions_match(expected: str, declared: str) -> bool:
-    """Exact version equality, tolerating a leading ``v`` and whitespace."""
-    return _normalise_version(expected) == _normalise_version(declared)
+    """Exact version equality, tolerating a leading ``v`` and whitespace.
+
+    nonpub labels compare case-insensitively (the operator types the label in
+    two places — the register column and the upload form — and casing drift
+    between them must not read as a version mismatch).
+    """
+    expected_normalised = _normalise_version(expected)
+    declared_normalised = _normalise_version(declared)
+    if is_nonpub_version(expected_normalised) or is_nonpub_version(declared_normalised):
+        return expected_normalised.casefold() == declared_normalised.casefold()
+    return expected_normalised == declared_normalised
 
 
 def _normalise_version(value: str) -> str:
     return value.strip().lstrip("vV")
 
 
-def structural_issues(payload_type: str, payload: dict) -> list[StructuralFinding]:
+def is_nonpub_version(version: str) -> bool:
+    """True when the version labels a non-published, operator-defined schema set."""
+    return bool(_NONPUB_PATTERN.match(_normalise_version(version)))
+
+
+def nonpub_version_key(version: str) -> str:
+    """Canonical lookup key for an uploaded nonpub schema set's version label."""
+    return _normalise_version(version).casefold()
+
+
+def structural_issues(
+    payload_type: str,
+    payload: dict,
+    uploaded_schemas: Mapping[str, Mapping[str, dict]] | None = None,
+) -> list[StructuralFinding]:
     """Field-level structural findings for one payload against its declared version.
 
     Returns a single low-severity "checks skipped" finding when no ruleset is
     pinned for the declared version, so a skipped check is never mistaken for a
     passed one. Callers ensure the payload declares a version before calling.
+
+    ``uploaded_schemas`` maps ``nonpub_version_key(label)`` to that uploaded
+    set's ``{filename: schema}`` mapping. A declared nonpub version is validated
+    ONLY against its uploaded set (canonical Draft 7 — the focused checks encode
+    published-1.5.2 assumptions); with no matching upload it yields one
+    high-severity upload-this-set finding, never a silent pass.
     """
     version = declared_version(payload)
     if version is None:
         return []
+    if is_nonpub_version(version):
+        schema_set = (uploaded_schemas or {}).get(nonpub_version_key(version))
+        if schema_set is None:
+            return [
+                StructuralFinding(
+                    description=(
+                        f"The payload declares non-published UDMI version '{version}' "
+                        "but no schema set with that label has been uploaded, so "
+                        "structural checks could not run."
+                    ),
+                    severity="high",
+                    observed_value=version,
+                    expected_value="an uploaded schema set with this label",
+                    suggested_action=(
+                        f"Upload the '{version}' schema set (state.json, metadata.json, "
+                        "events_pointset.json) under UDMI schema sets on the UDMI page, "
+                        "then re-run."
+                    ),
+                )
+            ]
+        return _uploaded_schema_findings(payload_type, payload, version, schema_set)
     ruleset = STRUCTURAL_RULESETS.get(_normalise_version(version))
     if ruleset is None:
         return [
@@ -211,6 +283,105 @@ def _canonical_validator(version: str, payload_type: str) -> Draft7Validator:
     )
 
 
+# Validators for uploaded nonpub sets are cached per (version label, payload
+# type) tagged with the set's CONTENT digest: a corrected re-upload under the
+# same label must take effect without restarting the API/worker, and rebuilding
+# on a digest change evicts the superseded validator so the cache holds at most
+# one entry per label per payload type (the @cache-by-version pattern above is
+# safe only for the immutable vendored bundle).
+_uploaded_validator_cache: dict[tuple[str, str], tuple[str, Draft7Validator]] = {}
+
+
+def _schema_set_digest(schema_set: Mapping[str, dict]) -> str:
+    canonical = json.dumps(schema_set, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _uploaded_schema_findings(
+    payload_type: str,
+    payload: dict,
+    version: str,
+    schema_set: Mapping[str, dict],
+) -> list[StructuralFinding]:
+    """Canonical Draft 7 findings against an operator-uploaded nonpub schema set."""
+    root_name = NONPUB_SCHEMA_ROOTS[payload_type]
+    root_schema = schema_set.get(root_name)
+    if not isinstance(root_schema, dict):
+        return [
+            StructuralFinding(
+                description=(
+                    f"The uploaded '{version}' schema set has no usable {root_name}, so the "
+                    f"{payload_type} payload could not be checked."
+                ),
+                severity="high",
+                expected_value=root_name,
+                observed_value="missing",
+                suggested_action=(
+                    f"Re-upload the '{version}' schema set including {root_name}."
+                ),
+            )
+        ]
+    digest = _schema_set_digest(schema_set)
+    cache_key = (nonpub_version_key(version), payload_type)
+    cached = _uploaded_validator_cache.get(cache_key)
+    validator = cached[1] if cached is not None and cached[0] == digest else None
+    try:
+        if validator is None:
+            registry = Registry().with_contents(
+                (
+                    (f"file:{name}", schema)
+                    for name, schema in schema_set.items()
+                    if isinstance(schema, dict)
+                ),
+                default_specification=DRAFT7,
+            )
+            validator = Draft7Validator(
+                root_schema,
+                registry=registry,
+                format_checker=_FORMAT_CHECKER,
+            )
+        # The payload is judged AS PUBLISHED: _canonical_payload's legacy
+        # pointset.points hoist is a published-version concession and must not
+        # rewrite the shape the operator's own schema describes.
+        errors = sorted(
+            validator.iter_errors(payload),
+            key=lambda error: ([str(part) for part in error.absolute_path], error.message),
+        )
+    except Exception as error:  # uploads are arbitrary operator JSON
+        # An unusable set (dangling $ref, garbage keywords) degrades to ONE
+        # finding instead of escaping and killing the whole run; a validator
+        # that failed to apply is never left cached, so a corrected re-upload
+        # is tried afresh.
+        _uploaded_validator_cache.pop(cache_key, None)
+        return [
+            StructuralFinding(
+                description=(
+                    f"The uploaded '{version}' schema set could not be applied to the "
+                    f"{payload_type} payload ({type(error).__name__}: {error})."
+                ),
+                severity="high",
+                expected_value="a usable uploaded schema set",
+                observed_value=type(error).__name__,
+                suggested_action=(
+                    f"Re-upload a complete '{version}' schema set whose $refs use the "
+                    "file:<name>#... form."
+                ),
+            )
+        ]
+    _uploaded_validator_cache[cache_key] = (digest, validator)
+    # No _focused_check_covers filter: the focused checks never run for nonpub
+    # versions, so there is nothing to de-duplicate against.
+    return [
+        _canonical_finding(
+            payload_type,
+            version,
+            error,
+            schema_label=f"uploaded '{version}' schema set",
+        )
+        for error in errors
+    ]
+
+
 def _canonical_schema_findings(
     payload_type: str,
     payload: dict,
@@ -243,13 +414,22 @@ def _canonical_finding(
     payload_type: str,
     version: str,
     error: ValidationError,
+    schema_label: str | None = None,
 ) -> StructuralFinding:
+    # An explicit label (an uploaded nonpub set) is the authority the operator
+    # must satisfy — the action must name it, not a published UDMI version.
+    suggested_action = (
+        f"Correct the {payload_type} publisher output to satisfy the {schema_label}."
+        if schema_label
+        else f"Correct the {payload_type} publisher output to satisfy UDMI {version}."
+    )
+    schema_label = schema_label or f"canonical UDMI {version}"
     path = [str(part) for part in error.absolute_path]
     location = ".".join(path) or "payload root"
     point_name = _point_name_from_path(path)
     if error.validator == "additionalProperties":
         description = (
-            f"Property at {location} is not allowed by the canonical UDMI {version} "
+            f"Property at {location} is not allowed by the {schema_label} "
             f"{payload_type} schema: {error.message}"
         )
     elif error.validator == "required":
@@ -267,7 +447,7 @@ def _canonical_finding(
         )
     else:
         description = (
-            f"Field '{location}' violates the canonical UDMI {version} {payload_type} "
+            f"Field '{location}' violates the {schema_label} {payload_type} "
             f"schema ({error.validator}): {error.message}"
         )
     return StructuralFinding(
@@ -276,7 +456,7 @@ def _canonical_finding(
         point_name=point_name,
         expected_value=str(error.validator_value),
         observed_value="missing" if error.validator == "required" else _observed_value(error.instance),
-        suggested_action=f"Correct the {payload_type} publisher output to satisfy UDMI {version}.",
+        suggested_action=suggested_action,
     )
 
 
@@ -308,7 +488,9 @@ def _focused_check_covers(payload_type: str, version: str, error: ValidationErro
     path = [str(part) for part in error.absolute_path]
     if error.validator == "required":
         missing = _required_property(error)
-        if not path and missing in STRUCTURAL_RULESETS[version].get(payload_type, ()):
+        # .get: versions with no focused ruleset (e.g. nonpub sets) must not
+        # KeyError out of canonical validation.
+        if not path and missing in STRUCTURAL_RULESETS.get(version, {}).get(payload_type, ()):
             return True
         if missing == "present_value" and "points" in path:
             return True

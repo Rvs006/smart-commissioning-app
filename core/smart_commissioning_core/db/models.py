@@ -192,6 +192,25 @@ class ImportRecord(Base):
     )
 
 
+class UdmiSchemaSet(Base):
+    """An operator-uploaded non-published UDMI schema set (one row per label).
+
+    ``version_label`` is stored in ``nonpub_version_key`` form (normalised,
+    casefolded) so the register column, the upload form, and the run-time
+    lookup can never drift apart on casing. ``files`` holds the complete
+    ``{filename: schema}`` mapping; a re-upload under the same label replaces
+    the row wholesale.
+    """
+
+    __tablename__ = "udmi_schema_sets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    version_label: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    files: Mapped[dict] = mapped_column(JSON, default=dict)
+    uploaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    uploaded_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class DiscoveredDevice(Base):
     """A device observed by a discovery engine (IP / BACnet / MQTT).
 
