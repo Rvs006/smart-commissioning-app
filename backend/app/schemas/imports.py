@@ -44,6 +44,15 @@ class ImportBatchSummary(BaseModel):
     rejected_rows: int
     status: ImportStatus
     missing_columns: list[str] = Field(default_factory=list)
+    # Informational notes about ACCEPTED content (e.g. UDP port entries the
+    # TCP-only IP scan can never verify). A separate list rather than a
+    # severity flag on ImportErrorRecord: everything that consumes `errors`
+    # (the /errors endpoint, rejected-row counts, the run-time "register
+    # rejected N row(s)" issue) equates an error with a rejected row, so a
+    # warning must never travel that path. Lives on the summary because the
+    # upload UI renders only this response; default keeps previously stored
+    # summaries valid.
+    warnings: list[ImportErrorRecord] = Field(default_factory=list)
     stored_file_name: str
     created_at: datetime
 
