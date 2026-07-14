@@ -27,8 +27,10 @@ from smart_commissioning_core.db.models import (
     ImportRecord,
     Run,
     RunIssue,
+    UdmiSchemaSet,
     User,
 )
+from smart_commissioning_core.udmi_schema import nonpub_version_key
 
 # Terminal run statuses eligible for sync. In-flight runs (queued/running/...)
 # are NEVER bundled: only finished, immutable records leave the edge.
@@ -415,6 +417,83 @@ class ImportRepository:
         if record is None:
             raise FileNotFoundError(import_id)
         return record
+
+
+def _schema_set_summary(record: UdmiSchemaSet) -> dict[str, object]:
+    """Label + filenames + upload metadata; never the full schema content."""
+    return {
+        "version_label": record.version_label,
+        "filenames": sorted(record.files or {}),
+        "uploaded_at": record.uploaded_at.isoformat(),
+        "uploaded_by": record.uploaded_by,
+    }
+
+
+class UdmiSchemaSetRepository:
+    """Operator-uploaded non-published UDMI schema sets, one row per label.
+
+    Labels are stored (and looked up) in ``nonpub_version_key`` form so the
+    register column, the upload form, and the run-time lookup can never drift
+    apart on casing or a leading ``v``. ``files`` holds the complete
+    ``{filename: schema}`` mapping; the summary shapes returned by
+    :meth:`upsert_set` / :meth:`list_sets` carry filenames only.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._session_factory = session_factory(engine)
+
+    def upsert_set(
+        self,
+        *,
+        version_label: str,
+        files: dict[str, dict],
+        uploaded_by: str | None = None,
+    ) -> dict[str, object]:
+        """Insert or REPLACE the set stored under this label; return its summary.
+
+        A re-upload replaces the previous row's files wholesale (no per-file
+        merge): the uploaded set is the complete new truth for that label.
+        """
+        label = nonpub_version_key(version_label)
+        with self._session_factory.begin() as session:
+            record = self._get(session, label)
+            if record is None:
+                record = UdmiSchemaSet(version_label=label)
+                session.add(record)
+            record.files = dict(files)
+            record.uploaded_at = datetime.now(UTC)
+            record.uploaded_by = uploaded_by
+            session.flush()
+            return _schema_set_summary(record)
+
+    def list_sets(self) -> list[dict[str, object]]:
+        """All stored set summaries, ordered by label."""
+        statement = select(UdmiSchemaSet).order_by(UdmiSchemaSet.version_label.asc())
+        with self._session_factory() as session:
+            return [_schema_set_summary(record) for record in session.scalars(statement).all()]
+
+    def get_all_files(self) -> dict[str, dict[str, dict]]:
+        """``{label: {filename: schema}}`` for embedding into run parameters."""
+        with self._session_factory() as session:
+            return {
+                record.version_label: dict(record.files or {})
+                for record in session.scalars(select(UdmiSchemaSet)).all()
+            }
+
+    def delete_set(self, version_label: str) -> bool:
+        """Delete the set stored under this label; False when absent."""
+        with self._session_factory.begin() as session:
+            record = self._get(session, nonpub_version_key(version_label))
+            if record is None:
+                return False
+            session.delete(record)
+            return True
+
+    @staticmethod
+    def _get(session: Session, label: str) -> UdmiSchemaSet | None:
+        return session.scalars(
+            select(UdmiSchemaSet).where(UdmiSchemaSet.version_label == label)
+        ).one_or_none()
 
 
 def _device_to_dict(row: DiscoveredDevice) -> dict[str, object]:

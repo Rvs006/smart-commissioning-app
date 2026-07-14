@@ -24,7 +24,13 @@ from smart_commissioning_core.mqtt_transport import (
     subscribe_and_capture,
 )
 from smart_commissioning_core.records import ValidationIssueRecord
-from smart_commissioning_core.udmi_schema import declared_version, structural_issues, versions_match
+from smart_commissioning_core.udmi_schema import (
+    declared_version,
+    is_nonpub_version,
+    nonpub_version_key,
+    structural_issues,
+    versions_match,
+)
 
 # When the core package is installed editable from the repository checkout,
 # parents[2] is the repository root (udmi_validation.py -> smart_commissioning_core -> core -> root).
@@ -162,13 +168,23 @@ def validate_udmi_full_report(
     # (pasted inputs or live capture); the fixture path carries no payload JSON,
     # so it returns [] and is labelled 'none' rather than fabricating content.
     payload_views = _build_payload_views(parameters or {})
+    conformance = _conformance_fields(expected_devices, not_publishing, issues)
     result_summary: dict[str, object] = {
         "expected_devices": len(expected_devices),
         "publishing_seen": max(0, len(expected_devices) - len(not_publishing)),
         "not_publishing": len(not_publishing),
+        # Silent systems (field ask 2026-07-14): the report needs the device
+        # IDS, not just the count — a device that never reported inside the
+        # allowed window is reported as "silent", distinct from pass/fail.
+        "not_publishing_devices": sorted(str(device) for device in not_publishing),
         "pointset_valid": len(_list_value(full_report, "DevicesPointsetValid")),
         "state_valid": len(_list_value(full_report, "DevicesStateValid")),
         "issue_count": len(issues),
+        # Field ask 2026-07-14: the hero score must be fed by validation
+        # outcomes, not publishing liveness — 100% next to a blocking issue is
+        # a lie. See _conformance_fields for the scale.
+        "blocking_issue_count": conformance["blocking_issue_count"],
+        "payload_conformance_percent": conformance["payload_conformance_percent"],
         "message_count": _message_count(parameters or {}),
         "payload_last_seen": latest_payload,
         "source": source,
@@ -195,6 +211,85 @@ def validate_udmi_full_report(
         issues=issues,
         source_fixture=source_fixture,
     )
+
+
+def _nonpub_schema_sets(parameters: dict[str, object]) -> dict[str, dict[str, dict]]:
+    """Operator-uploaded nonpub schema sets from run parameters, keyed canonically.
+
+    Shape: ``parameters["nonpub_schema_sets"] = {label: {filename: schema}}``
+    (embedded at run creation from the DB-backed store, so the queued worker
+    needs no filesystem access). Malformed entries are dropped, never raised —
+    a bad upload must degrade to the missing-set finding, not kill the run.
+    """
+    raw = parameters.get("nonpub_schema_sets")
+    if not isinstance(raw, dict):
+        return {}
+    sets: dict[str, dict[str, dict]] = {}
+    for label, schema_set in raw.items():
+        if not isinstance(label, str) or not isinstance(schema_set, dict):
+            continue
+        files = {
+            str(name): schema
+            for name, schema in schema_set.items()
+            if isinstance(schema, dict)
+        }
+        if files:
+            sets[nonpub_version_key(label)] = files
+    return sets
+
+
+# Severities that make a result row read "Fail" in the workbench (critical, and
+# high/medium which the frontend maps to "major"). The hero score uses the same
+# set so a red row can never coexist with a 100% score.
+_BLOCKING_SEVERITIES = frozenset({"critical", "high", "medium"})
+
+
+def _conformance_fields(
+    expected_devices: list[object],
+    not_publishing: list[object],
+    issues: list[ValidationIssueRecord],
+) -> dict[str, object]:
+    """Score fields fed by validation outcomes, not publishing liveness.
+
+    Scale: a device conforms when it published AND carries no blocking-severity
+    issue. ``payload_conformance_percent`` = floor(100 * conforming / expected),
+    clamped to at most 99 whenever ANY blocking issue or silent device exists
+    (including run-scoped issues that name no device — those mean devices were
+    not fully verified, so 100% must be impossible). Silent devices are neither
+    validated nor failed: their ``not_publishing`` liveness issues stay OUT of
+    ``blocking_issue_count``, but the devices still depress the score through
+    the conforming exclusion. ``None`` when no devices were expected, mirroring
+    the frontend's existing null guard.
+    """
+    blocking = [
+        issue
+        for issue in issues
+        if issue.issue_type != "not_publishing"
+        and (issue.severity or "").casefold() in _BLOCKING_SEVERITIES
+    ]
+    fields: dict[str, object] = {"blocking_issue_count": len(blocking)}
+    if not expected_devices:
+        fields["payload_conformance_percent"] = None
+        return fields
+    not_publishing_ids = {str(device) for device in not_publishing}
+    # Single-asset capture timeouts report silence only as an issue (never via
+    # DevicesNotPublishing), so silent ids are collected from both sources.
+    not_publishing_ids.update(
+        str(issue.asset_id)
+        for issue in issues
+        if issue.issue_type == "not_publishing" and issue.asset_id
+    )
+    blocked_assets = {issue.asset_id for issue in blocking if issue.asset_id}
+    conforming = [
+        device
+        for device in expected_devices
+        if str(device) not in not_publishing_ids and str(device) not in blocked_assets
+    ]
+    percent = (100 * len(conforming)) // len(expected_devices)
+    if blocking or not_publishing_ids:
+        percent = min(percent, 99)
+    fields["payload_conformance_percent"] = percent
+    return fields
 
 
 def _resolve_report_path(parameters: dict[str, object]) -> Path:
@@ -433,7 +528,12 @@ def _review_all_payload_issues(
     When ``parameters["assets"]`` is a non-empty list, each entry carries its
     own ``expected_schedule``/``*_payload`` keys; run the single-asset reviewer
     once per entry and aggregate. The single top-level path stays back-compatible.
+
+    Uploaded nonpub schema sets are embedded ONCE at run creation, at the top
+    level of the RUN parameters — never inside per-asset entries — so they are
+    resolved here and passed down to every reviewer call.
     """
+    uploaded_schemas = _nonpub_schema_sets(parameters)
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
         issues = [*existing_issues]
@@ -441,14 +541,16 @@ def _review_all_payload_issues(
         for entry in assets:
             if not isinstance(entry, dict):
                 continue
-            issues.extend(_review_payload_issues(entry, issues))
+            issues.extend(_review_payload_issues(entry, issues, uploaded_schemas=uploaded_schemas))
         return issues[first_new_issue:]
-    return _review_payload_issues(parameters, existing_issues)
+    return _review_payload_issues(parameters, existing_issues, uploaded_schemas=uploaded_schemas)
 
 
 def _review_payload_issues(
     parameters: dict[str, object],
     existing_issues: list[ValidationIssueRecord],
+    *,
+    uploaded_schemas: dict[str, dict[str, dict]] | None = None,
 ) -> list[ValidationIssueRecord]:
     expected = _dict_or_empty(parameters.get("expected_schedule"))
     if not expected:
@@ -461,6 +563,8 @@ def _review_payload_issues(
     metadata_payload = _dict_or_empty(parameters.get("metadata_payload"))
     pointset_payload = _dict_or_empty(parameters.get("pointset_payload"))
     raw_evidence_uri = str(parameters.get("raw_evidence_uri") or "runtime://udmi-validation/review-payloads")
+    if uploaded_schemas is None:
+        uploaded_schemas = _nonpub_schema_sets(parameters)
 
     # Register identity values that can never fit canonical UDMI are reported
     # by name; the template embeds a schema-valid placeholder for them instead
@@ -474,7 +578,14 @@ def _review_payload_issues(
     # captured payload, otherwise a malformed register value would look valid.
     for payload_type in ("state", "metadata", "pointset"):
         expected_template = _expected_payload_facet(expected, payload_type)
-        for finding in structural_issues(payload_type, expected_template or {}):
+        template_version = declared_version(expected_template or {})
+        if template_version and is_nonpub_version(template_version):
+            # Template facets are built in the canonical-1.5.2 shape with
+            # placeholders, so they can never be judged against an operator's
+            # nonpub schema (uploaded or not) — the payload-side loop below is
+            # the sole nonpub judge, and it reports a missing set exactly once.
+            continue
+        for finding in structural_issues(payload_type, expected_template or {}, uploaded_schemas):
             issues.append(
                 _issue(
                     issues,
@@ -546,7 +657,7 @@ def _review_payload_issues(
                 )
             )
             continue
-        for finding in structural_issues(payload_type, payload):
+        for finding in structural_issues(payload_type, payload, uploaded_schemas):
             issues.append(
                 _issue(
                     issues,

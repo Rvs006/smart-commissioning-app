@@ -16,11 +16,19 @@ from smart_commissioning_core.udmi_run_processor import (
     INLINE_INDEFINITE_CEILING_SECONDS,
     process_udmi_validation_run,
 )
-from smart_commissioning_core.udmi_schema import declared_version, structural_issues, versions_match
+from smart_commissioning_core.udmi_schema import (
+    declared_version,
+    is_nonpub_version,
+    nonpub_version_key,
+    structural_issues,
+    versions_match,
+)
+from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
     DEFAULT_MAX_MESSAGES,
     _capture_topics,
+    _conformance_fields,
     validate_udmi_full_report,
 )
 
@@ -181,6 +189,311 @@ class SchemaVersionMatchTests(unittest.TestCase):
         self.assertEqual(expected["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
         self.assertNotIn("udmi_version", expected)
         self.assertNotIn("manufacturer", expected)
+
+
+def _nonpub_state_schema() -> dict:
+    """A deliberately tiny operator schema: state requires a 'site_code' string."""
+    return {
+        "type": "object",
+        "required": ["version", "site_code"],
+        "properties": {
+            "version": {"type": "string"},
+            "site_code": {"type": "string"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _nonpub_set(state_schema: dict | None = None) -> dict[str, dict]:
+    return {
+        "state.json": state_schema or _nonpub_state_schema(),
+        "metadata.json": {"type": "object"},
+        "events_pointset.json": {"type": "object"},
+    }
+
+
+class NonPubSchemaTests(unittest.TestCase):
+    """Non-published version labels resolve against operator-uploaded schema sets."""
+
+    def test_nonpub_version_detection_and_key(self) -> None:
+        self.assertTrue(is_nonpub_version("nonpub.1"))
+        self.assertTrue(is_nonpub_version(" NonPub-siteA "))
+        self.assertTrue(is_nonpub_version("nonpub"))
+        self.assertFalse(is_nonpub_version("1.5.2"))
+        self.assertFalse(is_nonpub_version("nonpublished"))
+        self.assertEqual(nonpub_version_key(" NonPub.1 "), "nonpub.1")
+
+    def test_nonpub_labels_match_case_insensitively(self) -> None:
+        self.assertTrue(versions_match("NonPub.1", "nonpub.1"))
+        self.assertFalse(versions_match("nonpub.1", "nonpub.2"))
+        # Published versions keep exact matching.
+        self.assertFalse(versions_match("1.5.2", "1.5.20"))
+
+    def test_missing_uploaded_set_is_one_high_finding_with_upload_action(self) -> None:
+        findings = structural_issues("state", {"version": "nonpub.1", "site_code": "X"})
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "high")
+        self.assertIn("no schema set with that label has been uploaded", findings[0].description)
+        self.assertIn("Upload the 'nonpub.1' schema set", findings[0].suggested_action)
+
+    def test_uploaded_set_validates_payload_and_names_the_set(self) -> None:
+        sets = {"nonpub.1": _nonpub_set()}
+        conforming = structural_issues(
+            "state", {"version": "nonpub.1", "site_code": "GB-LON"}, sets
+        )
+        self.assertEqual(conforming, [])
+        violating = structural_issues("state", {"version": "nonpub.1"}, sets)
+        self.assertEqual(len(violating), 1)
+        self.assertEqual(violating[0].severity, "high")
+        self.assertIn("site_code", violating[0].description)
+        self.assertIn("uploaded 'nonpub.1' schema set", violating[0].suggested_action)
+
+    def test_focused_152_checks_do_not_run_for_nonpub_payloads(self) -> None:
+        # No timestamp, no system: fails 1.5.2's focused checks, but the
+        # operator's schema does not require them — must be a clean pass.
+        findings = structural_issues(
+            "state", {"version": "nonpub.1", "site_code": "GB-LON"}, {"nonpub.1": _nonpub_set()}
+        )
+        self.assertEqual(findings, [])
+
+    def test_reuploaded_set_takes_effect_without_restart(self) -> None:
+        payload = {"version": "nonpub.1", "site_code": "GB-LON"}
+        strict = _nonpub_set(
+            {
+                "type": "object",
+                "required": ["site_code", "extra_field"],
+                "properties": {"site_code": {"type": "string"}},
+            }
+        )
+        self.assertEqual(len(structural_issues("state", payload, {"nonpub.1": strict})), 1)
+        # Corrected re-upload under the SAME label must not serve stale results.
+        self.assertEqual(structural_issues("state", payload, {"nonpub.1": _nonpub_set()}), [])
+
+    def test_reupload_evicts_the_superseded_validator(self) -> None:
+        # The cache is keyed by (label, payload type): a re-upload rebuilds and
+        # replaces the entry instead of accumulating one validator per digest.
+        payload = {"version": "nonpub.evict", "site_code": "GB-LON"}
+        strict = _nonpub_set(
+            {"type": "object", "required": ["site_code", "extra_field"]}
+        )
+        structural_issues("state", payload, {"nonpub.evict": strict})
+        structural_issues("state", payload, {"nonpub.evict": _nonpub_set()})
+        keys = [
+            key for key in udmi_schema._uploaded_validator_cache if key[0] == "nonpub.evict"
+        ]
+        self.assertEqual(keys, [("nonpub.evict", "state")])
+
+    def test_broken_uploaded_set_is_one_high_finding_not_an_exception(self) -> None:
+        # A dangling $ref must degrade to a single finding, never escape and
+        # kill the run through the sanitized failure path.
+        broken = {
+            "state.json": {"$ref": "file:missing.json#/definitions/nope"},
+            "metadata.json": {"type": "object"},
+            "events_pointset.json": {"type": "object"},
+        }
+        findings = structural_issues(
+            "state", {"version": "nonpub.1", "site_code": "GB-LON"}, {"nonpub.1": broken}
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "high")
+        self.assertIn("could not be applied to the state payload", findings[0].description)
+        self.assertIn("file:<name>#", findings[0].suggested_action)
+
+    def test_uploaded_set_judges_the_payload_as_published(self) -> None:
+        # The legacy pointset.points hoist is a published-version concession;
+        # the operator's own schema must see the payload shape as published.
+        nested_payload = {
+            "version": "nonpub.1",
+            "pointset": {"points": {"flow_sensor": {"present_value": 1}}},
+        }
+        requires_nested = {
+            "state.json": {"type": "object"},
+            "metadata.json": {"type": "object"},
+            "events_pointset.json": {
+                "type": "object",
+                "required": ["pointset"],
+                "properties": {"pointset": {"type": "object"}},
+            },
+        }
+        requires_top_level = {
+            "state.json": {"type": "object"},
+            "metadata.json": {"type": "object"},
+            "events_pointset.json": {"type": "object", "required": ["points"]},
+        }
+        self.assertEqual(
+            structural_issues("pointset", nested_payload, {"nonpub.1": requires_nested}), []
+        )
+        flagged = structural_issues("pointset", nested_payload, {"nonpub.1": requires_top_level})
+        self.assertEqual(len(flagged), 1)
+        self.assertIn("points", flagged[0].description)
+
+    def test_full_report_missing_set_reported_once_per_payload_not_per_template(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(udmi_version="nonpub.1"),
+                "state_payload": {"version": "nonpub.1", "site_code": "GB-LON"},
+            }
+        )
+        missing = [
+            issue
+            for issue in issues
+            if "no schema set with that label has been uploaded" in issue.description
+        ]
+        self.assertEqual(len(missing), 1, [issue.description for issue in issues])
+        self.assertEqual(missing[0].severity, "high")
+
+    def test_full_report_with_uploaded_set_checks_payload_against_it(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(udmi_version="nonpub.1"),
+                "state_payload": {"version": "nonpub.1"},
+                "nonpub_schema_sets": {"NonPub.1": _nonpub_set()},
+            }
+        )
+        site_code = [issue for issue in issues if "site_code" in issue.description]
+        self.assertEqual(len(site_code), 1, [issue.description for issue in issues])
+
+    def test_register_driven_assets_use_run_level_uploaded_sets(self) -> None:
+        # Run creation embeds nonpub_schema_sets at the TOP level of the run
+        # parameters only; register rows become per-asset entries that must
+        # still resolve the uploaded sets rather than reporting them missing.
+        issues = _issues(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": _schedule(udmi_version="nonpub.1"),
+                        "state_payload": {"version": "nonpub.1"},
+                    }
+                ],
+                "nonpub_schema_sets": {"NonPub.1": _nonpub_set()},
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertNotIn("no schema set with that label has been uploaded", descriptions)
+        site_code = [issue for issue in issues if "site_code" in issue.description]
+        self.assertEqual(len(site_code), 1, [issue.description for issue in issues])
+
+    def test_nonpub_template_facets_are_never_judged_against_uploaded_sets(self) -> None:
+        # Template facets are canonical-1.5.2-shaped with placeholders (no
+        # site_code); judging them against the operator's schema would fabricate
+        # "cannot form a valid UDMI template" findings for a conforming device.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(udmi_version="nonpub.1", units={}),
+                "state_payload": {"version": "nonpub.1", "site_code": "GB-LON"},
+                "nonpub_schema_sets": {"nonpub.1": _nonpub_set()},
+            }
+        )
+        self.assertEqual([issue.description for issue in issues], [])
+
+
+class ConformanceScoreTests(unittest.TestCase):
+    """The hero score is fed by validation outcomes, never publishing liveness."""
+
+    def _summary(self, parameters: dict) -> dict:
+        return validate_udmi_full_report(parameters, live_capture=None).result_summary
+
+    def test_conformant_run_scores_100(self) -> None:
+        summary = self._summary(
+            {
+                "expected_schedule": _schedule(),
+                "state_payload": _state(),
+                "metadata_payload": _metadata(),
+                "pointset_payload": _pointset(),
+            }
+        )
+        self.assertEqual(summary["blocking_issue_count"], 0)
+        self.assertEqual(summary["payload_conformance_percent"], 100)
+
+    def test_blocking_issue_caps_score_below_100(self) -> None:
+        # Critical version mismatch on a pasted payload: the old liveness ratio
+        # read 100% here (nothing is "not publishing" in inline mode) — the
+        # score must now be capped strictly below 100.
+        summary = self._summary(
+            {
+                "expected_schedule": _schedule(),
+                "pointset_payload": {"version": "1.4.0", "timestamp": "2026-07-09T10:00:00Z"},
+            }
+        )
+        self.assertGreaterEqual(summary["blocking_issue_count"], 1)
+        self.assertLess(summary["payload_conformance_percent"], 100)
+
+    def test_no_expected_devices_yields_null_score(self) -> None:
+        fields = _conformance_fields([], [], [])
+        self.assertIsNone(fields["payload_conformance_percent"])
+        self.assertEqual(fields["blocking_issue_count"], 0)
+
+    def test_run_scoped_blocking_issue_clamps_score_to_99(self) -> None:
+        # A blocking issue that names no device (asset_id=None) means devices
+        # were not fully verified: per-device math would still say 100, so the
+        # clamp must make 100% impossible.
+        issue = ValidationIssueRecord(
+            issue_id="i1",
+            issue_type="payload_error",
+            severity="high",
+            description="run-scoped failure",
+        )
+        fields = _conformance_fields(["EM-1", "EM-2"], [], [issue])
+        self.assertEqual(fields["payload_conformance_percent"], 99)
+        self.assertEqual(fields["blocking_issue_count"], 1)
+
+    def test_low_severity_notes_do_not_block_100(self) -> None:
+        note = ValidationIssueRecord(
+            issue_id="i1",
+            issue_type="payload_error",
+            severity="low",
+            description="informational note",
+        )
+        fields = _conformance_fields(["EM-1"], [], [note])
+        self.assertEqual(fields["payload_conformance_percent"], 100)
+        self.assertEqual(fields["blocking_issue_count"], 0)
+
+    def test_device_scoped_blocking_issue_subtracts_only_that_device(self) -> None:
+        issue = ValidationIssueRecord(
+            issue_id="i1",
+            asset_id="EM-2",
+            issue_type="state_validation",
+            severity="critical",
+            description="device-scoped failure",
+        )
+        fields = _conformance_fields(["EM-1", "EM-2", "EM-3", "EM-4"], [], [issue])
+        self.assertEqual(fields["payload_conformance_percent"], 75)
+        self.assertEqual(fields["blocking_issue_count"], 1)
+
+    def test_silent_device_depresses_score_without_any_issue_records(self) -> None:
+        # Pins the not_publishing subtraction independently of issue records.
+        fields = _conformance_fields(["EM-1", "EM-2"], ["EM-2"], [])
+        self.assertEqual(fields["payload_conformance_percent"], 50)
+        self.assertEqual(fields["blocking_issue_count"], 0)
+
+    def test_silent_device_issues_are_not_blocking_but_still_depress_the_score(self) -> None:
+        # Silent devices are "neither validated nor failed": their liveness
+        # issues stay out of the blocking count, yet the score cannot pretend
+        # they conformed.
+        silent = ValidationIssueRecord(
+            issue_id="i1",
+            asset_id="EM-2",
+            issue_type="not_publishing",
+            severity="high",
+            description="Expected device EM-2 did not publish during the validation window.",
+        )
+        fields = _conformance_fields(["EM-1", "EM-2"], ["EM-2"], [silent])
+        self.assertEqual(fields["blocking_issue_count"], 0)
+        self.assertEqual(fields["payload_conformance_percent"], 50)
+
+    def test_run_scoped_silence_alone_keeps_100_impossible(self) -> None:
+        # Only silence exists (no blocking issue) and it names no expected
+        # device: the clamp must still make 100% impossible.
+        silent = ValidationIssueRecord(
+            issue_id="i1",
+            asset_id="UDMI assets",
+            issue_type="not_publishing",
+            severity="high",
+            description="Capture ended before every expected topic reported.",
+        )
+        fields = _conformance_fields(["EM-1"], [], [silent])
+        self.assertEqual(fields["blocking_issue_count"], 0)
+        self.assertEqual(fields["payload_conformance_percent"], 99)
 
 
 class StructuralCheckTests(unittest.TestCase):
