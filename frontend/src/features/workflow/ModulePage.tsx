@@ -33,8 +33,10 @@ import {
   bacnetBackendLabel,
   discoveryMetrics,
   discoveryViewFor,
+  expectedPortsOk,
   forbiddenOpenPorts,
   matchesTopicFilter,
+  missingExpectedPorts,
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
@@ -2584,12 +2586,16 @@ function renderCell(
   if (column === "Detailed Status") {
     const forbidden = forbiddenOpenPorts(row[column]);
     const unexpected = unexpectedOpenPorts(row[column]);
-    if (forbidden || unexpected) {
+    const missing = missingExpectedPorts(row[column]);
+    const expectedOk = expectedPortsOk(row[column]);
+    if (forbidden || unexpected || missing || expectedOk) {
       return (
         <>
           {row[column]}
           {forbidden && <span className="chip red"> Forbidden ports open: {forbidden}</span>}
           {unexpected && <span className="chip amber"> Unexpected ports open: {unexpected}</span>}
+          {missing && <span className="chip red"> Missing expected ports: {missing}</span>}
+          {expectedOk && <span className="chip green"> Expected ports {expectedOk}</span>}
         </>
       );
     }
@@ -2770,11 +2776,19 @@ function buildResultDetailItems(
     // mirroring the table cell chips so the detail view is self-contained.
     const forbidden = forbiddenOpenPorts(row["Detailed Status"]);
     const unexpected = unexpectedOpenPorts(row["Detailed Status"]);
+    const missing = missingExpectedPorts(row["Detailed Status"]);
+    const expectedOk = expectedPortsOk(row["Detailed Status"]);
     if (forbidden) {
       items.push({ label: "Forbidden ports open", value: forbidden });
     }
     if (unexpected) {
       items.push({ label: "Unexpected ports open", value: unexpected });
+    }
+    if (missing) {
+      items.push({ label: "Missing expected ports", value: missing });
+    }
+    if (expectedOk) {
+      items.push({ label: "Expected ports", value: expectedOk });
     }
     return items;
   }

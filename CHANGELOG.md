@@ -9,6 +9,7 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Added
 
+
 - **IP register imports now warn about UDP port entries instead of silently
   ignoring them.** The IP scan verifies TCP ports only, so entries like
   `47808/udp` in "Expected services/ports" or "Ports that should not be
@@ -17,6 +18,38 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   as an amber, non-blocking panel in the upload feedback), and the 47808/udp
   message points at the BACnet discovery run — the engine that really
   verifies BACnet/IP.
+
+
+- **IP scan flags hostname mismatches against the register's "Expected
+  hostname".** When reverse DNS is enabled and returns a name for a responsive
+  host that the IP register also carries a hostname for, the scan compares the
+  two (case-insensitively, on the short name — the reverse-DNS domain suffix is
+  stripped) and appends `HOSTNAME MISMATCH: expected <x>, got <y>` to the
+  host's detailed status, with a `hosts_with_hostname_mismatch` count in the
+  run summary. Warning-only: a blank on either side (no PTR record, site DNS
+  not configured, reverse DNS disabled, register row without a hostname) never
+  counts as a mismatch, since commissioning networks often run without DNS.
+
+### Fixed
+
+- **IP scan actually probes the register's declared ports and verdicts
+  expected-port coverage both ways.** The register's "Expected services/ports"
+  and "Ports that should not be enabled" columns previously only fed the
+  flagging maps — with a blank port field the scan probed just the 4 defaults
+  (80, 443, 1883, 502), so a host expected on 445/135/139/5985/7070 reported
+  `responsive: 443` with no findings while nmap showed all six expected ports
+  open (field report, 2026-07-14). Each host's probe list is now the base list
+  (operator spec or defaults) union that host's register-declared expected and
+  forbidden ports; hosts not in the register keep exactly the base list. New
+  verdicts in the detailed status: `MISSING EXPECTED PORTS: <ports>` when an
+  expected port does not answer (with a `hosts_with_missing_expected` run
+  summary count) and an explicit `EXPECTED PORTS OK: <n>/<n> open` pass when
+  every expected port is open and nothing forbidden/unexpected fired — a clean
+  host is a recorded decision, not silence. The per-host union respects the
+  ports-per-sweep ceiling; register ports the cap drops are reported as
+  `PROBE LIST CAPPED: register ports not probed: <ports>` (and never verdicted
+  missing), not silently truncated. Each host's record now also carries its
+  register `expected_ports` / `forbidden_ports` and the scanned port count.
 
 ## [0.1.9] - 2026-07-14
 
