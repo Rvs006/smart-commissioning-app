@@ -20,6 +20,11 @@ name: Windows Portable Bundle
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version stamped into the exe metadata + README_FIRST (e.g. v0.1.9). Leave empty for an unversioned CI build."
+        required: false
+        default: ""
   pull_request:
     paths:
       - "packaging/**"
@@ -71,8 +76,11 @@ jobs:
         run: python -m pip install "./core[bacnet]" ./backend pyinstaller==6.20.0
 
       # build.ps1 is `#Requires -Version 7.0`; pwsh is the runner default.
+      # The version input only exists on workflow_dispatch (release builds);
+      # PR/push runs pass an empty string and build.ps1 falls back to its
+      # git-describe / "unversioned" default (shallow checkout has no tags).
       - name: Build portable bundle (frontend + freeze + assemble)
-        run: pwsh packaging/windows_portable/build.ps1
+        run: pwsh packaging/windows_portable/build.ps1 -Version "${{ inputs.version || '' }}"
 
       # Upload BEFORE booting: keeps the artifact available for debugging even
       # when the boot smoke fails. (Since the stable-data-dir change the boot

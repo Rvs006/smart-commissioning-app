@@ -7,6 +7,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.9] - 2026-07-14
+
 ### Fixed
 
 - **Source Interface dropdown lists virtual adapters again (ranked last)
@@ -34,6 +38,14 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   location; the unfrozen dev layout keeps `<repo>/runtime`. The Windows
   portable CI boot smoke now asserts state lands in the stable dir and nothing
   leaks back beside the exe.
+
+## [0.1.2 – 0.1.8] - 2026-07-10 to 2026-07-13
+
+Releases v0.1.2 through v0.1.8 were tagged without cutting individual
+changelog sections; the entries below shipped across those releases and are
+grouped here as released work.
+
+### Fixed
 
 - **UDMI misplaced-field diagnostics and location.room support.** When an
   identity value (site, room, serial, GUID, …) is absent at its canonical UDMI
