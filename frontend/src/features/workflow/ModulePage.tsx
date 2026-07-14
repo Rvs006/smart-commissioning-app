@@ -949,6 +949,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // For real (non-dry-run) discovery the operator must confirm authorization.
   const discoveryBlocked = isDiscoveryModule && !scanDryRun && !scanAuthorized;
 
+  // Import warnings are informational (their rows stay accepted), so they get
+  // their own amber panel below the outcome — never the red error styling.
+  const importWarnings = importOutcome?.warnings ?? [];
+
   return (
     <div className="app-page">
       <section className="module-hero">
@@ -1115,6 +1119,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     {importOutcome.accepted_rows} accepted ·{" "}
                     {importOutcome.rejected_rows} rejected
                   </span>
+                </div>
+              )}
+
+              {importWarnings.length > 0 && (
+                <div className="state-panel warning">
+                  <strong>
+                    {importWarnings.length} warning(s) — affected rows are still accepted
+                  </strong>
+                  <ul>
+                    {importWarnings.map((warning, index) => (
+                      <li key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}>
+                        {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
+                        {warning.message}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>

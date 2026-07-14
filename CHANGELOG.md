@@ -9,6 +9,17 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Added
 
+
+- **IP register imports now warn about UDP port entries instead of silently
+  ignoring them.** The IP scan verifies TCP ports only, so entries like
+  `47808/udp` in "Expected services/ports" or "Ports that should not be
+  enabled" were accepted but never actually checked. Those rows are still
+  accepted; the import response now carries informational warnings (rendered
+  as an amber, non-blocking panel in the upload feedback), and the 47808/udp
+  message points at the BACnet discovery run — the engine that really
+  verifies BACnet/IP.
+
+
 - **IP scan flags hostname mismatches against the register's "Expected
   hostname".** When reverse DNS is enabled and returns a name for a responsive
   host that the IP register also carries a hostname for, the scan compares the

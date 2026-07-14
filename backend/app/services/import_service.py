@@ -52,12 +52,21 @@ class ImportProfile:
     # value never rejects a row (e.g. "Expected hostname", which most sites do
     # not populate).
     optional_columns: tuple[str, ...] = ()
+    # Informational row checks: their records surface as ImportBatchSummary
+    # warnings and never affect acceptance (unlike extra_checks).
+    warning_checks: tuple[Callable[[dict[str, str], int], list[ImportErrorRecord]], ...] = ()
 
     def validate_row(self, row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
         errors = _base_row_validation(self.required_columns, row, row_number)
         for check in self.extra_checks:
             errors.extend(check(row, row_number))
         return errors
+
+    def collect_warnings(self, row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+        warnings: list[ImportErrorRecord] = []
+        for check in self.warning_checks:
+            warnings.extend(check(row, row_number))
+        return warnings
 
     def as_summary(self) -> ImportProfileSummary:
         return ImportProfileSummary(
@@ -298,6 +307,47 @@ def _conflicting_asset_topic_error(
     )
 
 
+# One "<port>/udp" entry of a comma-separated ports cell (each token is
+# comma-split and stripped first; tolerate spaces around the slash and any
+# casing of "udp").
+_UDP_PORT_ENTRY = re.compile(r"(.+?)\s*/\s*udp", re.IGNORECASE)
+
+
+def _warn_udp_ports(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
+    """Warn (never reject) about UDP entries in an ip_register ports cell.
+
+    The IP scan engine is TCP-connect only (see engines/ip_scan.py): its port
+    parser strips the /udp suffix and probes over TCP, so a UDP entry is
+    tolerated but never actually verified. Without this note an "accepted"
+    import reads as "my 47808/udp line gets checked".
+    """
+    warnings: list[ImportErrorRecord] = []
+    for token in (part.strip() for part in row.get(field, "").split(",")):
+        match = _UDP_PORT_ENTRY.fullmatch(token)
+        if match is None:
+            continue
+        port = match.group(1).strip()
+        if port == "47808":
+            message = (
+                "47808/udp is a UDP service — the IP scan verifies TCP ports only. "
+                "UDP 47808 (BACnet/IP) is verified by the BACnet discovery run."
+            )
+        else:
+            message = (
+                f"{port}/udp is a UDP service — the IP scan verifies TCP ports only "
+                "and cannot check this entry."
+            )
+        warnings.append(
+            ImportErrorRecord(
+                row_number=row_number,
+                field=field,
+                code="udp_port_not_verified",
+                message=message,
+            )
+        )
+    return warnings
+
+
 def _base_row_validation(required_columns: tuple[str, ...], row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
     errors: list[ImportErrorRecord] = []
     for column in required_columns:
@@ -343,6 +393,10 @@ PROFILES: dict[ImportType, ImportProfile] = {
         ),
         duplicate_key_fields=("Asset ID", "Expected IP address"),
         extra_checks=(_validate_asset_identity, _field_check("Expected IP address", _validate_ip)),
+        warning_checks=(
+            _field_check("Expected services/ports", _warn_udp_ports),
+            _field_check("Ports that should not be enabled", _warn_udp_ports),
+        ),
     ),
     "bacnet_register": ImportProfile(
         import_type="bacnet_register",
@@ -638,6 +692,7 @@ class ImportService:
 
         mapped_rows, missing_columns = self._canonicalize_rows(profile, rows)
         errors: list[ImportErrorRecord] = []
+        warnings: list[ImportErrorRecord] = []
         accepted_rows: list[dict[str, str]] = []
 
         if missing_columns:
@@ -656,6 +711,9 @@ class ImportService:
             mqtt_roots_by_identity: dict[str, frozenset[str]] = {}
             for row_number, row in enumerate(mapped_rows, start=2):
                 row_errors = profile.validate_row(row, row_number)
+                # Warnings never affect acceptance and are collected even for
+                # rejected rows, so one re-upload can fix everything at once.
+                warnings.extend(profile.collect_warnings(row, row_number))
                 duplicate_key = tuple(row.get(field, "").strip() for field in profile.duplicate_key_fields)
                 if duplicate_key and any(duplicate_key):
                     if duplicate_key in seen_keys:
@@ -694,6 +752,7 @@ class ImportService:
             rejected_rows=max(len(mapped_rows) - len(accepted_rows), 0),
             status=status,
             missing_columns=missing_columns,
+            warnings=warnings,
             stored_file_name=stored_file_name,
             created_at=datetime.now(UTC),
         )
