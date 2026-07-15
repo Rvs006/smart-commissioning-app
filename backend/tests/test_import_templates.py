@@ -11,9 +11,8 @@ these under stdlib ``unittest``, which does not load ``conftest.py``).
 
 import unittest
 
-from smart_commissioning_core.engines.comparison_common import parse_tolerance
-
 from app.services.import_service import EXAMPLE_ROWS, PROFILES
+from smart_commissioning_core.engines.comparison_common import parse_tolerance
 
 
 class ExampleRowTests(unittest.TestCase):
