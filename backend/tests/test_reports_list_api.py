@@ -116,4 +116,3 @@ class ReportListProjectionTests(ApiTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-</content>
