@@ -9,6 +9,97 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 _Nothing yet._
 
+## [0.1.11] - 2026-07-15
+
+Field-walkthrough punch list (2026-07-15). Nothing here changes how a scan or
+validation actually works — every item is about the app telling the operator
+the truth about what it found and what it did.
+
+### Added
+
+- **A build-stamped version pill in the app header**, so an operator can say
+  which build they are running at a glance. `build.ps1` bakes the release
+  version into the frontend at build time and now refuses `-SkipFrontend` when
+  the reused `dist` was baked with a different version. Dev servers and
+  unstamped builds read "dev".
+
+- **Reports table columns: generation time, source runs, and a per-row
+  Download** for completed reports. `ReportSummary` gains `created_at` and
+  `source_run_ids`, projected from the stored run record — no migration.
+
+### Fixed
+
+- **The Reports page no longer hides your reports.** The Generated Reports
+  table rendered only inside the "3 Results" step group, while the Reports page
+  always landed on the hidden "setup" step — so a report that had been created
+  successfully, and was being returned by the API, was invisible until you
+  clicked a step nobody knew to click. The table is now ungated, the headline
+  says "Loading reports…" while the list is in flight instead of claiming "No
+  reports yet", and generating a report refreshes the list it points you at.
+
+- **Each head remembers its last run.** Navigating away and back reset
+  component state, so results, the run monitor and the report button vanished.
+  Each head now re-attaches its most recent succeeded run on mount. A restored
+  run reattaches on the Setup step rather than yanking you to Results.
+  Succeeded-only for now — an in-flight run is listed in Run History but is not
+  reattached to the monitor until it completes.
+
+- **Result tables no longer fall back to sample rows.** With the active run
+  cleared, tables rendered hardcoded fixtures — which is why the app appeared
+  to invent results ("it created sample views") after a page change. Until a
+  real run produces results, heads now show an honest empty state. This also
+  removes the fabricated "Report Queue" rows.
+
+- **A completed-but-empty scan says so**: "Scan complete — no responsive hosts
+  found (N hosts probed)" instead of "No results yet", with distinct copy for
+  dry runs, cancelled runs and failures, and per-head detail for IP, BACnet
+  (Who-Is range, BBMD/subnet caveat) and MQTT (capture window). A TCP-connect
+  miss is not proof of absence and is never rendered as a hard fail.
+
+- **A rejected register import now tells you why.** Per-row reasons (row,
+  field, message, code) and any missing required columns are listed, instead of
+  only "N accepted · M rejected". The reasons were already produced and stored,
+  and `GET /imports/{id}/errors` already existed — the UI simply discarded
+  them and never called it.
+
+- **Re-picking a corrected file with the same filename works.** The file input
+  never cleared its value, so Chromium fired no change event and the previous
+  file was silently re-sent — a corrected register never reached the server
+  until it was renamed. Fixed for the register and UDMI schema-set inputs.
+
+- **CSV registers saved by Excel import instead of failing.** CR-only line
+  endings raised a `csv.Error` that escaped the route's 400 handler as an HTTP
+  500; Windows-1252 and BOM'd UTF-16 saves now decode. Semicolon/tab regional
+  saves, an XLSX renamed to `.csv`, and binary files now return an actionable
+  400 naming the real problem instead of reporting all eight required columns
+  missing. `Expected reporting interval` accepts Excel's "60.0" on an
+  mqtt_register while still rejecting fractional values, and an
+  `Expected topic` rejection names every allowed suffix with an example.
+
+- **The report controls are where the run leaves you.** The format picker and
+  "Generate report from this run" sat only in the run-monitor step group, so a
+  finished run auto-advanced to Results and took them off screen. They now also
+  render at the end of Results on all five heads.
+
+- **Results snap to the top when they open**, on every head.
+
+- **The ELECTRACOM logo (and any other `frontend/public/` file) is served.**
+  Vite copies `public/` to the `dist` root rather than into `dist/assets/`, so
+  `/electracom-logo.png` missed the `/assets` mount and the SPA fallback
+  answered `index.html` for it. Real files under `dist` now resolve first, with
+  the correct content-type; anything resolving outside the dist root is 404.
+  Hard-refresh if the logo still looks wrong — the browser may have cached
+  index.html bytes under the image URL.
+
+- **The UDMI workbench no longer shows a duplicate "Run UDMI Validation" card**
+  at the top of Run Controls. The capture starts from "Execute capture" at the
+  bottom, after the operator has been through every option.
+
+- **Consistent discovery naming.** All three discovery heads read
+  "&lt;Protocol&gt; Discovery"; the IP head no longer says "IP Discovery" in the
+  menu and "IP Scanner" on the page. Routes, job types, API parameters and
+  report content are unchanged.
+
 ## [0.1.10] - 2026-07-14
 
 ### Added
