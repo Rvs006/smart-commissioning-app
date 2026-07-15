@@ -7,7 +7,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The tolerances template no longer rejects its own example row.** The
+  `Tolerance` column was validated as an integer, so the `0.5` shipped in the
+  downloadable template failed import with `invalid_numeric` — downloading the
+  template and uploading it unchanged was an error. Tolerance cells are now
+  checked with the comparison engines' own `parse_tolerance`, so the import
+  gate accepts exactly what the engines later read (`0.5`, `5%`, `abs:0.5`,
+  `percent:5`) and rejects the rest as `invalid_tolerance`. Integer fields
+  (BACnet device/object instance, reporting interval) are unchanged.
 
 ## [0.1.10] - 2026-07-14
 

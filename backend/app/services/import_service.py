@@ -11,6 +11,7 @@ from secrets import token_hex
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from smart_commissioning_core.db.repositories import ImportRepository
+from smart_commissioning_core.engines.comparison_common import parse_tolerance
 from sqlalchemy.engine import Engine
 
 from app.core.db import get_engine
@@ -103,11 +104,40 @@ def _validate_ip(row: dict[str, str], row_number: int, field: str) -> list[Impor
 
 
 def _validate_numeric(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
+    """Non-negative integers only — do not loosen to accept decimals.
+
+    This guards identity/count fields (BACnet device + object instance,
+    reporting interval) where a decimal is meaningless. Decimal-valued fields
+    have their own validators (see :func:`_validate_tolerance`).
+    """
     value = row.get(field, "").strip()
     if not value:
         return []
     if not value.isdigit():
         return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_numeric", message=f"{field} must be numeric.")]
+    return []
+
+
+def _validate_tolerance(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
+    """Accept exactly the tolerance forms the comparison engines understand.
+
+    A tolerance is a decimal ("0.5") or a percentage ("5%"), never an integer.
+    Delegating to ``parse_tolerance`` rather than re-stating its grammar keeps
+    the import gate from drifting out of step with the engines that parse these
+    cells later (comparison / point_validation, via build_tolerance_index).
+    """
+    value = row.get(field, "").strip()
+    if not value:
+        return []
+    if parse_tolerance(value) is None:
+        return [
+            ImportErrorRecord(
+                row_number=row_number,
+                field=field,
+                code="invalid_tolerance",
+                message=f"{field} must be a number (e.g. 0.5) or a percentage (e.g. 5%).",
+            )
+        ]
     return []
 
 
@@ -547,7 +577,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
         description="Point-level tolerances used by comparison validation.",
         required_columns=("Asset ID", "Point name", "Tolerance"),
         duplicate_key_fields=("Asset ID", "Point name"),
-        extra_checks=(_field_check("Tolerance", _validate_numeric),),
+        extra_checks=(_field_check("Tolerance", _validate_tolerance),),
     ),
 }
 
