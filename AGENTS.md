@@ -66,6 +66,15 @@ collection order is alphabetical — keep it so.
 
 ## Conventions
 
+- **Model routing (Claude Code)**: do planning, architecture, sizing, and
+  root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
+  **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
+  or delegate implementation subagents with `model: claude-opus-4-8`.
+- **Current handoff**: active work state and the next-release brief live in
+  `docs/handoff-2026-07-15-pete-walkthrough.md` (Pete's 2026-07-15 v0.1.10
+  walkthrough punch list, root causes with file:line evidence, and the
+  ready-to-paste v0.1.11 prompt). Read it before starting new work; update or
+  supersede it when the state changes.
 - **Commits**: Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`,
   `test:`). Log notable changes in `CHANGELOG.md`. See `CONTRIBUTING.md`.
 - **Sync**: after a verified commit, push its feature branch unless the user
