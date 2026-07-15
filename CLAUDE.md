@@ -70,11 +70,20 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: active work state and the next-release brief live in
-  `docs/handoff-2026-07-15-pete-walkthrough.md` (Pete's 2026-07-15 v0.1.10
-  walkthrough punch list, root causes with file:line evidence, and the
-  ready-to-paste v0.1.11 prompt). Read it before starting new work; update or
-  supersede it when the state changes.
+- **Current handoff**: active work state lives in
+  `docs/handoff-2026-07-15-pete-walkthrough.md` (the 2026-07-15 v0.1.10
+  walkthrough punch list, with root causes and file:line evidence). Read it
+  before starting new work; update or supersede it when the state changes.
+  Status as of 2026-07-15: **v0.1.11 is released** (on `main`, CI green — its
+  §6 prompt is spent). **v0.1.12** (BACnet foreign-device registration) is
+  implemented on `fix/v0.1.12-bacnet-foreign-device` and is hard-dated to a
+  live lab session on **2026-07-20** — see `docs/lab-day-2026-07-20-runbook.md`.
+  Note §3a carries two claims later disproven by source verification; the
+  corrections are marked inline.
+- **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
+  personnel, and commercial detail out of code, docs, and commit messages.
+  Technical root causes with file:line evidence are the point; operational
+  specifics belong in private notes.
 - **Commits**: Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`,
   `test:`). Log notable changes in `CHANGELOG.md`. See `CONTRIBUTING.md`.
 - **Sync**: after a verified commit, push its feature branch unless the user
@@ -113,3 +122,25 @@ collection order is alphabetical — keep it so.
 - **Real scans need authorization**: discovery/publish engines require
   `parameters.authorized = true` (or `scan_authorization`); a `dry_run` previews
   with no I/O and needs none.
+- **Locked-down (ThreatLocker/WDAC) machines: no local Python, but ruff still
+  works via WASM.** On managed corporate laptops the application allowlist
+  denies `ruff.exe` and ringfences `python.exe` so it cannot even *read* `.py`
+  files in this repo (`PermissionError`) — so `ruff check`, `unittest`, and
+  running the backend are all impossible locally, and **CI on a pushed branch is
+  the only Python validation path**. Node is not ringfenced, so ruff's WASM build
+  gives you a real lint gate:
+
+  ```bash
+  # in a scratch dir, NOT the repo — do not add this to any package.json
+  npm install @astral-sh/ruff-wasm-nodejs
+  ```
+
+  Then `new Workspace({...})` mirroring `ruff.toml` (`select`, `line-length`,
+  and the `flake8-bugbear.extend-immutable-calls` list — omit it and every
+  FastAPI `= Depends(...)` reports a false `B008`), and feed it each file's
+  source read with node's `fs`. Caveat: the Workspace gets no `src` setting, so
+  **`I001` is unreliable** for first-party `app.*` imports (they lint clean in
+  real CI) — but **`invalid-syntax` findings are config-independent and
+  trustworthy**. This is worth doing before any push: a stray tool-call XML tag
+  left in a test file once reddened `main` as a plain syntax error, and because
+  ruff runs before the unit tests it blocked the whole suite.
