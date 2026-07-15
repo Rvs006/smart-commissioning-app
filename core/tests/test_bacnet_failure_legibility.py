@@ -980,5 +980,68 @@ class ExpectedButSilentTests(unittest.TestCase):
         self.assertIn("no answer to a directed Who-Is sent to 10.10.0.99", issue.description)
 
 
+class ResultSummaryTransportStampTests(unittest.TestCase):
+    """The results badge reads the transport from the TOP level of result_summary.
+
+    ``discoveryRows.ts`` cannot import ``bacnet_params`` — it is TypeScript — so
+    this seam is held together by spelling alone, and it drifted immediately: the
+    mode was stamped only at ``bacnet_diagnostics.mode`` while
+    ``bacnetTransportClause()`` read ``result_summary.bacnet_mode``, so the clause
+    returned "" and EVERY live run's badge rendered "Live bacpypes3 scan." naming
+    no transport at all. A foreign-device registration would have been configured,
+    honoured by the engine, and then invisible on the one surface built to prove
+    it — which is precisely the bug this release exists to fix, wearing a
+    different hat.
+
+    The frontend suite could not catch it: its fixtures hand-build a summary with
+    these keys at the top level, so they assert against a shape the engine never
+    produced and stayed green throughout. These tests pin the shape production
+    ACTUALLY emits, spelled through the contract constants, so the next drift
+    fails here instead of on a lab floor.
+    """
+
+    def test_a_broadcast_run_stamps_its_mode_at_the_top_level(self) -> None:
+        store = FakeRunStore()
+        backend = _RecordingBackend(devices=[])
+        _run(store, {**_AUTHORIZED, "local_address": _INTERFACE}, backend)
+
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary[PARAM_BACNET_MODE], MODE_BROADCAST)
+        # A broadcast run has no BBMD. Stamping an empty value would read as
+        # "recorded, and it was blank" — the frontend distinguishes the two.
+        self.assertNotIn(PARAM_BBMD_ADDRESS, summary)
+
+    def test_a_foreign_device_run_stamps_the_mode_and_the_bbmd_at_the_top_level(self) -> None:
+        store = FakeRunStore()
+        backend = _RecordingBackend(devices=[])
+        fd_backend = _RecordingBackend(devices=[])
+        _run(
+            store,
+            {
+                **_AUTHORIZED,
+                "local_address": _INTERFACE,
+                PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
+                PARAM_BBMD_ADDRESS: "10.0.0.5",
+            },
+            backend,
+            fd_backend=fd_backend,
+        )
+
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary[PARAM_BACNET_MODE], MODE_FOREIGN_DEVICE)
+        self.assertEqual(summary[PARAM_BBMD_ADDRESS], "10.0.0.5")
+
+    def test_the_stamp_survives_the_runs_that_most_need_explaining(self) -> None:
+        # The summary record is seeded BEFORE the scan, so a run that dies mid-scan
+        # still names its intended transport. Otherwise the badge goes blank on
+        # exactly the failures an operator is trying to read.
+        store = FakeRunStore()
+        backend = _RecordingBackend(who_is_error=RuntimeError("transport died mid-scan"))
+        result, _ = _run(store, {**_AUTHORIZED, "local_address": _INTERFACE}, backend)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.summary_calls[-1][PARAM_BACNET_MODE], MODE_BROADCAST)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -91,6 +91,8 @@ from smart_commissioning_core.engines.bacnet_params import (
     DEFAULT_BBMD_PORT,
     MODE_BROADCAST,
     MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_MODE,
+    PARAM_BBMD_ADDRESS,
     PARAM_BBMD_PORT,
     BacnetTarget,
     bacnet_mode,
@@ -1753,6 +1755,24 @@ def _new_summary_record(
     backend_name = _backend_name(backend)
     return {
         "backend": backend_name,
+        # Top-level transport stamp, deliberately duplicating
+        # bacnet_diagnostics.mode below. The results page reads these two keys
+        # at the TOP level to name the transport on the run badge, and it cannot
+        # import bacnet_params (TypeScript), so the contract crosses that seam by
+        # spelling alone. Nesting them only under bacnet_diagnostics made the
+        # badge silently render "Live bacpypes3 scan." with no transport named —
+        # a configured foreign-device registration honoured by the engine and
+        # then invisible on the one surface built to prove it. Which is the bug
+        # this release exists to fix, wearing a different hat. Keep these keys
+        # and frontend/src/features/workflow/discoveryRows.ts in step.
+        PARAM_BACNET_MODE: mode,
+        # FD runs only: broadcast runs have no BBMD, and stamping an empty
+        # string would read as "recorded, and it was blank".
+        **(
+            {PARAM_BBMD_ADDRESS: bbmd_address(ctx.parameters)}
+            if mode == MODE_FOREIGN_DEVICE
+            else {}
+        ),
         "device_instance_low": low,
         "device_instance_high": high,
         "device_count": 0,
