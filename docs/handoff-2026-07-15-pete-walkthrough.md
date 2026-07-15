@@ -17,20 +17,50 @@ do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
 
 ## 1. Context
 
-- **Pete** — field engineer at ELECTRACOM, validating the app on his laptop and
-  an MSI server. He walked through v0.1.10 end-to-end on 2026-07-15 (IP
+- **Pete** — the field engineer validating the app, running it on a laptop and
+  on a customer server. He walked through v0.1.10 end-to-end on 2026-07-15 (IP
   discovery → BACnet → MQTT discovery → UDMI workbench → reports) and produced
-  the punch list below. John and Dylan will add feedback later.
+  the punch list below. Other reviewers will add feedback later.
+  (This repo is public: keep site names, addresses, personnel and commercial
+  detail out of it. Operational specifics live in the private notes, not here.)
 - **Verdict: NOT an overhaul.** No architecture changes. ~25 items,
   ~30–35 engineer-days total if everything ships; the field-critical core is
   ~2 weeks split into two releases (v0.1.11, v0.1.12).
-- **Hard date:** Pete's home lab (~60 devices, 3 servers, BBMD, real BACnet/
-  MQTT field devices) comes online over the weekend; deep scan session is
+- **Hard date:** a large device lab (BBMD plus real BACnet/MQTT field devices)
+  comes online over the weekend; the deep scan session is
   **Monday 2026-07-20**. The BACnet fix (v0.1.12 headline) should be ready then.
 - **Decision made on the call:** drop the Docker distribution; the portable exe
   is the only supported path going forward (Docker can't reach host L2 for
   scans). Do NOT remove the hosted multi-user profile code (api_key/Postgres/
   Redis/Hub) — it is Docker-independent; only the Docker packaging/docs go.
+
+### 1a. Reconciled against Pete's own notes doc (2026-07-15)
+
+Pete's emailed notes (24 numbered items + 16 screenshots) were checked against
+this punch list: **every item maps onto work already listed below, and the doc
+adds no new work item.** Three details it records that this handoff originally
+did not — none of which change v0.1.11 scope:
+
+1. **The look-and-feel target is named.** Pete: "use the UDMI page and apply
+   this look and feel to the other pages." The UDMI workbench is the canonical
+   reference for the consistency item (§4 IP Discovery, deferred to *Later*) —
+   not a fresh design.
+2. **The MQTT inspector wants message metadata, not just the payload.** Pete:
+   "can we see if it's retained, when it was published, QoS level of message."
+   The §4 MQTT inspector item (small 0.5d) only planned payload + JsonTree.
+   Check whether `mqtt_discovery` even captures retain/QoS/publish-time before
+   sizing this — if not, it is an engine change, not a UI wiring change, and the
+   0.5d estimate is wrong. (v0.1.12.)
+3. **"Documents at top of page in line with the changes"** is its own item; this
+   handoff folded it into the placeholder-content purge. (*Later*.)
+
+Screenshot corroboration worth knowing: his rejected-import screenshot shows
+exactly `REJECTED / 0 accepted · 4 rejected` with no reasons (§3b(1) is the
+headline fix of v0.1.11), and his filename was already date-suffixed
+(`..._template150726.csv`) — he had been working around the same-filename skip
+(§3b(3)) by hand. His UDMI failure screenshot shows `live_capture_timeout` →
+run status **FAILED** with "expected 4 / publishing 3", which is precisely the
+§4 "don't fail run on silent devices" fix (v0.1.12).
 
 ---
 
@@ -55,7 +85,7 @@ Consequences Pete observed, none of which are data loss:
    always lands on the hidden "setup" step. Clicking the "3 Results" step button
    reveals it. jsdom tests can't catch this class of bug (theme CSS not applied).
 2. **"IP discovery loses results on navigate-away."** Page state is
-   component-local `useState` reset on remount (`routes.tsx:24-29` remounts
+   component-local `useState` reset on remount (`app/routes.tsx:24-29` remounts
    ModulePage per path). Server-side run persistence is fine — `GET /runs` /
    `GET /discovery/runs` list runs newest-first with `job_type` filter
    (`client.ts:889` already supports the params). Fix = rehydrate the latest
@@ -89,8 +119,9 @@ The live bacpypes3 path supports **only local-subnet broadcast Who-Is**:
 - Empty Who-Is → run ends `status=succeeded`, `device_count=0`, silently
   (`bacnet_discovery.py:643,691-706`)
 
-Pete's device 123123 sits behind a BBMD at 10.10.10.22; his third-party browser
-sees it precisely because it does foreign-device registration. Secondary
+The target device sits behind a BBMD (real address is in the run register, not
+repeated here); a third-party BACnet browser sees that device precisely because
+it performs foreign-device registration. Secondary
 hypothesis: that browser holds UDP 47808 exclusively → bacpypes3 bind
 `OSError` → blanket except → sanitized generic failure (`engines/base.py:323-326,431-432`).
 
@@ -162,8 +193,8 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 |---|---|---|
 | Version pill on hero/brand bar | small 0.5d | Version exists only at build time (`build.ps1:91-119`; CI passes `workflow_dispatch` input). Set `$env:VITE_APP_VERSION = $BuildVersion` before `npm run build` (~`build.ps1:198`); read `import.meta.env.VITE_APP_VERSION` (precedent: `VITE_REVIEW_COMMENTS`, `App.tsx:166`); render pill in brand bar (`App.tsx:~99`). Optional: echo version in `/api/v1/health`. Risk: `-SkipFrontend` reuses a dist with old baked version — add guard like the `-SkipFreeze` one (`build.ps1:212-215`). |
 | ELECTRACOM logo not showing (exe) | trivial 0.25d | File ships in dist; FastAPI SPA fallback returns index.html for `/electracom-logo.png` because only `dist/assets` is mounted (`main.py:165-168`, fallback `:184-189`). Fix generically: if requested path resolves to a real file inside FRONTEND_DIST (traversal-guarded), `FileResponse` it. Covers all future `public/` files. Add a logo-200 assertion to the portable boot smoke. |
-| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on Pete's machines — needs migration or release note. |
-| Menu naming: "BACnet" → "BACnet Discovery" | trivial 0.25d | `NAV_GROUPS` in `App.tsx:13-39`; also reconcile `pageTitles` (`App.tsx:41-53`) and `moduleData.ts` titles (three layers disagree: "IP Scanner" vs "IP Discovery" etc.). Label-only, routes unchanged (precedent `moduleData.ts:121-125`). |
+| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `app/App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on Pete's machines — needs migration or release note. |
+| Menu naming: "BACnet" → "BACnet Discovery" | trivial 0.25d | `NAV_GROUPS` in `app/App.tsx:13-39`; also reconcile `pageTitles` (`app/App.tsx:41-53`) and `moduleData.ts` titles (three layers disagree: "IP Scanner" vs "IP Discovery" etc.). Label-only, routes unchanged (precedent `moduleData.ts:121-125`). |
 | Config tab sub-sections | small 1d | Seven flat accordion sections already exist (`ConfigurationPage.tsx:26-34`). Add group headers (Connections / System / Maintenance). Recommended extra: wire the fully-built signed backup endpoint (`POST /evidence/backup`, `backup_service.py`) to a "Download backup now" button — it currently has zero UI. |
 | Logging destinations | medium 2.5d | The whole Logging & Diagnostics config section is **decorative** — no code reads Remote Syslog Target/Port/Retention/Diagnostics Mode; no syslog handler exists. Actual logging = one JSON StreamHandler (`core/logging.py:151-173`). (a) local `RotatingFileHandler` to `RUNTIME_ROOT/logs/app.log` ~1d; (b) engineer-gated "Upload logs now" to a configured URL (httpx already frozen) ~1.5d. Secrets-masking + write-only sentinel for upload creds required. |
 | Certs "Not configured" pill | small 0.5d | ALL section status pills are static seeded strings never recomputed (`configuration_service.py:86`, save persists whatever the client echoes). Derive certificates status server-side on load from resolvable `secret://` refs + stored expiry (reuse `_secret_path().exists()`, `_stored_certificate_expiry:612-629`). Pete IS reloading keys so it may also genuinely be unconfigured. |
@@ -229,10 +260,10 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 browser-open question (§3a); RAG demotion of "pass with notes" (§4 UDMI);
 which browser he uses (confirms the same-filename no-change-event behavior).
 
-**Non-code context:** Raj's Claude subscription limit resets Fri/Sat; Pete was
-asking John about expensing a Max subscription. Pete emailed his own notes doc
-("smart commissioning app mods"). ITP = integrated testing and planning —
-reports feed ITP witnessing packs, hence the branding item.
+**Non-code context:** Pete emailed his own notes doc ("smart commissioning app
+mods") — its 24 items match this punch list exactly and add no new work.
+ITP = integrated testing and planning — reports feed ITP witnessing packs,
+hence the branding item.
 
 ---
 
