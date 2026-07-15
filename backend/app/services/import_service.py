@@ -1,3 +1,4 @@
+import codecs
 import csv
 import io
 import ipaddress
@@ -147,14 +148,30 @@ def _validate_topic(row: dict[str, str], row_number: int, field: str) -> list[Im
     return []
 
 
+# A whole number, optionally written with an integral decimal part: Excel
+# routinely saves a numeric column as "60.0", which asserts the same cadence as
+# "60". Deliberately narrower than float(): "1e2", "+60", "inf" and "60.5" stay
+# rejected. Used ONLY by _validate_positive_numeric (mqtt_register's Expected
+# reporting interval) — _validate_numeric above stays strict because it guards
+# genuinely-integer BACnet fields shared by other profiles.
+_WHOLE_NUMBER_RE = re.compile(r"\d+(\.0+)?")
+
+
 def _validate_positive_numeric(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
-    errors = _validate_numeric(row, row_number, field)
-    if errors:
-        return errors
-    try:
-        if float(row.get(field, "").strip()) <= 0:
-            raise ValueError
-    except ValueError:
+    value = row.get(field, "").strip()
+    if not value:
+        # Blank is the required-column check's business, not ours.
+        return []
+    if not _WHOLE_NUMBER_RE.fullmatch(value):
+        return [
+            ImportErrorRecord(
+                row_number=row_number,
+                field=field,
+                code="invalid_numeric",
+                message=f"{field} must be a whole number of seconds (e.g. 60 — Excel decimals like 60.0 are accepted, 60.5 is not).",
+            )
+        ]
+    if float(value) <= 0:
         return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_number", message=f"{field} must be greater than zero.")]
     return []
 
@@ -203,9 +220,12 @@ def _validate_mqtt_asset_topic(
             row_number=row_number,
             field=field,
             code="invalid_topic",
+            # Suffixes are interpolated from the tuple the gate above tests, so
+            # the message can never drift from the rule it explains.
             message=(
-                f"{field} must use a fixed asset prefix ending in /# or identify "
-                "that asset's state, metadata, or event(s)/pointset topic; '+' is not allowed."
+                f"{field} must end with one of {', '.join(_ASSET_TOPIC_SUFFIXES)} — e.g. "
+                "'site/b1/fcu-04/#' covers that asset's state, metadata and events/pointset "
+                "topics; '+' wildcards are not allowed."
             ),
         )
     ]
@@ -649,6 +669,46 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
 }
 
 
+def _decode_csv_bytes(file_bytes: bytes) -> str:
+    """Decode an uploaded CSV, tolerating the ways Excel actually saves them.
+
+    Raises ValueError (which the route turns into a 400 with this text) rather
+    than letting a raw codec message reach the operator. Best-effort by design:
+    this is not encoding detection. A file that is neither UTF-8 nor UTF-16 is
+    *assumed* to be Windows-1252 (Excel's "CSV (comma delimited)" save), so a
+    cp1250 file decodes with a few wrong accents instead of erroring.
+    """
+    if file_bytes.startswith(b"PK\x03\x04"):
+        raise ValueError(
+            "This file is an Excel XLSX workbook renamed to .csv — upload it with an .xlsx "
+            "extension or re-save it as 'CSV UTF-8 (comma delimited)'."
+        )
+    if file_bytes.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        # Excel's "Unicode Text" save. The utf-16 codec consumes either BOM.
+        text = file_bytes.decode("utf-16")
+    else:
+        try:
+            text = file_bytes.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                text = file_bytes.decode("cp1252")
+            except UnicodeDecodeError as error:
+                # cp1252 leaves 0x81/0x8D/0x8F/0x90/0x9D unmapped, so this is
+                # reachable for genuinely binary uploads.
+                raise ValueError(
+                    "CSV file is not readable text (tried UTF-8 and Windows-1252). Re-save it "
+                    "from Excel as 'CSV UTF-8 (comma delimited)'."
+                ) from error
+    if "\x00" in text:
+        # BOM-less UTF-16-LE ASCII is valid UTF-8 full of NULs, so it decodes
+        # "successfully" into garbage columns — catch it here instead.
+        raise ValueError(
+            "CSV file contains binary data (it may be UTF-16 without a byte-order mark). "
+            "Re-save it from Excel as 'CSV UTF-8 (comma delimited)'."
+        )
+    return text
+
+
 class ImportService:
     """Import batches with database-backed metadata.
 
@@ -795,15 +855,36 @@ class ImportService:
         raise ValueError(f"Unsupported file type: {file_type}")
 
     def _parse_csv(self, file_bytes: bytes) -> list[dict[str, str]]:
-        text = file_bytes.decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(text))
-        if reader.fieldnames is None:
-            raise ValueError("CSV file is missing a header row.")
+        text = _decode_csv_bytes(file_bytes)
         rows: list[dict[str, str]] = []
-        for raw_row in reader:
-            row = {_normalize_header(key): str(value or "").strip() for key, value in raw_row.items() if key is not None}
-            if any(value.strip() for value in row.values()):
-                rows.append(row)
+        try:
+            # newline="" hands the line endings to the csv module rather than to
+            # StringIO's universal-newline translation: without it a CR-only save
+            # (classic Excel for Mac) raises csv.Error — which is NOT a ValueError,
+            # so it escaped the route's 400 handler as a 500.
+            reader = csv.DictReader(io.StringIO(text, newline=""))
+            if reader.fieldnames is None:
+                raise ValueError("CSV file is missing a header row.")
+            if len(reader.fieldnames) == 1 and any(sep in reader.fieldnames[0] for sep in (";", "\t")):
+                # A regional Excel save. Without this the whole header parses as
+                # one column and every required column is reported missing, which
+                # tells the operator nothing about the actual problem. We say so
+                # rather than re-parsing with the guessed delimiter: auto-guessing
+                # mis-splits quoted content and would quietly accept a format the
+                # templates never promised.
+                raise ValueError(
+                    "CSV file is not comma-delimited (its header row uses ';' or tabs — a regional "
+                    "Excel CSV save). Re-save it as 'CSV UTF-8 (comma delimited)'."
+                )
+            for raw_row in reader:
+                row = {_normalize_header(key): str(value or "").strip() for key, value in raw_row.items() if key is not None}
+                if any(value.strip() for value in row.values()):
+                    rows.append(row)
+        except csv.Error as error:
+            # Residual csv failures (e.g. a field above csv.field_size_limit).
+            # csv.Error is not a ValueError, so it must be converted here or the
+            # route answers 500. The ValueErrors raised above pass through.
+            raise ValueError(f"CSV file could not be parsed: {error}") from error
         return rows
 
     def _parse_xlsx(self, file_bytes: bytes) -> list[dict[str, str]]:
