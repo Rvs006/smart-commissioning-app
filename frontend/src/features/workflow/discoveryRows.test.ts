@@ -52,10 +52,82 @@ describe("bacnetBackendLabel", () => {
   });
 
   it("confirms a real bacpypes3 scan", () => {
+    // No transport stamp (a run predating v0.1.12): the label says the scan was
+    // live and stops there.
     expect(bacnetBackendLabel(bacnetResults({ backend: "bacpypes3" }))).toEqual({
       kind: "live",
       text: "Live bacpypes3 scan.",
     });
+  });
+
+  it("names the BBMD a foreign-device run registered with", () => {
+    // The whole point of v0.1.12's pill: an engineer who set Foreign Device =
+    // Enabled can confirm from the result that the run really went through the
+    // BBMD, rather than discovering weeks later that the setting was ignored.
+    expect(
+      bacnetBackendLabel(
+        bacnetResults({ backend: "bacpypes3", bacnet_mode: "foreign_device", bbmd_address: "10.10.30.4" }),
+      ),
+    ).toEqual({
+      kind: "live",
+      text: "Live bacpypes3 scan — foreign-device registration via BBMD 10.10.30.4.",
+    });
+  });
+
+  it("says local broadcast only when the run registered with no BBMD", () => {
+    // Consistent with the empty-state copy below: a local broadcast does not
+    // reach devices behind a BBMD or on another subnet. Seeing this on a run
+    // configured for Foreign Device is the visible symptom of the v0.1.12 bug.
+    expect(bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bacnet_mode: "broadcast" }))).toEqual({
+      kind: "live",
+      text: "Live bacpypes3 scan — local broadcast only (no foreign-device registration configured).",
+    });
+  });
+
+  it("does not claim broadcast for a live run that recorded no transport", () => {
+    // Absent mode is unknown, not broadcast. Inventing "local broadcast only"
+    // for a run that never stamped its transport would be a fabricated
+    // observation — and would falsely accuse a correctly-configured old run.
+    const label = bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bbmd_address: "10.10.30.4" }));
+    expect(label?.text).toBe("Live bacpypes3 scan.");
+    expect(label?.text).not.toMatch(/broadcast|foreign/i);
+  });
+
+  it("reports a foreign-device run with no BBMD recorded instead of inventing one", () => {
+    // The engine fails such a run outright, so this is defensive: say what is
+    // missing rather than silently downgrading the claim to broadcast.
+    const label = bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bacnet_mode: "foreign_device" }));
+    expect(label?.text).toBe("Live bacpypes3 scan — foreign-device registration (BBMD address not recorded).");
+    expect(label?.text).not.toMatch(/local broadcast/i);
+  });
+
+  it("surfaces an unrecognised transport mode rather than guessing one", () => {
+    const label = bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bacnet_mode: "carrier-pigeon" }));
+    expect(label?.text).toBe("Live bacpypes3 scan — transport: carrier-pigeon.");
+  });
+
+  it("ignores blank or non-string transport stamps", () => {
+    expect(bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bacnet_mode: "   " }))?.text).toBe(
+      "Live bacpypes3 scan.",
+    );
+    expect(bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bacnet_mode: 7 }))?.text).toBe(
+      "Live bacpypes3 scan.",
+    );
+    // A foreign-device run whose bbmd_address is blank must not render an empty gap.
+    expect(
+      bacnetBackendLabel(bacnetResults({ backend: "bacpypes3", bacnet_mode: "foreign_device", bbmd_address: "" }))
+        ?.text,
+    ).toBe("Live bacpypes3 scan — foreign-device registration (BBMD address not recorded).");
+  });
+
+  it("leaves a simulated backend's label free of transport claims", () => {
+    // Simulated devices never touched the wire; a transport clause would imply
+    // packets that were never sent.
+    expect(
+      bacnetBackendLabel(
+        bacnetResults({ backend: "simulated", bacnet_mode: "foreign_device", bbmd_address: "10.10.30.4" }),
+      )?.text,
+    ).toBe("SIMULATED — demo data, not a real BACnet scan.");
   });
 
   it("surfaces an unrecognised backend neutrally instead of swallowing it", () => {
@@ -360,6 +432,67 @@ describe("discoveryEmptyStateFor", () => {
     const state = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", {}));
     expect(state?.detail).toMatch(/No devices answered the Who-Is\./);
     expect(state?.detail).not.toMatch(/instance range/);
+  });
+
+  it("prefers the engine's empty_scan_hint verbatim over the generic BACnet copy", () => {
+    // The engine knows what the run actually did — that it registered with the
+    // BBMD and the devices still stayed silent. That is a different diagnosis
+    // from the fallback's "may not receive a local broadcast", and paraphrasing
+    // or appending to it would put a second, less-informed voice on screen.
+    const hint =
+      "Registered with BBMD 10.10.30.4, but no devices answered the Who-Is (instances 0–4194303) " +
+      "within 3s. Check the device-instance range and the BBMD's broadcast distribution.";
+    const state = discoveryEmptyStateFor(
+      "bacnet-discovery",
+      emptyResults("succeeded", {
+        device_count: 0,
+        device_instance_low: 0,
+        device_instance_high: 4194303,
+        empty_scan_hint: hint,
+      }),
+    );
+    expect(state?.title).toBe("Discovery complete — no BACnet devices responded");
+    expect(state?.detail).toBe(hint);
+    // Verbatim means verbatim: the fallback's wording must not be mixed in.
+    expect(state?.detail).not.toMatch(/may not receive a local broadcast/);
+  });
+
+  it("keeps the pre-hint fallback copy for runs that stamped no hint", () => {
+    // Runs recorded before v0.1.12 carry no hint; they must still explain
+    // themselves rather than regress to bare "no results".
+    const state = discoveryEmptyStateFor(
+      "bacnet-discovery",
+      emptyResults("succeeded", { device_count: 0, device_instance_low: 1, device_instance_high: 4194303 }),
+    );
+    expect(state?.detail).toMatch(/No devices answered the Who-Is \(instance range 1–4194303\)/);
+    expect(state?.detail).toMatch(/may not receive a local broadcast/);
+  });
+
+  it("falls back when the hint is blank or not a string", () => {
+    const blank = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", { empty_scan_hint: "  " }));
+    expect(blank?.detail).toMatch(/No devices answered the Who-Is/);
+    const nonString = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", { empty_scan_hint: 42 }));
+    expect(nonString?.detail).toMatch(/No devices answered the Who-Is/);
+  });
+
+  it("does not let a hint override a failed or dry run", () => {
+    // A hint describes an observation. A failed run recorded none, and a dry run
+    // sent no packets — either reading as "we looked and found nothing" is the
+    // exact dishonesty the status/dry_run ordering exists to prevent.
+    const failed = discoveryEmptyStateFor(
+      "bacnet-discovery",
+      emptyResults("failed", { empty_scan_hint: "No devices answered the Who-Is." }),
+      "The BBMD at 10.10.30.4:47808 refused foreign-device registration (result code 3).",
+    );
+    expect(failed?.title).toBe("Run failed — no results recorded");
+    expect(failed?.detail).toBe("The BBMD at 10.10.30.4:47808 refused foreign-device registration (result code 3).");
+
+    const dry = discoveryEmptyStateFor(
+      "bacnet-discovery",
+      emptyResults("succeeded", { dry_run: true, empty_scan_hint: "No devices answered the Who-Is." }),
+    );
+    expect(dry?.title).toMatch(/Dry run complete — preview only/);
+    expect(dry?.detail).toMatch(/No packets were sent/);
   });
 
   it("names the capture window for an empty MQTT capture", () => {

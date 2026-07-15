@@ -329,9 +329,15 @@ export function ConfigurationPage() {
       .map((iface) => iface.name),
   ).size;
 
+  // The saved snapshot is loaded as-is. It used to be run through a
+  // "normalize for locks" pass that force-reset Foreign Device to Disabled
+  // whenever BBMD was Enabled — and since the seeded default is BBMD=Enabled,
+  // that silently un-set the one BACnet setting discovery depends on, on every
+  // load, on a default install. Foreign-device registration and the BBMD toggle
+  // are independent: this app is never itself a BBMD (v0.1.12).
   useEffect(() => {
     if (configurationQuery.data) {
-      setDraft(normalizeConfigurationForLocks(configurationQuery.data));
+      setDraft(configurationQuery.data);
       setValidationErrors([]);
     }
   }, [configurationQuery.data]);
@@ -422,7 +428,9 @@ export function ConfigurationPage() {
     mutationFn: (payload: ConfigurationExport | ConfigurationSnapshot) => importConfiguration(payload),
     onSuccess: (savedConfiguration) => {
       queryClient.setQueryData(["configuration"], savedConfiguration);
-      setDraft(normalizeConfigurationForLocks(savedConfiguration));
+      // As saved by the API — an imported snapshot prepared off-site for the
+      // lab keeps its Foreign Device setting instead of being reset on arrival.
+      setDraft(savedConfiguration);
       setValidationErrors([]);
       setTransferError(null);
       setTransferMessage("Imported configuration was validated by the API and saved as the new snapshot.");
@@ -438,18 +446,10 @@ export function ConfigurationPage() {
       if (!current) {
         return current;
       }
-      if (section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(current)) {
-        return current;
-      }
-
       const nextValues = {
         ...current[section].values,
         [field]: value,
       };
-
-      if (section === "bacnet" && field === "BBMD" && value === "Enabled") {
-        nextValues["Foreign Device"] = "Disabled";
-      }
 
       return {
         ...current,
@@ -746,7 +746,6 @@ export function ConfigurationPage() {
                       return (
                       <FieldControl
                         canEngineer={canEngineer}
-                        disabled={section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)}
                         expired={field === CERT_EXPIRY_FIELD && isExpired(value)}
                         field={field}
                         hint={showAutoHint ? AUTO_MULTI_ADAPTER_HINT : fieldHint(section, field, draft)}
@@ -793,19 +792,16 @@ function isIpLiteral(value: string): boolean {
   return /^\d+\.\d+\.\d+\.\d+$/.test(trimmed) || trimmed.includes(":");
 }
 
-// Per-field helper text. Beyond the BBMD lock hint, the certificate-expiry
-// field gets an honest status note explaining it is a derived indicator (red
-// when the stored expiry date is in the past) rather than a value to type, and
-// the MQTT TLS fields carry non-blocking warnings when the host/port pairing
-// looks inconsistent with the Use TLS choice.
+// Per-field helper text. The certificate-expiry field gets an honest status
+// note explaining it is a derived indicator (red when the stored expiry date is
+// in the past) rather than a value to type, and the MQTT TLS fields carry
+// non-blocking warnings when the host/port pairing looks inconsistent with the
+// Use TLS choice.
 function fieldHint(
   section: ConfigurationSectionKey,
   field: string,
   draft: ConfigurationSnapshot,
 ): string | undefined {
-  if (section === "bacnet" && field === "Foreign Device" && isBbmdEnabled(draft)) {
-    return "Locked because BBMD is enabled.";
-  }
   if (section === "mqtt" && field === "MQTT Broker FQDN or IP Address") {
     const host = draft.mqtt.values[field] ?? "";
     if (draft.mqtt.values["Use TLS"] === "Enabled" && isIpLiteral(host)) {
@@ -856,11 +852,14 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "BACnet Network Number": "Logical BACnet network this gateway lives on.",
   "UDP Port": "BACnet/IP UDP port (default 47808).",
   "Device Instance Range": "Range of BACnet device instance IDs to discover.",
-  BBMD: "BACnet Broadcast Management Device — relays broadcasts across subnets.",
-  "BBMD Address": "IP of the BBMD to register with.",
-  "BBMD UDP Port": "UDP port of the BBMD.",
-  "Foreign Device": "Register as a BBMD foreign device (locked when BBMD is enabled).",
-  TTL: "Foreign-device registration time-to-live, in seconds.",
+  BBMD:
+    "Informational note that a BBMD relays BACnet broadcasts across subnets. Discovery does not read this toggle — enable Foreign Device to actually register with a BBMD.",
+  "BBMD Address":
+    "IP of the BBMD that discovery registers with when Foreign Device is Enabled. Must be a real BBMD on the site network; the seeded value is demo data.",
+  "BBMD UDP Port": "UDP port of the BBMD (default 47808).",
+  "Foreign Device":
+    "Register with the BBMD at BBMD Address so discovery reaches devices on other subnets — required when the target devices sit behind a BBMD. This is the setting BACnet discovery actually uses.",
+  TTL: "Foreign-device registration time-to-live, in seconds (default 300).",
   // MQTT Settings
   "MQTT Broker FQDN or IP Address": "Hostname or IP of the MQTT broker to connect to.",
   Port: "MQTT broker TCP port (1883 plain, 8883 TLS).",
@@ -1079,26 +1078,6 @@ function FieldControl({
       {hint && <small>{hint}</small>}
     </label>
   );
-}
-
-function normalizeConfigurationForLocks(configuration: ConfigurationSnapshot): ConfigurationSnapshot {
-  if (configuration.bacnet.values.BBMD !== "Enabled") {
-    return configuration;
-  }
-  return {
-    ...configuration,
-    bacnet: {
-      ...configuration.bacnet,
-      values: {
-        ...configuration.bacnet.values,
-        "Foreign Device": "Disabled",
-      },
-    },
-  };
-}
-
-function isBbmdEnabled(configuration: ConfigurationSnapshot): boolean {
-  return configuration.bacnet.values.BBMD === "Enabled";
 }
 
 // Serialises an exported envelope to a downloadable JSON file via a transient

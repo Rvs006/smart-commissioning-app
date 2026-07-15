@@ -218,6 +218,67 @@ export function discoveryViewFor(
   return null;
 }
 
+// result_summary keys and values the BACnet engine stamps to describe the
+// transport a live run ACTUALLY used. Their spellings are owned on the Python
+// side by core/smart_commissioning_core/engines/bacnet_params.py
+// (PARAM_BACNET_MODE, PARAM_BBMD_ADDRESS, MODE_BROADCAST, MODE_FOREIGN_DEVICE);
+// TypeScript cannot import that module, so they are mirrored here ONCE, by
+// name, and never re-spelled at a call site. If the Python constants move,
+// these move with them — the vitest cases pin the current spellings so the
+// mirror cannot drift silently.
+const SUMMARY_BACNET_MODE = "bacnet_mode";
+const SUMMARY_BBMD_ADDRESS = "bbmd_address";
+const MODE_BROADCAST = "broadcast";
+const MODE_FOREIGN_DEVICE = "foreign_device";
+
+// The engine-authored sentence explaining a live scan that found nothing. It is
+// built from what the run actually did (transport, BBMD registration outcome,
+// instance range, unanswered directed Who-Is), none of which this module can
+// derive from the summary alone.
+const SUMMARY_EMPTY_SCAN_HINT = "empty_scan_hint";
+
+// A non-blank string value from a result_summary, or null. Blank is treated as
+// absent: an empty stamp carries no information and must not be rendered as
+// though the engine had said something.
+function summaryText(summary: Record<string, unknown> | undefined, key: string): string | null {
+  const value = summary?.[key];
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+// The transport clause appended to a live-scan label. This is the operator's
+// proof that a configured Foreign Device registration was honoured: v0.1.12
+// exists because a transport setting was read, stored, and then silently
+// ignored, and a run whose pill says "local broadcast only" while the
+// Configuration page says Foreign Device = Enabled makes that visible in
+// seconds instead of never.
+//
+// An ABSENT mode returns "" rather than claiming broadcast. Runs from before
+// this stamp existed did not record their transport, and reporting "local
+// broadcast only" for them would be a fabricated observation about a run
+// nobody observed.
+function bacnetTransportClause(summary: Record<string, unknown> | undefined): string {
+  const mode = summaryText(summary, SUMMARY_BACNET_MODE);
+  if (mode === null) {
+    return "";
+  }
+  if (mode === MODE_BROADCAST) {
+    return " — local broadcast only (no foreign-device registration configured)";
+  }
+  if (mode === MODE_FOREIGN_DEVICE) {
+    const bbmd = summaryText(summary, SUMMARY_BBMD_ADDRESS);
+    // A foreign-device run with no BBMD recorded should not reach here (the
+    // engine fails such a run outright), so say what is missing rather than
+    // invent an address or downgrade the claim to broadcast.
+    return bbmd === null
+      ? " — foreign-device registration (BBMD address not recorded)"
+      : ` — foreign-device registration via BBMD ${bbmd}`;
+  }
+  // Unrecognised but present: report it, exactly as an unrecognised backend is
+  // reported below. Guessing a mode here would re-create the silently-ignored
+  // transport bug in the one place meant to expose it.
+  return ` — transport: ${mode}`;
+}
+
 // The BACnet engine stamps result_summary.backend with the backend that actually
 // ran: "simulated" (demo/dry-run sample devices — Acme Controls / Globex BMS) or
 // "bacpypes3" (a real on-wire Who-Is / ReadProperty scan). Surface it so an
@@ -225,6 +286,11 @@ export function discoveryViewFor(
 // a simulated backend (IP/MQTT do not), so callers gate on the bacnet-discovery
 // route; returns null when the summary carries no backend label (e.g. a run that
 // predates the label, or a failed run that persisted no summary).
+//
+// A live scan additionally names its transport (see bacnetTransportClause), so
+// the pill answers both "was this real?" and "how did it actually reach the
+// network?" — the second question is what Pete's zero-device run could not
+// answer.
 export type BacnetBackendLabel = {
   kind: "simulated" | "live" | "unknown";
   text: string;
@@ -241,7 +307,10 @@ export function bacnetBackendLabel(
     return { kind: "simulated", text: "SIMULATED — demo data, not a real BACnet scan." };
   }
   if (backend === "bacpypes3") {
-    return { kind: "live", text: "Live bacpypes3 scan." };
+    return {
+      kind: "live",
+      text: `Live bacpypes3 scan${bacnetTransportClause(results.result_summary)}.`,
+    };
   }
   // Unrecognised but present: report it neutrally rather than swallow it, so an
   // unexpected backend value is still visible instead of silently trusted.
@@ -442,13 +511,31 @@ export function discoveryEmptyStateFor(
   }
 
   if (route === "bacnet-discovery") {
+    const title = "Discovery complete — no BACnet devices responded";
+
+    // The engine authors empty_scan_hint from what the run ACTUALLY did: which
+    // transport it used, whether the BBMD acknowledged the registration, and
+    // how many directed Who-Is to register addresses went unanswered. None of
+    // that is derivable here, so when the hint is present it is always the more
+    // specific and more accurate sentence — render it VERBATIM rather than
+    // paraphrasing or appending to it. One authored string, no second voice
+    // that can contradict it.
+    const hint = summaryText(summary, SUMMARY_EMPTY_SCAN_HINT);
+    if (hint !== null) {
+      return { title, detail: hint };
+    }
+
+    // Fallback for runs that predate the hint (v0.1.11 copy, unchanged).
     // Who-Is is a broadcast, so there is no probed-count analogue; the
-    // configured instance range is the honest scope descriptor.
+    // configured instance range is the honest scope descriptor. It is
+    // deliberately consistent with — not a contradiction of — the engine's
+    // wording: both say a local broadcast cannot reach devices behind a BBMD or
+    // on another subnet.
     const low = num("device_instance_low");
     const high = num("device_instance_high");
     const range = low !== undefined && high !== undefined ? ` (instance range ${low}–${high})` : "";
     return {
-      title: "Discovery complete — no BACnet devices responded",
+      title,
       detail:
         `No devices answered the Who-Is${range}. Devices behind a BBMD or on another subnet ` +
         "may not receive a local broadcast.",

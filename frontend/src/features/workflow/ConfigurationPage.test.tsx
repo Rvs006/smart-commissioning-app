@@ -272,6 +272,109 @@ describe("ConfigurationPage", () => {
     expect(select.value).toBe("Disabled");
   });
 
+  // v0.1.12 — the Foreign Device unlock.
+  //
+  // Until now the UI refused to let Foreign Device be enabled while BBMD was
+  // Enabled, and the seeded default is BBMD=Enabled. So on a default install the
+  // one setting BACnet discovery depends on could not be turned on at all: the
+  // select was disabled, changeValue rejected the edit, flipping BBMD back to
+  // Enabled force-reset it, and the load-time normalizer reset it again on every
+  // page load. A field engineer hit exactly this and got a silent zero-device
+  // scan. The two controls are independent — this app is never itself a BBMD —
+  // so all four blockers are gone and these tests hold them gone.
+  //
+  // The fixture is Pete's shape: BBMD "Enabled", Foreign Device "Disabled".
+  it("lets Foreign Device be enabled while BBMD is Enabled (v0.1.12 unlock)", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdLabel = (await screen.findByText("Foreign Device")).closest("label");
+    expect(fdLabel).not.toBeNull();
+    const select = within(fdLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    expect(within(fdLabel as HTMLElement).queryByText(/Locked because BBMD is enabled/i)).not.toBeInTheDocument();
+
+    // The edit sticks — changeValue no longer swallows it.
+    fireEvent.change(select, { target: { value: "Enabled" } });
+    expect(select.value).toBe("Enabled");
+  });
+
+  it("does not reset Foreign Device when BBMD is switched back to Enabled", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdSelect = within((await screen.findByText("Foreign Device")).closest("label") as HTMLElement).getByRole(
+      "combobox",
+    ) as HTMLSelectElement;
+    const bbmdSelect = within(screen.getByText("BBMD").closest("label") as HTMLElement).getByRole(
+      "combobox",
+    ) as HTMLSelectElement;
+
+    fireEvent.change(fdSelect, { target: { value: "Enabled" } });
+    fireEvent.change(bbmdSelect, { target: { value: "Disabled" } });
+    fireEvent.change(bbmdSelect, { target: { value: "Enabled" } });
+
+    // The old auto-reset made this "Disabled" — silently discarding the
+    // operator's choice as a side effect of touching an unrelated toggle.
+    expect(fdSelect.value).toBe("Enabled");
+    expect(bbmdSelect.value).toBe("Enabled");
+  });
+
+  it("loads a saved Foreign Device = Enabled snapshot without resetting it", async () => {
+    // The load-time normalizer was the deepest of the four blockers: even with
+    // the select enabled, a stored FD=Enabled alongside BBMD=Enabled was reset
+    // to Disabled on every load, so the value could never survive a refresh.
+    const payload = configurationPayload();
+    // BBMD stays Enabled (fixture default) — the combination the normalizer used
+    // to treat as impossible.
+    payload.bacnet.values["Foreign Device"] = "Enabled";
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payload);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdSelect = within((await screen.findByText("Foreign Device")).closest("label") as HTMLElement).getByRole(
+      "combobox",
+    ) as HTMLSelectElement;
+    expect(fdSelect.value).toBe("Enabled");
+  });
+
+  it("tells the operator Foreign Device is the setting discovery uses, and BBMD is not", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdLabel = (await screen.findByText("Foreign Device")).closest("label");
+    expect(fdLabel).toHaveAttribute("title", expect.stringMatching(/discovery actually uses/i));
+    expect(fdLabel).toHaveAttribute("title", expect.stringMatching(/reaches devices on other subnets/i));
+    // The stale "(locked when BBMD is enabled)" claim is gone.
+    expect(fdLabel).not.toHaveAttribute("title", expect.stringMatching(/locked/i));
+
+    const bbmdLabel = screen.getByText("BBMD").closest("label");
+    expect(bbmdLabel).toHaveAttribute("title", expect.stringMatching(/Discovery does not read this toggle/i));
+  });
+
   it("warns that a TLS connection to an IP literal needs the certificate SAN", async () => {
     const payload = configurationPayload();
     // Use TLS stays Enabled (fixture default); the broker is a bare IP literal.
