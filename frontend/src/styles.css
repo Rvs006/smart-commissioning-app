@@ -1397,6 +1397,14 @@ input.field-expired {
   padding-left: 18px;
 }
 
+/* A large register can reject hundreds of rows; the 50-row render cap plus this
+   scroll box keeps the setup column usable. Red styling is inherited from
+   .state-panel.error — no new colour rules. */
+.state-panel.import-errors ul {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 .state-panel.success,
 .state-panel.accepted {
   background: var(--green-bg);

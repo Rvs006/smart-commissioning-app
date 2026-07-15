@@ -52,7 +52,7 @@ const ROLES: Role[] = [
         num: "2",
         title: "Map what is actually on the wire",
         rows: [
-          { lab: "Go to", text: "IP Discovery (IP Scanner)" },
+          { lab: "Go to", text: "IP Discovery" },
           {
             lab: "Do",
             text: "Run a scan across the site subnet and sort hosts into reachable, missing and unexpected against your device schedule.",
@@ -177,7 +177,7 @@ const ROLES: Role[] = [
         num: "2",
         title: "Check every designed device exists",
         rows: [
-          { lab: "Go to", text: "IP Discovery (IP Scanner)" },
+          { lab: "Go to", text: "IP Discovery" },
           {
             lab: "Do",
             text: "Scan and compare reachable hosts against your device schedule to spot missing controllers and unexpected extras.",
@@ -408,7 +408,7 @@ const ROLES: Role[] = [
         num: "2",
         title: "Confirm the gateway is reachable",
         rows: [
-          { lab: "Go to", text: "IP Discovery (IP Scanner)" },
+          { lab: "Go to", text: "IP Discovery" },
           {
             lab: "Do",
             text: "Scan to confirm the edge gateway and the BACnet side of the network respond at the addresses you configured.",
@@ -705,7 +705,7 @@ const FIRST_RUN: Lesson[] = [
     num: "2",
     title: "Run your first scan — safely",
     rows: [
-      { lab: "Go to", text: "IP Scanner" },
+      { lab: "Go to", text: "IP Discovery" },
       {
         lab: "Do",
         text: (

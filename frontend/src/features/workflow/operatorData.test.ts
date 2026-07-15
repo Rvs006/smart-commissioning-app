@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { UdmiAssetPayloadView } from "../../api/client";
-import { mergeAssetGroups, type AssetIssueGroup, type IssueRow } from "./operatorData";
+import {
+  mergeAssetGroups,
+  moduleWorkspaces,
+  type AssetIssueGroup,
+  type IssueRow,
+} from "./operatorData";
 
 function issue(id: string, assetId: string): IssueRow {
   return { id, assetId, severity: "minor", area: "pointset validation", message: "msg" };
@@ -64,5 +69,20 @@ describe("mergeAssetGroups (mq9m4bnv)", () => {
     expect(merged).toHaveLength(1);
     expect(merged[0].payloadTypes[0].hasPayloadView).toBe(false);
     expect(merged[0].payloadTypes[0].issues).toHaveLength(1);
+  });
+});
+
+describe("reports workspace fixture", () => {
+  // The reports workspace shipped four invented rows ("Excel issue report",
+  // "Word handover report", "Evidence pack", "Blocked report") that a reviewer
+  // read as reports the app had really produced. Real reports come from
+  // GET /reports and are listed by the Generated Reports table.
+  //
+  // This is a DATA-layer assertion on purpose. No DOM test can pin it: the
+  // `workspace?.rows` fallback that used to render these is gone, so restoring
+  // the rows changes nothing on screen — it just re-plants dead fixture data for
+  // the next fallback to surface. Assert on the fixture itself, at the source.
+  it("carries no fabricated sample rows", () => {
+    expect(moduleWorkspaces.reports.rows).toEqual([]);
   });
 });

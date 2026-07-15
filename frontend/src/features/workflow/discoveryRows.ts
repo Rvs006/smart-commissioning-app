@@ -358,3 +358,116 @@ export function validationMetrics(
 
   return null;
 }
+
+// Explicit empty-state copy for a *terminal* discovery run that produced no
+// rows. Without this every such outcome collapses into the same "No results
+// yet" as a head that has never run (Pete 2026-07-15: "it can't find anything,
+// but it doesn't really tell us").
+//
+// The honesty rule cuts both ways here:
+//  - Zero found on a SUCCEEDED run is a real observation, not a failure. Say
+//    what was probed and what answered, and never imply the run went wrong.
+//  - A FAILED or CANCELLED run must never read as "nothing found". No result
+//    was recorded at all, which is an entirely different claim.
+//
+// Ordering is load-bearing: status is resolved BEFORE summary.dry_run. Engines
+// stamp `dry_run` via base.py `_apply_success`, which writes result_summary on
+// every non-exception engine return and only *then* resolves the terminal
+// status through `_terminal_status` (base.py:363-382) — so a cancelled or
+// self-diagnosed-failed run still carries `dry_run: true`. Testing dry_run
+// first would label a cancelled dry run "Dry run complete", i.e. report a
+// completion that never happened.
+export type DiscoveryEmptyState = { title: string; detail: string };
+
+export function discoveryEmptyStateFor(
+  route: string,
+  results: DiscoveryResultsResponse | undefined,
+  errorMessage?: string | null,
+): DiscoveryEmptyState | null {
+  if (!results) {
+    return null;
+  }
+  const summary = results.result_summary ?? {};
+  const num = (key: string): number | undefined => {
+    const value = summary[key];
+    return typeof value === "number" ? value : undefined;
+  };
+
+  // A failure is not an observation: echo the engine's own diagnosis rather
+  // than implying the scan looked and found nothing. The run monitor remains
+  // the primary failure surface, so point at it instead of duplicating it.
+  if (results.status === "failed") {
+    return {
+      title: "Run failed — no results recorded",
+      detail:
+        errorMessage ??
+        "The run ended in failure before recording results. See the run monitor on the Run step for details.",
+    };
+  }
+  if (results.status === "cancelled") {
+    return {
+      title: "Run cancelled",
+      detail: "The run was cancelled before any results were recorded.",
+    };
+  }
+  if (results.status !== "succeeded") {
+    return null;
+  }
+
+  // A dry run sends no packets, so its zero counts describe the preview, not
+  // the network. This must precede the per-route copy below, whose "0 hosts
+  // probed" wording would otherwise read as a real negative finding.
+  if (summary.dry_run === true) {
+    return {
+      title: "Dry run complete — preview only",
+      detail:
+        "No packets were sent and no live results are expected. Run a real scan to populate results.",
+    };
+  }
+
+  if (route === "ip-scanner") {
+    const scanned = num("hosts_scanned");
+    let detail: string;
+    if (scanned === 0) {
+      detail = "0 hosts were probed — check the target override or the imported IP register.";
+    } else if (scanned !== undefined) {
+      detail =
+        `${scanned} host${scanned === 1 ? "" : "s"} probed — none answered on the scanned ports. ` +
+        "No response is not proof a host is absent; it only means nothing accepted a TCP " +
+        "connection on the probed ports.";
+    } else {
+      detail = "The scan completed, but no host answered on the scanned ports.";
+    }
+    return { title: "Scan complete — no responsive hosts found", detail };
+  }
+
+  if (route === "bacnet-discovery") {
+    // Who-Is is a broadcast, so there is no probed-count analogue; the
+    // configured instance range is the honest scope descriptor.
+    const low = num("device_instance_low");
+    const high = num("device_instance_high");
+    const range = low !== undefined && high !== undefined ? ` (instance range ${low}–${high})` : "";
+    return {
+      title: "Discovery complete — no BACnet devices responded",
+      detail:
+        `No devices answered the Who-Is${range}. Devices behind a BBMD or on another subnet ` +
+        "may not receive a local broadcast.",
+    };
+  }
+
+  if (route === "mqtt-discovery") {
+    // Defensive only: the engine currently stamps a zero-message capture as
+    // FAILED (capture_window_empty, mqtt_discovery.py:447-461), so this arm is
+    // unreachable today and must not be described as fixing an observable case.
+    const secs = num("capture_seconds");
+    const window = secs !== undefined ? ` during the ${secs}s capture window` : "";
+    return {
+      title: "Capture complete — no MQTT messages received",
+      detail:
+        `No messages arrived on the subscribed topic filters${window}. Zero traffic is a real ` +
+        "observation — check that devices are publishing and the topic filter matches.",
+    };
+  }
+
+  return null;
+}

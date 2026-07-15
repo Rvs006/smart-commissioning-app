@@ -1,5 +1,5 @@
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   cancelRun,
   createImport,
@@ -10,6 +10,7 @@ import {
   getDiscoveryRun,
   getDiscoveryTopics,
   getDiscoveryTopicsXlsxPath,
+  getImportErrors,
   getValidationIssues,
   getValidationRun,
   getImportTemplatePath,
@@ -18,6 +19,7 @@ import {
   ImportType,
   listImportProfiles,
   listReports,
+  listRuns,
   listUdmiSchemaSets,
   rollbackMqttConfigPublish,
   startMqttConfigPublishRun,
@@ -44,6 +46,7 @@ import {
 } from "./operatorData";
 import {
   bacnetBackendLabel,
+  discoveryEmptyStateFor,
   discoveryMetrics,
   discoveryViewFor,
   expectedPortsOk,
@@ -53,7 +56,7 @@ import {
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
-import { isTerminalStatus, toHealthState } from "./runFormat";
+import { formatAbsoluteTime, isTerminalStatus, toHealthState } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
@@ -83,9 +86,13 @@ type PointValuePair = {
 };
 
 // Which kind of run is being monitored, so we poll the right status endpoint.
+// `restored` marks a run rehydrated from run history on page arrival rather than
+// started by the operator here and now: it re-attaches the monitor and results
+// without hijacking the step the operator is looking at (see the seed effect).
 type ActiveRun = {
   runId: string;
   kind: "discovery" | "validation";
+  restored?: boolean;
 };
 
 // The module page is split into three stages so the operator works one screen
@@ -93,6 +100,11 @@ type ActiveRun = {
 type ModuleStep = "setup" | "run" | "results";
 
 const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discovery"]);
+
+// A large register can reject hundreds of rows. Render the first N and state the
+// honest remainder count rather than building pagination for a pre-1.0 fix:
+// fixing the listed rows and re-uploading surfaces the rest.
+const IMPORT_ERROR_DISPLAY_CAP = 50;
 
 const validationModeCards = [
   {
@@ -201,6 +213,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // all engineer+ mutations server-side. A viewer/reviewer sees these controls
   // disabled with an explanatory tooltip rather than letting the click 403.
   const { canEngineer } = useSession();
+  const queryClient = useQueryClient();
   const module = getModuleByRoute(moduleRoute);
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
@@ -275,6 +288,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [captureTopicFilter, setCaptureTopicFilter] = useState("#");
   const [captureSeconds, setCaptureSeconds] = useState("10");
   const [step, setStep] = useState<ModuleStep>("setup");
+  // Snap target for the results-open scroll: the top-of-page hero section.
+  const heroRef = useRef<HTMLElement | null>(null);
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
@@ -380,6 +395,49 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["udmi-schema-sets"],
   });
 
+  // Per-row rejection reasons for the import just uploaded. The POST returns
+  // counts only, so a rejected upload used to say "4 rejected" and nothing more.
+  //
+  // Gate on status !== "accepted", NOT rejected_rows > 0: _status()
+  // (import_service.py:929-934) returns "rejected" with rejected_rows 0 for an
+  // empty or missing-columns file, and that case needs the explanation most.
+  // Keying on import_id makes each new upload refetch; the route-change reset
+  // effect nulls importOutcome, which disables the query on navigation.
+  const importErrorsQuery = useQuery({
+    enabled: Boolean(importOutcome && importOutcome.status !== "accepted"),
+    queryFn: () => getImportErrors(importOutcome?.import_id ?? ""),
+    queryKey: ["import-errors", importOutcome?.import_id],
+  });
+
+  // Run retention: the page state is wiped on every navigation, so arriving at a
+  // head used to look like nothing had ever run there. Ask the run store for the
+  // most recent succeeded run of this head's own job types and re-attach it, so
+  // the monitor and results survive navigating away and back.
+  //
+  // Report actions carry no run lifecycle, so they are excluded — which also
+  // naturally exempts the reports route (report-only actions => no query).
+  const rehydratableActions = module.runActions.filter(
+    (action): action is Exclude<ModuleRunAction, { kind: "report" }> => action.kind !== "report",
+  );
+  const lastRunQuery = useQuery({
+    enabled: rehydratableActions.length > 0,
+    // Keyed by route so one head's cached run can never be handed to another.
+    queryKey: ["last-succeeded-run", module.route],
+    queryFn: async () => {
+      const responses = await Promise.all(
+        rehydratableActions.map((action) =>
+          listRuns({ jobType: action.jobType, limit: 1, status: "succeeded" }),
+        ),
+      );
+      // One request per job type (data-validation has three); pick the newest
+      // across them. created_at is ISO-8601 UTC, so it sorts lexicographically.
+      const newest = responses
+        .flatMap((response) => response.runs)
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
+      return newest ?? null;
+    },
+  });
+
   // When SSE reports the run terminal but polling is paused, the polled record
   // (and its result_summary) may still be mid-run. Trigger a single refetch so
   // the terminal-gated issues/results queries fire against fresh data.
@@ -438,6 +496,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetAllTemplatesDownload,
   ]);
 
+  // Re-attach this head's most recent succeeded run (see lastRunQuery above).
+  //
+  // THIS EFFECT MUST STAY DECLARED AFTER THE RESET EFFECT ABOVE. React runs
+  // effects in declaration order, and the reset's unconditional setActiveRun(null)
+  // is what stops one head's run bleeding into the next: on a route change the
+  // reset nulls the old run first, and only then does this effect seed from the
+  // new route's own data. Re-ordering the two would re-introduce the bleed.
+  //
+  // Seeding is idempotent (the activeRun guard), so StrictMode's double
+  // invocation and the reset/seed two-pass flush both settle on the same run.
+  useEffect(() => {
+    const run = lastRunQuery.data;
+    if (!run || activeRun) {
+      return;
+    }
+    // Belt-and-braces on top of the route-keyed query: only ever seed a run
+    // whose job type this head can actually start.
+    const action = module.runActions.find(
+      (entry) => entry.kind !== "report" && entry.jobType === run.job_type,
+    );
+    if (!action || action.kind === "report") {
+      return;
+    }
+    setActiveRun({ kind: action.kind, restored: true, runId: run.run_id });
+  }, [lastRunQuery.data, activeRun, module.runActions]);
+
   // Auto-clear the report confirmation toast after a few seconds so a stale
   // "report generated" note does not linger on the page (mqautz9j follow-up).
   useEffect(() => {
@@ -451,8 +535,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Step flow: advance to Run the moment a run is queued, and to Results when it
   // reaches a terminal state, so the operator follows the job rather than
   // hunting down a long page. Manual step clicks still override at any time.
+  //
+  // A *restored* run never moves the step: the operator arrived here to set
+  // something up, and yanking them to Results for a run they did not just start
+  // would be worse than the stale-looking page this retention fixes. The run
+  // monitor is visible on Setup anyway (the run-controls section is in the
+  // "setup run" step group) and StepNav's Results button is one click away.
   useEffect(() => {
-    if (activeRun) {
+    if (activeRun && !activeRun.restored) {
       setStep("run");
     }
   }, [activeRun]);
@@ -462,10 +552,29 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // activeRunError — otherwise the operator would land on an empty Results view
   // with no clue why the job ended.
   useEffect(() => {
-    if (activeRunTerminal && activeRunStatus === "succeeded") {
+    if (activeRunTerminal && activeRunStatus === "succeeded" && activeRun && !activeRun.restored) {
       setStep("results");
     }
-  }, [activeRunTerminal, activeRunStatus]);
+  }, [activeRunTerminal, activeRunStatus, activeRun]);
+
+  // Pete's walkthrough ask (2026-07-15): when Results opens, snap to the top of
+  // the page so the operator sees the headline results first, not whatever
+  // mid-page scroll position the Run step left behind.
+  //
+  // This watches `step` rather than hooking the effect above, so one insertion
+  // covers every route into Results — the auto-advance on a succeeded run, the
+  // setStep("results") in runMutation's report branch, and a manual StepNav
+  // click — on all five heads. A *restored* run never advances the step (see
+  // above), so rehydration on arrival never snaps.
+  //
+  // Instant ("auto") on purpose: this is a step change, not an animation, so
+  // prefers-reduced-motion needs no handling. jsdom has no scrollIntoView; the
+  // test setup installs a no-op.
+  useEffect(() => {
+    if (step === "results") {
+      heroRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
+    }
+  }, [step]);
 
   const importMutation = useMutation({
     mutationFn: (input: { importType: ImportType; file: File }) =>
@@ -626,6 +735,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setReportToast(
         `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
       );
+      // The toast points at the Reports tab, so the list behind it must not be
+      // stale. The reports query is disabled off the reports route, so this
+      // marks it stale and it refetches when that route enables it.
+      void queryClient.invalidateQueries({ queryKey: ["reports-list"] });
     },
   });
 
@@ -647,14 +760,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // killed mid-run, so refuse it up front instead of failing after two days.
   const udmiCaptureOverCap = Number(udmiCaptureSecondsEffective) > 172_800;
 
+  // Run actions the Run Controls card list renders. Used ONLY to decide which
+  // branch the list shows — the map below still walks the full module.runActions
+  // so each card keeps its original index for runMutation.mutate(index).
+  const visibleRunActions = module.runActions.filter((action) => !action.hiddenFromRunControls);
+
   // Index of the UDMI validation run action, used by the Schedule & Payload
-  // Evidence "Execute capture" button so it triggers the same run as the Run
-  // Controls card (mq9n7pbe). Defaults to 0 if the action shape ever changes.
-  const udmiRunActionIndex = Math.max(
-    0,
-    module.runActions.findIndex(
-      (action) => action.kind === "validation" && action.runKind === "udmi",
-    ),
+  // Evidence "Execute capture" button — the only visible trigger for this run
+  // now that the Run Controls card is hidden (mq9n7pbe).
+  //
+  // Deliberately NOT clamped to 0: a -1 flows into runMutation's "Unknown run
+  // action." guard, surfacing a visible error panel on this same Setup step,
+  // instead of silently dispatching whatever happens to sit at index 0.
+  const udmiRunActionIndex = module.runActions.findIndex(
+    (action) => action.kind === "validation" && action.runKind === "udmi",
   );
 
   // Verdicts derive from the run's issues list, so an empty list only means
@@ -783,7 +902,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [hasUdmiLiveResults]);
 
   // Live discovery results view (ip/bacnet/mqtt). Built only after a terminal
-  // run; until then the table falls back to labelled sample rows.
+  // run; until then the table shows its honest "No results yet" empty state.
   const discoveryView = useMemo(() => {
     if (!isDiscoveryModule || !discoveryResultsQuery.data) {
       return null;
@@ -810,11 +929,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const usingLiveResults = Boolean(discoveryView) || Boolean(udmiLiveResults);
   const tableColumns = discoveryView?.columns ?? udmiLiveResults?.columns ?? workspace?.columns ?? [];
-  const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? workspace?.rows ?? [];
+  // Rows come from live run results only. There is deliberately no sample-row
+  // fallback here: labelling fabricated rows as a "Sample preview" was not
+  // enough to stop them being read as real findings, and a head with history
+  // now re-attaches its last real run (see lastRunQuery) instead. When there
+  // are no rows the table renders the "No results yet" empty state below.
+  const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? [];
   const selectedResult = resultRows[selectedResultIndex] ?? resultRows[0] ?? null;
   const resultDetails = selectedResult
     ? buildResultDetailItems(module.route, selectedResult, usingLiveResults, mergedAssetGroups)
     : [];
+
+  // Terminal empty-state: a discovery run that completed with zero rows must say
+  // so explicitly — distinct from "no run yet" / "in flight" / "failed"
+  // (Pete 2026-07-15: "it can't find anything, but it doesn't really tell us").
+  // Gating on activeRun keeps this composable with run rehydration: a restored
+  // terminal run sets activeRun and lights this state up unchanged.
+  const discoveryEmptyState =
+    isDiscoveryModule && activeRun && activeRunTerminal && resultRows.length === 0
+      ? discoveryEmptyStateFor(module.route, discoveryResultsQuery.data, activeRunError)
+      : null;
 
   // Honest headline metrics: real numbers derived from the latest terminal run
   // (discovery, validation, or reports). When nothing has run there is no number
@@ -869,6 +1003,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
     setImportOutcome(null);
+    // Chromium fires no change event when the same path is re-picked while the
+    // input still holds it, so a corrected CSV saved over the original was
+    // silently never re-read (Pete had to rename the file to get it uploaded).
+    // Clearing the value makes every pick deliver a fresh File snapshot. The
+    // File captured into state above stays valid for the upload, and the staged
+    // name is rendered from state since the native input now always reads
+    // "No file chosen".
+    event.target.value = "";
   };
 
   const handleImport = () => {
@@ -1032,9 +1174,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // their own amber panel below the outcome — never the red error styling.
   const importWarnings = importOutcome?.warnings ?? [];
 
+  // Rejection reasons for the red panel. When the summary already names the
+  // missing columns on its own line, the per-column missing_required_column
+  // records (import_service.py:698-706) would repeat it verbatim as bullets —
+  // drop them there only, so the reasons stay complete but nothing is said twice.
+  const importErrors = (importErrorsQuery.data?.errors ?? []).filter(
+    (error) =>
+      error.code !== "missing_required_column" ||
+      (importOutcome?.missing_columns.length ?? 0) === 0,
+  );
+  const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
+  const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
+
   return (
     <div className="app-page">
-      <section className="module-hero">
+      <section className="module-hero" ref={heroRef}>
         <div>
           <span className="eyebrow">{module.backendService}</span>
           <h2>{workspace?.title ?? module.title}</h2>
@@ -1055,7 +1209,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           ) : (
             <article className="module-metrics-empty">
               <strong>—</strong>
-              <span>{module.route === "reports" ? "No reports yet" : "No run yet"}</span>
+              <span>
+                {module.route === "reports"
+                  ? reportsQuery.isLoading
+                    ? "Loading reports..."
+                    : "No reports yet"
+                  : "No run yet"}
+              </span>
             </article>
           )}
         </div>
@@ -1099,6 +1259,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 CSV or XLSX file
                 <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
               </label>
+              {/* handleFileChange clears the input's value, so the native
+                  control always reads "No file chosen" — the staged file is
+                  named here from state instead. */}
+              {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
 
               <button
                 className="primary-button"
@@ -1201,6 +1365,43 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               )}
 
+              {importOutcome && importOutcome.status !== "accepted" && (
+                <div className="state-panel error import-errors">
+                  <strong>
+                    {importOutcome.status === "rejected"
+                      ? "Import rejected — reasons below"
+                      : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
+                  </strong>
+                  {importOutcome.missing_columns.length > 0 && (
+                    <span>
+                      Missing required columns: {importOutcome.missing_columns.join(", ")}
+                    </span>
+                  )}
+                  {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
+                  {/* Never let a failed fetch look like "no reasons": say so. */}
+                  {importErrorsQuery.isError && (
+                    <span>Could not load rejection reasons: {importErrorsQuery.error.message}</span>
+                  )}
+                  {visibleImportErrors.length > 0 && (
+                    <ul>
+                      {visibleImportErrors.map((error, index) => (
+                        <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
+                          {error.row_number != null ? `Row ${error.row_number} — ` : ""}
+                          {error.field ? `${error.field}: ` : ""}
+                          {error.message} ({error.code})
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {hiddenImportErrorCount > 0 && (
+                    <span>
+                      ...and {hiddenImportErrorCount} more rejected rows not shown — fix the rows
+                      listed above and re-upload to see the rest.
+                    </span>
+                  )}
+                </div>
+              )}
+
               {importWarnings.length > 0 && (
                 <div className="state-panel warning">
                   <strong>
@@ -1257,8 +1458,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
 
           <div className="run-list">
-            {module.runActions.length > 0 ? (
+            {visibleRunActions.length > 0 ? (
+              // Mapped over the FULL list and skipped in place, never
+              // filter-then-map: `index` must stay the action's real index in
+              // module.runActions or mutate(index) dispatches the wrong action.
               module.runActions.map((action, index) => {
+                if (action.hiddenFromRunControls) {
+                  return null;
+                }
                 const scanBlocked = action.kind === "discovery" && discoveryBlocked;
                 const overCapBlocked =
                   udmiCaptureOverCap && action.kind === "validation" && action.runKind === "udmi";
@@ -1296,6 +1503,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   </div>
                 );
               })
+            ) : module.runActions.length > 0 ? (
+              // This head HAS a run action, it is just started from elsewhere.
+              // Without this pointer the Run step is a dead end: StepNav never
+              // disables steps, so an operator can land here before any run and
+              // find no start control at all.
+              <div className="empty-workspace">
+                <strong>Run controls are at the bottom of Setup</strong>
+                <span>
+                  Work through the options below, then start the run with Execute capture under Schedule and Payload
+                  Evidence.
+                </span>
+              </div>
             ) : (
               <div className="empty-workspace">
                 <strong>Saved synchronously</strong>
@@ -1423,32 +1642,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </button>
                   )}
                 {canEngineer && activeRunTerminal && (
-                  <>
-                    <label className="report-format-picker">
-                      Report format
-                      <select
-                        aria-label="Report format"
-                        onChange={(event) =>
-                          setReportExportFormat(event.target.value as ReportFormat)
-                        }
-                        value={reportExportFormat}
-                      >
-                        <option value="pdf">PDF (.pdf)</option>
-                        <option value="docx">Word (.docx)</option>
-                        <option value="xlsx">Excel (.xlsx)</option>
-                        <option value="zip">Evidence pack (.zip)</option>
-                      </select>
-                    </label>
-                    <button
-                      className="secondary-button compact"
-                      disabled={reportFromRunMutation.isPending}
-                      onClick={handleGenerateReportFromRun}
-                      title="Generate a report for this run type, then find it in the Reports tab."
-                      type="button"
-                    >
-                      {reportFromRunMutation.isPending ? "Generating..." : "Generate report from this run"}
-                    </button>
-                  </>
+                  <ReportFromRunControls
+                    format={reportExportFormat}
+                    onFormatChange={setReportExportFormat}
+                    onGenerate={handleGenerateReportFromRun}
+                    pending={reportFromRunMutation.isPending}
+                  />
                 )}
               </div>
 
@@ -1790,10 +1989,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <input
                 accept=".json"
                 multiple
-                onChange={(event) => setSchemaSetFiles(Array.from(event.target.files ?? []))}
+                onChange={(event) => {
+                  setSchemaSetFiles(Array.from(event.target.files ?? []));
+                  // Same Chromium re-pick trap as the register file input above:
+                  // clear the value so re-picking the same schema files after
+                  // editing them on disk always delivers fresh File snapshots.
+                  event.target.value = "";
+                }}
                 type="file"
               />
             </label>
+            {schemaSetFiles.length > 0 && (
+              <p className="field-note">
+                Selected: {schemaSetFiles.map((file) => file.name).join(", ")}
+              </p>
+            )}
             <button
               className="primary-button"
               disabled={
@@ -2175,7 +2385,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "reports" && (
-        <section className="surface" data-stepgroup="results">
+        // Shown on every step, not just Results: the Reports page always lands on
+        // Setup, which used to hide this table behind a step click nobody knew to
+        // make. The Generate buttons live in the "setup run" Run Controls section,
+        // so defaulting this route to Results instead would just hide those.
+        <section className="surface" data-stepgroup="setup run results">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Reports</span>
@@ -2216,7 +2430,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <th>Type</th>
                     <th>Format</th>
                     <th>Status</th>
+                    <th>Generated</th>
+                    <th>Source runs</th>
                     <th>File</th>
+                    <th>Download</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2242,7 +2459,38 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             {report.status}
                           </span>
                         </td>
+                        <td>{formatAbsoluteTime(report.created_at)}</td>
+                        {/* The source run ids in full, not a count: tracing a report back
+                            to the runs it was built from is the whole point of an ITP
+                            evidence pack, and run ids are already shown raw in the Report
+                            column and the run monitor. `?? []` because a response from an
+                            older backend (or a cached query payload) carries neither new
+                            field — formatAbsoluteTime already tolerates undefined. */}
+                        <td>{(report.source_run_ids ?? []).join(", ") || "—"}</td>
                         <td>{report.file_name || "—"}</td>
+                        <td>
+                          <button
+                            className="secondary-button compact"
+                            disabled={!downloadable || exportDownload.pendingKey !== null}
+                            onClick={() =>
+                              void exportDownload.download(
+                                `row-${report.report_id}`,
+                                getReportDownloadPath(report.report_id),
+                                report.file_name || `${report.report_id}.${report.output_format}`,
+                              )
+                            }
+                            title={
+                              downloadable
+                                ? `Download ${report.file_name || report.report_id}`
+                                : "Only completed reports can be downloaded."
+                            }
+                            type="button"
+                          >
+                            {exportDownload.pendingKey === `row-${report.report_id}`
+                              ? "Downloading..."
+                              : "Download"}
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -2288,13 +2536,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </button>
           </div>
 
-          {!usingLiveResults && resultRows.length > 0 && (
-            <div className="sample-banner" role="note">
-              {isDiscoveryModule
-                ? "Sample preview — run a discovery to replace this with live results."
-                : "Sample preview — per-asset result rows are illustrative. The live issues panel and run monitor reflect real run data."}
-            </div>
-          )}
           {usingLiveResults && (
             <div className="sample-banner" role="note">
               {isDiscoveryModule
@@ -2356,14 +2597,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             ) : (
               <div className="empty-workspace">
                 <strong>
-                  {isDiscoveryModule && activeRun && !activeRunTerminal
-                    ? "Run in progress..."
-                    : "No results yet"}
+                  {discoveryEmptyState
+                    ? discoveryEmptyState.title
+                    : isDiscoveryModule && activeRun && !activeRunTerminal
+                      ? "Run in progress..."
+                      : "No results yet"}
                 </strong>
                 <span>
-                  {isDiscoveryModule
-                    ? "Run a discovery; observed devices, points, or topics appear here once it completes."
-                    : "Run a job to populate results."}
+                  {discoveryEmptyState
+                    ? discoveryEmptyState.detail
+                    : isDiscoveryModule
+                      ? "Run a discovery; observed devices, points, or topics appear here once it completes."
+                      : "Run a job to populate results."}
                 </span>
               </div>
             )}
@@ -2583,6 +2828,57 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </>
         </aside>
       </section>
+
+      {/* Second instance of the report controls, at the END of the Results step
+          (Pete's 2026-07-15 walkthrough: a run finishes, the step auto-advances
+          to Results, and the run monitor's copy — which lives in the "setup run"
+          stepgroup — vanishes with it, so the operator had to click back a step
+          to generate the report they just earned). Both instances render the
+          same stateless ReportFromRunControls wired to the one lifted
+          reportExportFormat state, so they can never disagree.
+
+          MUST stay a DIRECT child of .module-steps: the gate is
+          `.module-steps > [data-stepgroup]` (electracom-theme.css:1302).
+          Nesting it inside the results grid above would leave it ungated (and
+          add a stray third column). jsdom never applies the theme CSS, so no
+          visibility assertion can protect this — the tests pin the parent node
+          and the data-stepgroup attribute instead.
+
+          The `module.route !== "reports"` clause is DEFENSIVE, not a live fix:
+          the reports head's run actions are all kind:"report", and report
+          actions never setActiveRun (see runMutation.onSuccess), so activeRun is
+          already always null there. It is here because that route's own section
+          renders reportToast across every step group — the day a report run does
+          attach itself to the monitor, this card would toast twice on one
+          screen. Cheap insurance, unreachable today; don't read it as evidence
+          the case exists. */}
+      {module.route !== "reports" && canEngineer && activeRun && activeRunTerminal && (
+        <section className="surface" data-stepgroup="results">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Reporting</span>
+              <h3>Generate Report</h3>
+            </div>
+          </div>
+          <div className="inline-actions">
+            <ReportFromRunControls
+              format={reportExportFormat}
+              onFormatChange={setReportExportFormat}
+              onGenerate={handleGenerateReportFromRun}
+              pending={reportFromRunMutation.isPending}
+            />
+          </div>
+          {reportToast && (
+            <div className="state-panel success" role="status">
+              <strong>Report generated</strong>
+              <span>{reportToast}</span>
+            </div>
+          )}
+          {reportFromRunMutation.isError && (
+            <span className="error-text">{reportFromRunMutation.error.message}</span>
+          )}
+        </section>
+      )}
       </div>
     </div>
   );
@@ -2625,6 +2921,55 @@ function StepNav({
         );
       })}
     </nav>
+  );
+}
+
+// Report format picker + "Generate report from this run" button. Rendered twice
+// — once in the run monitor ("setup run" stepgroup) and once at the end of the
+// Results step — because the step the run leaves you on is not the step the
+// control used to live on.
+//
+// Deliberately stateless: the format lives in ModulePage's single
+// reportExportFormat state and the guards (canEngineer / activeRun / terminal)
+// stay at the call sites. Give this component its own useState and the two
+// instances would silently drift apart — the picker you changed would not be
+// the one the POST reads.
+function ReportFromRunControls({
+  format,
+  onFormatChange,
+  onGenerate,
+  pending,
+}: {
+  format: ReportFormat;
+  onFormatChange: (next: ReportFormat) => void;
+  onGenerate: () => void;
+  pending: boolean;
+}) {
+  return (
+    <>
+      <label className="report-format-picker">
+        Report format
+        <select
+          aria-label="Report format"
+          onChange={(event) => onFormatChange(event.target.value as ReportFormat)}
+          value={format}
+        >
+          <option value="pdf">PDF (.pdf)</option>
+          <option value="docx">Word (.docx)</option>
+          <option value="xlsx">Excel (.xlsx)</option>
+          <option value="zip">Evidence pack (.zip)</option>
+        </select>
+      </label>
+      <button
+        className="secondary-button compact"
+        disabled={pending}
+        onClick={onGenerate}
+        title="Generate a report for this run type, then find it in the Reports tab."
+        type="button"
+      >
+        {pending ? "Generating..." : "Generate report from this run"}
+      </button>
+    </>
   );
 }
 

@@ -92,6 +92,12 @@ class RunService:
             output_format=request.output_format,
             status=run.status,
             file_name=self._report_file_name(request.report_type, run.run_id, request.output_format),
+            # Same projection the list/get path builds in reports.py; `run` here is
+            # the RunRecord returned by update_run_status, so created_at is the
+            # stored value and the POST response cannot disagree with the later
+            # GET of the same report.
+            created_at=run.created_at,
+            source_run_ids=list(request.source_run_ids),
         )
         return run, report
 

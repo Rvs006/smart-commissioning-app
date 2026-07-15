@@ -21,7 +21,7 @@ const reviewerKey = "smartCommissioningEngineerReviewerName";
 
 const moduleLabels: Record<string, string> = {
   "/": "Homepage",
-  "/bacnet-discovery": "BACnet",
+  "/bacnet-discovery": "BACnet Discovery",
   "/configuration": "Configuration",
   "/data-validation": "Validation",
   "/ip-scanner": "IP Discovery",
@@ -34,7 +34,7 @@ const modules = [
   "Homepage",
   "Configuration",
   "IP Discovery",
-  "BACnet",
+  "BACnet Discovery",
   "MQTT Discovery",
   "UDMI",
   "Validation",

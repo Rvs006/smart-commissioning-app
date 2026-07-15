@@ -109,6 +109,18 @@ export type ImportWarningRecord = {
   message: string;
 };
 
+// Reason a row (or the file) was REJECTED. Byte-identical mirror of the same
+// backend model as the warning record (schemas/imports.py:28-32), so it is
+// aliased rather than redefined. Both row_number and field are nullable and
+// each nullability occurs in real data: missing_required_column records carry a
+// field but no row_number, duplicate_row records a row_number but no field.
+export type ImportErrorRecord = ImportWarningRecord;
+
+export type ImportErrorReport = {
+  import_id: string;
+  errors: ImportErrorRecord[];
+};
+
 export type ImportBatchSummary = {
   import_id: string;
   import_type: ImportType;
@@ -225,6 +237,13 @@ export type ReportSummary = {
   output_format: ReportFormat;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
   file_name: string;
+  // Mirrors the backend projection: created_at is the report run's stored
+  // creation instant (FastAPI serializes datetime as ISO 8601), source_run_ids
+  // the runs the report was scoped to. Both are required server-side, but
+  // render them defensively — a response from an older backend, or a cached
+  // query payload, carries neither.
+  created_at: string;
+  source_run_ids: string[];
 };
 
 export type ReportListResponse = {
@@ -677,6 +696,13 @@ export function createImport(input: {
     body,
     method: "POST",
   });
+}
+
+// Per-row rejection reasons for one import. The POST above returns only the
+// accepted/rejected counts; the reasons are persisted separately and read back
+// from here, so an operator can see WHY rows were rejected.
+export function getImportErrors(importId: string): Promise<ImportErrorReport> {
+  return request<ImportErrorReport>(`/imports/${encodeURIComponent(importId)}/errors`);
 }
 
 // One uploaded non-published UDMI schema set: payloads that declare this

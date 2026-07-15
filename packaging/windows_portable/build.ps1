@@ -188,18 +188,40 @@ if (-not (Test-Path -LiteralPath (Join-Path $CoreSrc "alembic.ini"))) {
 
 # --- 1. frontend ---
 $FrontendDir = Join-Path $RepoRoot "frontend"
+# The version pill in the app header renders VITE_APP_VERSION, which vite bakes
+# into the JS bundle at build time. The marker below records what got baked, so
+# -SkipFrontend can prove a reused dist is not carrying a stale version.
+# It lives INSIDE dist/ deliberately: `vite build` empties dist/ on every build,
+# so a dist produced by a bare `npm run build` (which bakes "dev") loses the
+# marker and is correctly rejected - the marker can never claim a version for
+# bytes it did not travel with.
+$DistVersionPath = Join-Path $FrontendDistSrc ".app-version"
 if ($SkipFrontend) {
     Write-Step "Frontend: SKIPPED (-SkipFrontend) - reusing existing dist"
     if (-not (Test-Path -LiteralPath (Join-Path $FrontendDistSrc "index.html"))) {
         throw "frontend/dist/index.html missing but -SkipFrontend was set."
     }
+    $ExistingDistVersion = if (Test-Path -LiteralPath $DistVersionPath) {
+        (Get-Content -LiteralPath $DistVersionPath -Raw).Trim()
+    } else { "" }
+    if ($ExistingDistVersion -ne $BuildVersion) {
+        throw "-SkipFrontend would package a frontend dist baked as version '$ExistingDistVersion' with build version '$BuildVersion' (the app's version pill would lie). Rebuild without -SkipFrontend."
+    }
 } else {
     Write-Step "Frontend: npm ci && npm run build"
     Invoke-Native -File "npm" -Arguments @("ci")        -WorkingDirectory $FrontendDir
-    Invoke-Native -File "npm" -Arguments @("run","build") -WorkingDirectory $FrontendDir
+    try {
+        $env:VITE_APP_VERSION = $BuildVersion
+        Invoke-Native -File "npm" -Arguments @("run","build") -WorkingDirectory $FrontendDir
+    }
+    finally {
+        # Don't leave the var behind in an interactive pwsh session that dot-ran this.
+        Remove-Item Env:\VITE_APP_VERSION -ErrorAction SilentlyContinue
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $FrontendDistSrc "index.html"))) {
         throw "frontend build did not produce frontend/dist/index.html."
     }
+    Set-Content -LiteralPath $DistVersionPath -Value $BuildVersion -Encoding UTF8 -NoNewline
 }
 
 # --- 2. PyInstaller freeze ---

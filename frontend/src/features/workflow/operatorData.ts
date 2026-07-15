@@ -314,7 +314,10 @@ export const issueRows: IssueRow[] = [
 export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
   "ip-scanner": {
     route: "ip-scanner",
-    title: "IP Scanner",
+    // Must stay in step with the "ip-scanner" title in moduleData.ts: this one
+    // wins in the module hero (`workspace?.title ?? module.title`).
+    // moduleTitles.test.ts guards the pair against drifting apart again.
+    title: "IP Discovery",
     headline: "Find reachable, missing, and rogue network hosts against the expected register.",
     tableTitle: "Network Scan Results",
     columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
@@ -388,12 +391,12 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Create evidence packs, issue reports, and commissioning handover outputs.",
     tableTitle: "Report Queue",
     columns: ["Report", "Source", "Status", "File"],
-    rows: [
-      { Report: "Excel issue report", Source: "Validation runs", Status: "Ready", File: "issue_report.xlsx" },
-      { Report: "Word handover report", Source: "All completed runs", Status: "Ready", File: "commissioning_handover.docx" },
-      { Report: "Evidence pack", Source: "All runs", Status: "Queued", File: "evidence_pack.zip" },
-      { Report: "Blocked report", Source: "Incomplete validation", Status: "Blocked", File: "Awaiting validation" },
-    ],
+    // Deliberately empty. This held four fabricated rows ("Excel issue report",
+    // "Word handover report", "Evidence pack", "Blocked report") that a reviewer
+    // read as real reports the app had produced. The real, generated reports are
+    // listed by the Generated Reports table above, from GET /reports. Do not
+    // re-add sample rows here — an empty table honestly says "nothing yet".
+    rows: [],
     issues: issueRows,
     evidence: ["Evidence pack ZIP", "Issue report XLSX", "Executive summary PDF"],
   },

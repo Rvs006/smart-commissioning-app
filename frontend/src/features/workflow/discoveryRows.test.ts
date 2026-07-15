@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DiscoveryResultsResponse } from "../../api/client";
 import {
   bacnetBackendLabel,
+  discoveryEmptyStateFor,
   expectedPortsOk,
   forbiddenOpenPorts,
   ipRowsFromResults,
@@ -248,5 +249,147 @@ describe("validationMetrics", () => {
         expected_devices: "35" as unknown as number,
       }),
     ).toBeNull();
+  });
+});
+
+// A terminal discovery run that observed nothing: every collection is empty and
+// only status + result_summary distinguish the outcomes.
+function emptyResults(
+  status: DiscoveryResultsResponse["status"],
+  resultSummary: Record<string, unknown>,
+): DiscoveryResultsResponse {
+  return {
+    run_id: "run-empty-1",
+    job_type: "ip_discovery",
+    status,
+    result_summary: resultSummary,
+    discovered_assets: [],
+    devices: [],
+    points: [],
+    topics: [],
+  };
+}
+
+describe("discoveryEmptyStateFor", () => {
+  it("returns null when no results have arrived yet", () => {
+    expect(discoveryEmptyStateFor("ip-scanner", undefined)).toBeNull();
+  });
+
+  it("reports hosts probed vs answered for a succeeded but empty IP scan", () => {
+    const state = discoveryEmptyStateFor(
+      "ip-scanner",
+      emptyResults("succeeded", { hosts_scanned: 254, hosts_responsive: 0 }),
+    );
+    expect(state?.title).toMatch(/Scan complete — no responsive hosts found/);
+    expect(state?.detail).toMatch(/254 hosts probed/);
+    // Zero found is an observation, not a failure — and a silent negative must
+    // not be oversold as proof the hosts are absent.
+    expect(state?.title).not.toMatch(/fail/i);
+    expect(state?.detail).toMatch(/not proof a host is absent/i);
+  });
+
+  it("singularises a one-host sweep", () => {
+    const state = discoveryEmptyStateFor("ip-scanner", emptyResults("succeeded", { hosts_scanned: 1 }));
+    expect(state?.detail).toMatch(/1 host probed/);
+  });
+
+  it("points at the target spec when nothing was probed at all", () => {
+    const state = discoveryEmptyStateFor(
+      "ip-scanner",
+      emptyResults("succeeded", { hosts_scanned: 0, hosts_responsive: 0 }),
+    );
+    expect(state?.detail).toMatch(/0 hosts were probed/);
+    expect(state?.detail).toMatch(/target override or the imported IP register/);
+  });
+
+  it("falls back to neutral copy when the summary carries no host count", () => {
+    const state = discoveryEmptyStateFor("ip-scanner", emptyResults("succeeded", {}));
+    expect(state?.title).toMatch(/Scan complete/);
+    expect(state?.detail).toBe("The scan completed, but no host answered on the scanned ports.");
+    expect(state?.detail).not.toMatch(/\d/);
+  });
+
+  it("labels a dry run as a preview instead of a real negative finding", () => {
+    // base.py stamps hosts_scanned: 0 on dry runs; without the dry_run gate this
+    // would claim "0 hosts were probed" as if the network had been checked.
+    const state = discoveryEmptyStateFor(
+      "ip-scanner",
+      emptyResults("succeeded", { dry_run: true, hosts_scanned: 0, hosts_responsive: 0 }),
+    );
+    expect(state?.title).toMatch(/Dry run complete — preview only/);
+    expect(state?.title).not.toMatch(/no responsive hosts/);
+    expect(state?.detail).toMatch(/No packets were sent/);
+  });
+
+  it("resolves a failed or cancelled status before dry_run, never claiming completion", () => {
+    // _apply_success writes result_summary (stamping dry_run) for every
+    // non-exception engine return and resolves the terminal status afterwards,
+    // so a cancelled dry run really does carry dry_run: true. It must not read
+    // as "Dry run complete".
+    const cancelled = discoveryEmptyStateFor(
+      "ip-scanner",
+      emptyResults("cancelled", { dry_run: true, hosts_scanned: 0 }),
+    );
+    expect(cancelled?.title).toBe("Run cancelled");
+    expect(cancelled?.title).not.toMatch(/complete/i);
+
+    const failed = discoveryEmptyStateFor(
+      "ip-scanner",
+      emptyResults("failed", { dry_run: true, hosts_scanned: 0 }),
+      "Engine execution failed.",
+    );
+    expect(failed?.title).toMatch(/Run failed/);
+    expect(failed?.title).not.toMatch(/complete/i);
+  });
+
+  it("names the Who-Is instance range and the BBMD caveat for empty BACnet discovery", () => {
+    const state = discoveryEmptyStateFor(
+      "bacnet-discovery",
+      emptyResults("succeeded", {
+        device_count: 0,
+        device_instance_low: 0,
+        device_instance_high: 4194303,
+      }),
+    );
+    expect(state?.title).toMatch(/no BACnet devices responded/);
+    expect(state?.detail).toMatch(/0–4194303/);
+    expect(state?.detail).toMatch(/BBMD/);
+  });
+
+  it("omits the BACnet instance range when the summary does not carry one", () => {
+    const state = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", {}));
+    expect(state?.detail).toMatch(/No devices answered the Who-Is\./);
+    expect(state?.detail).not.toMatch(/instance range/);
+  });
+
+  it("names the capture window for an empty MQTT capture", () => {
+    const state = discoveryEmptyStateFor(
+      "mqtt-discovery",
+      emptyResults("succeeded", { topics_discovered: 0, messages_captured: 0, capture_seconds: 30 }),
+    );
+    expect(state?.title).toMatch(/no MQTT messages received/);
+    expect(state?.detail).toMatch(/30s capture window/);
+  });
+
+  it("echoes the engine's own failure message instead of implying nothing was found", () => {
+    const state = discoveryEmptyStateFor(
+      "mqtt-discovery",
+      emptyResults("failed", {}),
+      "MQTT discovery failed (capture_window_empty).",
+    );
+    expect(state?.title).toBe("Run failed — no results recorded");
+    expect(state?.detail).toBe("MQTT discovery failed (capture_window_empty).");
+    // Honesty, inverse direction: a failure must never read as "nothing found".
+    expect(state?.title).not.toMatch(/complete|found/i);
+  });
+
+  it("points a message-less failure at the run monitor", () => {
+    const state = discoveryEmptyStateFor("ip-scanner", emptyResults("failed", {}), null);
+    expect(state?.detail).toMatch(/run monitor/i);
+  });
+
+  it("returns null for non-discovery routes and non-terminal statuses", () => {
+    expect(discoveryEmptyStateFor("reports", emptyResults("succeeded", {}))).toBeNull();
+    expect(discoveryEmptyStateFor("ip-scanner", emptyResults("running", { hosts_scanned: 254 }))).toBeNull();
   });
 });

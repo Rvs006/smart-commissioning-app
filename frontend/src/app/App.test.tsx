@@ -69,7 +69,12 @@ function unauthorizedResponse(): Response {
   } as unknown as Response;
 }
 
-function renderApp() {
+// Defaults mount the dashboard at "/". `route` lets a test park the shell on
+// another path with a stub child element, so App-shell assertions (the page h1)
+// need no fetch stubs for the real page component.
+function renderApp(
+  route?: { path: string; initialEntry: string },
+) {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -81,10 +86,12 @@ function renderApp() {
       {
         path: "/",
         element: <App />,
-        children: [{ index: true, element: <DashboardPage /> }],
+        children: route
+          ? [{ path: route.path, element: <div /> }]
+          : [{ index: true, element: <DashboardPage /> }],
       },
     ],
-    { initialEntries: ["/"] },
+    { initialEntries: [route ? route.initialEntry : "/"] },
   );
 
   return render(
@@ -138,6 +145,7 @@ function stubDashboardFetch(
 describe("App shell", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     clearApiKey();
   });
 
@@ -153,6 +161,67 @@ describe("App shell", () => {
 
     // Wait for the mocked health query so nothing resolves after teardown.
     expect(await screen.findByText("ok")).toBeInTheDocument();
+  });
+
+  it("shows the build-stamped version in the brand bar", async () => {
+    // Pete 2026-07-15: no way to tell which build is on screen. build.ps1 sets
+    // VITE_APP_VERSION before `npm run build`; vite bakes it into the bundle.
+    vi.stubEnv("VITE_APP_VERSION", "v9.9.9");
+    stubDashboardFetch();
+    renderApp();
+
+    expect(screen.getByTitle("App version")).toHaveTextContent("v9.9.9");
+
+    expect(await screen.findByText("ok")).toBeInTheDocument();
+  });
+
+  it("falls back to 'dev' when no version was baked in", async () => {
+    // Dev servers and the test run have no VITE_APP_VERSION (no frontend/.env*
+    // file exists). `||` not `??`, so a future CI step exporting an empty
+    // VITE_APP_VERSION="" also lands here instead of rendering a blank pill.
+    stubDashboardFetch();
+    renderApp();
+
+    expect(screen.getByTitle("App version")).toHaveTextContent("dev");
+
+    expect(await screen.findByText("ok")).toBeInTheDocument();
+  });
+
+  it("renders an empty-string version as 'dev' rather than a blank pill", async () => {
+    vi.stubEnv("VITE_APP_VERSION", "");
+    stubDashboardFetch();
+    renderApp();
+
+    expect(screen.getByTitle("App version")).toHaveTextContent("dev");
+
+    expect(await screen.findByText("ok")).toBeInTheDocument();
+  });
+
+  it("names all three discovery heads '<Protocol> Discovery' in the menu", async () => {
+    // Pete 2026-07-15: "all discovery or none" — the BACnet entry read plain
+    // "BACnet" while its neighbours read "IP Discovery" / "MQTT Discovery".
+    // Exact names, never regexes: /BACnet/ also matches the separate
+    // "BACnet to MQTT Validation" link and would pass even if this regressed.
+    stubDashboardFetch();
+    renderApp();
+
+    expect(screen.getByRole("link", { name: "IP Discovery" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "BACnet Discovery" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MQTT Discovery" })).toBeInTheDocument();
+
+    expect(await screen.findByText("ok")).toBeInTheDocument();
+  });
+
+  it("titles the /ip-scanner page 'IP Discovery', matching its menu entry", async () => {
+    // The pageTitles h1 layer used to say "IP Scanner" while the menu said "IP
+    // Discovery" — the same head named two things on one screen.
+    stubDashboardFetch();
+    renderApp({ path: "ip-scanner", initialEntry: "/ip-scanner" });
+
+    expect(screen.getByRole("heading", { level: 1, name: "IP Discovery" })).toBeInTheDocument();
+
+    // Settle the session query so nothing resolves after teardown.
+    expect(await screen.findByRole("button", { name: "Set API key" })).toBeInTheDocument();
   });
 
   it("renders recent runs from the live /runs response", async () => {

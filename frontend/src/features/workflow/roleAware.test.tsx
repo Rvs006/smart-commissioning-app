@@ -33,6 +33,10 @@ function stubFetchWithRole(role: string) {
     "fetch",
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      // Run rehydration asks for this head's last succeeded run on arrival.
+      if (url.includes("/api/v1/runs?")) {
+        return jsonResponse({ runs: [] });
+      }
       if (url.endsWith("/api/v1/me")) {
         return jsonResponse({ username: `${role}-1`, role, source: "user_key" });
       }

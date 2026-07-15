@@ -35,12 +35,25 @@ def _to_report_summary(report_id: str) -> ReportSummary:
     output_format = run.parameters.get("output_format", "zip")
     if output_format not in {"docx", "pdf", "xlsx", "zip"}:
         output_format = "zip"
+    # Scoped source runs, read back from the stored parameters. Same defensive
+    # shape-checking as report_type/output_format above: a run record is
+    # persisted JSON, so nothing guarantees the list survived as a list of str.
+    # (Attribute access on run.parameters is unredacted — the field_serializer
+    # only fires on serialization — and run ids are not sensitive.)
+    raw_source_run_ids = run.parameters.get("source_run_ids")
+    source_run_ids = (
+        [item for item in raw_source_run_ids if isinstance(item, str)]
+        if isinstance(raw_source_run_ids, list)
+        else []
+    )
     return ReportSummary(
         report_id=run.run_id,
         report_type=report_type,
         output_format=output_format,
         status=run.status,
         file_name=f"{report_type}_{run.run_id}.{output_format}",
+        created_at=run.created_at,
+        source_run_ids=source_run_ids,
     )
 
 
