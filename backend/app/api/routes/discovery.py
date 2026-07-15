@@ -21,6 +21,15 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
+from smart_commissioning_core.engines.bacnet_params import (
+    PARAM_BACNET_TARGETS,
+    TARGET_ADDRESS,
+    TARGET_ASSET_ID,
+    TARGET_ASSET_NAME,
+    TARGET_DEVICE_INSTANCE,
+    TARGET_NETWORK,
+    parse_targets,
+)
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
 from smart_commissioning_core.engines.safety import is_authorized
@@ -199,6 +208,89 @@ def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
     )
 
 
+def _resolve_bacnet_transport(project_id: str, site_id: str, parameters: dict) -> None:
+    """Inject the saved BACnet transport config (foreign-device registration) into
+    the run parameters BEFORE the run is persisted, mirroring the MQTT route's
+    ``mqtt_subscribe_defaults`` + ``setdefault`` shape.
+
+    ``setdefault`` per key, so an operator run-parameter override wins — consistent
+    with source_ip / local_address / qos on these routes. Nothing is injected
+    unless the saved config has Foreign Device = Enabled, so a default install's
+    run parameters are unchanged and discovery stays local-broadcast exactly as
+    it behaves today.
+
+    An unusable BBMD Address surfaces as a 400 here, at run creation, with a
+    fix-your-config message — no orphaned run is persisted, and the run never
+    silently falls back to broadcast (that silent fallback IS the bug this
+    release fixes: a run the operator asked to send through a BBMD would report a
+    clean, empty, local scan).
+
+    Dry runs are deliberately NOT skipped: the plan must echo the same resolved
+    transport the real scan would use, so the transport can be verified before a
+    single packet is sent.
+    """
+    try:
+        defaults = config_service.bacnet_transport_defaults(project_id, site_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    for key, value in defaults.items():
+        parameters.setdefault(key, value)
+
+
+def _bacnet_register_targets(record: dict) -> list[dict]:
+    """Contract-shaped target rows from one bacnet_register import's accepted rows.
+
+    Maps the register's column names onto the shared row keys, then delegates ALL
+    normalisation (types, bounds, dedupe on (address, device_instance), first-seen
+    order) to the contract's ``parse_targets`` — the same function the engine reads
+    back with, which is what stops the write and the read from drifting apart.
+
+    Malformed rows are SKIPPED, never fatal: a legacy import predating the
+    numeric/IP validators must not turn a scan into a 500. ``parse_targets`` never
+    raises on JSON-shaped input, and the ``isinstance`` guard here keeps a
+    non-dict row from breaking the ``.get`` before it gets there.
+    """
+    return [
+        target.as_dict()
+        for target in parse_targets(
+            {
+                TARGET_ADDRESS: row.get("IP address"),
+                TARGET_DEVICE_INSTANCE: row.get("BACnet device instance"),
+                TARGET_ASSET_ID: row.get("Asset ID"),
+                TARGET_ASSET_NAME: row.get("Asset name"),
+                TARGET_NETWORK: row.get("BACnet network"),
+            }
+            for row in record.get("accepted_rows", [])
+            if isinstance(row, dict)
+        )
+    ]
+
+
+def _ensure_bacnet_targets(project_id: str, site_id: str, parameters: dict) -> None:
+    """Resolve the expected-device list for a BACnet discovery run from the newest
+    accepted ``bacnet_register`` import, so the engine can probe registered devices
+    directly and report which expected devices stayed silent.
+
+    An operator-supplied ``bacnet_targets`` wins untouched, like every other
+    resolver on these routes.
+
+    NO REGISTER IS NOT AN ERROR — unlike :func:`_ensure_ip_targets`, which 400s
+    because an IP sweep with no targets has nothing to do at all. BACnet
+    broadcast-only discovery is a legitimate scan: with no register the targets
+    are simply absent and the run proceeds on the broadcast (and, if configured,
+    foreign-device) lanes. Do not copy the IP route's 400 here.
+    """
+    if parameters.get(PARAM_BACNET_TARGETS):
+        return
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="bacnet_register"
+    )
+    for record in imports:  # newest-first
+        if targets := _bacnet_register_targets(record):
+            parameters[PARAM_BACNET_TARGETS] = targets
+            return
+
+
 def _ip_register_by_address(project_id: str, site_id: str, column: str) -> dict[str, str]:
     """``{Expected IP address: <column>}`` from the newest ip_register import that
     has any non-empty value in ``column`` (every accepted row has an IP address)."""
@@ -333,6 +425,16 @@ def create_bacnet_discovery_run(
     _require_scan_authorization(parameters)
     _stamp_authorizer(parameters, principal)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
+    # Transport (foreign-device registration via a BBMD) and targeting (the
+    # expected devices from the bacnet_register) are resolved HERE, before
+    # _create_run, for the same reason source_ip is: the worker path reads the
+    # PERSISTED run.parameters, not this dict. create_job_run only shallow-copies
+    # what it is given, so injecting before it is what makes the inline (portable
+    # exe) path and the hosted worker path run against identical parameters —
+    # inject after it and the portable build would foreign-device register while
+    # the worker silently broadcast.
+    _resolve_bacnet_transport(request.project_id, request.site_id, parameters)
+    _ensure_bacnet_targets(request.project_id, request.site_id, parameters)
     # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
     # backend so it ATTEMPTS real discovery (never silently returns simulated
     # data). Persisted into run.parameters BEFORE _create_run so both the inline

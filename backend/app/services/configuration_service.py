@@ -9,6 +9,15 @@ from typing import Literal
 from cryptography import x509
 from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
+from smart_commissioning_core.engines.bacnet_params import (
+    MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_MODE,
+    PARAM_BBMD_ADDRESS,
+    PARAM_BBMD_PORT,
+    PARAM_FD_TTL,
+    bbmd_port,
+    fd_ttl,
+)
 from sqlalchemy.engine import Engine
 
 from app.core.db import get_engine
@@ -48,7 +57,20 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "BACnet Network Number": "1532",
             "UDP Port": "47808",
             "Device Instance Range": "1 - 4194303",
-            "BBMD": "Enabled",
+            # INFORMATIONAL ONLY — discovery never reads this toggle. It seeds
+            # Disabled because Enabled used to LOCK the "Foreign Device" control
+            # (UI) and be rejected alongside it (validation), so a default install
+            # could not enable the one setting that makes cross-subnet discovery
+            # work. Discovery gates STRICTLY on "Foreign Device" (see
+            # bacnet_transport_defaults).
+            # NOTE: changing this default does NOT touch an already-persisted
+            # snapshot — _merge_with_defaults only fills MISSING keys, so an
+            # existing install keeps whatever it saved until an operator edits
+            # and saves the Configuration page.
+            "BBMD": "Disabled",
+            # Demo seed, NOT a real BBMD. Nothing may register against it: only
+            # "Foreign Device" == Enabled triggers registration, and an operator
+            # who enables it must type their real BBMD's address here.
             "BBMD Address": "10.10.25.20",
             "BBMD UDP Port": "47808",
             "Foreign Device": "Disabled",
@@ -275,6 +297,67 @@ class ConfigurationService:
             defaults["topic_filter"] = root if ("#" in root or "+" in root) else root.rstrip("/") + "/#"
         return defaults
 
+    def bacnet_transport_defaults(
+        self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID
+    ) -> dict:
+        """BACnet transport run-parameters from saved config (mirrors :meth:`mqtt_subscribe_defaults`).
+
+        Returns the flat, JSON-safe scalars the engine reads — ``bacnet_mode`` /
+        ``bbmd_address`` / ``bbmd_port`` / ``fd_ttl``, spelled by importing the
+        shared contract, never as literals — so they survive the Dramatiq
+        round-trip to the worker unchanged. Addresses "I set the BBMD fields and
+        the scan ignored them".
+
+        THE TRIGGER IS "Foreign Device" == Enabled (casefolded) AND NOTHING ELSE.
+        Not the confusingly-named "BBMD" toggle, not a non-empty "BBMD Address":
+        both are seeded on a default install (with the FICTIONAL demo address
+        10.10.25.20), so keying on either would make every default install
+        register against a host that does not exist. Anything but Enabled returns
+        ``{}`` and the run stays local-broadcast — byte-identical to today's
+        behaviour, which is the zero-regression guarantee for the path that
+        works.
+
+        Strictness is deliberately split:
+
+        * "BBMD Address" is LOAD-BEARING — an FD run cannot happen without a
+          real one, and falling back to broadcast would report a clean scan for
+          a run the operator explicitly asked to send through a BBMD. Blank or
+          unparseable raises :class:`ValueError` with an actionable message; the
+          route turns that into a 400 before any run is created.
+        * "BBMD UDP Port" / "TTL" SOFT-DEFAULT to 47808 / 300 (via the contract's
+          own readers, so the bounds cannot drift from the engine's). Old
+          snapshots can hold junk in fields that were only ever validated on
+          save, and neither is worth blocking a lab scan over.
+        """
+        values = self.load(project_id, site_id).bacnet.values
+        if str(values.get("Foreign Device") or "").strip().casefold() != "enabled":
+            return {}
+        address = str(values.get("BBMD Address") or "").strip()
+        if not address:
+            raise ValueError(
+                "Foreign Device is Enabled but BBMD Address is empty. Set your BBMD's IP "
+                "address on the Configuration page (BACnet -> BBMD Address) and Save, then "
+                "run discovery again."
+            )
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError as error:
+            raise ValueError(
+                f"Foreign Device is Enabled but BBMD Address '{address}' is not a valid IP "
+                "address. Fix it on the Configuration page (BACnet -> BBMD Address) and Save, "
+                "then run discovery again."
+            ) from error
+        # Read the soft-defaulted values through the contract's own readers so the
+        # bounds and fallbacks are defined in exactly one place (the engine reads
+        # the same functions back off the run parameters).
+        stored = {PARAM_BBMD_PORT: values.get("BBMD UDP Port"), PARAM_FD_TTL: values.get("TTL")}
+        return {
+            PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
+            PARAM_BBMD_ADDRESS: str(parsed),
+            PARAM_BBMD_PORT: bbmd_port(stored),
+            PARAM_FD_TTL: fd_ttl(stored),
+        }
+
     def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
@@ -365,11 +448,22 @@ class ConfigurationService:
         self._validate_port(errors, "BBMD UDP Port", configuration.bacnet.values.get("BBMD UDP Port", ""))
         self._validate_enabled_disabled(errors, "BACnet Foreign Device", configuration.bacnet.values.get("Foreign Device", ""))
         self._validate_enabled_disabled(errors, "BACnet BBMD", configuration.bacnet.values.get("BBMD", ""))
-        if (
-            configuration.bacnet.values.get("BBMD", "").strip().casefold() == "enabled"
-            and configuration.bacnet.values.get("Foreign Device", "").strip().casefold() == "enabled"
-        ):
-            errors.append("Foreign Device must be Disabled when BBMD is Enabled.")
+        # The FD/BBMD mutual-exclusion rule is GONE (was: "Foreign Device must be
+        # Disabled when BBMD is Enabled."). It encoded a real BACnet constraint —
+        # a node that IS a BBMD cannot also be a foreign device — but this app is
+        # never a BBMD. Combined with the seeded BBMD=Enabled it made Foreign
+        # Device unsettable on a default install, which is why the transport
+        # config never reached a scan. "BBMD" is informational now.
+        #
+        # In its place: BBMD Address is only load-bearing when Foreign Device is
+        # Enabled, so validate it as an IP exactly then. Validating it always
+        # would fail every default install that never intends to use FD; not
+        # validating it at all (the old behaviour) let garbage through to a
+        # 400 at run time, far from the field the operator has to fix.
+        if configuration.bacnet.values.get("Foreign Device", "").strip().casefold() == "enabled":
+            self._validate_ip_field(
+                errors, "BACnet BBMD Address", configuration.bacnet.values.get("BBMD Address", "")
+            )
         self._validate_positive_int(errors, "BACnet TTL", configuration.bacnet.values.get("TTL", ""))
         self._validate_range_number(
             errors,

@@ -19,6 +19,19 @@ import socket
 import unittest
 
 from harness import ApiTestCase
+from smart_commissioning_core.engines.bacnet_params import (
+    MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_MODE,
+    PARAM_BACNET_TARGETS,
+    PARAM_BBMD_ADDRESS,
+    PARAM_BBMD_PORT,
+    PARAM_FD_TTL,
+    TARGET_ADDRESS,
+    TARGET_ASSET_ID,
+    TARGET_ASSET_NAME,
+    TARGET_DEVICE_INSTANCE,
+    TARGET_NETWORK,
+)
 
 _API_KEY = "test-engines-api-key"
 
@@ -273,6 +286,293 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
         blob = str(results).lower()
         self.assertNotIn("acme controls", blob)
         self.assertNotIn("globex", blob)
+
+
+class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
+    """Server-side injection of the saved BACnet transport config + register targets.
+
+    This IS the feature: the frontend posts ``{authorized: true}`` and nothing
+    else for a BACnet run, so a key not injected here never reaches the engine at
+    all — which is precisely how the saved BBMD / Foreign Device fields came to be
+    validated, stored, and then silently ignored by every scan.
+
+    The parameter keys are IMPORTED from the shared contract, never spelled as
+    literals. The engine suite imports the same names, so a key renamed on one
+    side of the seam breaks both suites instead of passing both and failing only
+    against a real BBMD on the lab network.
+
+    Every run here is a DRY RUN. The route resolves transport and targets
+    identically for dry and real runs (deliberately — the plan must echo the
+    transport a real scan would use, so it can be checked before a packet is
+    sent), and a dry run performs no I/O, so nothing here depends on bacpypes3
+    being installed or on a network being reachable.
+
+    Each test uses its OWN project/site: the harness database is process-wide and
+    is never reset between tests, so a config snapshot or register import written
+    under a shared id would leak into unrelated tests and make these pass or fail
+    on execution order.
+    """
+
+    def _save_bacnet_config(self, project_id: str, values: dict, site_id: str = "lab-site") -> None:
+        """Persist a BACnet config snapshot straight through the service.
+
+        Bypassing PUT /configuration's validation is not a shortcut here — it is
+        the real case. A snapshot is validated only when it is saved and is never
+        re-validated or re-defaulted on load, so a machine configured by an
+        EARLIER release holds whatever that release allowed. It is also the only
+        way to build the invalid-BBMD-Address case at all, now that validate()
+        rejects that at the field.
+        """
+        from app.api.routes import discovery as discovery_routes
+
+        config_service = discovery_routes.config_service
+        snapshot = config_service.load(project_id, site_id, mask_secrets=False)
+        snapshot.bacnet.values.update(values)
+        config_service.save(snapshot, project_id=project_id, site_id=site_id)
+
+    def _dry_run(self, project_id: str, site_id: str = "lab-site", parameters: dict | None = None):
+        return self.client.post(
+            "/api/v1/discovery/bacnet/runs",
+            json={
+                "project_id": project_id,
+                "site_id": site_id,
+                "job_type": "bacnet_discovery",
+                "parameters": {"dry_run": True, **(parameters or {})},
+            },
+        )
+
+    def _persisted_parameters(self, response) -> dict:
+        """The parameters as PERSISTED on the run record — what the worker reads.
+
+        Asserting on the stored record rather than the request dict is the point:
+        the hosted worker path never sees the route's local dict, only this.
+        """
+        self.assertEqual(response.status_code, 200, response.text)
+        record = self.client.get(f"/api/v1/discovery/runs/{response.json()['run_id']}")
+        self.assertEqual(record.status_code, 200, record.text)
+        return record.json()["parameters"]
+
+    def _run_count(self) -> int:
+        return len(self.client.get("/api/v1/discovery/runs").json()["runs"])
+
+    # -- transport: Foreign Device enabled ---------------------------------
+
+    def test_foreign_device_enabled_persists_typed_transport_parameters(self) -> None:
+        self._save_bacnet_config(
+            "fd-on",
+            {
+                "Foreign Device": "Enabled",
+                "BBMD Address": "10.20.30.40",
+                "BBMD UDP Port": "47809",
+                "TTL": "120",
+            },
+        )
+        parameters = self._persisted_parameters(self._dry_run("fd-on"))
+        self.assertEqual(parameters[PARAM_BACNET_MODE], MODE_FOREIGN_DEVICE)
+        self.assertEqual(parameters[PARAM_BBMD_ADDRESS], "10.20.30.40")
+        # TYPED, not the config's strings: the config stores every value as text,
+        # and the engine needs ints on the far side of the Dramatiq round-trip.
+        self.assertEqual(parameters[PARAM_BBMD_PORT], 47809)
+        self.assertEqual(parameters[PARAM_FD_TTL], 120)
+
+    def test_foreign_device_enabled_soft_defaults_junk_port_and_ttl(self) -> None:
+        # Port/TTL were only ever validated on save, so an old snapshot can hold
+        # junk in them. Neither is worth blocking a lab scan over — unlike the
+        # BBMD Address, which is load-bearing and fails loud below.
+        self._save_bacnet_config(
+            "fd-junk",
+            {
+                "Foreign Device": "Enabled",
+                "BBMD Address": "10.20.30.40",
+                "BBMD UDP Port": "not-a-port",
+                "TTL": "",
+            },
+        )
+        parameters = self._persisted_parameters(self._dry_run("fd-junk"))
+        self.assertEqual(parameters[PARAM_BACNET_MODE], MODE_FOREIGN_DEVICE)
+        self.assertEqual(parameters[PARAM_BBMD_PORT], 47808)
+        self.assertEqual(parameters[PARAM_FD_TTL], 300)
+
+    def test_run_parameters_override_saved_transport_config(self) -> None:
+        # setdefault semantics, consistent with source_ip / qos on these routes.
+        self._save_bacnet_config(
+            "fd-override",
+            {"Foreign Device": "Enabled", "BBMD Address": "10.20.30.40", "TTL": "300"},
+        )
+        parameters = self._persisted_parameters(
+            self._dry_run(
+                "fd-override",
+                parameters={PARAM_BBMD_ADDRESS: "192.0.2.99", PARAM_BBMD_PORT: 47810, PARAM_FD_TTL: 60},
+            )
+        )
+        self.assertEqual(parameters[PARAM_BBMD_ADDRESS], "192.0.2.99")
+        self.assertEqual(parameters[PARAM_BBMD_PORT], 47810)
+        self.assertEqual(parameters[PARAM_FD_TTL], 60)
+        # Keys the operator did NOT override still come from the config.
+        self.assertEqual(parameters[PARAM_BACNET_MODE], MODE_FOREIGN_DEVICE)
+
+    # -- transport: the zero-regression path -------------------------------
+
+    def test_default_install_injects_no_transport_parameters(self) -> None:
+        # A project with no saved config gets the seeded defaults. Nothing may be
+        # injected: with nothing configured, discovery must behave EXACTLY as it
+        # does today (local broadcast), and the seeded BBMD Address is fictional
+        # demo data that must never reach a run.
+        parameters = self._persisted_parameters(self._dry_run("fd-default"))
+        for key in (PARAM_BACNET_MODE, PARAM_BBMD_ADDRESS, PARAM_BBMD_PORT, PARAM_FD_TTL):
+            self.assertNotIn(key, parameters)
+        self.assertNotIn("10.10.25.20", str(parameters))
+
+    def test_bbmd_enabled_alone_never_triggers_foreign_device_registration(self) -> None:
+        # THE trigger-discipline guard. "BBMD" is a different, informational
+        # setting that happened to be seeded Enabled alongside a fictional
+        # address; gating on it (or on "a BBMD Address is present") would make
+        # every default install register against a host that does not exist.
+        # Only "Foreign Device" == Enabled counts.
+        self._save_bacnet_config(
+            "fd-off",
+            {"BBMD": "Enabled", "BBMD Address": "10.10.25.20", "Foreign Device": "Disabled"},
+        )
+        parameters = self._persisted_parameters(self._dry_run("fd-off"))
+        for key in (PARAM_BACNET_MODE, PARAM_BBMD_ADDRESS, PARAM_BBMD_PORT, PARAM_FD_TTL):
+            self.assertNotIn(key, parameters)
+
+    # -- transport: fail loud, fail early ----------------------------------
+
+    def test_invalid_bbmd_address_returns_400_and_creates_no_run(self) -> None:
+        # Reachable from a snapshot saved before validate() checked this field —
+        # i.e. from the machine this release is being shipped to. The run must
+        # never be created and must never quietly fall back to broadcast: that
+        # would report a clean empty local scan for a scan the operator asked to
+        # send through a BBMD, which is the exact bug being fixed.
+        self._save_bacnet_config(
+            "fd-garbage", {"Foreign Device": "Enabled", "BBMD Address": "not-an-ip"}
+        )
+        before = self._run_count()
+        response = self._dry_run("fd-garbage")
+        self.assertEqual(response.status_code, 400, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("BBMD Address", detail)
+        self.assertIn("not-an-ip", detail)
+        self.assertIn("Configuration page", detail)  # actionable: names where to fix it
+        self.assertEqual(self._run_count(), before, "a rejected request must leave no orphaned run")
+
+    def test_blank_bbmd_address_returns_400_and_creates_no_run(self) -> None:
+        self._save_bacnet_config(
+            "fd-blank", {"Foreign Device": "Enabled", "BBMD Address": "   "}
+        )
+        before = self._run_count()
+        response = self._dry_run("fd-blank")
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("BBMD Address is empty", response.json()["detail"])
+        self.assertEqual(self._run_count(), before, "a rejected request must leave no orphaned run")
+
+    # -- targeting: the bacnet_register ------------------------------------
+
+    def _import_register(self, project_id: str, csv: bytes, *, expect_accepted: int) -> None:
+        response = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "bacnet_register", "project_id": project_id, "site_id": "lab-site"},
+            files={"file": ("bacnet-register.csv", csv, "text/csv")},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["accepted_rows"], expect_accepted, response.text)
+
+    def test_register_import_becomes_deduped_bacnet_targets(self) -> None:
+        # A1 and A3 are distinct rows to the IMPORT (its duplicate key is
+        # Asset ID + instance) but name the SAME device — same address, same
+        # instance. The route must probe it once.
+        self._import_register(
+            "reg-dedupe",
+            b"Project/site,System,Asset ID,Asset name,BACnet device instance,BACnet network,IP address\n"
+            b"M,HVAC,A1,AHU-1,101,1,10.10.100.10\n"
+            b"M,HVAC,A2,AHU-2,102,1,10.10.100.11\n"
+            b"M,HVAC,A3,AHU-1 duplicate entry,101,1,10.10.100.10\n",
+            expect_accepted=3,
+        )
+        parameters = self._persisted_parameters(self._dry_run("reg-dedupe"))
+        targets = parameters[PARAM_BACNET_TARGETS]
+        self.assertEqual(
+            [(t[TARGET_ADDRESS], t[TARGET_DEVICE_INSTANCE]) for t in targets],
+            [("10.10.100.10", 101), ("10.10.100.11", 102)],
+            "deduped on (address, device_instance), first-seen (register) order",
+        )
+        # Rich rows, not bare addresses: the register identity is what lets the
+        # run report WHICH expected device stayed silent.
+        self.assertEqual(targets[0][TARGET_ASSET_ID], "A1")
+        self.assertEqual(targets[0][TARGET_ASSET_NAME], "AHU-1")
+        # Typed on the far side of the Dramatiq round-trip, like the transport ints.
+        self.assertEqual(targets[0][TARGET_NETWORK], 1)
+        self.assertIsInstance(targets[0][TARGET_DEVICE_INSTANCE], int)
+
+    def test_no_register_still_creates_a_broadcast_only_run(self) -> None:
+        # Deliberately UNLIKE the IP route, which 400s with no targets because an
+        # IP sweep then has nothing to do at all. Broadcast-only BACnet discovery
+        # is a legitimate scan and must not be blocked for want of a register.
+        response = self._dry_run("reg-absent")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn(PARAM_BACNET_TARGETS, self._persisted_parameters(response))
+
+    def test_operator_supplied_targets_win_over_the_register(self) -> None:
+        self._import_register(
+            "reg-override",
+            b"Project/site,System,Asset ID,Asset name,BACnet device instance,BACnet network,IP address\n"
+            b"M,HVAC,A1,AHU-1,101,1,10.10.100.10\n",
+            expect_accepted=1,
+        )
+        chosen = [{TARGET_ADDRESS: "192.0.2.7", TARGET_DEVICE_INSTANCE: 999}]
+        parameters = self._persisted_parameters(
+            self._dry_run("reg-override", parameters={PARAM_BACNET_TARGETS: chosen})
+        )
+        self.assertEqual(parameters[PARAM_BACNET_TARGETS], chosen)
+
+    def test_legacy_register_rows_are_skipped_not_fatal(self) -> None:
+        # A register imported before the numeric/IP row validators existed can
+        # hold unusable rows. They must cost the operator those rows, never the
+        # whole scan: a 500 here would read to the field as "discovery is broken"
+        # with nothing naming the register as the cause. Written through the
+        # repository because the import route would (correctly) reject them now.
+        from app.api.routes import discovery as discovery_routes
+        from smart_commissioning_core.db.repositories import ImportRepository
+
+        ImportRepository(discovery_routes.service.engine).create(
+            import_id="imp_legacy_bacnet_register",
+            import_type="bacnet_register",
+            project_id="reg-legacy",
+            site_id="lab-site",
+            original_filename="legacy-register.csv",
+            stored_file_path="",
+            summary={},
+            accepted_rows=[
+                {
+                    "IP address": "10.10.100.10",
+                    "BACnet device instance": "101",
+                    "BACnet network": "1",
+                    "Asset ID": "A1",
+                    "Asset name": "AHU-1",
+                },
+                # Unusable instance: could never be matched to a discovered
+                # device, so it could never be reported as expected-but-silent.
+                {"IP address": "10.10.100.11", "BACnet device instance": "not-a-number"},
+                {"IP address": "", "BACnet device instance": "103"},  # nothing to probe
+                {"BACnet device instance": "104"},  # no address at all
+                "not-even-a-row",  # corrupt record
+            ],
+        )
+        response = self._dry_run("reg-legacy")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self._persisted_parameters(response)[PARAM_BACNET_TARGETS],
+            [
+                {
+                    TARGET_ADDRESS: "10.10.100.10",
+                    TARGET_DEVICE_INSTANCE: 101,
+                    TARGET_ASSET_ID: "A1",
+                    TARGET_ASSET_NAME: "AHU-1",
+                    TARGET_NETWORK: 1,
+                }
+            ],
+        )
 
 
 class MqttDiscoveryApiTests(_EngineApiTestCase):
