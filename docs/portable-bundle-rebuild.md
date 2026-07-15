@@ -203,12 +203,17 @@ or, equivalently:
 scripts/smoke_local.sh http://127.0.0.1:8000
 ```
 
-### Expected smoke output — all 6 checks PASS
+### Expected smoke output — all 6 checks PASS (plus the 3b logo check)
 
 1. `PASS GET /api/v1/health -> 200 status=ok`
 2. `PASS GET /api/v1/ready -> 200 status=ready`  (local SQLite only; no Redis/PG
    needed — a 503 here means the DB layer failed, i.e. migrations didn't run)
 3. `PASS GET /metrics -> 200 Prometheus exposition text`  (matches `# HELP`/`# TYPE`/`sct_`)
+   - 3b. `PASS GET /electracom-logo.png -> 200 image/png (frontend static serving)`
+     — the bundle serves the built frontend, so this one always runs here. A
+     FAIL naming `text/html` means the SPA fallback swallowed the asset (the
+     v0.1.10 logo bug). Only a backend-only stack (no dist at `/`) skips it with
+     an Info line, so the footer count is 7 for the portable bundle.
 4. `PASS GET /api/v1/configuration -> 200 snapshot returned`  (demo-project/demo-site)
 5. UDMI validation against the **bundled fixture, no network**:
    `PASS POST /api/v1/validation/udmi/runs -> 200 run_id=…`,

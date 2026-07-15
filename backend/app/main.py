@@ -181,9 +181,44 @@ def root():
     }
 
 
+def _resolve_frontend_file(spa_path: str) -> Path | None:
+    """Map a request path to a real file inside FRONTEND_DIST, or None for SPA routes.
+
+    Vite copies frontend/public/ to the dist ROOT (not into dist/assets/), so the
+    /assets mount never sees files like electracom-logo.png; without this they
+    fell through to the SPA fallback and the browser got index.html for a PNG.
+
+    Any path that escapes the dist root -- '../' traversal, an absolute or
+    drive-qualified path -- raises 404 and is never served. The is_relative_to
+    check is load-bearing rather than just '..' screening: joining an absolute
+    component (e.g. 'C:/Windows/win.ini') REPLACES the base.
+
+    Junk that stays inside the root (e.g. an embedded NUL, which pathlib reports
+    as simply "not a file") is not special-cased: it resolves to no file and so
+    gets index.html like any other unknown SPA route.
+    """
+    dist_root = FRONTEND_DIST.resolve()
+    try:
+        candidate = (dist_root / spa_path).resolve()
+        inside = candidate.is_relative_to(dist_root)
+        found = inside and candidate.is_file()
+    except (OSError, ValueError):
+        # Defensive: resolve() can still raise on some malformed Windows paths.
+        raise HTTPException(status_code=404, detail="Route not found.") from None
+    if not inside:
+        raise HTTPException(status_code=404, detail="Route not found.")
+    return candidate if found else None
+
+
 @app.get("/{spa_path:path}", include_in_schema=False, response_model=None)
 def spa_fallback(spa_path: str):
     index_path = FRONTEND_DIST / "index.html"
-    if index_path.exists() and not spa_path.startswith("api/"):
-        return FileResponse(index_path)
-    raise HTTPException(status_code=404, detail="Route not found.")
+    if not index_path.exists() or spa_path.startswith("api/"):
+        # Backend-only deployments (no built dist) and unknown /api/* paths keep
+        # answering 404; the api/ gate stays AHEAD of file resolution.
+        raise HTTPException(status_code=404, detail="Route not found.")
+    static_file = _resolve_frontend_file(spa_path)
+    if static_file is not None:
+        # No media_type: starlette infers it from the extension (.png -> image/png).
+        return FileResponse(static_file)
+    return FileResponse(index_path)

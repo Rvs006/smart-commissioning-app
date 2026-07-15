@@ -10,6 +10,9 @@
       1. GET  /api/v1/health                      -> 200, status "ok"
       2. GET  /api/v1/ready                        -> 200, status "ready"
       3. GET  /metrics                             -> Prometheus exposition text
+      3b. GET /electracom-logo.png                 -> 200 image/png (frontend
+                                                      static serving; skipped
+                                                      when / is not the bundle)
       4. GET  /api/v1/configuration                -> demo-project/demo-site snapshot
       5. POST /api/v1/validation/udmi/runs         -> validate the BUNDLED UDMI
                                                       fixture (NO network I/O)
@@ -181,6 +184,32 @@ if ($r.Status -eq 200 -and $r.Raw -match '(?m)^# (HELP|TYPE) |sct_') {
     Write-Pass 'GET /metrics -> 200 Prometheus exposition text'
 } else {
     Write-Fail "GET /metrics -> HTTP $($r.Status) (expected 200 Prometheus text)"
+}
+
+# --- 3b. frontend static serving (the ELECTRACOM logo) ---------------------
+# Only meaningful when this stack actually serves the built frontend: the
+# portable bundle does, but a split-mode dev backend legitimately answers JSON
+# at / (main.py root()), so the check is conditional rather than a hard Fail.
+# Invoke-WebRequest directly instead of Invoke-Api: Invoke-Api discards response
+# headers and would try ConvertFrom-Json on the binary PNG body.
+try {
+    $rootResp = Invoke-WebRequest -Uri "$BaseUrl/" -Headers $Headers -TimeoutSec $CurlTimeout -UseBasicParsing
+    $rootCt = [string]$rootResp.Headers['Content-Type']
+    if ($rootCt -like 'text/html*') {
+        $logoResp = Invoke-WebRequest -Uri "$BaseUrl/electracom-logo.png" -Headers $Headers -TimeoutSec $CurlTimeout -UseBasicParsing
+        $logoStatus = [int]$logoResp.StatusCode
+        $logoCt = [string]$logoResp.Headers['Content-Type']
+        if ($logoStatus -eq 200 -and $logoCt -like 'image/png*') {
+            Write-Pass 'GET /electracom-logo.png -> 200 image/png (frontend static serving)'
+        } else {
+            Write-Fail "GET /electracom-logo.png -> HTTP $logoStatus content-type='$logoCt' (expected 200 image/png)"
+            Write-Info 'text/html here means the SPA fallback swallowed the asset request.'
+        }
+    } else {
+        Write-Info "frontend bundle not served at / (content-type='$rootCt') — logo check skipped (backend-only stack)."
+    }
+} catch {
+    Write-Fail "GET /electracom-logo.png -> request failed ($($_.Exception.Message))"
 }
 
 # --- 4. configuration ------------------------------------------------------
