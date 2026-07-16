@@ -137,6 +137,52 @@ class PublishFilterTests(unittest.TestCase):
         self.assertIn(b"\x70\x02\x45\x67", bytes(sock.sent))
 
 
+class MessageMetadataTests(unittest.TestCase):
+    """The decoded MqttMessage carries the DELIVERY QoS alongside the retain flag,
+    feeding the v0.1.13 MQTT discovery inspector. No broker: a PUBLISH packet is
+    fed straight through the mocked decode path.
+    """
+
+    def _client(self) -> MqttClient:
+        sock = RecordingSocket()
+        client = MqttClient(_settings(), socket_factory=lambda _addr, _t: sock)
+        client._socket = sock
+        return client
+
+    def test_qos1_retained_publish_decodes_retained_and_qos(self) -> None:
+        client = self._client()
+        topic = "site/asset/state"
+        packet_id = b"\x12\x34"
+        payload = len(topic).to_bytes(2, "big") + topic.encode() + packet_id + b'{"ok":true}'
+        # 0x33 = PUBLISH (0x30) | QoS 1 (bits <<1 = 0x02) | RETAIN (0x01).
+        with mock.patch.object(client, "_read_packet", return_value=(0x33, payload)):
+            message = client.read_publish_any(expected_topics={topic}, timeout_seconds=1)
+        self.assertIsNotNone(message)
+        self.assertEqual(message.topic, topic)
+        self.assertEqual(message.json_payload(), {"ok": True})
+        self.assertTrue(message.retained)
+        self.assertEqual(message.qos, 1)
+        # PUBACK (0x40) echoing the packet id proves the QoS1 ack path still ran.
+        self.assertIn(b"\x40\x02\x12\x34", bytes(client._socket.sent))
+
+    def test_plain_qos0_publish_defaults_retained_false_qos_zero(self) -> None:
+        client = self._client()
+        topic = "site/asset/state"
+        payload = len(topic).to_bytes(2, "big") + topic.encode() + b"{}"
+        with mock.patch.object(client, "_read_packet", return_value=(0x30, payload)):
+            message = client.read_publish_any(expected_topics={topic}, timeout_seconds=1)
+        self.assertIsNotNone(message)
+        self.assertFalse(message.retained)
+        self.assertEqual(message.qos, 0)
+
+    def test_message_construction_defaults_qos_to_zero(self) -> None:
+        # Back-compat: every existing (topic, payload) call site keeps working and
+        # gets qos=0 without passing it, so appending the field breaks nothing.
+        message = MqttMessage(topic="t", payload=b"{}")
+        self.assertEqual(message.qos, 0)
+        self.assertFalse(message.retained)
+
+
 class ConfigPublishConfirmationTests(unittest.TestCase):
     def test_confirmation_ignores_retained_and_pre_publish_pointsets(self) -> None:
         topic = "site/asset/events/pointset"
@@ -448,6 +494,88 @@ class SubscribeAndCaptureCompletionTests(unittest.TestCase):
             )
 
         self.assertEqual(messages, [first, first, first])
+
+
+class RetainLatestTests(unittest.TestCase):
+    """retain_latest decouples the per-topic retention (which today only the
+    stop_when completion path used) from the completion predicate, so a long
+    capture stays memory-bounded. on_message lets the caller keep an honest
+    per-topic total across that dedup.
+    """
+
+    def test_retain_latest_keeps_one_latest_message_per_topic(self) -> None:
+        first_a = MqttMessage(topic="ASSET-1/state", payload=b'{"n":1}')
+        first_b = MqttMessage(topic="ASSET-1/state", payload=b'{"n":2}')
+        second = MqttMessage(topic="ASSET-2/state", payload=b'{"n":3}')
+        fake = _FakeCaptureClient([first_a, first_b, second])
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            messages = mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=["+/state"],
+                timeout_seconds=None,
+                max_messages=2,
+                retain_latest=True,
+            )
+
+        # First-seen order; ASSET-1 collapsed to its LATEST payload; the list
+        # length is the distinct-topic count, not the raw message count.
+        self.assertEqual(messages, [first_b, second])
+
+    def test_on_message_fires_for_every_accepted_message_including_duplicates(self) -> None:
+        first_a = MqttMessage(topic="ASSET-1/state", payload=b'{"n":1}')
+        first_b = MqttMessage(topic="ASSET-1/state", payload=b'{"n":2}')
+        second = MqttMessage(topic="ASSET-2/state", payload=b'{"n":3}')
+        fake = _FakeCaptureClient([first_a, first_b, second])
+        seen: list[str] = []
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=["+/state"],
+                timeout_seconds=None,
+                max_messages=2,
+                retain_latest=True,
+                on_message=lambda message: seen.append(message.topic),
+            )
+
+        # Fired three times even though only two survive in the returned list —
+        # the duplicate that replaced ASSET-1 still counts toward the total.
+        self.assertEqual(seen, ["ASSET-1/state", "ASSET-1/state", "ASSET-2/state"])
+
+    def test_retain_latest_stops_at_the_distinct_topic_cap(self) -> None:
+        captured = [MqttMessage(topic=f"ASSET-{index}/state", payload=b"{}") for index in range(4)]
+        fake = _FakeCaptureClient(list(captured))
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            messages = mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=["+/state"],
+                timeout_seconds=None,
+                max_messages=3,
+                retain_latest=True,
+            )
+
+        # Cap is a distinct-topic cap: the 4th topic is never read.
+        self.assertEqual(messages, captured[:3])
+
+    def test_defaults_off_is_byte_identical_to_todays_raw_capture(self) -> None:
+        # Regression pin for udmi_validation (passes stop_when) and every raw
+        # caller: with both new kwargs at their defaults the behavior is the old
+        # append-every-message path unchanged.
+        first = MqttMessage(topic="ASSET-1/state", payload=b"{}")
+        second = MqttMessage(topic="ASSET-2/state", payload=b"{}")
+        fake = _FakeCaptureClient([first, first, second])
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            messages = mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=[first.topic, second.topic],
+                timeout_seconds=None,
+                max_messages=3,
+            )
+
+        self.assertEqual(messages, [first, first, second])
 
 
 if __name__ == "__main__":

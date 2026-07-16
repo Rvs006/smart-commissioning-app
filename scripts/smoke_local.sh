@@ -7,6 +7,9 @@
 #   1. GET  /api/v1/health                      -> 200, status "ok"
 #   2. GET  /api/v1/ready                        -> 200, status "ready"
 #   3. GET  /metrics                             -> Prometheus exposition text
+#   3b. GET /electracom-logo.png                 -> 200 image/png (frontend static
+#                                                   serving; skipped when / is not
+#                                                   the bundle)
 #   4. GET  /api/v1/configuration                -> demo-project/demo-site snapshot
 #   5. POST /api/v1/validation/udmi/runs         -> validate the BUNDLED UDMI
 #                                                   fixture (NO network I/O)
@@ -173,6 +176,33 @@ if http_get "${BASE_URL}/metrics" && [ "$HTTP_STATUS" = "200" ]; then
 else
   fail "GET /metrics -> HTTP ${HTTP_STATUS} (expected 200)"
 fi
+
+# --- 3b. frontend static serving (the ELECTRACOM logo) ---------------------
+# Only meaningful when this stack actually serves the built frontend: the
+# portable bundle does, but a split-mode dev backend legitimately answers JSON
+# at / (main.py root()), so the check is conditional rather than a hard fail.
+# Raw curl (not http_get) so we can read content-type and keep the binary body
+# out of the shell.
+root_ct="$(curl -sS --max-time "$CURL_TIMEOUT" "${AUTH_ARGS[@]}" \
+  -o /dev/null -w '%{content_type}' "${BASE_URL}/" 2>/dev/null)" || root_ct=""
+case "$root_ct" in
+  text/html*)
+    logo_probe="$(curl -sS --max-time "$CURL_TIMEOUT" "${AUTH_ARGS[@]}" \
+      -o /dev/null -w '%{http_code} %{content_type}' "${BASE_URL}/electracom-logo.png" 2>/dev/null)" || logo_probe=""
+    case "$logo_probe" in
+      "200 image/png"*)
+        pass "GET /electracom-logo.png -> 200 image/png (frontend static serving)"
+        ;;
+      *)
+        fail "GET /electracom-logo.png -> '${logo_probe}' (expected '200 image/png')"
+        info "text/html here means the SPA fallback swallowed the asset request."
+        ;;
+    esac
+    ;;
+  *)
+    info "frontend bundle not served at / (content-type='${root_ct}') — logo check skipped (backend-only stack)."
+    ;;
+esac
 
 # --- 4. configuration ------------------------------------------------------
 CFG_BODY=""

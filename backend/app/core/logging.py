@@ -25,7 +25,10 @@ import contextvars
 import datetime as _dt
 import json
 import logging
+import logging.handlers
+import time
 import uuid
+from pathlib import Path
 
 # -- correlation context ----------------------------------------------------
 
@@ -171,3 +174,90 @@ def configure_logging(level: int | str = logging.INFO) -> None:
 
     root.addHandler(handler)
     root.setLevel(level)
+
+
+# Marker for the rotating FILE handler, distinct from the console handler flag
+# so configure_file_logging replaces only its own handler and never disturbs the
+# console StreamHandler installed by configure_logging.
+_SCT_FILE_HANDLER_FLAG = "_sct_json_file_handler"
+
+
+def configure_file_logging(
+    log_dir: Path,
+    level: int | str = logging.INFO,
+    max_bytes: int = 5_242_880,
+    backup_count: int = 10,
+) -> None:
+    """Install a rotating JSON *file* handler alongside the console handler.
+
+    Writes ``<log_dir>/app.log`` as single-line JSON (the same
+    :class:`JsonLogFormatter` + :class:`CorrelationIdFilter` the console uses),
+    rotating at ``max_bytes`` and keeping ``backup_count`` rollovers (default
+    5 MiB x 10, a ~50 MiB hard cap so a chatty capture can never fill a field
+    laptop's disk). Level filtering is applied on the handler itself, so the file
+    can be quieter or louder than the root/console level.
+
+    Idempotent: a previously installed file handler (flagged
+    :data:`_SCT_FILE_HANDLER_FLAG`) is removed first, so repeated calls (a config
+    save that re-applies logging, a test harness) never stack handlers or leak
+    file descriptors.
+
+    ``delay=True`` is load-bearing: no file is opened until the first record is
+    emitted, so importing the app never litters an empty ``app.log`` and Windows
+    keeps no open handle while logging is quiet (which would otherwise block a
+    rollover rename).
+    """
+    if isinstance(level, str):
+        level = logging.getLevelNamesMapping().get(level.upper(), logging.INFO)
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if getattr(existing, _SCT_FILE_HANDLER_FLAG, False):
+            root.removeHandler(existing)
+            try:
+                existing.close()
+            except Exception:  # noqa: BLE001 (closing a stale handler must never raise)
+                pass
+
+    handler = logging.handlers.RotatingFileHandler(
+        log_dir / "app.log",
+        maxBytes=max_bytes,
+        backupCount=backup_count,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(JsonLogFormatter())
+    handler.addFilter(CorrelationIdFilter())
+    handler.setLevel(level)
+    setattr(handler, _SCT_FILE_HANDLER_FLAG, True)
+
+    root.addHandler(handler)
+
+
+def purge_old_logs(log_dir: Path, retention_days: int) -> None:
+    """Best-effort delete of rotated/crash log files older than ``retention_days``.
+
+    Removes every ``*.log*`` file under ``log_dir`` (rotated ``app.log.N``,
+    ``crash-*.log``, ``faulthandler-*.log``) whose modification time is older
+    than the retention window. Rotation itself is size-based; this is the only
+    time-based pruning, run once at startup.
+
+    Never raises: a missing directory or a per-file ``OSError`` (a locked file, a
+    permission gap) is swallowed so a startup purge can never block boot. A
+    non-positive ``retention_days`` disables purging entirely.
+    """
+    if retention_days <= 0:
+        return
+    cutoff = time.time() - retention_days * 86_400
+    try:
+        candidates = list(log_dir.glob("*.log*"))
+    except OSError:
+        return
+    for path in candidates:
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            continue

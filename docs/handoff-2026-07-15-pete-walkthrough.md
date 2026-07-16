@@ -17,20 +17,50 @@ do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
 
 ## 1. Context
 
-- **Pete** — field engineer at ELECTRACOM, validating the app on his laptop and
-  an MSI server. He walked through v0.1.10 end-to-end on 2026-07-15 (IP
+- **Pete** — the field engineer validating the app, running it on a laptop and
+  on a customer server. He walked through v0.1.10 end-to-end on 2026-07-15 (IP
   discovery → BACnet → MQTT discovery → UDMI workbench → reports) and produced
-  the punch list below. John and Dylan will add feedback later.
+  the punch list below. Other reviewers will add feedback later.
+  (This repo is public: keep site names, addresses, personnel and commercial
+  detail out of it. Operational specifics live in the private notes, not here.)
 - **Verdict: NOT an overhaul.** No architecture changes. ~25 items,
   ~30–35 engineer-days total if everything ships; the field-critical core is
   ~2 weeks split into two releases (v0.1.11, v0.1.12).
-- **Hard date:** Pete's home lab (~60 devices, 3 servers, BBMD, real BACnet/
-  MQTT field devices) comes online over the weekend; deep scan session is
+- **Hard date:** a large device lab (BBMD plus real BACnet/MQTT field devices)
+  comes online over the weekend; the deep scan session is
   **Monday 2026-07-20**. The BACnet fix (v0.1.12 headline) should be ready then.
 - **Decision made on the call:** drop the Docker distribution; the portable exe
   is the only supported path going forward (Docker can't reach host L2 for
   scans). Do NOT remove the hosted multi-user profile code (api_key/Postgres/
   Redis/Hub) — it is Docker-independent; only the Docker packaging/docs go.
+
+### 1a. Reconciled against Pete's own notes doc (2026-07-15)
+
+Pete's emailed notes (24 numbered items + 16 screenshots) were checked against
+this punch list: **every item maps onto work already listed below, and the doc
+adds no new work item.** Three details it records that this handoff originally
+did not — none of which change v0.1.11 scope:
+
+1. **The look-and-feel target is named.** Pete: "use the UDMI page and apply
+   this look and feel to the other pages." The UDMI workbench is the canonical
+   reference for the consistency item (§4 IP Discovery, deferred to *Later*) —
+   not a fresh design.
+2. **The MQTT inspector wants message metadata, not just the payload.** Pete:
+   "can we see if it's retained, when it was published, QoS level of message."
+   The §4 MQTT inspector item (small 0.5d) only planned payload + JsonTree.
+   Check whether `mqtt_discovery` even captures retain/QoS/publish-time before
+   sizing this — if not, it is an engine change, not a UI wiring change, and the
+   0.5d estimate is wrong. (v0.1.12.)
+3. **"Documents at top of page in line with the changes"** is its own item; this
+   handoff folded it into the placeholder-content purge. (*Later*.)
+
+Screenshot corroboration worth knowing: his rejected-import screenshot shows
+exactly `REJECTED / 0 accepted · 4 rejected` with no reasons (§3b(1) is the
+headline fix of v0.1.11), and his filename was already date-suffixed
+(`..._template150726.csv`) — he had been working around the same-filename skip
+(§3b(3)) by hand. His UDMI failure screenshot shows `live_capture_timeout` →
+run status **FAILED** with "expected 4 / publishing 3", which is precisely the
+§4 "don't fail run on silent devices" fix (v0.1.12).
 
 ---
 
@@ -55,7 +85,7 @@ Consequences Pete observed, none of which are data loss:
    always lands on the hidden "setup" step. Clicking the "3 Results" step button
    reveals it. jsdom tests can't catch this class of bug (theme CSS not applied).
 2. **"IP discovery loses results on navigate-away."** Page state is
-   component-local `useState` reset on remount (`routes.tsx:24-29` remounts
+   component-local `useState` reset on remount (`app/routes.tsx:24-29` remounts
    ModulePage per path). Server-side run persistence is fine — `GET /runs` /
    `GET /discovery/runs` list runs newest-first with `job_type` filter
    (`client.ts:889` already supports the params). Fix = rehydrate the latest
@@ -73,38 +103,196 @@ Consequences Pete observed, none of which are data loss:
 
 ## 3. The three live bugs — root causes (all high confidence)
 
-### 3a. BACnet discovery returns nothing (CONFIRMED; fix ~3d — v0.1.12 headline)
+### 3a. BACnet discovery returns nothing (CONFIRMED; fix IMPLEMENTED — v0.1.12 headline)
 
-The live bacpypes3 path supports **only local-subnet broadcast Who-Is**:
+> **Status 2026-07-15 (later the same day):** v0.1.12 is written and committed on
+> `fix/v0.1.12-bacnet-foreign-device`. **Two of the claims in the original
+> diagnosis below were disproven** by a source-verification pass against
+> bacpypes3 — they are corrected inline and marked, not deleted, because both
+> sent earlier reasoning down dead ends and the next reader needs to know why.
+> **The Python has not been CI-verified at time of writing** (the branch tip is
+> ahead of `origin`, so no CI run covers it) and **has never executed against a
+> real BACnet stack** — no Python on the dev machine, no BACnet hardware in CI.
+> Its wire behaviour is genuinely unproven. Lab-day procedure, gates and
+> fallbacks live in **`docs/lab-day-2026-07-20-runbook.md`**.
 
-- `Bacpypes3Backend.who_is` drops the directed address on purpose
-  ("intentionally not passed") — `core/smart_commissioning_core/engines/bacnet_discovery.py:374-391`
-- `Application.from_json` config has NO BBMD/foreign-device entries — `bacnet_discovery.py:359-371`
-- The Configuration page's BBMD / Foreign Device / BBMD Address / TTL fields are
+#### The original diagnosis (still correct)
+
+The live bacpypes3 path supported **only local-subnet broadcast Who-Is**:
+
+- `Application.from_json` config had NO BBMD/foreign-device entries
+- The Configuration page's BBMD / Foreign Device / BBMD Address / TTL fields were
   validated and stored but **consumed nowhere**
   (`configuration_service.py:46-54,363-377`; `ConfigurationPage.tsx:146-147`)
-- The uploaded `bacnet_register` is never used for discovery targeting — there
-  is no BACnet analogue of `_ensure_ip_targets` (`discovery.py:168-199` is IP-only);
-  the BACnet run route injects only `device."Source Interface"` (`discovery.py:323-365`, `:130-138`)
+- The uploaded `bacnet_register` was never used for discovery targeting — there
+  was no BACnet analogue of `_ensure_ip_targets`; the BACnet run route injected
+  only `device."Source Interface"`
 - Empty Who-Is → run ends `status=succeeded`, `device_count=0`, silently
-  (`bacnet_discovery.py:643,691-706`)
 
-Pete's device 123123 sits behind a BBMD at 10.10.10.22; his third-party browser
-sees it precisely because it does foreign-device registration. Secondary
-hypothesis: that browser holds UDP 47808 exclusively → bacpypes3 bind
-`OSError` → blanket except → sanitized generic failure (`engines/base.py:323-326,431-432`).
+The target device sits behind a BBMD (real address is in the run register, not
+repeated here); a third-party BACnet browser sees that device precisely because
+it performs foreign-device registration. That reading held up and is what
+v0.1.12 is built on.
 
-**Fix:** plumb the bacnet config section (Foreign Device toggle + BBMD Address +
-TTL) from `create_bacnet_discovery_run` into the backend parameters and
-configure bacpypes3 FD registration (`fdBBMDAddress`/`fdSubscriptionLifetime`);
-add directed **unicast Who-Is to register IPs** as fallback; replace the
-sanitized bind-failure with an actionable "UDP 47808 in use — close other BACnet
-tools" message. Must be field-verified on Pete's lab Monday 2026-07-20.
+#### CORRECTION 1 (2026-07-15) — "bacpypes3 can't send a directed Who-Is" was FALSE
 
-**Ask Pete:** run status of his failed attempt (succeeded-with-0 vs failed —
-distinguishes silent-empty from 47808 conflict); whether the BACnet browser was
-open during the run; his Source Interface value; whether the BBMD accepts FD
-registrations.
+The original text said `Bacpypes3Backend.who_is` "drops the directed address on
+purpose (`intentionally not passed`)", citing the code comment at
+`bacnet_discovery.py:374-391`. The implication — that the library cannot do it —
+is **wrong at every version in the pinned range** (checked at v0.0.97, v0.0.99
+and main). The real signature, from bacpypes3's `service/device.py`:
+
+```
+def who_is(self, low_limit=None, high_limit=None, address=None, timeout=WHO_IS_TIMEOUT)
+```
+
+`address` has been a first-class argument the whole time; omitting it is what
+makes the Who-Is a broadcast. Worse, **the engine was already passing a directed
+address in** — it reached the backend and the backend threw it away. So the only
+thing standing between this app and cross-subnet unicast discovery was an
+incorrect comment that nobody re-checked against the library.
+
+The comment is deleted. The verified signature is now quoted verbatim at the
+call site (`bacnet_discovery.py:1076-1086`) so the next person re-checks the
+library, not the folklore, and the directed branch is live at `:1087-1096`.
+
+**Lesson worth keeping:** a code comment asserting what a third-party API cannot
+do is a claim, not evidence. This one cost a release.
+
+#### CORRECTION 2 (2026-07-15) — the 47808-conflict hypothesis was mechanically FALSE
+
+The original secondary hypothesis was: browser holds UDP 47808 → bacpypes3 bind
+`OSError` → blanket except → sanitized generic failure. **That chain does not
+exist.** bacpypes3's `IPv4DatagramServer` catches its own bind `OSError` and
+retries once a second, **forever, silently**. The error never propagates. There
+is no exception for the blanket except to catch.
+
+The consequence is the important part, and it is worse than the original theory:
+
+> **A contended UDP 47808 and a genuinely quiet network produce the IDENTICAL
+> run record today** — `succeeded`, `device_count=0`, no error, no reason.
+
+So both of the candidate causes for Pete's failed run — silent-empty broadcast,
+and a port conflict — collapse into the same artifact. **His old run cannot tell
+us which it was**, retroactively, by any means. That is not a gap in our
+forensics; it is the bug.
+
+It also means an `except OSError` classifier would never have fired for the real
+conflict. Detection had to become **proactive**: a plain stdlib bind/close on the
+exact interface and port *before* any bacpypes3 Application is constructed
+(`preflight_bind`, `bacnet_discovery.py:708-736`). That pre-flight is the entire
+mechanism behind the port-in-use message; the errno classifier that remains
+(`:650-666`) is defence-in-depth only. Known limit, stated in the code and the
+runbook: it proves the port was free a moment ago, not that it stays free.
+
+#### A latent bug found while planning — it would have wrecked Monday on its own
+
+`Bacpypes3Backend.close()` had **zero call sites**. The portable exe runs engines
+inline in one long-lived process, so the first live scan's UDP 47808 socket
+leaked for the life of the app, and **the second scan of any session conflicted
+with itself** — invisibly, because of Correction 2. Every scan after the first
+silently returned zero devices. Nobody ever filed it, because it does not look
+like a bug.
+
+Fixed: `close()` now runs in a `finally` on every exit path
+(`bacnet_discovery.py:2459-2466`, method at `:1306`). Note this is a
+*prerequisite* for the pre-flight message being true — a leaked socket would
+otherwise produce a scan that confidently blames "another BACnet tool" for a port
+this very process is holding.
+
+#### What v0.1.12 actually does (strings copied from the shipped code)
+
+Three independent Who-Is lanes, deliberately redundant, deliberately
+non-substituting — a lane that fails is reported failed and is **never** quietly
+replaced by another (`bacnet_discovery.py:3-23`):
+
+| Lane | What it is | Reaches |
+|---|---|---|
+| 1 — broadcast | local broadcast on UDP **47808**; unchanged when nothing new is configured | the laptop's own subnet |
+| 2 — directed | unicast Who-Is to `bacnet_register` addresses, **fallback-only** (sent only to devices still silent after lanes 1 and 3) | any routable address, **no BBMD involved** |
+| 3 — foreign_device | second app on UDP **47809**, registers with the BBMD; gated strictly on `bacnet_mode == 'foreign_device'` | other subnets, incl. routed MS/TP devices lane 2 structurally cannot see |
+
+**How the operator turns it on** (`configuration_service.py:333`, field names as
+they appear on the Configuration page): the trigger is **`Foreign Device` =
+`Enabled`** and nothing else. Not the `BBMD` toggle — that is now informational
+only, and its seeded default flipped to `Disabled` (`:70`). `BBMD Address` is
+load-bearing (blank or unparseable → HTTP 400 naming the fix); `BBMD UDP Port`
+and `TTL` soft-default to 47808 / 300. **The seeded `BBMD Address` is
+`10.10.25.20` and is demo data, not a real BBMD** (`:74`) — and persisted config
+snapshots do NOT update when defaults change, so on Pete's machine this must be
+hand-set or the whole fix ships inert.
+
+**What a failed registration looks like now.** Before any Who-Is, the foreign
+lane waits up to **10s** (`FD_REGISTRATION_WAIT_S`, `:228`) for the BBMD's answer
+and hard-fails the run rather than scanning into a void. Outcomes recorded at
+`bacnet_diagnostics.fd_registration.outcome`: `registered` / `refused` /
+`pending` / `timeout` / `unknown` (`:214-222`). A refusal reads:
+
+> "The BBMD at `<ip:port>` refused foreign-device registration (BVLL result code
+> `<n>`). Ask the BBMD administrator to permit foreign-device registrations from
+> this machine's IP address, and to check the BBMD's foreign-device table has a
+> free entry." — `:778-783`
+
+A port conflict reads:
+
+> "UDP port `<n>` on `<ip>` is already in use by another program — usually
+> another BACnet tool (for example a BACnet browser) still running on this
+> machine. Close it and run the scan again." — `:675-680`
+
+**Every run** stamps `result_summary["bacnet_diagnostics"]` — `interface`,
+`udp_port`, `bind`, `mode`, `fd_registration`, `who_is` counters,
+`bacpypes3_version`, `transport_verified` (`:1760-1784`) — plus a `lanes`
+breakdown and `expected_not_responding` (`:1785-1789`), on success **and** on
+every self-diagnosed failure. The bar: a failed Monday scan must be diagnosable
+from `GET /discovery/runs/{id}` alone, because there will be no live debugging
+session.
+
+**An empty scan stays `succeeded`** — finding nothing is a valid result — but
+carries `empty_scan_hint`, one authored sentence naming the real candidates
+(`:2256-2268`, builder at `:1677`). It is only called a *clean* empty once the
+transport was affirmatively verified.
+
+**Expected-but-silent is amber, never "device absent"** — issue type
+`bacnet_expected_device_silent` (`:183`). BACnet-135 lets a device answer a
+directed Who-Is with a local-broadcast I-Am we cannot hear from off-subnet, and
+routed MS/TP devices are invisible to lane 2 by design. Directed silence is
+**inconclusive**.
+
+**Pre-flight without sending a packet:** a dry run echoes the resolved transport
+— `foreign-device registration via BBMD <ip:port>` or `local broadcast only`
+(`:2333-2337`) — and the directed lane's target count. "0 targets" there is the
+cheapest possible catch for a register import that never reached the engine.
+The same wording appears on the results pill (`discoveryRows.ts:265,274`).
+
+Also: `bacpypes3` is now pinned **exactly** (`core/pyproject.toml:45`,
+`bacpypes3==0.0.106` — the same source the API research read), and `base.py:448`
+finally logs the exception behind "See server logs for details", which until now
+was a lie.
+
+#### What is still unproven — the load-bearing guesses
+
+- **Whether the lab BBMD accepts foreign-device registrations at all.** This is
+  THE Monday decider and no amount of code can settle it. If it refuses, lane 3
+  is dead on arrival and **lane 2 (register-driven unicast) is the only route to
+  cross-subnet devices** — the day's sequence changes. The fix makes the refusal
+  loud and names the BVLL code; it cannot make a refusing BBMD cooperate.
+- Whether the register's IP addresses are each device's own BACnet/IP address or
+  supervisor/router addresses fronting MS/TP trunks (routed devices read as
+  silent on lane 2 even when perfectly alive).
+- Whether cross-subnet devices answer a directed Who-Is with a unicast I-Am back
+  to us, or with a local broadcast we never hear. BACnet-135 permits either.
+- Whether the BBMD replies to lane 3's source port 47809 (Annex-J-legal, but
+  nonconformant gear that hardcodes 47808 exists — fallback in the runbook).
+- The Windows errno mapping in the bind pre-flight (10048/10013) is verified **by
+  design, never by execution**. Pete's off-network smoke test is its first run.
+
+**Ask Pete:** whether the BBMD accepts FD registrations and can pre-authorise the
+laptop's IP **before Monday** (highest-value question by a distance); whether the
+register IPs are per-device or supervisor/router addresses; his current saved
+BBMD / Foreign Device / BBMD Address / TTL values; whether the BACnet browser was
+open during his failed run. Note his run *status* (succeeded-with-0 vs failed) is
+worth asking for context but **cannot** distinguish the two hypotheses — see
+Correction 2.
 
 ### 3b. Register import rejections (CONFIRMED; fix ~2d — in v0.1.11)
 
@@ -162,8 +350,8 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 |---|---|---|
 | Version pill on hero/brand bar | small 0.5d | Version exists only at build time (`build.ps1:91-119`; CI passes `workflow_dispatch` input). Set `$env:VITE_APP_VERSION = $BuildVersion` before `npm run build` (~`build.ps1:198`); read `import.meta.env.VITE_APP_VERSION` (precedent: `VITE_REVIEW_COMMENTS`, `App.tsx:166`); render pill in brand bar (`App.tsx:~99`). Optional: echo version in `/api/v1/health`. Risk: `-SkipFrontend` reuses a dist with old baked version — add guard like the `-SkipFreeze` one (`build.ps1:212-215`). |
 | ELECTRACOM logo not showing (exe) | trivial 0.25d | File ships in dist; FastAPI SPA fallback returns index.html for `/electracom-logo.png` because only `dist/assets` is mounted (`main.py:165-168`, fallback `:184-189`). Fix generically: if requested path resolves to a real file inside FRONTEND_DIST (traversal-guarded), `FileResponse` it. Covers all future `public/` files. Add a logo-200 assertion to the portable boot smoke. |
-| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on Pete's machines — needs migration or release note. |
-| Menu naming: "BACnet" → "BACnet Discovery" | trivial 0.25d | `NAV_GROUPS` in `App.tsx:13-39`; also reconcile `pageTitles` (`App.tsx:41-53`) and `moduleData.ts` titles (three layers disagree: "IP Scanner" vs "IP Discovery" etc.). Label-only, routes unchanged (precedent `moduleData.ts:121-125`). |
+| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `app/App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on Pete's machines — needs migration or release note. |
+| Menu naming: "BACnet" → "BACnet Discovery" | trivial 0.25d | `NAV_GROUPS` in `app/App.tsx:13-39`; also reconcile `pageTitles` (`app/App.tsx:41-53`) and `moduleData.ts` titles (three layers disagree: "IP Scanner" vs "IP Discovery" etc.). Label-only, routes unchanged (precedent `moduleData.ts:121-125`). |
 | Config tab sub-sections | small 1d | Seven flat accordion sections already exist (`ConfigurationPage.tsx:26-34`). Add group headers (Connections / System / Maintenance). Recommended extra: wire the fully-built signed backup endpoint (`POST /evidence/backup`, `backup_service.py`) to a "Download backup now" button — it currently has zero UI. |
 | Logging destinations | medium 2.5d | The whole Logging & Diagnostics config section is **decorative** — no code reads Remote Syslog Target/Port/Retention/Diagnostics Mode; no syslog handler exists. Actual logging = one JSON StreamHandler (`core/logging.py:151-173`). (a) local `RotatingFileHandler` to `RUNTIME_ROOT/logs/app.log` ~1d; (b) engineer-gated "Upload logs now" to a configured URL (httpx already frozen) ~1.5d. Secrets-masking + write-only sentinel for upload creds required. |
 | Certs "Not configured" pill | small 0.5d | ALL section status pills are static seeded strings never recomputed (`configuration_service.py:86`, save persists whatever the client echoes). Derive certificates status server-side on load from resolvable `secret://` refs + stored expiry (reuse `_secret_path().exists()`, `_stored_certificate_expiry:612-629`). Pete IS reloading keys so it may also genuinely be unconfigured. |
@@ -225,14 +413,16 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 | **v0.1.12** (target: usable Monday 2026-07-20 lab session) | BACnet foreign-device registration + unicast Who-Is + 47808-in-use message; MQTT template-compare RAG; MQTT duration (retain-latest first); UDMI RAG amber + succeed-with-silent-devices. | ~6–7d |
 | **Later** | nmap-style discovery pane; branded per-head report content + headers/footers; ModulePage component extraction (look-and-feel); logging destinations; Docker removal; placeholder/demo-content purge; config status pills derived. | ~12d |
 
-**Open questions for Pete** (ask before/while building): BACnet run status +
-browser-open question (§3a); RAG demotion of "pass with notes" (§4 UDMI);
-which browser he uses (confirms the same-filename no-change-event behavior).
+**Open questions for Pete** (ask before/while building): whether the lab BBMD
+accepts foreign-device registrations, and the register/browser questions in §3a
+(note the run-status question no longer distinguishes the two BACnet hypotheses —
+see §3a Correction 2); RAG demotion of "pass with notes" (§4 UDMI); which browser
+he uses (confirms the same-filename no-change-event behavior).
 
-**Non-code context:** Raj's Claude subscription limit resets Fri/Sat; Pete was
-asking John about expensing a Max subscription. Pete emailed his own notes doc
-("smart commissioning app mods"). ITP = integrated testing and planning —
-reports feed ITP witnessing packs, hence the branding item.
+**Non-code context:** Pete emailed his own notes doc ("smart commissioning app
+mods") — its 24 items match this punch list exactly and add no new work.
+ITP = integrated testing and planning — reports feed ITP witnessing packs,
+hence the branding item.
 
 ---
 

@@ -74,6 +74,41 @@ class ConfigurationReviewTests(unittest.TestCase):
         merged_secure = ConfigurationService()._merge_with_defaults(secure)
         self.assertEqual(merged_secure.mqtt.values["Use TLS"], "Enabled")
 
+    def test_defaults_do_not_fabricate_observations(self) -> None:
+        # Honesty rule: a fresh install has made no observations, so the seeded
+        # defaults must not claim a backup that never ran or health never checked.
+        configuration = DEFAULT_CONFIGURATION
+        self.assertEqual(configuration.backups.values["Last Backup Status"], "Never run")
+        self.assertEqual(configuration.backups.status, "Manual only")
+        self.assertEqual(configuration.mqtt.status, "Not checked")
+        self.assertEqual(configuration.device.status, "Not checked")
+
+        # The new neutral literals are non-empty, so validate() still passes on a
+        # default snapshot (backup-section non-empty rules stay satisfied).
+        result = ConfigurationService().validate(DEFAULT_CONFIGURATION.model_copy(deep=True))
+        backup_errors = [error for error in result.errors if "Backup" in error]
+        self.assertEqual(backup_errors, [])
+
+    def test_persisted_seeded_placeholders_are_migrated(self) -> None:
+        # An install persisted under an earlier release carries the OLD fabricated
+        # seeds; _merge_with_defaults rewrites them to the honest labels on load.
+        legacy = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        legacy.backups.values["Last Backup Status"] = "Success"
+        legacy.backups.status = "Success"
+        legacy.mqtt.status = "Connected"
+
+        merged = ConfigurationService()._merge_with_defaults(legacy)
+        self.assertEqual(merged.backups.values["Last Backup Status"], "Never run")
+        self.assertEqual(merged.backups.status, "Manual only")
+        self.assertEqual(merged.mqtt.status, "Not checked")
+
+        # A non-seed value (impossible today, but future-proofing the exact match)
+        # is left untouched — the migration only rewrites the exact old seed.
+        custom = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        custom.backups.values["Last Backup Status"] = "custom note"
+        merged_custom = ConfigurationService()._merge_with_defaults(custom)
+        self.assertEqual(merged_custom.backups.values["Last Backup Status"], "custom note")
+
     def test_validation_rejects_bad_network_and_backup_values(self) -> None:
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.device.values["Subnet Mask"] = "bad-mask"
@@ -91,15 +126,37 @@ class ConfigurationReviewTests(unittest.TestCase):
         self.assertIn("MQTT Keep Alive Interval must be greater than zero.", result.errors)
         self.assertIn("Encrypted Backups must be Enabled or Disabled.", result.errors)
 
-    def test_bbmd_locks_out_foreign_device_mode(self) -> None:
+    def test_bbmd_and_foreign_device_can_both_be_enabled(self) -> None:
+        # v0.1.12 removed the old mutual-exclusion lock. BBMD is now informational
+        # and Foreign Device is what discovery uses to register with a BBMD, so an
+        # operator MUST be able to enable both — the former rule ("Foreign Device
+        # must be Disabled when BBMD is Enabled") blocked exactly the configuration
+        # the BACnet fix requires.
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.bacnet.values["BBMD"] = "Enabled"
         configuration.bacnet.values["Foreign Device"] = "Enabled"
+        configuration.bacnet.values["BBMD Address"] = "10.0.0.5"
+
+        result = ConfigurationService().validate(configuration)
+
+        self.assertTrue(result.valid)
+        self.assertNotIn(
+            "Foreign Device must be Disabled when BBMD is Enabled.", result.errors
+        )
+
+    def test_foreign_device_requires_a_bbmd_address(self) -> None:
+        # The replacement contract: enabling Foreign Device with no BBMD Address
+        # is the misconfiguration to catch — the registration has nowhere to go —
+        # so validation fails with an actionable message rather than a silent
+        # empty scan on site.
+        configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        configuration.bacnet.values["Foreign Device"] = "Enabled"
+        configuration.bacnet.values["BBMD Address"] = ""
 
         result = ConfigurationService().validate(configuration)
 
         self.assertFalse(result.valid)
-        self.assertIn("Foreign Device must be Disabled when BBMD is Enabled.", result.errors)
+        self.assertIn("BACnet BBMD Address must not be empty.", result.errors)
 
     def test_secret_storage_returns_masked_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

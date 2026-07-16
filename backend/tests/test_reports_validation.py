@@ -12,7 +12,14 @@ All in-process against the shared temporary SQLite DB (no live infra). Covers:
     version (no payload_conformance_percent / blocking_issue_count /
     not_publishing_devices) still renders — liveness-labelled compliance, a
     blocking count derived from the run's own issue records (so the ≤99 clamp
-    still fires), and a placeholder silent-systems row instead of ids.
+    still fires), and a placeholder silent-systems row instead of ids;
+  * the ELECTRACOM report branding (field ask 2026-07-15): the text-only
+    header/footer band on the pdf (wordmark + rule on every page, footer
+    wordmark + page number + run id), the real OOXML header1.xml/footer1.xml
+    parts and their relationships/content-type/sectPr wiring in the docx, and
+    the per-sheet oddHeader/oddFooter in the xlsx — with a deliberate re-pin of
+    byte-reproducibility and verify over the now-branded bytes (the branding
+    changes every artifact's bytes, so this coverage lands in the same commit).
 
 Source runs are seeded through RunService's public API (create_job_run +
 update_result_summary + replace_issues) — the same records a real
@@ -369,6 +376,123 @@ class ValidationReportApiTests(ApiTestCase):
         # labelled (liveness) because a liveness-only run contributed.
         self.assertEqual(overall["Overall Compliance %"], "90% (liveness)")
 
+    # -- ELECTRACOM report branding ----------------------------------------------
+
+    def test_pdf_branding_on_every_page(self) -> None:
+        # Enough issues to force multiple pages (each finding adds an identity
+        # row plus per-finding paragraphs), so the every-page furniture is tested
+        # across a page break, not just on page 1.
+        issues = [
+            {**_POINT_ISSUE, "issue_id": f"iss-{index:03d}", "asset_id": f"AHU-{index}"}
+            for index in range(60)
+        ]
+        run_id = self._seed_validation_run(_UPGRADED_SUMMARY, issues)
+        report_id = self._create_report("pdf", [run_id])
+        content = self._download(report_id).content
+
+        # Page objects only: "/Type /Page " (trailing space) excludes "/Type /Pages".
+        pages = content.count(b"/Type /Page ")
+        self.assertGreaterEqual(pages, 2, "test needs a multi-page report to prove per-page furniture")
+        # ELECTRACOM appears exactly twice per page: header-left + footer-left
+        # wordmark. Content streams are uncompressed so the literals are direct.
+        self.assertEqual(content.count(b"ELECTRACOM"), 2 * pages)
+        # The report run id sits in the footer-right on every page (and nowhere in
+        # the body — the body carries source-run ids, not the report's own id).
+        # report_id IS the report-generation run's id; run_id is the SOURCE run,
+        # which lives only in the body, so counting it here (as this once did) made
+        # the assertion depend on body length rather than page count.
+        self.assertGreaterEqual(content.count(report_id.encode("ascii")), pages)
+
+    def test_docx_branding_parts_and_references(self) -> None:
+        run_id = self._seed_validation_run(_UPGRADED_SUMMARY, [_POINT_ISSUE])
+        report_id = self._create_report("docx", [run_id])
+        download = self._download(report_id)
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            names = set(archive.namelist())
+            header_xml = archive.read("word/header1.xml").decode("utf-8")
+            footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+            rels_xml = archive.read("word/_rels/document.xml.rels").decode("utf-8")
+            content_types = archive.read("[Content_Types].xml").decode("utf-8")
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+
+        self.assertIn("word/header1.xml", names)
+        self.assertIn("word/footer1.xml", names)
+        self.assertIn("word/_rels/document.xml.rels", names)
+
+        self.assertIn("ELECTRACOM", header_xml)
+        self.assertIn("ELECTRACOM", footer_xml)
+        # Footer carries the PAGE/NUMPAGES fields and the report's OWN run id
+        # (report_id == the report-generation run's run_id; the source validation
+        # runs are listed in the report body, not the footer).
+        self.assertIn(" PAGE ", footer_xml)
+        self.assertIn(" NUMPAGES ", footer_xml)
+        self.assertIn(report_id, footer_xml)
+
+        # Relationships point header/footer types at the parts.
+        self.assertIn(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header", rels_xml
+        )
+        self.assertIn(
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer", rels_xml
+        )
+        self.assertIn('Target="header1.xml"', rels_xml)
+        self.assertIn('Target="footer1.xml"', rels_xml)
+
+        # Content types declare both parts.
+        self.assertIn("wordprocessingml.header+xml", content_types)
+        self.assertIn("wordprocessingml.footer+xml", content_types)
+
+        # document.xml wires the references, declares r:, and no longer carries
+        # the empty self-closing sectPr.
+        self.assertIn("w:headerReference", document_xml)
+        self.assertIn("w:footerReference", document_xml)
+        self.assertIn(
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"',
+            document_xml,
+        )
+        self.assertNotIn("<w:sectPr/>", document_xml)
+
+    def test_xlsx_branding_on_every_sheet(self) -> None:
+        run_id = self._seed_validation_run(_UPGRADED_SUMMARY, [_POINT_ISSUE])
+        report_id = self._create_report("xlsx", [run_id])
+        download = self._download(report_id)
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            sheet_names = [
+                name
+                for name in archive.namelist()
+                if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+            ]
+            self.assertTrue(sheet_names, "expected at least one worksheet part")
+            for name in sheet_names:
+                sheet_xml = archive.read(name).decode("utf-8")
+                self.assertIn("<headerFooter", sheet_xml, name)
+                self.assertIn("oddHeader", sheet_xml, name)
+                self.assertIn("oddFooter", sheet_xml, name)
+                self.assertIn("ELECTRACOM", sheet_xml, name)
+                # openpyxl serializes the friendly &[Page]/&N page tokens as the
+                # compact Excel codes &P/&N, XML-escaped to &amp;P/&amp;N. If a
+                # future openpyxl serializes differently, pin the real form here.
+                self.assertIn("&amp;P", sheet_xml, name)
+                self.assertIn("&amp;N", sheet_xml, name)
+                self.assertIn(run_id, sheet_xml, name)
+
+    def test_branded_artifacts_remain_reproducible_and_verifiable(self) -> None:
+        # The branding changes every artifact's bytes; deliberately re-pin
+        # byte-reproducibility AND verify over the new bytes, in the same commit
+        # that changes them (extends the pdf-only coverage above to docx/xlsx).
+        run_id = self._seed_validation_run(_UPGRADED_SUMMARY, [_POINT_ISSUE])
+        for output_format in ("pdf", "docx", "xlsx"):
+            report_id = self._create_report(output_format, [run_id])
+            first = self._download(report_id).content
+            second = self._download(report_id).content
+            self.assertEqual(first, second, f"{output_format} artifact must be reproducible")
+
+            verify = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
+            self.assertEqual(verify.status_code, 200, verify.text)
+            body = verify.json()
+            self.assertTrue(body["hash_matches"], (output_format, body))
+            self.assertTrue(body["signature_valid"], (output_format, body))
+
 
 class PdfWriterUnitTests(unittest.TestCase):
     """Direct PdfDocument tests (no API): WinAnsi extras and long-token layout."""
@@ -407,6 +531,17 @@ class PdfWriterUnitTests(unittest.TestCase):
 
         self.assertEqual(_wrap("short line", 10.0, False, 495.0), ["short line"])
         self.assertEqual(_truncate("short", 10.0, False, 495.0), "short")
+
+    def test_no_furniture_means_no_header(self) -> None:
+        # The writer's default (furniture-less) output shape is unchanged: no
+        # branding band, and the footer is exactly the single page-number line.
+        from app.services.report_pdf import PdfDocument
+
+        document = PdfDocument()
+        document.add_paragraph("A single line of body text.")
+        rendered = document.render()
+        self.assertNotIn(b"ELECTRACOM", rendered)
+        self.assertEqual(rendered.count(b"Page 1 of 1"), 1)
 
 
 if __name__ == "__main__":

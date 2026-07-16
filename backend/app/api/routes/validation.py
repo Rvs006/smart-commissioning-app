@@ -48,6 +48,14 @@ from app.services.engine_dispatch import (
     make_import_loader,
 )
 from app.services.job_queue import JobQueueService, JobQueueUnavailable
+
+# Relocated to app.services.register_topics (shared with the MQTT discovery
+# register-comparison); imported under the original private name so the single
+# call site in _asset_entry_from_row and the direct test import in
+# test_v1_review_contracts.py both keep working unchanged.
+from app.services.register_topics import (
+    capture_topics_from_expected as _capture_topics_from_expected,
+)
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import VALIDATION_JOB_TYPES, RunService
 
@@ -134,66 +142,6 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
     if units_map:
         schedule["units"] = units_map
     return schedule
-
-
-def _capture_topics_from_expected(expected_topic: object, payload_type: object = None) -> dict:
-    """Derive state/metadata/pointset capture topics from a register Expected topic.
-
-    Accepts a ``prefix/#`` wildcard (covers all three), an explicit per-type topic,
-    or a comma-separated list of those — matching the register's topic conventions.
-    A wildcard also subscribes the legacy singular ``<prefix>/event/pointset`` so
-    sites on that convention still deliver their pointset payload.
-    """
-    topics: dict[str, object] = {}
-    extra_topics: list[str] = []
-    roots: set[str] = set()
-    requested_type = str(payload_type or "").strip().casefold()
-    for part in str(expected_topic or "").split(","):
-        topic = part.strip()
-        if not topic:
-            continue
-        # Keep a register wildcard in the live subscription set as well as
-        # its derived siblings; some site ACLs/brokers behave differently for
-        # wildcard versus concrete subscriptions. Explicit topics remain
-        # unchanged to avoid broadening their contract.
-        if topic.endswith("/#"):
-            topics.setdefault("register_topic_filter", topic)
-        if topic.endswith("/#"):
-            prefix = topic[:-2].rstrip("/")
-            roots.add(prefix)
-            if requested_type in {"", "state"}:
-                topics.setdefault("state_topic", prefix + "/state")
-            if requested_type in {"", "metadata"}:
-                topics.setdefault("metadata_topic", prefix + "/metadata")
-            if requested_type in {"", "pointset"}:
-                topics.setdefault("pointset_topic", prefix + "/events/pointset")
-                extra_topics.append(prefix + "/event/pointset")
-        elif topic.endswith("/state") and requested_type in {"", "state"}:
-            roots.add(topic.removesuffix("/state"))
-            topics["state_topic"] = topic
-        elif topic.endswith("/metadata") and requested_type in {"", "metadata"}:
-            roots.add(topic.removesuffix("/metadata"))
-            topics["metadata_topic"] = topic
-        elif topic.endswith("/events/pointset") and requested_type in {"", "pointset"}:
-            roots.add(topic.removesuffix("/events/pointset"))
-            topics["pointset_topic"] = topic
-        elif topic.endswith("/event/pointset") and requested_type in {"", "pointset"}:
-            roots.add(topic.removesuffix("/event/pointset"))
-            topics["pointset_topic"] = topic
-
-    # Pete's register contract: blank Payload type represents one WHOLE asset,
-    # so even one explicit sibling topic must require all three payload slots.
-    required_slots = {"state_topic", "metadata_topic", "pointset_topic"}
-    if not requested_type and roots and not required_slots.issubset(topics):
-        if len(roots) == 1:
-            prefix = next(iter(roots))
-            topics.setdefault("state_topic", prefix + "/state")
-            topics.setdefault("metadata_topic", prefix + "/metadata")
-            topics.setdefault("pointset_topic", prefix + "/events/pointset")
-            extra_topics.append(prefix + "/event/pointset")
-    if extra_topics:
-        topics["extra_capture_topics"] = list(dict.fromkeys(extra_topics))
-    return topics
 
 
 def _asset_entry_from_row(row: dict) -> dict:

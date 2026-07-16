@@ -1,5 +1,5 @@
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   cancelRun,
   createImport,
@@ -10,14 +10,17 @@ import {
   getDiscoveryRun,
   getDiscoveryTopics,
   getDiscoveryTopicsXlsxPath,
+  getImportErrors,
   getValidationIssues,
   getValidationRun,
   getImportTemplatePath,
   getReportDownloadPath,
+  getUdmiSchemaTemplatePath,
   ImportBatchSummary,
   ImportType,
   listImportProfiles,
   listReports,
+  listRuns,
   listUdmiSchemaSets,
   rollbackMqttConfigPublish,
   startMqttConfigPublishRun,
@@ -44,16 +47,19 @@ import {
 } from "./operatorData";
 import {
   bacnetBackendLabel,
+  discoveryEmptyStateFor,
   discoveryMetrics,
   discoveryViewFor,
+  expectedByRegisterSilent,
   expectedPortsOk,
   forbiddenOpenPorts,
   matchesTopicFilter,
   missingExpectedPorts,
+  mqttRegisterCompareNote,
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
-import { isTerminalStatus, toHealthState } from "./runFormat";
+import { formatAbsoluteTime, isTerminalStatus, toHealthState } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
@@ -83,9 +89,13 @@ type PointValuePair = {
 };
 
 // Which kind of run is being monitored, so we poll the right status endpoint.
+// `restored` marks a run rehydrated from run history on page arrival rather than
+// started by the operator here and now: it re-attaches the monitor and results
+// without hijacking the step the operator is looking at (see the seed effect).
 type ActiveRun = {
   runId: string;
   kind: "discovery" | "validation";
+  restored?: boolean;
 };
 
 // The module page is split into three stages so the operator works one screen
@@ -93,6 +103,11 @@ type ActiveRun = {
 type ModuleStep = "setup" | "run" | "results";
 
 const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discovery"]);
+
+// A large register can reject hundreds of rows. Render the first N and state the
+// honest remainder count rather than building pagination for a pre-1.0 fix:
+// fixing the listed rows and re-uploading surfaces the rest.
+const IMPORT_ERROR_DISPLAY_CAP = 50;
 
 const validationModeCards = [
   {
@@ -201,6 +216,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // all engineer+ mutations server-side. A viewer/reviewer sees these controls
   // disabled with an explanatory tooltip rather than letting the click 403.
   const { canEngineer } = useSession();
+  const queryClient = useQueryClient();
   const module = getModuleByRoute(moduleRoute);
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
@@ -274,11 +290,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // is on-site-untested; this drives the existing mqtt discovery run + topics.
   const [captureTopicFilter, setCaptureTopicFilter] = useState("#");
   const [captureSeconds, setCaptureSeconds] = useState("10");
+  // Field ask 2026-07-14: day-scale windows are real (metadata often every 24h),
+  // so the capture duration carries a unit. The wire value stays SECONDS — only
+  // the control converts (mirrors the UDMI run-time unit).
+  const [captureUnit, setCaptureUnit] = useState<"seconds" | "minutes" | "hours">("seconds");
   const [step, setStep] = useState<ModuleStep>("setup");
+  // Snap target for the results-open scroll: the top-of-page hero section.
+  const heroRef = useRef<HTMLElement | null>(null);
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
   const allTemplatesDownload = useFileDownload();
+  const schemaTemplateDownload = useFileDownload();
 
   const profilesQuery = useQuery({
     queryFn: listImportProfiles,
@@ -380,6 +403,49 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["udmi-schema-sets"],
   });
 
+  // Per-row rejection reasons for the import just uploaded. The POST returns
+  // counts only, so a rejected upload used to say "4 rejected" and nothing more.
+  //
+  // Gate on status !== "accepted", NOT rejected_rows > 0: _status()
+  // (import_service.py:929-934) returns "rejected" with rejected_rows 0 for an
+  // empty or missing-columns file, and that case needs the explanation most.
+  // Keying on import_id makes each new upload refetch; the route-change reset
+  // effect nulls importOutcome, which disables the query on navigation.
+  const importErrorsQuery = useQuery({
+    enabled: Boolean(importOutcome && importOutcome.status !== "accepted"),
+    queryFn: () => getImportErrors(importOutcome?.import_id ?? ""),
+    queryKey: ["import-errors", importOutcome?.import_id],
+  });
+
+  // Run retention: the page state is wiped on every navigation, so arriving at a
+  // head used to look like nothing had ever run there. Ask the run store for the
+  // most recent succeeded run of this head's own job types and re-attach it, so
+  // the monitor and results survive navigating away and back.
+  //
+  // Report actions carry no run lifecycle, so they are excluded — which also
+  // naturally exempts the reports route (report-only actions => no query).
+  const rehydratableActions = module.runActions.filter(
+    (action): action is Exclude<ModuleRunAction, { kind: "report" }> => action.kind !== "report",
+  );
+  const lastRunQuery = useQuery({
+    enabled: rehydratableActions.length > 0,
+    // Keyed by route so one head's cached run can never be handed to another.
+    queryKey: ["last-succeeded-run", module.route],
+    queryFn: async () => {
+      const responses = await Promise.all(
+        rehydratableActions.map((action) =>
+          listRuns({ jobType: action.jobType, limit: 1, status: "succeeded" }),
+        ),
+      );
+      // One request per job type (data-validation has three); pick the newest
+      // across them. created_at is ISO-8601 UTC, so it sorts lexicographically.
+      const newest = responses
+        .flatMap((response) => response.runs)
+        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
+      return newest ?? null;
+    },
+  });
+
   // When SSE reports the run terminal but polling is paused, the polled record
   // (and its result_summary) may still be mid-run. Trigger a single refetch so
   // the terminal-gated issues/results queries fire against fresh data.
@@ -438,6 +504,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetAllTemplatesDownload,
   ]);
 
+  // Re-attach this head's most recent succeeded run (see lastRunQuery above).
+  //
+  // THIS EFFECT MUST STAY DECLARED AFTER THE RESET EFFECT ABOVE. React runs
+  // effects in declaration order, and the reset's unconditional setActiveRun(null)
+  // is what stops one head's run bleeding into the next: on a route change the
+  // reset nulls the old run first, and only then does this effect seed from the
+  // new route's own data. Re-ordering the two would re-introduce the bleed.
+  //
+  // Seeding is idempotent (the activeRun guard), so StrictMode's double
+  // invocation and the reset/seed two-pass flush both settle on the same run.
+  useEffect(() => {
+    const run = lastRunQuery.data;
+    if (!run || activeRun) {
+      return;
+    }
+    // Belt-and-braces on top of the route-keyed query: only ever seed a run
+    // whose job type this head can actually start.
+    const action = module.runActions.find(
+      (entry) => entry.kind !== "report" && entry.jobType === run.job_type,
+    );
+    if (!action || action.kind === "report") {
+      return;
+    }
+    setActiveRun({ kind: action.kind, restored: true, runId: run.run_id });
+  }, [lastRunQuery.data, activeRun, module.runActions]);
+
   // Auto-clear the report confirmation toast after a few seconds so a stale
   // "report generated" note does not linger on the page (mqautz9j follow-up).
   useEffect(() => {
@@ -451,8 +543,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Step flow: advance to Run the moment a run is queued, and to Results when it
   // reaches a terminal state, so the operator follows the job rather than
   // hunting down a long page. Manual step clicks still override at any time.
+  //
+  // A *restored* run never moves the step: the operator arrived here to set
+  // something up, and yanking them to Results for a run they did not just start
+  // would be worse than the stale-looking page this retention fixes. The run
+  // monitor is visible on Setup anyway (the run-controls section is in the
+  // "setup run" step group) and StepNav's Results button is one click away.
   useEffect(() => {
-    if (activeRun) {
+    if (activeRun && !activeRun.restored) {
       setStep("run");
     }
   }, [activeRun]);
@@ -462,10 +560,29 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // activeRunError — otherwise the operator would land on an empty Results view
   // with no clue why the job ended.
   useEffect(() => {
-    if (activeRunTerminal && activeRunStatus === "succeeded") {
+    if (activeRunTerminal && activeRunStatus === "succeeded" && activeRun && !activeRun.restored) {
       setStep("results");
     }
-  }, [activeRunTerminal, activeRunStatus]);
+  }, [activeRunTerminal, activeRunStatus, activeRun]);
+
+  // Pete's walkthrough ask (2026-07-15): when Results opens, snap to the top of
+  // the page so the operator sees the headline results first, not whatever
+  // mid-page scroll position the Run step left behind.
+  //
+  // This watches `step` rather than hooking the effect above, so one insertion
+  // covers every route into Results — the auto-advance on a succeeded run, the
+  // setStep("results") in runMutation's report branch, and a manual StepNav
+  // click — on all five heads. A *restored* run never advances the step (see
+  // above), so rehydration on arrival never snaps.
+  //
+  // Instant ("auto") on purpose: this is a step change, not an animation, so
+  // prefers-reduced-motion needs no handling. jsdom has no scrollIntoView; the
+  // test setup installs a no-op.
+  useEffect(() => {
+    if (step === "results") {
+      heroRef.current?.scrollIntoView({ behavior: "auto", block: "start" });
+    }
+  }, [step]);
 
   const importMutation = useMutation({
     mutationFn: (input: { importType: ImportType; file: File }) =>
@@ -516,7 +633,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           jobType: action.jobType,
           parameters: buildDiscoveryParameters(action, {
             authorized: scanAuthorized,
-            captureSeconds,
+            captureSeconds: captureSecondsEffective,
             captureTopicFilter,
             dryRun: scanDryRun,
             scanPorts,
@@ -626,6 +743,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setReportToast(
         `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
       );
+      // The toast points at the Reports tab, so the list behind it must not be
+      // stale. The reports query is disabled off the reports route, so this
+      // marks it stale and it refetches when that route enables it.
+      void queryClient.invalidateQueries({ queryKey: ["reports-list"] });
     },
   });
 
@@ -647,14 +768,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // killed mid-run, so refuse it up front instead of failing after two days.
   const udmiCaptureOverCap = Number(udmiCaptureSecondsEffective) > 172_800;
 
+  // MQTT discovery capture duration carries the same unit + 48h cap (the
+  // discover_mqtt actor runs at cap + 1h). Blank/non-numeric pass through
+  // unchanged so the 0-sentinel (run until stopped) convention is untouched.
+  const captureUnitSeconds = { hours: 3600, minutes: 60, seconds: 1 }[captureUnit];
+  const captureSecondsEffective =
+    captureSeconds.trim() === "" || !Number.isFinite(Number(captureSeconds))
+      ? captureSeconds
+      : String(Number(captureSeconds) * captureUnitSeconds);
+  const mqttCaptureOverCap = Number(captureSecondsEffective) > 172_800;
+
+  // Run actions the Run Controls card list renders. Used ONLY to decide which
+  // branch the list shows — the map below still walks the full module.runActions
+  // so each card keeps its original index for runMutation.mutate(index).
+  const visibleRunActions = module.runActions.filter((action) => !action.hiddenFromRunControls);
+
   // Index of the UDMI validation run action, used by the Schedule & Payload
-  // Evidence "Execute capture" button so it triggers the same run as the Run
-  // Controls card (mq9n7pbe). Defaults to 0 if the action shape ever changes.
-  const udmiRunActionIndex = Math.max(
-    0,
-    module.runActions.findIndex(
-      (action) => action.kind === "validation" && action.runKind === "udmi",
-    ),
+  // Evidence "Execute capture" button — the only visible trigger for this run
+  // now that the Run Controls card is hidden (mq9n7pbe).
+  //
+  // Deliberately NOT clamped to 0: a -1 flows into runMutation's "Unknown run
+  // action." guard, surfacing a visible error panel on this same Setup step,
+  // instead of silently dispatching whatever happens to sit at index 0.
+  const udmiRunActionIndex = module.runActions.findIndex(
+    (action) => action.kind === "validation" && action.runKind === "udmi",
   );
 
   // Verdicts derive from the run's issues list, so an empty list only means
@@ -666,9 +803,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // verdict kind, which carries no tone class.
   const udmiIssuesSettled = validationIssuesQuery.isSuccess;
   const gatedUdmiVerdict = useCallback(
-    (issues: IssueRow[], observedPresent: boolean): UdmiVerdict =>
+    (issues: IssueRow[], observedPresent: boolean, assetOffline: boolean): UdmiVerdict =>
+      // Keep the "Verdict pending" gate FIRST so a summary-derived offline
+      // signal (which rides the run record, arriving before issues settle) can
+      // never paint red ahead of the issues query — preserves the existing
+      // no-false-green / no-false-red gating contract.
       udmiIssuesSettled
-        ? udmiVerdictForIssues(issues, observedPresent)
+        ? udmiVerdictForIssues(issues, observedPresent, assetOffline)
         : { label: "Verdict pending", verdict: "none" },
     [udmiIssuesSettled],
   );
@@ -679,7 +820,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     activeRun?.kind === "validation" && validationIssuesQuery.data
       ? validationIssuesQuery.data.issues.map(toIssueRow)
       : null;
-  const visibleIssues = liveIssues ?? workspace?.issues ?? [];
+  // Discovery routes never have live validation issues (activeRun.kind is not
+  // "validation"), so the workspace?.issues fallback would render fabricated
+  // sample operatorData issues as findings. Suppress it there — the MQTT
+  // inspector shows the real captured payload instead, and other discovery
+  // routes show a neutral note. Validation routes keep the sample fallback.
+  const visibleIssues = liveIssues ?? (isDiscoveryModule ? [] : (workspace?.issues ?? []));
 
   // Per-asset / per-payload-type grouping for UDMI live issues (mq9m4bnv).
   // Collapsed shows a cross-payload-type summary per asset; expanding an asset
@@ -704,6 +850,35 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     const raw = validationRunQuery.data?.result_summary?.payload_views;
     return Array.isArray(raw) ? (raw as UdmiAssetPayloadView[]) : null;
   }, [module.route, activeRun, validationRunQuery.data]);
+
+  // Asset ids a capture attempt found SILENT — the red "offline" set for the
+  // RAG scheme (mqf-udmi-rag). Derived from real capture evidence only: issues
+  // stamped issue_type "not_publishing" (the complete path — single-asset
+  // capture timeouts report silence ONLY as an issue, never in the summary
+  // list), unioned with result_summary.not_publishing_devices (the
+  // DevicesNotPublishing path) as defensive insurance. Never inferred from
+  // observed_present=false alone, so a pasted-payload run (no capture attempted)
+  // never paints a device red (honesty rule).
+  const offlineAssets = useMemo<Set<string>>(() => {
+    const ids = new Set<string>();
+    if (module.route !== "udmi-validation" || activeRun?.kind !== "validation") {
+      return ids;
+    }
+    for (const issue of validationIssuesQuery.data?.issues ?? []) {
+      if (issue.issue_type === "not_publishing" && issue.asset_id) {
+        ids.add(issue.asset_id);
+      }
+    }
+    const summary = validationRunQuery.data?.result_summary?.not_publishing_devices;
+    if (Array.isArray(summary)) {
+      for (const id of summary) {
+        if (typeof id === "string") {
+          ids.add(id);
+        }
+      }
+    }
+    return ids;
+  }, [module.route, activeRun, validationIssuesQuery.data, validationRunQuery.data]);
 
   const payloadViewSource =
     activeRun?.kind === "validation"
@@ -751,8 +926,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       group.payloadTypes.map((entry) => {
         const observed = entry.hasPayloadView ? (entry.observedPresent ? "Yes" : "No") : "—";
         // Shared (issues-gated) verdict helper so the row, its View detail,
-        // and the per-asset payload sections can never disagree on pass/fail.
-        const { label, verdict } = gatedUdmiVerdict(entry.issues, entry.observedPresent);
+        // and the per-asset payload sections can never disagree on the verdict.
+        const { label, verdict } = gatedUdmiVerdict(
+          entry.issues,
+          entry.observedPresent,
+          offlineAssets.has(group.assetId),
+        );
         return {
           Asset: group.assetId,
           Payload: `UDMI ${entry.payloadType}`,
@@ -770,7 +949,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return null;
     }
     return { columns: ["Asset", "Payload", "Observed", "Issues", "Raw Payload", "Result"], rows };
-  }, [module.route, mergedAssetGroups, validationRunQuery.data, gatedUdmiVerdict]);
+  }, [module.route, mergedAssetGroups, validationRunQuery.data, gatedUdmiVerdict, offlineAssets]);
 
   // Reset the row selection when the live UDMI view replaces the sample rows so
   // the inspector never shows a stale sample-row selection against live results.
@@ -783,13 +962,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [hasUdmiLiveResults]);
 
   // Live discovery results view (ip/bacnet/mqtt). Built only after a terminal
-  // run; until then the table falls back to labelled sample rows.
+  // run; until then the table shows its honest "No results yet" empty state.
   const discoveryView = useMemo(() => {
     if (!isDiscoveryModule || !discoveryResultsQuery.data) {
       return null;
     }
     return discoveryViewFor(module.route, discoveryResultsQuery.data);
   }, [isDiscoveryModule, discoveryResultsQuery.data, module.route]);
+
+  // Reset the row selection when the discovery view identity changes (a re-run
+  // produces a new view object), mirroring the UDMI reset above, so a re-run
+  // never leaves a stale, out-of-range selection pointing at the old rows.
+  useEffect(() => {
+    if (discoveryView) {
+      setSelectedResultIndex(0);
+    }
+  }, [discoveryView]);
 
   const liveMetrics = useMemo(() => {
     if (!isDiscoveryModule || !discoveryResultsQuery.data) {
@@ -810,11 +998,41 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const usingLiveResults = Boolean(discoveryView) || Boolean(udmiLiveResults);
   const tableColumns = discoveryView?.columns ?? udmiLiveResults?.columns ?? workspace?.columns ?? [];
-  const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? workspace?.rows ?? [];
+  // Rows come from live run results only. There is deliberately no sample-row
+  // fallback here: labelling fabricated rows as a "Sample preview" was not
+  // enough to stop them being read as real findings, and a head with history
+  // now re-attaches its last real run (see lastRunQuery) instead. When there
+  // are no rows the table renders the "No results yet" empty state below.
+  const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? [];
   const selectedResult = resultRows[selectedResultIndex] ?? resultRows[0] ?? null;
   const resultDetails = selectedResult
     ? buildResultDetailItems(module.route, selectedResult, usingLiveResults, mergedAssetGroups)
     : [];
+
+  // The structured DiscoveredTopic record for the selected MQTT row, matched by
+  // topic (topics are distinct per run by aggregation construction). Yields the
+  // real last_payload OBJECT for the inspector's JsonTree — we NEVER re-parse
+  // the row's stringified "Raw Payload" cell. Null off the mqtt-discovery route,
+  // before results land, or when nothing is selected.
+  const selectedMqttTopic = useMemo<DiscoveryRowRecord | null>(() => {
+    if (module.route !== "mqtt-discovery" || !discoveryResultsQuery.data || !selectedResult) {
+      return null;
+    }
+    const topic = selectedResult.Topic;
+    return (
+      discoveryResultsQuery.data.topics.find((record) => String(record.topic) === topic) ?? null
+    );
+  }, [module.route, discoveryResultsQuery.data, selectedResult]);
+
+  // Terminal empty-state: a discovery run that completed with zero rows must say
+  // so explicitly — distinct from "no run yet" / "in flight" / "failed"
+  // (Pete 2026-07-15: "it can't find anything, but it doesn't really tell us").
+  // Gating on activeRun keeps this composable with run rehydration: a restored
+  // terminal run sets activeRun and lights this state up unchanged.
+  const discoveryEmptyState =
+    isDiscoveryModule && activeRun && activeRunTerminal && resultRows.length === 0
+      ? discoveryEmptyStateFor(module.route, discoveryResultsQuery.data, activeRunError)
+      : null;
 
   // Honest headline metrics: real numbers derived from the latest terminal run
   // (discovery, validation, or reports). When nothing has run there is no number
@@ -869,6 +1087,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
     setImportOutcome(null);
+    // Chromium fires no change event when the same path is re-picked while the
+    // input still holds it, so a corrected CSV saved over the original was
+    // silently never re-read (Pete had to rename the file to get it uploaded).
+    // Clearing the value makes every pick deliver a fresh File snapshot. The
+    // File captured into state above stays valid for the upload, and the staged
+    // name is rendered from state since the native input now always reads
+    // "No file chosen".
+    event.target.value = "";
   };
 
   const handleImport = () => {
@@ -1032,9 +1258,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // their own amber panel below the outcome — never the red error styling.
   const importWarnings = importOutcome?.warnings ?? [];
 
+  // Rejection reasons for the red panel. When the summary already names the
+  // missing columns on its own line, the per-column missing_required_column
+  // records (import_service.py:698-706) would repeat it verbatim as bullets —
+  // drop them there only, so the reasons stay complete but nothing is said twice.
+  const importErrors = (importErrorsQuery.data?.errors ?? []).filter(
+    (error) =>
+      error.code !== "missing_required_column" ||
+      (importOutcome?.missing_columns.length ?? 0) === 0,
+  );
+  const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
+  const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
+
   return (
     <div className="app-page">
-      <section className="module-hero">
+      <section className="module-hero" ref={heroRef}>
         <div>
           <span className="eyebrow">{module.backendService}</span>
           <h2>{workspace?.title ?? module.title}</h2>
@@ -1055,7 +1293,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           ) : (
             <article className="module-metrics-empty">
               <strong>—</strong>
-              <span>{module.route === "reports" ? "No reports yet" : "No run yet"}</span>
+              <span>
+                {module.route === "reports"
+                  ? reportsQuery.isLoading
+                    ? "Loading reports..."
+                    : "No reports yet"
+                  : "No run yet"}
+              </span>
             </article>
           )}
         </div>
@@ -1099,6 +1343,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 CSV or XLSX file
                 <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
               </label>
+              {/* handleFileChange clears the input's value, so the native
+                  control always reads "No file chosen" — the staged file is
+                  named here from state instead. */}
+              {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
 
               <button
                 className="primary-button"
@@ -1201,6 +1449,43 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               )}
 
+              {importOutcome && importOutcome.status !== "accepted" && (
+                <div className="state-panel error import-errors">
+                  <strong>
+                    {importOutcome.status === "rejected"
+                      ? "Import rejected — reasons below"
+                      : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
+                  </strong>
+                  {importOutcome.missing_columns.length > 0 && (
+                    <span>
+                      Missing required columns: {importOutcome.missing_columns.join(", ")}
+                    </span>
+                  )}
+                  {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
+                  {/* Never let a failed fetch look like "no reasons": say so. */}
+                  {importErrorsQuery.isError && (
+                    <span>Could not load rejection reasons: {importErrorsQuery.error.message}</span>
+                  )}
+                  {visibleImportErrors.length > 0 && (
+                    <ul>
+                      {visibleImportErrors.map((error, index) => (
+                        <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
+                          {error.row_number != null ? `Row ${error.row_number} — ` : ""}
+                          {error.field ? `${error.field}: ` : ""}
+                          {error.message} ({error.code})
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {hiddenImportErrorCount > 0 && (
+                    <span>
+                      ...and {hiddenImportErrorCount} more rejected rows not shown — fix the rows
+                      listed above and re-upload to see the rest.
+                    </span>
+                  )}
+                </div>
+              )}
+
               {importWarnings.length > 0 && (
                 <div className="state-panel warning">
                   <strong>
@@ -1257,11 +1542,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
 
           <div className="run-list">
-            {module.runActions.length > 0 ? (
+            {visibleRunActions.length > 0 ? (
+              // Mapped over the FULL list and skipped in place, never
+              // filter-then-map: `index` must stay the action's real index in
+              // module.runActions or mutate(index) dispatches the wrong action.
               module.runActions.map((action, index) => {
+                if (action.hiddenFromRunControls) {
+                  return null;
+                }
                 const scanBlocked = action.kind === "discovery" && discoveryBlocked;
+                const mqttOverCapBlocked =
+                  mqttCaptureOverCap && action.kind === "discovery" && action.runKind === "mqtt";
                 const overCapBlocked =
-                  udmiCaptureOverCap && action.kind === "validation" && action.runKind === "udmi";
+                  (udmiCaptureOverCap && action.kind === "validation" && action.runKind === "udmi") ||
+                  mqttOverCapBlocked;
                 const blocked = scanBlocked || !canEngineer || overCapBlocked;
                 // Role gate takes priority in the tooltip; otherwise the existing
                 // scan-authorization hint is shown for a blocked real scan.
@@ -1269,9 +1563,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ? ENGINEER_REQUIRED_TOOLTIP
                   : scanBlocked
                     ? "Confirm scan authorization (or enable dry run) before starting a real scan."
-                    : overCapBlocked
-                      ? "Run time exceeds the 48-hour capture limit."
-                      : undefined;
+                    : mqttOverCapBlocked
+                      ? "Capture duration exceeds the 48-hour capture limit."
+                      : overCapBlocked
+                        ? "Run time exceeds the 48-hour capture limit."
+                        : undefined;
                 return (
                   <div className="run-card" key={action.label}>
                     <div>
@@ -1296,6 +1592,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   </div>
                 );
               })
+            ) : module.runActions.length > 0 ? (
+              // This head HAS a run action, it is just started from elsewhere.
+              // Without this pointer the Run step is a dead end: StepNav never
+              // disables steps, so an operator can land here before any run and
+              // find no start control at all.
+              <div className="empty-workspace">
+                <strong>Run controls are at the bottom of Setup</strong>
+                <span>
+                  Work through the options below, then start the run with Execute capture under Schedule and Payload
+                  Evidence.
+                </span>
+              </div>
             ) : (
               <div className="empty-workspace">
                 <strong>Saved synchronously</strong>
@@ -1423,32 +1731,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </button>
                   )}
                 {canEngineer && activeRunTerminal && (
-                  <>
-                    <label className="report-format-picker">
-                      Report format
-                      <select
-                        aria-label="Report format"
-                        onChange={(event) =>
-                          setReportExportFormat(event.target.value as ReportFormat)
-                        }
-                        value={reportExportFormat}
-                      >
-                        <option value="pdf">PDF (.pdf)</option>
-                        <option value="docx">Word (.docx)</option>
-                        <option value="xlsx">Excel (.xlsx)</option>
-                        <option value="zip">Evidence pack (.zip)</option>
-                      </select>
-                    </label>
-                    <button
-                      className="secondary-button compact"
-                      disabled={reportFromRunMutation.isPending}
-                      onClick={handleGenerateReportFromRun}
-                      title="Generate a report for this run type, then find it in the Reports tab."
-                      type="button"
-                    >
-                      {reportFromRunMutation.isPending ? "Generating..." : "Generate report from this run"}
-                    </button>
-                  </>
+                  <ReportFromRunControls
+                    format={reportExportFormat}
+                    onFormatChange={setReportExportFormat}
+                    onGenerate={handleGenerateReportFromRun}
+                    pending={reportFromRunMutation.isPending}
+                  />
                 )}
               </div>
 
@@ -1690,7 +1978,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               />
             </label>
             <label>
-              Capture duration (seconds — 0 or blank = run until stopped)
+              Capture duration (0 or blank = run until stopped)
               <input
                 inputMode="numeric"
                 onChange={(event) => setCaptureSeconds(event.target.value)}
@@ -1698,16 +1986,45 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 value={captureSeconds}
               />
             </label>
+            <label>
+              Capture duration unit
+              <select
+                onChange={(event) =>
+                  setCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
+                }
+                value={captureUnit}
+              >
+                <option value="seconds">seconds</option>
+                <option value="minutes">minutes</option>
+                <option value="hours">hours</option>
+              </select>
+            </label>
           </div>
+          {mqttCaptureOverCap && (
+            <span className="error-text">
+              Capture duration exceeds the 48-hour capture limit — shorten the window.
+            </span>
+          )}
           <p className="section-copy">
             Subscribes through an MQTT discovery run and shows the latest payload seen per topic. The live
             broker capture is on-site-untested here; with no broker reachable the run records
             broker_unreachable and this panel stays empty rather than showing fabricated payloads. The
             filter and duration are sent to the run; set the duration to{" "}
-            <strong>{Number(captureSeconds) > 0 ? `${captureSeconds}s` : "0 (run until stopped)"}</strong> —
-            an indefinite capture runs until you press Cancel above or the message cap is reached. Captured
+            <strong>{Number(captureSecondsEffective) > 0 ? `${captureSecondsEffective}s` : "0 (run until stopped)"}</strong> —
+            an indefinite capture runs until you press Cancel above or the topic cap is reached. Captures are
+            capped at 48 hours; on the portable exe (inline runs) an indefinite capture is bounded to the
+            5-second default window, and an hour-to-day-scale window needs the hosted worker profile — a long
+            capture there runs inside a single HTTP request and does not survive closing the app. Captured
             topics appear here when the run completes.
           </p>
+          {activeRunTerminal &&
+            discoveryRunQuery.data?.result_summary?.indefinite_bounded_inline === true && (
+              <span className="error-text">
+                This run requested an indefinite capture but executed inline, so it was bounded to{" "}
+                {String(discoveryRunQuery.data?.result_summary?.capture_seconds)}s — run indefinite or
+                long captures on the hosted worker profile.
+              </span>
+            )}
           <div className="data-table-wrap">
             {captureRows.length > 0 ? (
               <table className="data-table">
@@ -1773,9 +2090,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </div>
           <p className="section-copy">
             Payloads declaring a non-published UDMI version (e.g. nonpub.1) are validated against
-            the uploaded schema set with that label.
+            the uploaded schema set with that label. Download the published 1.5.2 schema set as a
+            starting point, modify it, and upload it under a nonpub label.
           </p>
           <div className="form-stack">
+            <button
+              className="secondary-button"
+              disabled={schemaTemplateDownload.pendingKey !== null}
+              onClick={() =>
+                void schemaTemplateDownload.download(
+                  "udmi-schema-template",
+                  getUdmiSchemaTemplatePath(),
+                  "udmi-schema-template-1.5.2.zip",
+                )
+              }
+              type="button"
+            >
+              {schemaTemplateDownload.pendingKey === "udmi-schema-template"
+                ? "Downloading..."
+                : "Download schema template (1.5.2)"}
+            </button>
+            {schemaTemplateDownload.error && (
+              <div className="state-panel error">
+                <strong>Template download failed</strong>
+                <span>{schemaTemplateDownload.error}</span>
+              </div>
+            )}
             <label>
               Version label
               <input
@@ -1790,10 +2130,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <input
                 accept=".json"
                 multiple
-                onChange={(event) => setSchemaSetFiles(Array.from(event.target.files ?? []))}
+                onChange={(event) => {
+                  setSchemaSetFiles(Array.from(event.target.files ?? []));
+                  // Same Chromium re-pick trap as the register file input above:
+                  // clear the value so re-picking the same schema files after
+                  // editing them on disk always delivers fresh File snapshots.
+                  event.target.value = "";
+                }}
                 type="file"
               />
             </label>
+            {schemaSetFiles.length > 0 && (
+              <p className="field-note">
+                Selected: {schemaSetFiles.map((file) => file.name).join(", ")}
+              </p>
+            )}
             <button
               className="primary-button"
               disabled={
@@ -2175,7 +2526,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
 
       {module.route === "reports" && (
-        <section className="surface" data-stepgroup="results">
+        // Shown on every step, not just Results: the Reports page always lands on
+        // Setup, which used to hide this table behind a step click nobody knew to
+        // make. The Generate buttons live in the "setup run" Run Controls section,
+        // so defaulting this route to Results instead would just hide those.
+        <section className="surface" data-stepgroup="setup run results">
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Reports</span>
@@ -2216,7 +2571,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <th>Type</th>
                     <th>Format</th>
                     <th>Status</th>
+                    <th>Generated</th>
+                    <th>Source runs</th>
                     <th>File</th>
+                    <th>Download</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2242,7 +2600,38 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             {report.status}
                           </span>
                         </td>
+                        <td>{formatAbsoluteTime(report.created_at)}</td>
+                        {/* The source run ids in full, not a count: tracing a report back
+                            to the runs it was built from is the whole point of an ITP
+                            evidence pack, and run ids are already shown raw in the Report
+                            column and the run monitor. `?? []` because a response from an
+                            older backend (or a cached query payload) carries neither new
+                            field — formatAbsoluteTime already tolerates undefined. */}
+                        <td>{(report.source_run_ids ?? []).join(", ") || "—"}</td>
                         <td>{report.file_name || "—"}</td>
+                        <td>
+                          <button
+                            className="secondary-button compact"
+                            disabled={!downloadable || exportDownload.pendingKey !== null}
+                            onClick={() =>
+                              void exportDownload.download(
+                                `row-${report.report_id}`,
+                                getReportDownloadPath(report.report_id),
+                                report.file_name || `${report.report_id}.${report.output_format}`,
+                              )
+                            }
+                            title={
+                              downloadable
+                                ? `Download ${report.file_name || report.report_id}`
+                                : "Only completed reports can be downloaded."
+                            }
+                            type="button"
+                          >
+                            {exportDownload.pendingKey === `row-${report.report_id}`
+                              ? "Downloading..."
+                              : "Download"}
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -2288,22 +2677,41 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </button>
           </div>
 
-          {!usingLiveResults && resultRows.length > 0 && (
-            <div className="sample-banner" role="note">
-              {isDiscoveryModule
-                ? "Sample preview — run a discovery to replace this with live results."
-                : "Sample preview — per-asset result rows are illustrative. The live issues panel and run monitor reflect real run data."}
-            </div>
-          )}
           {usingLiveResults && (
             <div className="sample-banner" role="note">
-              {isDiscoveryModule
-                ? 'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
-                : `Live validation results — per-asset payload checks from the latest run. Observed payloads were ${
-                    payloadViewSource === "live_capture"
-                      ? "captured from the MQTT broker"
-                      : "supplied directly (pasted), not captured from a broker"
-                  }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}`}
+              {isDiscoveryModule ? (
+                module.route === "ip-scanner" ? (
+                  'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
+                ) : module.route === "mqtt-discovery" &&
+                  discoveryResultsQuery.data?.register_comparison ? (
+                  discoveryResultsQuery.data.register_comparison.register_available ? (
+                    <>
+                      Green rows match a topic in the uploaded MQTT register; red rows were
+                      observed on the broker but are not in the register.
+                      {mqttRegisterCompareNote(discoveryResultsQuery.data) ? (
+                        <>
+                          <br />
+                          {mqttRegisterCompareNote(discoveryResultsQuery.data)}
+                        </>
+                      ) : null}
+                    </>
+                  ) : (
+                    "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
+                  )
+                ) : (
+                  // No register comparison available (non-MQTT discovery, or an
+                  // MQTT run that observed nothing / has no register): the
+                  // discovery table shows observations, and register verdicts are
+                  // otherwise produced by validation.
+                  'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
+                )
+              ) : (
+                `Live validation results — per-asset payload checks from the latest run. Observed payloads were ${
+                  payloadViewSource === "live_capture"
+                    ? "captured from the MQTT broker"
+                    : "supplied directly (pasted), not captured from a broker"
+                }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}`
+              )}
             </div>
           )}
           {bacnetBackend &&
@@ -2330,10 +2738,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </thead>
                 <tbody>
                   {resultRows.map((row, rowIndex) => (
-                    // Boolean row shading (live UDMI rows only): a pass shades
-                    // green, a fail red; "Not received" and every sample or
-                    // discovery row stays neutral (no __tone key).
-                    <tr className={row.__tone ? `row-${row.__tone}` : undefined} key={rowIndex}>
+                    // Row shading: live UDMI verdicts (pass green / fail red),
+                    // IP discovery register verdicts (pass/fail plus warn amber
+                    // for expected-but-silent and other inconclusive findings)
+                    // via ipRowVerdict, and MQTT discovery register-comparison
+                    // verdicts (pass = topic in the register, fail = observed but
+                    // not in the register) all set __tone. "Not received" and
+                    // neutral sample/discovery rows (including MQTT rows with no
+                    // register imported) carry no tone. The expression stays
+                    // generic so any row map with a __tone key gets shaded.
+                    // Rows are clickable to drive the Inspector without opening
+                    // the modal (Pete: "select a scan result"). row-selected marks
+                    // the active row; the nested "Copy payload" click bubbles here
+                    // and also selects — benign and desirable, no stopPropagation.
+                    <tr
+                      className={`${row.__tone ? `row-${row.__tone}` : ""}${
+                        selectedResultIndex === rowIndex ? " row-selected" : ""
+                      }`.trim() || undefined}
+                      key={rowIndex}
+                      onClick={() => setSelectedResultIndex(rowIndex)}
+                    >
                       {tableColumns.map((column) => (
                         <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
                       ))}
@@ -2356,14 +2780,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             ) : (
               <div className="empty-workspace">
                 <strong>
-                  {isDiscoveryModule && activeRun && !activeRunTerminal
-                    ? "Run in progress..."
-                    : "No results yet"}
+                  {discoveryEmptyState
+                    ? discoveryEmptyState.title
+                    : isDiscoveryModule && activeRun && !activeRunTerminal
+                      ? "Run in progress..."
+                      : "No results yet"}
                 </strong>
                 <span>
-                  {isDiscoveryModule
-                    ? "Run a discovery; observed devices, points, or topics appear here once it completes."
-                    : "Run a job to populate results."}
+                  {discoveryEmptyState
+                    ? discoveryEmptyState.detail
+                    : isDiscoveryModule
+                      ? "Run a discovery; observed devices, points, or topics appear here once it completes."
+                      : "Run a job to populate results."}
                 </span>
               </div>
             )}
@@ -2470,9 +2898,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               // so scrolling the sections draws the eye to red
                               // without re-reading the table. "Not received"
                               // and a pending/failed issues fetch stay neutral.
-                              const sectionTone = udmiVerdictTone(
-                                gatedUdmiVerdict(entry.issues, entry.observedPresent).verdict,
+                              const sectionVerdict = gatedUdmiVerdict(
+                                entry.issues,
+                                entry.observedPresent,
+                                offlineAssets.has(group.assetId),
                               );
+                              const sectionTone = udmiVerdictTone(sectionVerdict.verdict);
                               return (
                                 <div
                                   className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
@@ -2481,9 +2912,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                   <h5>{entry.payloadType}</h5>
                                   {sectionTone && (
                                     <p className={`payload-verdict ${sectionTone}`}>
-                                      {sectionTone === "pass"
+                                      {sectionVerdict.verdict === "pass"
                                         ? "PASS — UDMI Compliant"
-                                        : "FAIL — please see details below"}
+                                        : sectionVerdict.verdict === "pass-notes"
+                                          ? "PASS WITH NOTES — minor issues below"
+                                          : sectionVerdict.verdict === "offline"
+                                            ? "OFFLINE — device did not publish during the capture window"
+                                            : "NON-COMPLIANT — please see details below"}
                                     </p>
                                   )}
                                   {entry.issues.map((issue) => (
@@ -2545,6 +2980,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     );
                   })}
                 </div>
+              ) : module.route === "mqtt-discovery" ? (
+                // Real captured payload for the selected topic, replacing the old
+                // fabricated sample issue-cards on this discovery route.
+                selectedMqttTopic ? (
+                  <MqttPayloadPanel topic={selectedMqttTopic} />
+                ) : (
+                  <div className="empty-workspace">
+                    <strong>No topic selected</strong>
+                    <span>Select a captured topic to inspect its last payload.</span>
+                  </div>
+                )
+              ) : isDiscoveryModule ? (
+                // Other discovery routes (ip/bacnet): a neutral note in place of
+                // the old sample issue-cards — discovery observes, it does not
+                // produce register-comparison findings.
+                <div className="empty-workspace">
+                  <strong>No findings here</strong>
+                  <span>Findings are produced by validation runs, not discovery.</span>
+                </div>
               ) : (
               <div className="issue-list compact-list">
                 {visibleIssues.length > 0 ? (
@@ -2583,6 +3037,57 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </>
         </aside>
       </section>
+
+      {/* Second instance of the report controls, at the END of the Results step
+          (Pete's 2026-07-15 walkthrough: a run finishes, the step auto-advances
+          to Results, and the run monitor's copy — which lives in the "setup run"
+          stepgroup — vanishes with it, so the operator had to click back a step
+          to generate the report they just earned). Both instances render the
+          same stateless ReportFromRunControls wired to the one lifted
+          reportExportFormat state, so they can never disagree.
+
+          MUST stay a DIRECT child of .module-steps: the gate is
+          `.module-steps > [data-stepgroup]` (electracom-theme.css:1302).
+          Nesting it inside the results grid above would leave it ungated (and
+          add a stray third column). jsdom never applies the theme CSS, so no
+          visibility assertion can protect this — the tests pin the parent node
+          and the data-stepgroup attribute instead.
+
+          The `module.route !== "reports"` clause is DEFENSIVE, not a live fix:
+          the reports head's run actions are all kind:"report", and report
+          actions never setActiveRun (see runMutation.onSuccess), so activeRun is
+          already always null there. It is here because that route's own section
+          renders reportToast across every step group — the day a report run does
+          attach itself to the monitor, this card would toast twice on one
+          screen. Cheap insurance, unreachable today; don't read it as evidence
+          the case exists. */}
+      {module.route !== "reports" && canEngineer && activeRun && activeRunTerminal && (
+        <section className="surface" data-stepgroup="results">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Reporting</span>
+              <h3>Generate Report</h3>
+            </div>
+          </div>
+          <div className="inline-actions">
+            <ReportFromRunControls
+              format={reportExportFormat}
+              onFormatChange={setReportExportFormat}
+              onGenerate={handleGenerateReportFromRun}
+              pending={reportFromRunMutation.isPending}
+            />
+          </div>
+          {reportToast && (
+            <div className="state-panel success" role="status">
+              <strong>Report generated</strong>
+              <span>{reportToast}</span>
+            </div>
+          )}
+          {reportFromRunMutation.isError && (
+            <span className="error-text">{reportFromRunMutation.error.message}</span>
+          )}
+        </section>
+      )}
       </div>
     </div>
   );
@@ -2625,6 +3130,55 @@ function StepNav({
         );
       })}
     </nav>
+  );
+}
+
+// Report format picker + "Generate report from this run" button. Rendered twice
+// — once in the run monitor ("setup run" stepgroup) and once at the end of the
+// Results step — because the step the run leaves you on is not the step the
+// control used to live on.
+//
+// Deliberately stateless: the format lives in ModulePage's single
+// reportExportFormat state and the guards (canEngineer / activeRun / terminal)
+// stay at the call sites. Give this component its own useState and the two
+// instances would silently drift apart — the picker you changed would not be
+// the one the POST reads.
+function ReportFromRunControls({
+  format,
+  onFormatChange,
+  onGenerate,
+  pending,
+}: {
+  format: ReportFormat;
+  onFormatChange: (next: ReportFormat) => void;
+  onGenerate: () => void;
+  pending: boolean;
+}) {
+  return (
+    <>
+      <label className="report-format-picker">
+        Report format
+        <select
+          aria-label="Report format"
+          onChange={(event) => onFormatChange(event.target.value as ReportFormat)}
+          value={format}
+        >
+          <option value="pdf">PDF (.pdf)</option>
+          <option value="docx">Word (.docx)</option>
+          <option value="xlsx">Excel (.xlsx)</option>
+          <option value="zip">Evidence pack (.zip)</option>
+        </select>
+      </label>
+      <button
+        className="secondary-button compact"
+        disabled={pending}
+        onClick={onGenerate}
+        title="Generate a report for this run type, then find it in the Reports tab."
+        type="button"
+      >
+        {pending ? "Generating..." : "Generate report from this run"}
+      </button>
+    </>
   );
 }
 
@@ -2762,6 +3316,39 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
   throw new Error(`${label} must be a JSON object.`);
 }
 
+// The MQTT discovery inspector's payload panel: the real last_payload OBJECT for
+// the selected topic (never a re-parse of the stringified "Raw Payload" cell).
+// Mirrors the UDMI observed-payload block (pre + Explore JSON tree). Honesty:
+// a non-JSON payload is stored as a presence marker, so we say exactly that and
+// render no tree; a JSON scalar/list is wrapped by the engine under `_value`,
+// so we unwrap it before display.
+function MqttPayloadPanel({ topic }: { topic: DiscoveryRowRecord }) {
+  const payload = topic.last_payload;
+  const topicName = String(topic.topic ?? "topic");
+  const isObject = payload !== null && typeof payload === "object";
+  const rawPresent = isObject && (payload as Record<string, unknown>)._raw_present === true;
+  const hasValueWrap = isObject && "_value" in (payload as Record<string, unknown>);
+  const display = hasValueWrap ? (payload as Record<string, unknown>)._value : payload;
+  return (
+    <div className="payload-inspector">
+      <h4>Last payload on {topicName}</h4>
+      {rawPresent ? (
+        <p className="section-copy">
+          Non-JSON payload observed. The engine stores a presence marker, not the raw bytes.
+        </p>
+      ) : (
+        <>
+          <pre className="payload-cell">{JSON.stringify(display, null, 2)}</pre>
+          <details className="json-inspector">
+            <summary>Explore JSON tree</summary>
+            <JsonTree value={display} />
+          </details>
+        </>
+      )}
+    </div>
+  );
+}
+
 function JsonTree({ value }: { value: unknown }) {
   if (value === null || typeof value !== "object") {
     return <span>{JSON.stringify(value)}</span>;
@@ -2867,7 +3454,10 @@ function renderCell(
     const unexpected = unexpectedOpenPorts(row[column]);
     const missing = missingExpectedPorts(row[column]);
     const expectedOk = expectedPortsOk(row[column]);
-    if (forbidden || unexpected || missing || expectedOk) {
+    // A register-listed host that answered nothing: amber/inconclusive, never a
+    // red "offline" claim — a TCP-connect miss is not proof the host is absent.
+    const expectedSilent = expectedByRegisterSilent(row[column]);
+    if (forbidden || unexpected || missing || expectedOk || expectedSilent) {
       return (
         <>
           {row[column]}
@@ -2875,6 +3465,7 @@ function renderCell(
           {unexpected && <span className="chip amber"> Unexpected ports open: {unexpected}</span>}
           {missing && <span className="chip red"> Missing expected ports: {missing}</span>}
           {expectedOk && <span className="chip green"> Expected ports {expectedOk}</span>}
+          {expectedSilent && <span className="chip amber"> Expected by register — no response</span>}
         </>
       );
     }
@@ -3095,11 +3686,32 @@ function buildResultDetailItems(
   }
 
   if (route === "mqtt-discovery") {
+    // Per-message metadata rides hidden row keys (see mqttRowsFromResults).
+    // Honesty-rule wording is load-bearing: NEVER label a timestamp "Published"
+    // (MQTT 3.1.1 has no publish time on the wire), and state that delivery QoS
+    // is capped by our subscription QoS. Old runs carry no keys -> "Not recorded".
+    const retained =
+      row.__retained === "yes"
+        ? "Yes — replayed from the broker's retained store"
+        : row.__retained === "no"
+          ? "No — arrived live during the capture window"
+          : "Not recorded (run predates metadata capture)";
+    const deliveryQos = row.__qos
+      ? `${row.__qos} (broker-to-tool delivery; capped by this tool's subscription QoS${
+          row.__subscribeQos ? ` ${row.__subscribeQos}` : ""
+        } — the publisher's QoS may be higher)`
+      : "Not recorded";
+    const receivedAt = row.__receivedAt
+      ? `${new Date(row.__receivedAt).toLocaleString()} (this tool's clock — MQTT 3.1.1 carries no broker publish timestamp)`
+      : "Not recorded";
     return [
       { label: "Topic", value: row.Topic ?? "State, metadata, or pointset topic" },
       { label: "Asset", value: row.Asset ?? "—" },
       { label: "Messages", value: row["Message Count"] ?? "Pending" },
       { label: "Last payload seen", value: row["Last Payload Seen"] ?? "Not recorded" },
+      { label: "Retained", value: retained },
+      { label: "Delivery QoS", value: deliveryQos },
+      { label: "Received at", value: receivedAt },
       { label: "Connection status", value: row["Detailed Status"] ?? "Pending" },
       {
         label: "Note",

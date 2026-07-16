@@ -12,7 +12,7 @@ import {
   type JobSummary,
   type ValidationIssueRecord,
 } from "../../api/client";
-import { derivePayloadType, workflowStages } from "./operatorData";
+import { derivePayloadType } from "./operatorData";
 import {
   formatRelativeTime,
   humanizeJobType,
@@ -301,29 +301,6 @@ export function DashboardPage() {
       </section>
 
       <section className="app-grid two-col home-main-grid">
-        <article className="surface">
-          <div className="surface-heading">
-            <div>
-              <span className="eyebrow">Workflow</span>
-              <h3>Current Stage</h3>
-            </div>
-            <span className="sample-tag" title="No workflow-status endpoint exists yet.">
-              Sample preview
-            </span>
-          </div>
-          <div className="workflow-board">
-            {workflowStages.map((stage) => (
-              <div className={`workflow-stage ${stage.state}`} key={stage.name}>
-                <div>
-                  <strong>{stage.name}</strong>
-                  <p>{stage.summary}</p>
-                </div>
-                <span>{stage.action}</span>
-              </div>
-            ))}
-          </div>
-        </article>
-
         <article className="surface">
           <div className="surface-heading">
             <div>

@@ -21,9 +21,22 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
+from smart_commissioning_core.engines.bacnet_params import (
+    PARAM_BACNET_TARGETS,
+    TARGET_ADDRESS,
+    TARGET_ASSET_ID,
+    TARGET_ASSET_NAME,
+    TARGET_DEVICE_INSTANCE,
+    TARGET_NETWORK,
+    parse_targets,
+)
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
-from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
+from smart_commissioning_core.engines.mqtt_discovery import (
+    DEFAULT_CAPTURE_SECONDS,
+    process_mqtt_discovery_run,
+)
 from smart_commissioning_core.engines.safety import is_authorized
+from smart_commissioning_core.mqtt_settings import parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import AuthPrincipal, get_principal, require_role
@@ -52,6 +65,7 @@ from app.services.engine_dispatch import (
     resolve_source_interface,
 )
 from app.services.job_queue import JobQueueService, JobQueueUnavailable
+from app.services.register_topics import expected_topic_filters
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
 
@@ -66,6 +80,14 @@ config_service = ConfigurationService()
 # applies on top of this — RBAC is WHO may act, scan-auth is the safety consent.
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
+
+# Hard ceiling on an explicit MQTT capture window: 48 hours. MUST equal
+# validation.py MAX_UDMI_CAPTURE_SECONDS and stay strictly BELOW the
+# discover_mqtt actor's time_limit (worker/app/tasks.py runs at cap + 1h) — else
+# a maximum-length accepted capture would be killed at the wire by its own
+# executor. All three move together; the contract is asserted in
+# backend/tests/test_mqtt_capture_window.py.
+MQTT_MAX_CAPTURE_SECONDS = 172_800
 
 
 # Actionable message returned when a real scan lacks authorization. Mirrors the
@@ -197,6 +219,89 @@ def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
             "'cidr' or 'start'/'end' range, before running IP discovery."
         ),
     )
+
+
+def _resolve_bacnet_transport(project_id: str, site_id: str, parameters: dict) -> None:
+    """Inject the saved BACnet transport config (foreign-device registration) into
+    the run parameters BEFORE the run is persisted, mirroring the MQTT route's
+    ``mqtt_subscribe_defaults`` + ``setdefault`` shape.
+
+    ``setdefault`` per key, so an operator run-parameter override wins — consistent
+    with source_ip / local_address / qos on these routes. Nothing is injected
+    unless the saved config has Foreign Device = Enabled, so a default install's
+    run parameters are unchanged and discovery stays local-broadcast exactly as
+    it behaves today.
+
+    An unusable BBMD Address surfaces as a 400 here, at run creation, with a
+    fix-your-config message — no orphaned run is persisted, and the run never
+    silently falls back to broadcast (that silent fallback IS the bug this
+    release fixes: a run the operator asked to send through a BBMD would report a
+    clean, empty, local scan).
+
+    Dry runs are deliberately NOT skipped: the plan must echo the same resolved
+    transport the real scan would use, so the transport can be verified before a
+    single packet is sent.
+    """
+    try:
+        defaults = config_service.bacnet_transport_defaults(project_id, site_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    for key, value in defaults.items():
+        parameters.setdefault(key, value)
+
+
+def _bacnet_register_targets(record: dict) -> list[dict]:
+    """Contract-shaped target rows from one bacnet_register import's accepted rows.
+
+    Maps the register's column names onto the shared row keys, then delegates ALL
+    normalisation (types, bounds, dedupe on (address, device_instance), first-seen
+    order) to the contract's ``parse_targets`` — the same function the engine reads
+    back with, which is what stops the write and the read from drifting apart.
+
+    Malformed rows are SKIPPED, never fatal: a legacy import predating the
+    numeric/IP validators must not turn a scan into a 500. ``parse_targets`` never
+    raises on JSON-shaped input, and the ``isinstance`` guard here keeps a
+    non-dict row from breaking the ``.get`` before it gets there.
+    """
+    return [
+        target.as_dict()
+        for target in parse_targets(
+            {
+                TARGET_ADDRESS: row.get("IP address"),
+                TARGET_DEVICE_INSTANCE: row.get("BACnet device instance"),
+                TARGET_ASSET_ID: row.get("Asset ID"),
+                TARGET_ASSET_NAME: row.get("Asset name"),
+                TARGET_NETWORK: row.get("BACnet network"),
+            }
+            for row in record.get("accepted_rows", [])
+            if isinstance(row, dict)
+        )
+    ]
+
+
+def _ensure_bacnet_targets(project_id: str, site_id: str, parameters: dict) -> None:
+    """Resolve the expected-device list for a BACnet discovery run from the newest
+    accepted ``bacnet_register`` import, so the engine can probe registered devices
+    directly and report which expected devices stayed silent.
+
+    An operator-supplied ``bacnet_targets`` wins untouched, like every other
+    resolver on these routes.
+
+    NO REGISTER IS NOT AN ERROR — unlike :func:`_ensure_ip_targets`, which 400s
+    because an IP sweep with no targets has nothing to do at all. BACnet
+    broadcast-only discovery is a legitimate scan: with no register the targets
+    are simply absent and the run proceeds on the broadcast (and, if configured,
+    foreign-device) lanes. Do not copy the IP route's 400 here.
+    """
+    if parameters.get(PARAM_BACNET_TARGETS):
+        return
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="bacnet_register"
+    )
+    for record in imports:  # newest-first
+        if targets := _bacnet_register_targets(record):
+            parameters[PARAM_BACNET_TARGETS] = targets
+            return
 
 
 def _ip_register_by_address(project_id: str, site_id: str, column: str) -> dict[str, str]:
@@ -333,6 +438,16 @@ def create_bacnet_discovery_run(
     _require_scan_authorization(parameters)
     _stamp_authorizer(parameters, principal)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
+    # Transport (foreign-device registration via a BBMD) and targeting (the
+    # expected devices from the bacnet_register) are resolved HERE, before
+    # _create_run, for the same reason source_ip is: the worker path reads the
+    # PERSISTED run.parameters, not this dict. create_job_run only shallow-copies
+    # what it is given, so injecting before it is what makes the inline (portable
+    # exe) path and the hosted worker path run against identical parameters —
+    # inject after it and the portable build would foreign-device register while
+    # the worker silently broadcast.
+    _resolve_bacnet_transport(request.project_id, request.site_id, parameters)
+    _ensure_bacnet_targets(request.project_id, request.site_id, parameters)
     # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
     # backend so it ATTEMPTS real discovery (never silently returns simulated
     # data). Persisted into run.parameters BEFORE _create_run so both the inline
@@ -373,6 +488,21 @@ def create_mqtt_discovery_run(
     parameters = dict(request.parameters)
     _require_scan_authorization(parameters)
     _stamp_authorizer(parameters, principal)
+    # Reject an over-cap capture window BEFORE creating the run (UDMI precedent
+    # routes/validation.py) so a rejected request never leaves an orphaned run.
+    # None (0/blank = indefinite) passes: it is bounded by Cancel and, worst
+    # case, the 49h actor kill.
+    capture_seconds = parse_capture_seconds(
+        parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS
+    )
+    if capture_seconds is not None and capture_seconds > MQTT_MAX_CAPTURE_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"capture_seconds may be at most {MQTT_MAX_CAPTURE_SECONDS} seconds "
+                "(48 hours); the worker would kill a longer capture at its time limit."
+            ),
+        )
     # Inherit Root Topic (-> default subscribe filter) and QoS from saved config
     # when the operator didn't override them on the run.
     defaults = config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)
@@ -451,6 +581,7 @@ def get_discovery_results(run_id: str) -> DiscoveryResultsResponse:
         discovered_assets = []
 
     repository = _discovery_repository()
+    topics, register_comparison = _annotate_register_matches(run, repository.list_topics(run_id))
     return DiscoveryResultsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
@@ -459,7 +590,8 @@ def get_discovery_results(run_id: str) -> DiscoveryResultsResponse:
         discovered_assets=discovered_assets,
         devices=repository.list_devices(run_id),
         points=repository.list_points(run_id),
-        topics=repository.list_topics(run_id),
+        topics=topics,
+        register_comparison=register_comparison,
     )
 
 
@@ -485,11 +617,15 @@ def get_discovery_points(run_id: str) -> DiscoveryPointsResponse:
 )
 def get_discovery_topics(run_id: str) -> DiscoveryTopicsResponse:
     run = _load_discovery_run(run_id)
+    topics, register_comparison = _annotate_register_matches(
+        run, _discovery_repository().list_topics(run_id)
+    )
     return DiscoveryTopicsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
         status=run.status,
-        topics=_discovery_repository().list_topics(run_id),
+        topics=topics,
+        register_comparison=register_comparison,
     )
 
 
@@ -503,10 +639,14 @@ def export_discovery_topics_xlsx(run_id: str, topic_filter: str | None = None) -
     applies the same ``+``/``#`` wildcard semantics as the on-screen filter so
     the export matches what the operator sees.
     """
-    _load_discovery_run(run_id)
+    run = _load_discovery_run(run_id)
     rows = _discovery_repository().list_topics(run_id)
     if topic_filter:
         rows = [row for row in rows if _matches_topic_filter(str(row.get("topic") or ""), topic_filter)]
+    # Annotate the (already filter-narrowed) rows with the same register-match
+    # verdict the on-screen table uses, so the export carries the "Register
+    # Match" column (appended last, so existing column indexes stay valid).
+    rows, _ = _annotate_register_matches(run, rows)
     return Response(
         content=_build_topics_xlsx(rows),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -519,7 +659,9 @@ def _build_topics_xlsx(rows: list[dict[str, object]]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "MQTT Capture"
-    sheet.append(["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"])
+    # "Register Match" is appended LAST so the existing columns (indexes 0-4)
+    # and their assertions are unchanged; it is blank when no register applies.
+    sheet.append(["Topic", "Asset", "Last Seen", "Message Count", "Latest Payload", "Register Match"])
     for row in rows:
         attributes = row.get("attributes")
         attributes = attributes if isinstance(attributes, dict) else {}
@@ -534,9 +676,10 @@ def _build_topics_xlsx(rows: list[dict[str, object]]) -> bytes:
                 _xlsx_cell(row.get("created_at")),
                 _xlsx_cell(row.get("message_count")),
                 payload_text,
+                _register_match_cell(attributes),
             ]
         )
-    for column, width in {"A": 40, "B": 20, "C": 24, "D": 14, "E": 60}.items():
+    for column, width in {"A": 40, "B": 20, "C": 24, "D": 14, "E": 60, "F": 28}.items():
         sheet.column_dimensions[column].width = width
     buffer = BytesIO()
     workbook.save(buffer)
@@ -547,6 +690,21 @@ def _xlsx_cell(value: object) -> str:
     if value is None or value == "":
         return ""
     return value if isinstance(value, str) else str(value)
+
+
+def _register_match_cell(attributes: dict) -> str:
+    """The 'Register Match' export cell, mirroring the on-screen verdict.
+
+    ``matched (<filter>)`` / ``not in register`` / ``""`` when the row carries no
+    register verdict (no register imported, or a dry/failed run that observed
+    nothing — the honesty rule keeps those blank rather than red)."""
+    match = attributes.get("register_match")
+    if match == "matched":
+        topic_filter = attributes.get("register_matched_filter")
+        return f"matched ({topic_filter})" if topic_filter else "matched"
+    if match == "unmatched":
+        return "not in register"
+    return ""
 
 
 def _matches_topic_filter(topic: str, pattern: str) -> bool:
@@ -576,3 +734,94 @@ def _load_discovery_run(run_id: str) -> RunRecord:
     if run.job_type not in DISCOVERY_JOB_TYPES:
         raise HTTPException(status_code=404, detail=f"Discovery run '{run_id}' was not found.")
     return run
+
+
+def _mqtt_register_filters(
+    project_id: str, site_id: str
+) -> tuple[list[tuple[str, str]], str | None]:
+    """(expected_topic_filters, import_filename) from the newest mqtt_register import.
+
+    Mirrors validation.py ``_expected_assets_from_register``: iterate imports
+    newest-first and use the FIRST record with non-empty ``accepted_rows`` (a
+    newer but fully-rejected import is skipped, so a bad re-upload never blanks
+    the comparison). Returns ``([], None)`` when there is no usable register.
+    """
+    imports = ImportRepository(service.engine).list(
+        project_id=project_id, site_id=site_id, import_type="mqtt_register"
+    )
+    for record in imports:  # newest-first
+        rows = record.get("accepted_rows", [])
+        if rows:
+            return expected_topic_filters(rows), record.get("original_filename")
+    return [], None
+
+
+def _annotate_register_matches(
+    run: RunRecord, topics: list[dict]
+) -> tuple[list[dict], dict | None]:
+    """Stamp each observed topic with a register-comparison verdict, at read time.
+
+    Verdicts are computed on GET (not persisted), so importing a register AFTER
+    an old run — or re-importing a corrected one — re-verdicts that run on its
+    next read with no migration.
+
+    HONESTY RULE, applied deliberately:
+      * Only a SUCCEEDED, non-dry mqtt_discovery run is compared. A dry run sent
+        no packets and a failed run observed nothing, so stamping an "expected but
+        unobserved" verdict there would fabricate an observation.
+      * With NO register we return ``{"register_available": False}`` and DO NOT
+        stamp any row — no template means no verdict; we never mark everything red.
+      * "unobserved" filters are reported as a summary count, never as absence of a
+        device: a silent topic is not proof the device is gone.
+    """
+    if not (
+        run.job_type == "mqtt_discovery"
+        and run.status == "succeeded"
+        and run.result_summary.get("dry_run") is not True
+    ):
+        return topics, None
+    filters, filename = _mqtt_register_filters(run.project_id, run.site_id)
+    if not filters:
+        return topics, {"register_available": False}
+
+    annotated: list[dict] = []
+    matched_count = 0
+    unmatched_count = 0
+    matched_filters: set[str] = set()
+    for topic in topics:
+        row = dict(topic)
+        raw_attributes = row.get("attributes")
+        attributes = dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
+        topic_str = str(row.get("topic") or "")
+        match: tuple[str, str] | None = None
+        for asset_id, topic_filter in filters:  # concrete-before-wildcard, first wins
+            if _matches_topic_filter(topic_str, topic_filter):
+                match = (asset_id, topic_filter)
+                break
+        if match is not None:
+            asset_id, topic_filter = match
+            attributes["register_match"] = "matched"
+            attributes["register_matched_filter"] = topic_filter
+            attributes["register_asset_id"] = asset_id
+            matched_filters.add(topic_filter)
+            matched_count += 1
+        else:
+            attributes["register_match"] = "unmatched"
+            unmatched_count += 1
+        row["attributes"] = attributes
+        annotated.append(row)
+
+    unobserved = [
+        {"asset_id": asset_id, "filter": topic_filter}
+        for asset_id, topic_filter in filters
+        if topic_filter not in matched_filters
+    ]
+    summary = {
+        "register_available": True,
+        "import_filename": filename,
+        "matched_count": matched_count,
+        "unmatched_count": unmatched_count,
+        "expected_filter_count": len(filters),
+        "unobserved_filters": unobserved,
+    }
+    return annotated, summary

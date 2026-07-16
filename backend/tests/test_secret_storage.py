@@ -23,6 +23,30 @@ PEM_CONTENT = "-----BEGIN CERTIFICATE-----\nsecret-material-abc123\n-----END CER
 KEY_CONTENT = "-----BEGIN PRIVATE KEY-----\nprivate-material-xyz789\n-----END PRIVATE KEY-----"
 
 
+def _self_signed_cert(not_after) -> str:
+    """A self-signed EC certificate PEM whose notAfter is ``not_after``."""
+    from datetime import UTC, datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "expiry-test")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime(2020, 1, 1, tzinfo=UTC))
+        .not_valid_after(not_after)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+
+
 class SecretStorageTestCase(unittest.TestCase):
     """Per-test temporary secrets root and SQLite database."""
 
@@ -180,28 +204,7 @@ class WriteOnlyUpdateTests(SecretStorageTestCase):
 
 
 class CertificateExpiryTests(SecretStorageTestCase):
-    @staticmethod
-    def _self_signed_cert(not_after) -> str:
-        from datetime import UTC, datetime
-
-        from cryptography import x509
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.x509.oid import NameOID
-
-        key = ec.generate_private_key(ec.SECP256R1())
-        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "expiry-test")])
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(name)
-            .issuer_name(name)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime(2020, 1, 1, tzinfo=UTC))
-            .not_valid_after(not_after)
-            .sign(key, hashes.SHA256())
-        )
-        return cert.public_bytes(serialization.Encoding.PEM).decode("utf-8")
+    _self_signed_cert = staticmethod(_self_signed_cert)
 
     def test_storing_a_certificate_parses_and_records_its_expiry(self) -> None:
         from datetime import UTC, datetime
@@ -285,6 +288,77 @@ class DanglingSecretRefTests(SecretStorageTestCase):
 
         reloaded = self.service.load(mask_secrets=False)
         self.assertEqual(reloaded.certificates.values["Client Certificate"], stored.secret_ref)
+
+
+class DerivedCertificatesStatusTests(SecretStorageTestCase):
+    """The certificates section pill is derived server-side from disk evidence,
+    not read from a static seed or a client-echoed string."""
+
+    def test_fresh_install_status_is_not_configured(self) -> None:
+        # No material on disk -> the pill makes no claim.
+        self.assertEqual(self.service.load().certificates.status, "Not configured")
+
+    def test_uploading_private_key_updates_status(self) -> None:
+        # Pete's exact scenario: after an upload the pill answers "did my keys
+        # load?" on the next GET, with no explicit save.
+        self.service.store_secret(
+            SecretMaterialRequest(field="Private Key", file_name="device.key", content=KEY_CONTENT)
+        )
+        self.assertEqual(self.service.load().certificates.status, "Private key stored")
+
+    def test_all_material_listed_with_expiry(self) -> None:
+        from datetime import UTC, datetime
+
+        cert = _self_signed_cert(datetime(2030, 1, 2, tzinfo=UTC))
+        self.service.store_secret(
+            SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=cert)
+        )
+        self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="client.pem", content=cert)
+        )
+        self.service.store_secret(
+            SecretMaterialRequest(field="Private Key", file_name="device.key", content=KEY_CONTENT)
+        )
+        self.assertEqual(
+            self.service.load().certificates.status,
+            "CA, Client cert, Private key stored (expires 2030-01-02)",
+        )
+
+    def test_expired_certificate_reads_expired(self) -> None:
+        from datetime import UTC, datetime
+
+        expired = _self_signed_cert(datetime(2020, 1, 1, tzinfo=UTC))
+        self.service.store_secret(
+            SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=expired)
+        )
+        # "expired" hits the frontend red-tone regex.
+        self.assertEqual(self.service.load().certificates.status, "Certificate expired 2020-01-01")
+
+    def test_deleted_secret_file_never_reads_stored(self) -> None:
+        # Honesty rule: a ref whose backing file has vanished must not read
+        # "stored". The load() path (no persist) must also not crash.
+        stored = self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="client.pem", content=PEM_CONTENT)
+        )
+        secret_name = stored.secret_ref.removeprefix("secret://")
+        (self.secrets_root / f"{secret_name}.pem").unlink()
+
+        status = self.service.load().certificates.status
+        self.assertIn("needs attention", status.lower())
+        self.assertIn("re-upload", status.lower())
+        self.assertNotIn("stored", status.lower())
+
+    def test_client_echoed_stale_status_is_overwritten(self) -> None:
+        self.service.store_secret(
+            SecretMaterialRequest(field="Private Key", file_name="device.key", content=KEY_CONTENT)
+        )
+        configuration = self.service.load(mask_secrets=False)
+        # Simulate a client PUT echoing back the old seeded string.
+        configuration.certificates.status = "Not configured"
+        returned = self.service.save(configuration)
+
+        self.assertEqual(returned.certificates.status, "Private key stored")
+        self.assertEqual(self.stored_payload()["certificates"]["status"], "Private key stored")
 
 
 if __name__ == "__main__":

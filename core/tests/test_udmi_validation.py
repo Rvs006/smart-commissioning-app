@@ -1499,7 +1499,11 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         self.assertEqual(capture.calls[-1]["timeout_seconds"], 7.0)
         self.assertFalse(store.summaries[-1]["indefinite_bounded_inline"])
 
-    def test_live_capture_timeout_marks_the_run_failed(self) -> None:
+    def test_live_capture_timeout_succeeds_with_silent_devices(self) -> None:
+        # Field ask 2026-07-15: "it can't fail the whole validation just because
+        # one device isn't responding." A completed capture window with a silent
+        # device ends succeeded (distinct stage) and lands on Results; the
+        # not_publishing issue carries the story, so no error_message is set.
         store = _FakeRunStore()
         record = process_udmi_validation_run(
             "run-timeout",
@@ -1508,10 +1512,58 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             execution_mode="dramatiq_worker",
             live_capture=RecordingCapture([]),
         )
-        self.assertEqual(record["status"], "failed")
-        self.assertIn("did not complete", record["error_message"])
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(record["stage"], "udmi_validation_complete_with_silent_devices")
+        self.assertNotIn("error_message", record)
         self.assertEqual(store.summaries[-1]["broker_status_detail"], "live_capture_timeout")
         self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
+
+    def test_partial_capture_succeeds_and_names_silent_topics(self) -> None:
+        # Pete's "expected 4 / publishing 3" shape: one topic reports, the rest
+        # are silent. The window completed, so the run succeeds and the silent
+        # topics are named in a not_publishing issue.
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-partial",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=RecordingCapture([_msg("a/b/state")]),
+        )
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(record["stage"], "udmi_validation_complete_with_silent_devices")
+        self.assertEqual(store.summaries[-1]["captured_topics"], ["a/b/state"])
+        not_publishing = "\n".join(
+            issue.description for issue in store.issues if issue.issue_type == "not_publishing"
+        )
+        self.assertIn("a/b/metadata", not_publishing)
+
+    def test_full_capture_keeps_the_plain_complete_stage(self) -> None:
+        # A complete capture must never leak the silent-device stage.
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-full",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=RecordingCapture(list(_ALL_TOPIC_MESSAGES)),
+        )
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(record["stage"], "udmi_fixture_validation_complete")
+
+    def test_capture_unavailable_still_fails(self) -> None:
+        # Allowlist boundary: a config/context failure (no live_capture wired)
+        # is NOT a silent device — it must stay failed.
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-unavailable",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=None,
+        )
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("live_capture_unavailable", record["error_message"])
 
     def test_live_broker_error_marks_the_run_failed(self) -> None:
         store = _FakeRunStore()

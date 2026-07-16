@@ -14,7 +14,16 @@ the capture into:
 * a ``discovered_assets`` entry per topic (or per device derived from the
   topic) in the ``DiscoveryAssetObservation`` shape the API reads, plus
 * a structured ``DiscoveredTopic`` row (``topic``, ``message_count``,
-  ``last_payload``) for the DiscoveryRepository.
+  ``last_payload``, plus per-message metadata in ``attributes``:
+  ``last_retained`` / ``last_qos`` / ``last_received_at``) for the
+  DiscoveryRepository.
+
+Message-metadata honesty (load-bearing — see ``_aggregate_capture``):
+``last_received_at`` is THIS TOOL'S receive clock, never a broker publish time
+(MQTT 3.1.1 carries no publish timestamp on the wire); ``last_retained=True``
+means a broker retained-value replay whose publish time is unknown; and
+``last_qos`` is the DELIVERY QoS capped by our subscription QoS
+(``subscribe_qos`` in ``result_summary``), not the publisher's QoS.
 
 The actual capture is dependency-injected (``live_capture`` parameter) exactly
 like ``udmi_validation.validate_udmi_full_report`` injects ``live_capture`` —
@@ -80,6 +89,12 @@ ENGINE_NAME = "mqtt_discovery"
 DEFAULT_TOPIC_FILTER = "#"
 DEFAULT_CAPTURE_SECONDS = 5.0
 DEFAULT_MAX_MESSAGES = 500
+# With retain-latest the message cap bounds DISTINCT TOPICS, not raw messages
+# (mqtt_transport.subscribe_and_capture keeps one latest payload per topic), so a
+# large operator max_messages can no longer buy unbounded payload memory — but
+# each retained topic still holds one decoded JSON object, so clamp the topic
+# count. Worst-case memory ~= distinct_topics x largest payload.
+MAX_TOPIC_CAP = 10_000
 
 # The capture callable: same positional/keyword shape as
 # mqtt_transport.subscribe_and_capture, so the real client is the default and a
@@ -123,7 +138,9 @@ def _capture_seconds(parameters: dict[str, Any]) -> float | None:
 
 
 def _max_messages(parameters: dict[str, Any]) -> int:
-    return parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES)
+    # Clamp to MAX_TOPIC_CAP: under retain-latest this is a distinct-topic cap,
+    # so an outsized operator value would only enlarge the retained-payload set.
+    return min(parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES), MAX_TOPIC_CAP)
 
 
 def _device_ref_from_topic(topic: str) -> str | None:
@@ -323,6 +340,24 @@ def _run_mqtt_discovery(
             ),
         )
 
+    # Retain-latest bounds memory on a long capture (one payload per topic) while
+    # the observer keeps an honest per-topic total across the dedup: it fires for
+    # every accepted message BEFORE retention drops a duplicate, so counts survive
+    # even a MqttCaptureInterrupted (the observer already ran per message).
+    observed_counts: dict[str, int] = {}
+    messages_observed = 0
+
+    def _observe(message: MqttMessage) -> None:
+        nonlocal messages_observed
+        observed_counts[message.topic] = observed_counts.get(message.topic, 0) + 1
+        messages_observed += 1
+
+    # Requested subscription QoS (0-2). This is the DELIVERY-QoS CAP: the broker
+    # grants min(this, publisher's QoS), so every message's delivery QoS can be
+    # at most this value. Surfaced in result_summary so the frontend can state
+    # the cap honestly next to a per-message delivery QoS.
+    subscribe_qos = parse_int(ctx.parameters.get("qos"), default=0)
+
     capture_error_status: str | None = None
     try:
         messages = live_capture(
@@ -331,7 +366,9 @@ def _run_mqtt_discovery(
             timeout_seconds=capture_seconds,
             max_messages=max_messages,
             cancel_check=ctx.is_cancelled,
-            qos=parse_int(ctx.parameters.get("qos"), default=0),
+            qos=subscribe_qos,
+            retain_latest=True,
+            on_message=_observe,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
@@ -361,6 +398,9 @@ def _run_mqtt_discovery(
         cancelled=ctx.is_cancelled(),
         indefinite_bounded_inline=indefinite_bounded_inline,
         capture_error_status=capture_error_status,
+        observed_counts=observed_counts,
+        messages_observed=messages_observed,
+        subscribe_qos=subscribe_qos,
     )
 
 
@@ -375,6 +415,9 @@ def _aggregate_capture(
     cancelled: bool,
     indefinite_bounded_inline: bool = False,
     capture_error_status: str | None = None,
+    observed_counts: dict[str, int] | None = None,
+    messages_observed: int = 0,
+    subscribe_qos: int = 0,
 ) -> EngineResult:
     """Aggregate captured messages into topics + assets + structured records.
 
@@ -382,17 +425,43 @@ def _aggregate_capture(
     the number of messages observed, last_payload is the JSON of the LAST
     message on that topic (or a ``{"_raw_present": True}`` marker when the
     payload is non-JSON, so we never store undecodable bytes).
+
+    Per-topic message metadata (``last_retained`` / ``last_qos`` /
+    ``last_received_at``) describes the SAME message as ``last_payload`` by
+    construction. Honesty caveats the frontend must preserve:
+
+    * ``last_received_at`` is OUR receive clock (``MqttMessage.received_at``),
+      stamped at packet-decode time — NOT a broker publish time. MQTT 3.1.1
+      carries no publish timestamp on the wire, so a publish time cannot be
+      shown at all.
+    * ``last_retained=True`` means the broker REPLAYED a stored retained value
+      on subscribe; its received_at is the replay moment and says nothing about
+      when the value was originally published (could be days earlier).
+    * ``last_qos`` is the DELIVERY QoS = min(publisher's QoS, our subscription
+      QoS). With the default subscription QoS 0 every delivery reads 0
+      regardless of the publisher; ``subscribe_qos`` records the cap so the
+      frontend can say so.
+
+    Under retain-latest the transport deduplicates to one message per topic and
+    ``observed_counts``/``messages_observed`` carry the honest per-topic and
+    total counts across that dedup. When ``observed_counts`` is empty (an ad-hoc
+    fake that never called ``on_message``) we fall back to counting the returned
+    message list so those callers still report a truthful, non-zero count.
     """
     order: list[str] = []
     counts: dict[str, int] = {}
     last_payload: dict[str, Any] = {}
+    last_meta: dict[str, dict[str, Any]] = {}
+    observed = observed_counts or {}
 
     for message in messages:
         topic = message.topic
         if topic not in counts:
             counts[topic] = 0
             order.append(topic)
-        counts[topic] += 1
+        # Prefer the observer's real per-topic total (survives dedup); else
+        # increment per message so a raw/no-observer capture stays honest.
+        counts[topic] = observed.get(topic, counts[topic] + 1)
         decoded = message.json_payload()
         if isinstance(decoded, dict):
             last_payload[topic] = decoded
@@ -402,6 +471,13 @@ def _aggregate_capture(
         else:
             # JSON scalar/list — wrap so the column (a JSON object) stays a dict.
             last_payload[topic] = {"_value": decoded}
+        # Metadata for the SAME (last) message as last_payload. received_at is our
+        # receive clock (not a publish time); retained flags a broker replay.
+        last_meta[topic] = {
+            "last_retained": message.retained,
+            "last_qos": message.qos,
+            "last_received_at": message.received_at.isoformat(),
+        }
 
     discovered_assets: list[dict[str, Any]] = []
     structured_records: list[dict[str, Any]] = []
@@ -424,23 +500,41 @@ def _aggregate_capture(
                 "attributes": {
                     "device_ref": device_ref,
                     "position": position,
+                    # Per-message metadata for the last message on this topic.
+                    # Rides the free-form attributes JSON column (no migration).
+                    **last_meta.get(topic, {}),
                 },
             }
         )
 
+    # Under retain-latest ``messages`` is one entry per distinct topic, so
+    # len(messages) is the distinct-topic count; messages_captured reports the
+    # true total the observer saw (fallback to the list for no-observer fakes).
+    messages_captured = max(messages_observed, len(messages))
     extra: dict[str, Any] = {
         "topics_discovered": len(order),
-        "messages_captured": len(messages),
+        "messages_captured": messages_captured,
         "topic_filters": list(topic_filters),
         "capture_seconds": capture_seconds,
         "capture_mode": "indefinite" if capture_seconds is None else "bounded",
         "indefinite_bounded_inline": indefinite_bounded_inline,
         "max_messages": max_messages,
+        "capture_retention": "latest_per_topic",
+        # The requested subscription QoS = the delivery-QoS cap. The frontend
+        # states it beside a per-message delivery QoS so QoS 0 (the default,
+        # which forces every delivery to read 0) is never mistaken for the
+        # publisher's QoS.
+        "subscribe_qos": subscribe_qos,
+        "topic_limit_reached": len(order) >= max_messages,
         "broker_status_detail": (
             "cancelled"
             if cancelled
             else capture_error_status or ("messages_captured" if messages else "capture_window_empty")
         ),
+        # NOTE: under retain-latest len(messages) IS the distinct-topic count, so
+        # this key now tracks the topic cap (same value as topic_limit_reached).
+        # Kept for API consumers; capture_retention/topic_limit_reached make the
+        # new semantics explicit. Nothing in the frontend reads this key.
         "message_limit_reached": len(messages) >= max_messages,
     }
 

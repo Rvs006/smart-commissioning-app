@@ -5,10 +5,20 @@ from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex
 from typing import Literal
+from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
+from smart_commissioning_core.engines.bacnet_params import (
+    MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_MODE,
+    PARAM_BBMD_ADDRESS,
+    PARAM_BBMD_PORT,
+    PARAM_FD_TTL,
+    bbmd_port,
+    fd_ttl,
+)
 from sqlalchemy.engine import Engine
 
 from app.core.db import get_engine
@@ -41,20 +51,35 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             # the dropdown, so a stored sentinel is an explicit choice.
             "Source Interface": "",
         },
-        status="Healthy",
+        # Honesty rule: a fresh install has made no observations. Neutral labels,
+        # not fabricated "Healthy"/"Listening"/"Connected" verdicts.
+        status="Not checked",
     ),
     bacnet=ConfigurationSection(
         values={
             "BACnet Network Number": "1532",
             "UDP Port": "47808",
             "Device Instance Range": "1 - 4194303",
-            "BBMD": "Enabled",
+            # INFORMATIONAL ONLY — discovery never reads this toggle. It seeds
+            # Disabled because Enabled used to LOCK the "Foreign Device" control
+            # (UI) and be rejected alongside it (validation), so a default install
+            # could not enable the one setting that makes cross-subnet discovery
+            # work. Discovery gates STRICTLY on "Foreign Device" (see
+            # bacnet_transport_defaults).
+            # NOTE: changing this default does NOT touch an already-persisted
+            # snapshot — _merge_with_defaults only fills MISSING keys, so an
+            # existing install keeps whatever it saved until an operator edits
+            # and saves the Configuration page.
+            "BBMD": "Disabled",
+            # Demo seed, NOT a real BBMD. Nothing may register against it: only
+            # "Foreign Device" == Enabled triggers registration, and an operator
+            # who enables it must type their real BBMD's address here.
             "BBMD Address": "10.10.25.20",
             "BBMD UDP Port": "47808",
             "Foreign Device": "Disabled",
             "TTL": "300",
         },
-        status="Listening",
+        status="Not checked",
     ),
     mqtt=ConfigurationSection(
         values={
@@ -68,7 +93,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "MQTT Username": "",
             "MQTT Password": "********",
         },
-        status="Connected",
+        status="Not checked",
     ),
     certificates=ConfigurationSection(
         # No cert material ships pre-installed: a fresh install has NOTHING
@@ -92,7 +117,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Secondary NTP Server": "1.pool.ntp.org",
             "NTP Update Interval": "64",
         },
-        status="Synchronised",
+        status="Not checked",
     ),
     backups=ConfigurationSection(
         values={
@@ -100,20 +125,28 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Backup Retention": "30 days",
             "Encrypted Backups": "Enabled",
             "Backup Location": "/data/backups",
-            "Last Backup Status": "Success",
+            # No scheduler exists; backups only happen via the manual
+            # POST /evidence/backup. A fresh install has run none.
+            "Last Backup Status": "Never run",
             "Restore Action": "Available",
         },
-        status="Success",
+        status="Manual only",
     ),
     logging=ConfigurationSection(
         values={
             "Log Level": "Info",
             "Log Retention": "30 days",
-            "Remote Syslog Target": "10.10.25.60",
-            "Syslog Port": "514",
             "Diagnostics Mode": "Disabled",
+            # Upload-to-URL replaces the never-wired Remote Syslog Target/Port:
+            # an isolated site has no syslog server, which is why upload-to-URL
+            # was asked for. Blank URL keeps logging local-only. The token is a
+            # password-kind sentinel (all-asterisk default), so it inherits the
+            # write-only + API-masking semantics via PASSWORD_KIND_FIELDS.
+            "Log Upload URL": "",
+            "Log Upload Token": "********",
         },
-        status="Healthy",
+        # Honest: a fresh install logs to the local rotating file only.
+        status="Local file",
     ),
 )
 
@@ -241,6 +274,10 @@ class ConfigurationService:
             snapshot = self._persist(DEFAULT_CONFIGURATION, project_id, site_id)
         else:
             snapshot = self._merge_with_defaults(ConfigurationSnapshot.model_validate(payload))
+        # Answer Pete's question ("why does it say Not configured?") from disk:
+        # GET /configuration reports what is verifiably present right now, whether
+        # or not anything was re-saved since the material was uploaded.
+        self._derive_certificates_status(snapshot)
         return self._mask_for_api(snapshot) if mask_secrets else snapshot
 
     def save(
@@ -275,10 +312,75 @@ class ConfigurationService:
             defaults["topic_filter"] = root if ("#" in root or "+" in root) else root.rstrip("/") + "/#"
         return defaults
 
+    def bacnet_transport_defaults(
+        self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID
+    ) -> dict:
+        """BACnet transport run-parameters from saved config (mirrors :meth:`mqtt_subscribe_defaults`).
+
+        Returns the flat, JSON-safe scalars the engine reads — ``bacnet_mode`` /
+        ``bbmd_address`` / ``bbmd_port`` / ``fd_ttl``, spelled by importing the
+        shared contract, never as literals — so they survive the Dramatiq
+        round-trip to the worker unchanged. Addresses "I set the BBMD fields and
+        the scan ignored them".
+
+        THE TRIGGER IS "Foreign Device" == Enabled (casefolded) AND NOTHING ELSE.
+        Not the confusingly-named "BBMD" toggle, not a non-empty "BBMD Address":
+        both are seeded on a default install (with the FICTIONAL demo address
+        10.10.25.20), so keying on either would make every default install
+        register against a host that does not exist. Anything but Enabled returns
+        ``{}`` and the run stays local-broadcast — byte-identical to today's
+        behaviour, which is the zero-regression guarantee for the path that
+        works.
+
+        Strictness is deliberately split:
+
+        * "BBMD Address" is LOAD-BEARING — an FD run cannot happen without a
+          real one, and falling back to broadcast would report a clean scan for
+          a run the operator explicitly asked to send through a BBMD. Blank or
+          unparseable raises :class:`ValueError` with an actionable message; the
+          route turns that into a 400 before any run is created.
+        * "BBMD UDP Port" / "TTL" SOFT-DEFAULT to 47808 / 300 (via the contract's
+          own readers, so the bounds cannot drift from the engine's). Old
+          snapshots can hold junk in fields that were only ever validated on
+          save, and neither is worth blocking a lab scan over.
+        """
+        values = self.load(project_id, site_id).bacnet.values
+        if str(values.get("Foreign Device") or "").strip().casefold() != "enabled":
+            return {}
+        address = str(values.get("BBMD Address") or "").strip()
+        if not address:
+            raise ValueError(
+                "Foreign Device is Enabled but BBMD Address is empty. Set your BBMD's IP "
+                "address on the Configuration page (BACnet -> BBMD Address) and Save, then "
+                "run discovery again."
+            )
+        try:
+            parsed = ipaddress.ip_address(address)
+        except ValueError as error:
+            raise ValueError(
+                f"Foreign Device is Enabled but BBMD Address '{address}' is not a valid IP "
+                "address. Fix it on the Configuration page (BACnet -> BBMD Address) and Save, "
+                "then run discovery again."
+            ) from error
+        # Read the soft-defaulted values through the contract's own readers so the
+        # bounds and fallbacks are defined in exactly one place (the engine reads
+        # the same functions back off the run parameters).
+        stored = {PARAM_BBMD_PORT: values.get("BBMD UDP Port"), PARAM_FD_TTL: values.get("TTL")}
+        return {
+            PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
+            PARAM_BBMD_ADDRESS: str(parsed),
+            PARAM_BBMD_PORT: bbmd_port(stored),
+            PARAM_FD_TTL: fd_ttl(stored),
+        }
+
     def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
         self._drop_dangling_secret_refs(configuration)
+        # Derive AFTER dropping dangling refs so a blanked ref persists as
+        # "Not configured", not "needs attention". This overwrites any stale
+        # status the client echoed back, so the stored payload holds the truth.
+        self._derive_certificates_status(configuration)
         self._repository.save(project_id, site_id, configuration.model_dump(mode="json"))
         return configuration
 
@@ -352,6 +454,68 @@ class ConfigurationService:
         if not any_cert_resolvable:
             values["Certificate Expiry"] = ""
 
+    def _derive_certificates_status(self, configuration: ConfigurationSnapshot) -> None:
+        """Overwrite the certificates section status from evidence on disk.
+
+        Honesty rule: the pill only claims what this load/persist just VERIFIED —
+        that a ``secret://`` reference resolves to a real file, and (for CA/Client
+        certs) that its PEM parses to a notAfter date. It never reads "stored"
+        for material the app cannot actually resolve. Expiry is re-derived from
+        the resolved PEM rather than trusting the stored "Certificate Expiry"
+        string, so the pill stays honest even if the file changed out of band.
+
+        Total by construction: every helper it calls (``_secret_path``,
+        ``_stored_certificate_expiry`` -> ``read_secret_material``) already
+        contains its own errors. load() feeds run dispatch
+        (``mqtt_subscribe_defaults`` / ``bacnet_transport_defaults``), so a raise
+        here would break every configuration read and every run start — do not
+        add a raising path.
+        """
+        values = configuration.certificates.values
+        stored: list[str] = []
+        broken: list[str] = []
+        expiries: list[str] = []
+        for field, label in (
+            ("CA Certificate", "CA"),
+            ("Client Certificate", "Client cert"),
+            ("Private Key", "Private key"),
+        ):
+            value = str(values.get(field, "")).strip()
+            if not value:
+                continue
+            resolvable = False
+            if value.startswith("secret://"):
+                try:
+                    resolvable = _secret_path(value).exists()
+                except ValueError:
+                    # Malformed ref (e.g. path traversal) — treat as unresolvable.
+                    resolvable = False
+            # A non-secret:// value is a legacy inline filename the app cannot
+            # load, so it counts as broken (needs re-upload), never as stored.
+            if resolvable:
+                stored.append(label)
+                expiry = self._stored_certificate_expiry(field, value)
+                if expiry is not None:
+                    expiries.append(expiry)
+            else:
+                broken.append(label)
+        # Strings are chosen to hit the frontend statusTone regexes
+        # (ConfigurationPage.tsx): "expired" -> red, "attention" -> amber, else
+        # green. "expires" deliberately does NOT match the /expired/ red rule.
+        if expiries and min(expiries) < datetime.now(UTC).date().isoformat():
+            configuration.certificates.status = f"Certificate expired {min(expiries)}"
+        elif stored and broken:
+            configuration.certificates.status = (
+                f"{', '.join(stored)} stored; {', '.join(broken)} needs attention - re-upload"
+            )
+        elif stored:
+            suffix = f" (expires {min(expiries)})" if expiries else ""
+            configuration.certificates.status = f"{', '.join(stored)} stored{suffix}"
+        elif broken:
+            configuration.certificates.status = f"Needs attention - re-upload {', '.join(broken)}"
+        else:
+            configuration.certificates.status = "Not configured"
+
     def validate(self, configuration: ConfigurationSnapshot) -> ConfigurationValidationResult:
         errors: list[str] = []
         configuration = self._merge_with_defaults(configuration)
@@ -365,11 +529,22 @@ class ConfigurationService:
         self._validate_port(errors, "BBMD UDP Port", configuration.bacnet.values.get("BBMD UDP Port", ""))
         self._validate_enabled_disabled(errors, "BACnet Foreign Device", configuration.bacnet.values.get("Foreign Device", ""))
         self._validate_enabled_disabled(errors, "BACnet BBMD", configuration.bacnet.values.get("BBMD", ""))
-        if (
-            configuration.bacnet.values.get("BBMD", "").strip().casefold() == "enabled"
-            and configuration.bacnet.values.get("Foreign Device", "").strip().casefold() == "enabled"
-        ):
-            errors.append("Foreign Device must be Disabled when BBMD is Enabled.")
+        # The FD/BBMD mutual-exclusion rule is GONE (was: "Foreign Device must be
+        # Disabled when BBMD is Enabled."). It encoded a real BACnet constraint —
+        # a node that IS a BBMD cannot also be a foreign device — but this app is
+        # never a BBMD. Combined with the seeded BBMD=Enabled it made Foreign
+        # Device unsettable on a default install, which is why the transport
+        # config never reached a scan. "BBMD" is informational now.
+        #
+        # In its place: BBMD Address is only load-bearing when Foreign Device is
+        # Enabled, so validate it as an IP exactly then. Validating it always
+        # would fail every default install that never intends to use FD; not
+        # validating it at all (the old behaviour) let garbage through to a
+        # 400 at run time, far from the field the operator has to fix.
+        if configuration.bacnet.values.get("Foreign Device", "").strip().casefold() == "enabled":
+            self._validate_ip_field(
+                errors, "BACnet BBMD Address", configuration.bacnet.values.get("BBMD Address", "")
+            )
         self._validate_positive_int(errors, "BACnet TTL", configuration.bacnet.values.get("TTL", ""))
         self._validate_range_number(
             errors,
@@ -398,6 +573,19 @@ class ConfigurationService:
         self._validate_non_empty(errors, "Backup Location", configuration.backups.values.get("Backup Location", ""))
         self._validate_non_empty(errors, "Last Backup Status", configuration.backups.values.get("Last Backup Status", ""))
         self._validate_non_empty(errors, "Restore Action", configuration.backups.values.get("Restore Action", ""))
+        self._validate_choice(
+            errors,
+            "Log Level",
+            configuration.logging.values.get("Log Level", ""),
+            choices=("Debug", "Info", "Warning", "Error"),
+        )
+        self._validate_positive_int_from_prefix(
+            errors, "Log Retention", configuration.logging.values.get("Log Retention", "")
+        )
+        self._validate_enabled_disabled(
+            errors, "Diagnostics Mode", configuration.logging.values.get("Diagnostics Mode", "")
+        )
+        self._validate_log_upload_url(errors, configuration.logging.values.get("Log Upload URL", ""))
 
         return ConfigurationValidationResult(valid=not errors, errors=errors)
 
@@ -455,6 +643,8 @@ class ConfigurationService:
 
     def _merge_with_defaults(self, configuration: ConfigurationSnapshot) -> ConfigurationSnapshot:
         self._migrate_mqtt_fields(configuration)
+        self._migrate_logging_fields(configuration)
+        self._migrate_seeded_placeholders(configuration)
         for section_name in ConfigurationSnapshot.model_fields:
             loaded_section = getattr(configuration, section_name)
             default_section = getattr(DEFAULT_CONFIGURATION, section_name)
@@ -478,6 +668,54 @@ class ConfigurationService:
         port = str(mqtt_values.get("Port", "")).strip()
         if "Use TLS" not in mqtt_values and port:
             mqtt_values["Use TLS"] = "Enabled" if port == "8883" else "Disabled"
+
+    # The Remote Syslog Target / Syslog Port fields were never wired to any
+    # SysLogHandler — no consumer ever read them (grep-verified) — and an
+    # isolated site has no syslog server anyway. They are removed in favour of
+    # local-file logging + upload-to-URL. Dropping the keys here (like
+    # _migrate_mqtt_fields) is LOAD-BEARING: _merge_with_defaults unions
+    # {**default, **loaded}, so a persisted snapshot on a field machine would
+    # otherwise keep the stale keys alive and the UI would keep rendering them.
+    # Any value an operator typed into these fields was never consumed; its loss
+    # is noted in the CHANGELOG.
+    _REMOVED_LOGGING_FIELDS = ("Remote Syslog Target", "Syslog Port")
+
+    def _migrate_logging_fields(self, configuration: ConfigurationSnapshot) -> None:
+        logging_values = configuration.logging.values
+        for field in self._REMOVED_LOGGING_FIELDS:
+            logging_values.pop(field, None)
+
+    # Honesty rule: earlier releases SEEDED fabricated observation verdicts
+    # ("Last Backup Status": "Success", section pills "Healthy"/"Listening"/
+    # "Connected"/"Synchronised"/"Success"/"Healthy") into fresh installs, so a
+    # field machine showed a backup that never ran and health it never checked.
+    # Those seeds are now neutral labels. This rewrites the OLD seed literals in
+    # an already-persisted snapshot on load, exactly like _migrate_mqtt_fields:
+    # the operator sees honest values immediately, made durable on next save.
+    #
+    # Safe by provenance: grep proves NO code path ever wrote these fields or any
+    # section status — the DEFAULT_CONFIGURATION seeds were the only writers — and
+    # the UI renders "Last Backup Status" as readonly, so a stored value equal to
+    # a seed literal is provably seed data, never an operator observation. Any
+    # other string (e.g. a future status-writer feature or a hand-edited PUT)
+    # survives untouched. If such a writer is ever added, remove this migration.
+    _SEEDED_STATUS_MIGRATIONS = {
+        "device": ("Healthy", "Not checked"),
+        "bacnet": ("Listening", "Not checked"),
+        "mqtt": ("Connected", "Not checked"),
+        "time": ("Synchronised", "Not checked"),
+        "backups": ("Success", "Manual only"),
+        "logging": ("Healthy", "Not checked"),
+    }
+
+    def _migrate_seeded_placeholders(self, configuration: ConfigurationSnapshot) -> None:
+        backup_values = configuration.backups.values
+        if backup_values.get("Last Backup Status") == "Success":
+            backup_values["Last Backup Status"] = "Never run"
+        for section_name, (old_status, new_status) in self._SEEDED_STATUS_MIGRATIONS.items():
+            section = getattr(configuration, section_name)
+            if section.status == old_status:
+                section.status = new_status
 
     def _validate_ip_field(self, errors: list[str], label: str, value: str) -> None:
         value = value.strip()
@@ -568,6 +806,29 @@ class ConfigurationService:
         normalized = value.strip().casefold()
         if normalized not in {"enabled", "disabled"}:
             errors.append(f"{label} must be Enabled or Disabled.")
+
+    def _validate_choice(self, errors: list[str], label: str, value: str, *, choices: tuple[str, ...]) -> None:
+        allowed = {choice.casefold() for choice in choices}
+        if value.strip().casefold() not in allowed:
+            errors.append(f"{label} must be one of: {', '.join(choices)}.")
+
+    def _validate_log_upload_url(self, errors: list[str], value: str) -> None:
+        """Empty (local-only) is valid; otherwise require an http(s) URL with a
+        host and no embedded credentials (the upload token rides an Authorization
+        header, never the URL)."""
+        value = value.strip()
+        if not value:
+            return
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            errors.append(
+                "Log Upload URL must be an http:// or https:// URL, or left blank to keep logs local-only."
+            )
+            return
+        if parts.username or parts.password:
+            errors.append(
+                "Log Upload URL must not embed credentials (user:pass@host); use the Log Upload Token field."
+            )
 
     def _validate_certificate(self, errors: list[str], label: str, value: str) -> None:
         value = value.strip()

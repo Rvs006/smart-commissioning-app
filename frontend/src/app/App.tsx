@@ -17,7 +17,7 @@ const NAV_GROUPS: NavGroup[] = [
     stage: "Discover",
     items: [
       { label: "IP Discovery", to: "/ip-scanner" },
-      { label: "BACnet", to: "/bacnet-discovery" },
+      { label: "BACnet Discovery", to: "/bacnet-discovery" },
       { label: "MQTT Discovery", to: "/mqtt-discovery" },
     ],
   },
@@ -44,7 +44,7 @@ const pageTitles: Record<string, string> = {
   "/configuration": "Configuration",
   "/data-validation": "BACnet to MQTT Validation",
   "/hub": "Multi-Project Hub",
-  "/ip-scanner": "IP Scanner",
+  "/ip-scanner": "IP Discovery",
   "/mqtt-discovery": "MQTT Discovery",
   "/reports": "Reports",
   "/run-history": "Run History",
@@ -97,6 +97,15 @@ export function App() {
           </NavLink>
 
           <div className="app-header-meta">
+            {/* Build-stamped release version. build.ps1 sets VITE_APP_VERSION before
+                `npm run build`, so a release bundle reads "v0.1.11" and an unstamped
+                CI bundle reads its git-describe string; dev servers and the test run
+                read "dev". Kept inline (not a module const) so it is read per render,
+                and `||` not `??` so an empty-string env var falls back rather than
+                rendering a blank pill. */}
+            <span className="site-pill subtle" title="App version">
+              {import.meta.env.VITE_APP_VERSION || "dev"}
+            </span>
             <Link
               className="header-pill"
               title="Product brief — what the tool is and how it works"
@@ -112,10 +121,6 @@ export function App() {
               Learning
             </Link>
             <ThemeToggle />
-            <span className="site-pill" title="Active commissioning site">
-              <span className="site-pill-dot" />
-              Block B Plantroom
-            </span>
             <span className="site-pill subtle" title="Connected to the backend API workspace">
               API workspace
             </span>

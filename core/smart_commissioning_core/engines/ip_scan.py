@@ -10,14 +10,23 @@ ports (expected + forbidden, from the ``*_by_address`` maps), so the register's
 "Expected services/ports" are genuinely checked — not just used for flagging.
 A host is considered *present* if ANY of its scanned ports accepts a connection
 (connect-success liveness — we never send ICMP and never send any application
-payload). For each responsive host we emit:
+payload). We emit a ``discovered_assets`` row for EVERY scanned host so the
+operator sees the whole sweep, not just the responders:
 
-* a ``discovered_assets`` entry in the ``DiscoveryAssetObservation`` shape the
-  API's ``DiscoveryResultsResponse`` reads from ``result_summary["discovered_assets"]``
-  (``ip_address``, ``hostname``, ``observed_ports=[{port,protocol,service}]``,
-  ``match_basis``, ``status_detail``), and
-* a structured ``DiscoveredDevice`` row (``device_type="ip_host"``) for the
-  DiscoveryRepository, with the open-port detail under ``attributes``.
+* a *responsive* host gets a ``discovered_assets`` entry in the
+  ``DiscoveryAssetObservation`` shape the API's ``DiscoveryResultsResponse``
+  reads from ``result_summary["discovered_assets"]`` (``ip_address``,
+  ``hostname``, ``observed_ports=[{port,protocol,service}]``, ``match_basis``,
+  ``status_detail``), PLUS a structured ``DiscoveredDevice`` row
+  (``device_type="ip_host"``) for the DiscoveryRepository, with the open-port
+  detail under ``attributes``.
+* a *silent* host (no port accepted a connection) gets a ``discovered_assets``
+  row too, with ``observed_ports=[]``, ``match_basis="none"``, ``last_seen_at``
+  None (we never saw it — no fabricated timestamp) and a ``status_detail`` of
+  ``"no response on scanned ports"`` — plus an ``EXPECTED BY REGISTER``
+  inconclusive note when the host was named in the register import. A silent
+  host emits NO structured record: a host we did not hear from is not a
+  discovered device and must never enter the device inventory or reports.
 
 Safety / honesty
 ----------------
@@ -95,6 +104,20 @@ _SERVICE_HINTS: dict[int, str] = {
 }
 
 ENGINE_NAME = "ip_discovery"
+
+# Honest copy for a host that accepted no connection on any scanned port. This
+# exact spelling is the single source of truth for the "no response" verdict and
+# is mirrored BY NAME in the frontend (discoveryRows.ts NO_RESPONSE_DETAIL) — the
+# same cross-language contract as SUMMARY_BACNET_MODE there, pinned by tests on
+# both sides. A TCP-connect miss is inconclusive: never "offline", never proof a
+# host is absent.
+NO_RESPONSE_DETAIL = "no response on scanned ports"
+# Marker appended to a silent host's status_detail ONLY when that host was named
+# in the register import. Mirrors the BACnet expected-but-silent semantics
+# (bacnet_discovery.py ISSUE_EXPECTED_DEVICE_SILENT): register-expected silence
+# is amber/inconclusive, unregistered silence is neutral. Mirrored by name in
+# discoveryRows.ts (MARKER_EXPECTED_BY_REGISTER).
+MARKER_EXPECTED_BY_REGISTER = "EXPECTED BY REGISTER"
 
 # A connect probe: open a TCP connection to (host, port) within ``timeout`` and
 # return True iff it succeeds. Injectable so tests can avoid real sockets.
@@ -620,6 +643,7 @@ async def _run_ip_discovery(
     site_id = ctx.parameters.get("site_id")
 
     hosts_scanned = 0
+    hosts_responsive = 0
     hosts_with_forbidden = 0
     hosts_with_unexpected = 0
     hosts_with_missing_expected = 0
@@ -655,7 +679,52 @@ async def _run_ip_discovery(
         )
         open_ports = sorted({port for port, ok in results if ok})
         if not open_ports:
+            # A host that accepted no connection on any probed port. We still
+            # emit a row — the operator asked to see EVERY scanned host, not
+            # only the responders — but honestly: "no response on scanned ports"
+            # is a TCP-connect miss, never proof the host is absent/offline.
+            #
+            # Cancellation honesty: if a cancel cut this host's port batch short,
+            # fewer probes completed than were dispatched, so a "no response
+            # (N probed)" row would claim a full ask that never happened. Skip
+            # the row entirely in that case — a half-asked host gets no verdict.
+            # The cheap length check is first so the common full-batch path never
+            # pays for the (possibly store-backed) cancellation check.
+            if len(results) < len(host_ports) and ctx.is_cancelled():
+                continue
+            detail = f"{NO_RESPONSE_DETAIL} ({len(results)} probed)"
+            # Amber ONLY for register-expected silence (asset mapping or an
+            # expected-ports declaration), mirroring the BACnet expected-but-
+            # silent semantics; an unregistered silent host stays neutral so a
+            # wide CIDR override sweep does not drown the table in amber.
+            if asset_by_address.get(host) or host in expected_by_address:
+                detail += (
+                    f" | {MARKER_EXPECTED_BY_REGISTER}: expected from the register "
+                    "import but did not answer this scan — inconclusive, not proof "
+                    "the host is offline"
+                )
+            # No reverse-DNS / ARP for a silent host: no observation was made, a
+            # blank is the honest value, and per-dead-host arp.exe subprocesses
+            # would multiply a 4096-host sweep. last_seen_at stays None (never
+            # seen -> no fabricated time). We do NOT stamp MISSING EXPECTED PORTS
+            # on a fully silent host: that marker renders a red chip and would
+            # over-claim a real closed-port finding on a plain TCP miss. Emit
+            # into discovered_assets ONLY — no structured_record — so a host we
+            # never heard from never enters the device inventory or reports.
+            discovered_assets.append(
+                {
+                    "asset_id": asset_by_address.get(host),
+                    "ip_address": host,
+                    "mac_address": None,
+                    "hostname": None,
+                    "observed_ports": [],
+                    "match_basis": "none",
+                    "status_detail": detail,
+                    "last_seen_at": None,
+                }
+            )
             continue
+        hosts_responsive += 1
 
         # Reverse DNS is a synchronous, potentially blocking call (it hits the
         # site resolver); run it off the event loop so it does not stall the
@@ -763,7 +832,9 @@ async def _run_ip_discovery(
         structured_records=structured_records,
         result_summary_extra={
             "hosts_scanned": hosts_scanned,
-            "hosts_responsive": len(discovered_assets),
+            # discovered_assets now includes silent (non-responder) rows, so the
+            # responsive count comes from the dedicated counter, not len(assets).
+            "hosts_responsive": hosts_responsive,
             "ports_scanned": list(ports),
             "forbidden_ports": sorted(forbidden_ports),
             "hosts_with_forbidden_open": hosts_with_forbidden,

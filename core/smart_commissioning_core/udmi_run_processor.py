@@ -22,6 +22,19 @@ from smart_commissioning_core.udmi_validation import (
 INLINE_INDEFINITE_CEILING_SECONDS = 240.0
 _SANITIZED_FAILURE_MESSAGE = "UDMI validation failed; see server logs."
 
+# Capture outcomes where the transport did its WHOLE job: connect, subscribe,
+# and run the window to completion. A silent or non-conforming device inside a
+# completed window is a RESULT (not_publishing / payload_error issues, red
+# rows on the Results step) — never a run failure (field ask 2026-07-15: "it
+# can't fail the whole validation just because one device isn't responding").
+# Everything else — broker_unreachable / tls_error / authentication_error /
+# broker_timeout / live_capture_unavailable / missing_capture_topics / blank —
+# stays `failed`: if we never reached the broker we cannot claim we validated
+# anything (honesty rule), and an UNKNOWN future status defaults to failed for
+# the same reason.
+_CAPTURE_COMPLETED_STATUSES = frozenset({"live_payloads_captured", "live_capture_timeout"})
+_SILENT_DEVICE_STAGE = "udmi_validation_complete_with_silent_devices"
+
 
 def process_udmi_validation_run(
     run_id: str,
@@ -81,25 +94,29 @@ def process_udmi_validation_run(
                 stage="udmi_validation_cancelled",
                 progress_percent=100,
             )
+        broker_status_detail = str(result_summary.get("broker_status_detail") or "capture_failed")
         if (
             result_summary.get("broker_capture_attempted")
-            and result_summary.get("broker_status_detail") != "live_payloads_captured"
+            and broker_status_detail not in _CAPTURE_COMPLETED_STATUSES
         ):
-            status_detail = str(result_summary.get("broker_status_detail") or "capture_failed")
             return run_store.update_run_status(
                 run_id,
                 status="failed",
                 stage="udmi_fixture_validation_failed",
                 progress_percent=100,
                 error_message=(
-                    f"Live MQTT capture did not complete ({status_detail}); "
+                    f"Live MQTT capture did not complete ({broker_status_detail}); "
                     "see validation issues."
                 ),
             )
+        completed_with_silent_devices = (
+            bool(result_summary.get("broker_capture_attempted"))
+            and broker_status_detail == "live_capture_timeout"
+        )
         return run_store.update_run_status(
             run_id,
             status="succeeded",
-            stage="udmi_fixture_validation_complete",
+            stage=_SILENT_DEVICE_STAGE if completed_with_silent_devices else "udmi_fixture_validation_complete",
             progress_percent=100,
         )
     except Exception:

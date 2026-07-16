@@ -202,7 +202,7 @@ def discover_bacnet(run_id: str, parameters: dict) -> None:
         logger.info("Finished BACnet discovery", extra={"actor": "discover_bacnet"})
 
 
-@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
+@dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=176_400_000)
 def discover_mqtt(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting MQTT discovery", extra={"actor": "discover_mqtt"})
@@ -233,8 +233,10 @@ def discover_mqtt(run_id: str, parameters: dict) -> None:
 # actor limit is that maximum accepted capture plus a 1h margin so a full 48h
 # capture is never killed at the wire by its own executor. MUST stay above the
 # API's MAX_UDMI_CAPTURE_SECONDS (backend routes/validation.py) and the
-# frontend's udmiCaptureOverCap constant. The other validation actors keep
-# their 15 min ceiling; discover_mqtt keeps 1h.
+# frontend's udmiCaptureOverCap constant. Both long-capture actors sit at
+# cap + 1h: discover_mqtt above (its cap is MQTT_MAX_CAPTURE_SECONDS in
+# backend routes/discovery.py) and validate_udmi_payloads here. The remaining
+# validation actors keep their 15 min ceiling.
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=176_400_000)
 def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):

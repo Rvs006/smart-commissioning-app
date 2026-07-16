@@ -42,6 +42,71 @@ jobs:
         run: mypy core/smart_commissioning_core
         continue-on-error: true
 
+  # bacpypes3 API-surface contract check against the REAL pinned package.
+  #
+  # Every other BACnet test in this repo mocks bacpypes3 away, and the `python`
+  # job above deliberately never installs the [bacnet] extra (the import-guard
+  # tests assert the honest "bacpypes3 is not installed" failure and only pass
+  # while it is absent). That leaves one class of failure uncaught everywhere
+  # else: our code naming an API the pinned bacpypes3 does not actually have.
+  # Every bacpypes3 import in the engine is lazy and function-local, so a wrong
+  # module path raises nothing until a real run on a real BACnet network. This
+  # job is the only place that asks the real package.
+  #
+  # NON-BLOCKING (job-level continue-on-error) so a bacpypes3 yank, a PyPI
+  # outage, or a resolver hiccup cannot redden the merge gate on an unrelated
+  # PR. It is still meant to be LOUD: the job shows red in the checks list and a
+  # failure writes an ::error:: annotation and a step summary. A red here is
+  # never "just the flaky BACnet job" — it means the exact pin in
+  # core/pyproject.toml no longer matches the code, and the portable exe that
+  # ships to site is built from that same pin.
+  bacpypes3-contract:
+    name: bacpypes3 API contract (non-blocking; red = the pinned BACnet API moved)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The [bacnet] extra is scoped to THIS job only. Installing it in the
+      # `python` job would silently flip the import-guard tests from running to
+      # skipping, losing the coverage that keeps a missing dependency an honest
+      # failure instead of a simulated-data fallback.
+      - name: Install core with the [bacnet] extra (bacpypes3 is exact-pinned)
+        run: pip install -e './core[bacnet]'
+
+      # The contract suite is skipUnless(bacpypes3 installed) so it stays inert
+      # in the `python` job. That means a failed/empty install here would show
+      # up as a run of green skips — a gate reporting success without ever
+      # having run. Prove the import first, and print what actually resolved.
+      - name: Confirm bacpypes3 imports (a skipped suite is not a pass)
+        run: python -c "import bacpypes3, importlib.metadata as m; print('bacpypes3', m.version('bacpypes3'))"
+
+      - name: bacpypes3 API contract tests
+        run: python -m unittest discover -s core/tests -p 'test_bacpypes3_contract.py' -v
+
+      - name: Say what a failure here means
+        if: failure()
+        run: |
+          echo "::error title=bacpypes3 API contract broke::The pinned bacpypes3 no longer matches the API the BACnet foreign-device code is written against. This job is non-blocking, but the portable exe shipped to site freezes the SAME pin, so live BACnet discovery is at risk. Re-verify the failing symbol against the installed source, then fix the engine or move the pin in core/pyproject.toml deliberately."
+          {
+            echo "## bacpypes3 API contract FAILED"
+            echo
+            echo "The exact-pinned \`bacpypes3\` no longer exposes the API surface the BACnet"
+            echo "foreign-device lane is built on. **This job is non-blocking, but do not ignore it.**"
+            echo "The portable Windows build freezes the same pin, so a real discovery run against"
+            echo "real hardware is at risk — and that failure would surface on site, not here."
+            echo
+            echo "What to do:"
+            echo "1. Read the assertion message above — it names the symbol and what breaks without it."
+            echo "2. Check the symbol against the installed source in this job's environment."
+            echo "3. Either fix \`core/smart_commissioning_core/engines/bacnet_discovery.py\`, or move"
+            echo "   the pin in \`core/pyproject.toml\` deliberately and re-verify."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   # Additive SBOM + license inventory job. Generates a CycloneDX SBOM across the
   # three Python distributions and runs an allowlist-based license gate.
   # NON-BLOCKING (continue-on-error) because the generated inventory depends on

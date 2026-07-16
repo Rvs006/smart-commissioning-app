@@ -55,7 +55,7 @@ const walks: Record<RoleId, { num: string; title: string; rows: { lab: string; t
       num: "1",
       title: "Confirm the network is reachable",
       rows: [
-        { lab: "Go to", text: "IP Discovery (IP Scanner) and load the expected host list for the site." },
+        { lab: "Go to", text: "IP Discovery and load the expected host list for the site." },
         { lab: "Do", text: "Run a scan across the commissioning subnet to find reachable, missing and unexpected hosts." },
         { lab: "See", text: "A red flag on any missing controller before you waste an afternoon chasing it on BACnet." },
       ],
@@ -424,7 +424,7 @@ export function BriefPage() {
 
               <div className="dc-card">
                 <div className="dc-card-icon">🌐</div>
-                <div className="dc-card-title">IP Discovery (IP Scanner)</div>
+                <div className="dc-card-title">IP Discovery</div>
                 <p className="dc-card-desc">
                   Scan the site network to find what is reachable, what is missing and what
                   is unexpected before you touch a protocol.
@@ -583,7 +583,7 @@ export function BriefPage() {
 
               <div className="dc-ref-card">
                 <div className="dc-ref-head">
-                  <span className="dc-ref-title">IP Discovery (IP Scanner)</span>
+                  <span className="dc-ref-title">IP Discovery</span>
                   <span className="dc-ref-role">for everyone</span>
                 </div>
                 <p className="dc-ref-lead">

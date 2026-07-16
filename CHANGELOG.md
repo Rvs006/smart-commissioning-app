@@ -7,16 +7,328 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+The rest of the 2026-07-15 walkthrough punch list — the items an audit found
+still missing after v0.1.11 shipped. Like v0.1.11, none of this changes how a
+scan works; every item is about the app telling the operator the truth about
+what it found and stopping it from showing things that never happened. Two
+items were deferred to a later release: a general nmap-style discovery pane
+(needs the operator's curated port list first) and a pure component-extraction
+refactor (no user-visible change, real rebase risk under the dated BACnet fix).
+
+### Added
+
+- **Reports carry ELECTRACOM branding and a per-head discovery inventory.** PDF,
+  DOCX and XLSX reports gain an ELECTRACOM header band and a footer with the run
+  id, so a generated report reads as an ITP/witnessing document. Each report now
+  inventories what was discovered — IP hosts, BACnet devices and points, MQTT
+  topics — instead of only run metadata. (Logo-image embedding is a later phase;
+  this is the text wordmark.) All artifact bytes change, but reports stay
+  byte-reproducible under their Ed25519/SHA-256 signatures. After upgrading, a
+  report generated under an older version reads as hash-mismatched until
+  re-downloaded — old exported files keep valid signatures over their own bytes.
+
+- **Local file logging and log upload.** Runtime logs now write to a rotating
+  `logs/app.log` under the app runtime directory, and an engineer can upload a
+  secrets-masked log bundle to a configured URL — so retrieving logs from an
+  isolated site no longer needs remote-desktop access to the laptop. The
+  never-wired Remote Syslog Target / Syslog Port fields are removed; if a value
+  was typed into them it is dropped (nothing ever read it).
+
+- **Downloadable UDMI schema template.** A "Download schema template (1.5.2)"
+  button on the UDMI Validation page returns the vendored published schema set
+  as a starting point for authoring a non-published (project-deviation) set.
+
+- **MQTT discovery: long-duration capture, template compare, and a live
+  inspector.** The capture window can now run up to 48h (memory-bounded by
+  retaining the latest message per topic); a day-scale capture needs the hosted
+  worker profile, which the panel states. Discovered topics are compared against
+  the imported register — green if matched, red if a foreign/unmatched publisher
+  — the operator's "turn the full-broker scan into a template check". Selecting a
+  topic shows its payload plus the retained flag, delivery QoS, and received-at
+  time. (Received-at, not published-at: an MQTT 3.1.1 message carries no publish
+  timestamp. Delivery QoS reflects the current subscribe QoS.)
+
+- **UDMI RAG (red / amber / green) on the results page.** Green = online,
+  publishing and UDMI-compliant; amber = publishing but non-compliant; red =
+  offline / not publishing. Read strictly, a device that passes with only minor
+  notes now shows amber rather than green.
+
 ### Fixed
+
+- **A silent device no longer fails the whole UDMI validation.** A capture that
+  completed but timed out waiting for one device ended the run as FAILED, so the
+  operator never reached the results. It now succeeds (under a distinct stage)
+  and the silent device reads red as offline. Broker/transport failures still
+  fail the run — if we could not reach the broker we did not validate anything.
+  Historical FAILED runs stay failed; re-run to get the new behaviour.
+
+- **The certificates status pill tells the truth.** It was a static seeded
+  string that read "Not configured" even after keys were uploaded. It is now
+  derived on every load from the stored material and its expiry, so it reflects
+  what is actually configured. No migration — it heals on the next page load.
+
+- **IP scan shows every register entry, including non-responders.** Hosts that
+  answered on no scanned port were silently dropped from the results; they now
+  appear with an honest "no response on scanned ports" — never "offline" or
+  "fail", because a TCP-connect miss is not proof a device is absent.
+
+- **Placeholder and stale content removed.** The fictional "Block B Plantroom"
+  site pill, the sample dashboard "Current Stage" board, and seeded statuses that
+  described events that never happened ("Last Backup Status: Success", devices
+  "Healthy", broker "Connected") are gone; existing installs heal on load. The
+  Learning page's dropped Docker path is removed — with it a false statement that
+  the repository is private — and the locked-down-machine guidance now documents
+  the real IT hash-approval route.
 
 - **The tolerances template no longer rejects its own example row.** The
   `Tolerance` column was validated as an integer, so the `0.5` shipped in the
   downloadable template failed import with `invalid_numeric` — downloading the
   template and uploading it unchanged was an error. Tolerance cells are now
-  checked with the comparison engines' own `parse_tolerance`, so the import
-  gate accepts exactly what the engines later read (`0.5`, `5%`, `abs:0.5`,
+  checked with the comparison engines' own `parse_tolerance`, so the import gate
+  accepts exactly what the engines later read (`0.5`, `5%`, `abs:0.5`,
   `percent:5`) and rejects the rest as `invalid_tolerance`. Integer fields
   (BACnet device/object instance, reporting interval) are unchanged.
+
+> Field note: persisted configuration snapshots do not automatically adopt new
+> seeded defaults. Fabricated *statuses* are healed on load, but any new default
+> values a site should run with still need setting by hand on existing installs.
+
+## [0.1.12 — pending] BACnet foreign-device registration
+
+**Two things to know before you rely on any of it.**
+
+First, **an existing install does not pick this up on its own.** A saved
+configuration snapshot is never rewritten when the app's built-in defaults
+change — the app only fills in settings a snapshot is missing. So on any machine
+that has already saved a configuration, none of the BACnet work below changes a
+single scan until someone opens the Configuration page, sets **Foreign Device**
+to `Enabled`, types their real **BBMD Address**, and saves. The seeded
+`10.10.25.20` is demo data and is not a real BBMD.
+
+Second, **the live BACnet path still has not run against real hardware.** There
+is no BACnet device in CI and no Python on the machine this was written on, so
+the wire behaviour — the registration exchange with a BBMD, the replies coming
+back — is unproven until it is run on site. What follows was written to make
+that first run *diagnosable*, not to claim it will work.
+
+### Added
+
+- **Discovery can register with a BBMD as a foreign device**, so it reaches
+  devices on subnets a local broadcast cannot cross. This is what a third-party
+  BACnet browser does, and it is why a browser could see a device this app could
+  not. It runs only when **Foreign Device** is `Enabled` on the Configuration
+  page and only against the **BBMD Address** you type there; it binds its own
+  UDP port (47809), so it can run alongside the ordinary local-broadcast scan
+  rather than replacing it, and so a BACnet browser sitting on 47808 does not
+  block it.
+
+  **If the BBMD refuses or ignores the registration, the run fails and says so
+  — it never quietly scans the local subnet instead.** A refusal reads "The BBMD
+  at &lt;address&gt; refused foreign-device registration (BVLL result code
+  &lt;n&gt;)" and asks you to have the BBMD administrator permit registrations
+  from this machine's IP and check the foreign-device table has a free entry. No
+  answer within 10 seconds reads "No response from the BBMD at &lt;address&gt;"
+  and points at the address, the UDP port, and UDP routing between you and the
+  BBMD. Whether the lab's BBMD will accept a registration at all is not
+  something this app can decide — it can only make the answer legible.
+
+- **A directed Who-Is to the addresses in your `bacnet_register` import.** The
+  register was previously used for reporting only and never for targeting. It is
+  now a fallback: after the broadcast (and foreign-device) lanes have run,
+  anything still silent gets a direct, unicast Who-Is at its registered address.
+  No BBMD is involved, so this lane still works when a site's BBMD will not
+  cooperate. A register is optional — a broadcast-only scan is still a
+  legitimate scan and is never rejected for having no register.
+
+  **A device that stays silent is reported amber, as "expected but did not
+  answer" — never as offline.** That is deliberate and it is not hedging: BACnet
+  permits a device to answer a directed Who-Is with a broadcast this machine
+  cannot hear from another subnet, and a device behind a BACnet router is
+  invisible to this lane by design. Silence on this lane is inconclusive, and
+  labelling it "offline" next to 60 devices would be wrong more often than right.
+
+- **Every run records what the scan actually did**, under `bacnet_diagnostics`
+  in the run record: the Source Interface, the UDP port, whether the bind
+  succeeded and why not, which transport was used, the BBMD registration outcome
+  (`registered` / `refused` / `timeout` / `unknown`) with the raw code the BBMD
+  sent back, Who-Is counters, and the installed bacpypes3 version. It is written
+  on successful runs and on failed ones alike. The point is that a scan that goes
+  wrong can be worked out afterwards from the run record alone, without someone
+  reproducing it live.
+
+- **A scan that finds nothing now explains itself.** Finding nothing is still a
+  valid result and the run still says succeeded — but it carries a sentence built
+  from what actually happened. A local-broadcast scan that hears nothing tells
+  you devices behind a BBMD cannot hear a local broadcast and to enable Foreign
+  Device; a registered foreign-device scan that hears nothing tells you to check
+  the instance range and ask the BBMD administrator whether its broadcast
+  distribution table covers the subnets the devices are on. It also says how many
+  directed Who-Is to register addresses went unanswered. The empty-state on the
+  results page shows this sentence in place of the generic v0.1.11 copy.
+
+- **A CI job that checks the real bacpypes3 API.** Every other BACnet test mocks
+  bacpypes3 away, so nothing would have noticed the pinned library moving out
+  from under this code — that would have surfaced on site. This job installs the
+  real pinned package and asserts the parts the fix depends on. It is
+  non-blocking, so a package-index outage cannot redden an unrelated pull
+  request, but a red here means the pin no longer matches the code and the
+  portable build ships that same pin.
+
+### Changed
+
+- **`bacpypes3` is pinned exactly (`==0.0.106`)** instead of a `>=` range,
+  matching this repo's policy for every other dependency. It matters more here:
+  bacpypes3 is pre-1.0 with a moving API, the foreign-device code is written
+  against that exact version, and a range would let a build for site resolve a
+  version nothing ever tested.
+
+- **The `BBMD` toggle is informational and now seeds `Disabled`.** Discovery
+  never reads it. It described this machine acting as a BBMD, which it never
+  does. **Foreign Device** is the setting that decides whether discovery
+  registers with a BBMD, and it is the only one gating that behaviour — keying
+  off `BBMD` or off a non-blank `BBMD Address` would have every default install
+  registering against the fictional seeded address. The BACnet tooltips now say
+  which field does what.
+
+### Fixed
+
+- **You can actually turn Foreign Device on.** The dropdown was disabled
+  whenever `BBMD` was `Enabled` ("Locked because BBMD is enabled"), the saved
+  snapshot was force-reset to `Disabled` on every page load, and validation
+  rejected the two together. `BBMD` seeded `Enabled`. The result: a default
+  install could not enable the one setting that makes cross-subnet discovery
+  work, and the person who needed it was blocked by the UI from configuring the
+  thing whose absence caused his empty scan. The lock, the auto-reset and the
+  mutual-exclusion rule are all gone. **BBMD Address** is now validated as an IP
+  address when — and only when — Foreign Device is `Enabled`, so a typo is caught
+  on the page you fix it on rather than at scan time.
+
+- **The BBMD and Foreign Device settings are read by something.** They were
+  validated, saved, and then used by nothing at all: you filled them in and they
+  did nothing. They now resolve into a run's transport before the run is created,
+  so the portable build and the hosted worker both scan with identical settings,
+  and a dry run previews the same transport a live scan would use. An unusable
+  BBMD Address stops the run at creation with a message naming the field, rather
+  than leaving a run behind.
+
+- **The second scan of a session no longer returns zero devices, silently.** The
+  code that releases the UDP socket had never once been called. In the portable
+  build, which runs everything in one long-lived process, the first live scan's
+  socket stayed bound for the life of the app — so every scan after it collided
+  with the app's own leftover socket and found nothing. It never surfaced as a
+  bug report because it does not present as one: it looks like a quiet network.
+  The socket is now released after every scan, on the failure paths too.
+
+- **A UDP port held by another program is now an error message instead of an
+  empty scan.** bacpypes3 does not fail when it cannot bind — it retries every
+  second, forever, in the background — so a BACnet browser left open on 47808
+  produced a scan that found nothing and said nothing, indistinguishable from a
+  dead network. Discovery now checks the port itself before it starts and stops
+  with "UDP port 47808 on &lt;ip&gt; is already in use by another program —
+  usually another BACnet tool (for example a BACnet browser) still running on
+  this machine. Close it and run the scan again." Other bind failures point at
+  the Source Interface setting instead. This proves the port was free a moment
+  earlier, not that it stays free — a program using address-reuse can still take
+  datagrams — but it catches the ordinary case, which is what a browser does.
+
+- **The engine's own error messages reach the operator.** Every actionable
+  message above — the port conflict, the BBMD refusal, bacpypes3 missing —
+  already existed and was being thrown away and replaced with the generic
+  "Engine execution failed" before anyone saw it. They now reach the run record.
+  Relatedly, the generic message says to see the server logs; nothing was ever
+  logged there, so the traceback now goes where that sentence has always claimed
+  it goes.
+
+## [0.1.11] - 2026-07-15
+
+Field-walkthrough punch list (2026-07-15). Nothing here changes how a scan or
+validation actually works — every item is about the app telling the operator
+the truth about what it found and what it did.
+
+### Added
+
+- **A build-stamped version pill in the app header**, so an operator can say
+  which build they are running at a glance. `build.ps1` bakes the release
+  version into the frontend at build time and now refuses `-SkipFrontend` when
+  the reused `dist` was baked with a different version. Dev servers and
+  unstamped builds read "dev".
+
+- **Reports table columns: generation time, source runs, and a per-row
+  Download** for completed reports. `ReportSummary` gains `created_at` and
+  `source_run_ids`, projected from the stored run record — no migration.
+
+### Fixed
+
+- **The Reports page no longer hides your reports.** The Generated Reports
+  table rendered only inside the "3 Results" step group, while the Reports page
+  always landed on the hidden "setup" step — so a report that had been created
+  successfully, and was being returned by the API, was invisible until you
+  clicked a step nobody knew to click. The table is now ungated, the headline
+  says "Loading reports…" while the list is in flight instead of claiming "No
+  reports yet", and generating a report refreshes the list it points you at.
+
+- **Each head remembers its last run.** Navigating away and back reset
+  component state, so results, the run monitor and the report button vanished.
+  Each head now re-attaches its most recent succeeded run on mount. A restored
+  run reattaches on the Setup step rather than yanking you to Results.
+  Succeeded-only for now — an in-flight run is listed in Run History but is not
+  reattached to the monitor until it completes.
+
+- **Result tables no longer fall back to sample rows.** With the active run
+  cleared, tables rendered hardcoded fixtures — which is why the app appeared
+  to invent results ("it created sample views") after a page change. Until a
+  real run produces results, heads now show an honest empty state. This also
+  removes the fabricated "Report Queue" rows.
+
+- **A completed-but-empty scan says so**: "Scan complete — no responsive hosts
+  found (N hosts probed)" instead of "No results yet", with distinct copy for
+  dry runs, cancelled runs and failures, and per-head detail for IP, BACnet
+  (Who-Is range, BBMD/subnet caveat) and MQTT (capture window). A TCP-connect
+  miss is not proof of absence and is never rendered as a hard fail.
+
+- **A rejected register import now tells you why.** Per-row reasons (row,
+  field, message, code) and any missing required columns are listed, instead of
+  only "N accepted · M rejected". The reasons were already produced and stored,
+  and `GET /imports/{id}/errors` already existed — the UI simply discarded
+  them and never called it.
+
+- **Re-picking a corrected file with the same filename works.** The file input
+  never cleared its value, so Chromium fired no change event and the previous
+  file was silently re-sent — a corrected register never reached the server
+  until it was renamed. Fixed for the register and UDMI schema-set inputs.
+
+- **CSV registers saved by Excel import instead of failing.** CR-only line
+  endings raised a `csv.Error` that escaped the route's 400 handler as an HTTP
+  500; Windows-1252 and BOM'd UTF-16 saves now decode. Semicolon/tab regional
+  saves, an XLSX renamed to `.csv`, and binary files now return an actionable
+  400 naming the real problem instead of reporting all eight required columns
+  missing. `Expected reporting interval` accepts Excel's "60.0" on an
+  mqtt_register while still rejecting fractional values, and an
+  `Expected topic` rejection names every allowed suffix with an example.
+
+- **The report controls are where the run leaves you.** The format picker and
+  "Generate report from this run" sat only in the run-monitor step group, so a
+  finished run auto-advanced to Results and took them off screen. They now also
+  render at the end of Results on all five heads.
+
+- **Results snap to the top when they open**, on every head.
+
+- **The ELECTRACOM logo (and any other `frontend/public/` file) is served.**
+  Vite copies `public/` to the `dist` root rather than into `dist/assets/`, so
+  `/electracom-logo.png` missed the `/assets` mount and the SPA fallback
+  answered `index.html` for it. Real files under `dist` now resolve first, with
+  the correct content-type; anything resolving outside the dist root is 404.
+  Hard-refresh if the logo still looks wrong — the browser may have cached
+  index.html bytes under the image URL.
+
+- **The UDMI workbench no longer shows a duplicate "Run UDMI Validation" card**
+  at the top of Run Controls. The capture starts from "Execute capture" at the
+  bottom, after the operator has been through every option.
+
+- **Consistent discovery naming.** All three discovery heads read
+  "&lt;Protocol&gt; Discovery"; the IP head no longer says "IP Discovery" in the
+  menu and "IP Scanner" on the page. Routes, job types, API parameters and
+  report content are unchanged.
 
 ## [0.1.10] - 2026-07-14
 

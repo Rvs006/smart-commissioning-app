@@ -7,7 +7,12 @@ import type {
   ValidationRunKind,
 } from "../../api/client";
 
-export type ModuleRunAction =
+// `hiddenFromRunControls` hides an action from the Run Controls card list ONLY.
+// The action MUST stay in `runActions`: ModulePage resolves actions by array
+// index (runMutation.mutate(index), udmiRunActionIndex), so removing an entry
+// renumbers every later one. Narrowing on `kind` still works through the
+// intersection, as does Exclude<ModuleRunAction, { kind: "report" }>.
+export type ModuleRunAction = (
   | {
       kind: "discovery";
       label: string;
@@ -28,7 +33,8 @@ export type ModuleRunAction =
       helper: string;
       format?: ReportFormat;
       reportType: ReportType;
-    };
+    }
+) & { hiddenFromRunControls?: boolean };
 
 export type ModuleDefinition = {
   route: string;
@@ -50,8 +56,12 @@ const modules: ModuleDefinition[] = [
     runActions: []
   },
   {
+    // Route stays /ip-scanner and jobType stays "ip_discovery" (both are
+    // historical slugs the backend and saved runs key off); only the
+    // operator-facing title is renamed, so all three discovery heads read
+    // "<Protocol> Discovery" in the menu and on the page per review 2026-07-15.
     route: "ip-scanner",
-    title: "IP Scanner",
+    title: "IP Discovery",
     summary:
       "Runs authorized network discovery jobs, compares results to the imported IP register, and identifies reachable, missing, and rogue hosts.",
     backendService: "Discovery API",
@@ -109,6 +119,15 @@ const modules: ModuleDefinition[] = [
     importTypes: ["mqtt_register", "asset_validation", "mqtt_points"],
     runActions: [
       {
+        // Hidden from the Run Controls card (Pete 2026-07-15: the run control
+        // belongs at the bottom, after the operator has been through the
+        // options — the "Execute capture" button in Schedule and Payload
+        // Evidence starts this same action).
+        //
+        // DO NOT DELETE this entry because the card is gone: ModulePage resolves
+        // it by index (udmiRunActionIndex) and a missing entry fails the run as
+        // "Unknown run action."
+        hiddenFromRunControls: true,
         kind: "validation",
         label: "Run UDMI Validation",
         helper: "Runs a UDMI validation through the API and tracks it in the run monitor below.",

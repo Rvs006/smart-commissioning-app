@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { clearApiKey, setApiKey } from "../../api/client";
+import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
 import { SessionProvider } from "../../app/session";
 import { ConfigurationPage } from "./ConfigurationPage";
 
@@ -90,6 +91,26 @@ function payloadWithSourceInterface(value: string) {
     device: {
       ...base.device,
       values: { ...base.device.values, "Source Interface": value },
+    },
+  };
+}
+
+// A configuration payload whose logging section carries the real v0.1.13 fields
+// (no syslog fields), so the logging-destination tests render the section.
+function loggingPayload(loggingOverrides: Record<string, string> = {}) {
+  const base = configurationPayload();
+  return {
+    ...base,
+    logging: {
+      values: {
+        "Log Level": "Info",
+        "Log Retention": "30 days",
+        "Diagnostics Mode": "Disabled",
+        "Log Upload URL": "",
+        "Log Upload Token": "********",
+        ...loggingOverrides,
+      },
+      status: "Local file",
     },
   };
 }
@@ -270,6 +291,109 @@ describe("ConfigurationPage", () => {
     // The operator can switch to a non-secure connection.
     fireEvent.change(select, { target: { value: "Disabled" } });
     expect(select.value).toBe("Disabled");
+  });
+
+  // v0.1.12 — the Foreign Device unlock.
+  //
+  // Until now the UI refused to let Foreign Device be enabled while BBMD was
+  // Enabled, and the seeded default is BBMD=Enabled. So on a default install the
+  // one setting BACnet discovery depends on could not be turned on at all: the
+  // select was disabled, changeValue rejected the edit, flipping BBMD back to
+  // Enabled force-reset it, and the load-time normalizer reset it again on every
+  // page load. A field engineer hit exactly this and got a silent zero-device
+  // scan. The two controls are independent — this app is never itself a BBMD —
+  // so all four blockers are gone and these tests hold them gone.
+  //
+  // The fixture is Pete's shape: BBMD "Enabled", Foreign Device "Disabled".
+  it("lets Foreign Device be enabled while BBMD is Enabled (v0.1.12 unlock)", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdLabel = (await screen.findByText("Foreign Device")).closest("label");
+    expect(fdLabel).not.toBeNull();
+    const select = within(fdLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(select.disabled).toBe(false);
+    expect(within(fdLabel as HTMLElement).queryByText(/Locked because BBMD is enabled/i)).not.toBeInTheDocument();
+
+    // The edit sticks — changeValue no longer swallows it.
+    fireEvent.change(select, { target: { value: "Enabled" } });
+    expect(select.value).toBe("Enabled");
+  });
+
+  it("does not reset Foreign Device when BBMD is switched back to Enabled", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdSelect = within((await screen.findByText("Foreign Device")).closest("label") as HTMLElement).getByRole(
+      "combobox",
+    ) as HTMLSelectElement;
+    const bbmdSelect = within(screen.getByText("BBMD").closest("label") as HTMLElement).getByRole(
+      "combobox",
+    ) as HTMLSelectElement;
+
+    fireEvent.change(fdSelect, { target: { value: "Enabled" } });
+    fireEvent.change(bbmdSelect, { target: { value: "Disabled" } });
+    fireEvent.change(bbmdSelect, { target: { value: "Enabled" } });
+
+    // The old auto-reset made this "Disabled" — silently discarding the
+    // operator's choice as a side effect of touching an unrelated toggle.
+    expect(fdSelect.value).toBe("Enabled");
+    expect(bbmdSelect.value).toBe("Enabled");
+  });
+
+  it("loads a saved Foreign Device = Enabled snapshot without resetting it", async () => {
+    // The load-time normalizer was the deepest of the four blockers: even with
+    // the select enabled, a stored FD=Enabled alongside BBMD=Enabled was reset
+    // to Disabled on every load, so the value could never survive a refresh.
+    const payload = configurationPayload();
+    // BBMD stays Enabled (fixture default) — the combination the normalizer used
+    // to treat as impossible.
+    payload.bacnet.values["Foreign Device"] = "Enabled";
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(payload);
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdSelect = within((await screen.findByText("Foreign Device")).closest("label") as HTMLElement).getByRole(
+      "combobox",
+    ) as HTMLSelectElement;
+    expect(fdSelect.value).toBe("Enabled");
+  });
+
+  it("tells the operator Foreign Device is the setting discovery uses, and BBMD is not", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const fdLabel = (await screen.findByText("Foreign Device")).closest("label");
+    expect(fdLabel).toHaveAttribute("title", expect.stringMatching(/discovery actually uses/i));
+    expect(fdLabel).toHaveAttribute("title", expect.stringMatching(/reaches devices on other subnets/i));
+    // The stale "(locked when BBMD is enabled)" claim is gone.
+    expect(fdLabel).not.toHaveAttribute("title", expect.stringMatching(/locked/i));
+
+    const bbmdLabel = screen.getByText("BBMD").closest("label");
+    expect(bbmdLabel).toHaveAttribute("title", expect.stringMatching(/Discovery does not read this toggle/i));
   });
 
   it("warns that a TLS connection to an IP literal needs the certificate SAN", async () => {
@@ -938,5 +1062,143 @@ describe("ConfigurationPage", () => {
     fireEvent.change(fileInput, { target: { files: [file] } });
 
     expect(await screen.findByText(/MQTT Port must be between/i)).toBeInTheDocument();
+  });
+
+  // v0.1.13 — logging destinations. The Logging & Diagnostics section is
+  // collapsed by default, so each test expands it via its toggle first.
+  it("renders the logging section with a Log Level select and a masked upload token, and no syslog fields", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+
+    const logLevelLabel = (await screen.findByText("Log Level")).closest("label");
+    const levelSelect = within(logLevelLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(Array.from(levelSelect.options).map((option) => option.value)).toEqual([
+      "Debug",
+      "Info",
+      "Warning",
+      "Error",
+    ]);
+
+    const tokenLabel = (await screen.findByText("Log Upload Token")).closest("label");
+    const tokenInput = within(tokenLabel as HTMLElement).getByDisplayValue("********") as HTMLInputElement;
+    expect(tokenInput.type).toBe("password");
+    expect(
+      within(tokenLabel as HTMLElement).getByRole("button", { name: /Show Log Upload Token/i }),
+    ).toBeInTheDocument();
+
+    // The never-wired syslog fields are gone.
+    expect(screen.queryByText("Remote Syslog Target")).not.toBeInTheDocument();
+    expect(screen.queryByText("Syslog Port")).not.toBeInTheDocument();
+  });
+
+  it("disables Upload logs now until a Log Upload URL is set", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    const uploadButton = await screen.findByRole("button", { name: /Upload logs now/i });
+    // Blank URL -> disabled with an explanatory title.
+    expect(uploadButton).toBeDisabled();
+
+    const urlLabel = (await screen.findByText("Log Upload URL")).closest("label");
+    const urlInput = within(urlLabel as HTMLElement).getByRole("textbox") as HTMLInputElement;
+    fireEvent.change(urlInput, { target: { value: "https://logs.example/up" } });
+    expect(uploadButton).toBeEnabled();
+  });
+
+  it("gates Upload logs now behind the engineer role", async () => {
+    // A viewer principal (not the default engineer) so canEngineer is false.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({ username: "viewer-1", role: "viewer", source: "user_key" });
+        }
+        if (url.endsWith("/api/v1/system/interfaces")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/configuration")) {
+          return jsonResponse(loggingPayload({ "Log Upload URL": "https://logs.example/up" }));
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    const uploadButton = await screen.findByRole("button", { name: /Upload logs now/i });
+    // Even with a URL set, a viewer cannot upload.
+    expect(uploadButton).toBeDisabled();
+    expect(uploadButton).toHaveAttribute("title", ENGINEER_REQUIRED_TOOLTIP);
+  });
+
+  it("renders an honest error panel when the upload endpoint does not respond", async () => {
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/logs/upload") && init?.method === "POST") {
+        return jsonResponse({
+          outcome: "no_response",
+          status_code: null,
+          detail: "ConnectError: no route to host",
+          bundle_bytes: 0,
+          files: [],
+        });
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload({ "Log Upload URL": "https://logs.example/up" }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Upload logs now/i }));
+
+    expect(
+      await screen.findByText(/The upload endpoint did not respond:/i),
+    ).toBeInTheDocument();
+    // Never a fabricated success.
+    expect(screen.queryByText(/Logs uploaded/i)).not.toBeInTheDocument();
+  });
+
+  it("renders a success panel naming the uploaded file count", async () => {
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/logs/upload") && init?.method === "POST") {
+        return jsonResponse({
+          outcome: "uploaded",
+          status_code: 200,
+          detail: "Server accepted the bundle (200).",
+          bundle_bytes: 1024,
+          files: ["app.log"],
+        });
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload({ "Log Upload URL": "https://logs.example/up" }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Upload logs now/i }));
+
+    expect(await screen.findByText(/Uploaded 1 file/i)).toBeInTheDocument();
   });
 });

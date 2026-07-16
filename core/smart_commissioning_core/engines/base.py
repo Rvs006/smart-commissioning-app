@@ -16,8 +16,12 @@ polling keeps working):
        the injected persister, and sets a terminal status:
        ``succeeded`` (default), or ``cancelled`` if the context was cancelled
        mid-run / the engine returned ``status_override="cancelled"``.
-    4. On exception the wrapper sets ``failed`` with a SANITIZED error message
-       (raw exception text is never surfaced — it may contain credentials).
+    4. On exception the wrapper logs the traceback and sets ``failed`` with a
+       SANITIZED error message (raw exception text is never surfaced — it may
+       contain credentials). An engine that can diagnose itself should NOT use
+       this path: returning ``EngineResult(status_override="failed",
+       error_message=...)`` keeps its own vetted message, plus result_summary
+       and issues, all of which this path discards.
 
 Concurrency safety: :class:`Throttle` bounds in-flight work with an
 ``asyncio.Semaphore`` AND spaces dispatches with a simple async token-bucket so
@@ -28,12 +32,15 @@ when cancellation is requested.
 
 import asyncio
 import inspect
+import logging
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.run_store import RunStore
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -429,6 +436,16 @@ async def run_engine_async(
             )
         return _apply_success(ctx, result, persist_records)
     except Exception:
+        # The operator-facing message says "See server logs for details". Until
+        # now nothing in this module logged anything, so that sentence was a
+        # lie — the traceback was destroyed here and the run record carried only
+        # the generic text. The sanitized message stays exactly as it was (raw
+        # exception text can echo credentials back to the UI); the traceback now
+        # goes where the message has always claimed it goes. An engine with a
+        # safe, specific diagnosis should not rely on this path at all — it
+        # should return EngineResult(status_override="failed",
+        # error_message=...), which the operator actually sees.
+        logger.exception("engine execution failed for run %s", ctx.run_id)
         return _apply_failure(ctx)
 
 

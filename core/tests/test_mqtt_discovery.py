@@ -11,6 +11,7 @@ listed in the task's ``live_untested`` output and requires on-site validation.
 
 import json
 import unittest
+from datetime import UTC, datetime
 from typing import Any
 
 from smart_commissioning_core.engines import mqtt_discovery
@@ -60,12 +61,38 @@ def _stub_build(_parameters: dict[str, Any]) -> MqttConnectionSettings:
     return _STUB_SETTINGS
 
 
-def _json_msg(topic: str, payload: dict[str, Any]) -> MqttMessage:
-    return MqttMessage(topic=topic, payload=json.dumps(payload).encode("utf-8"))
+def _json_msg(
+    topic: str,
+    payload: dict[str, Any],
+    *,
+    retained: bool = False,
+    qos: int = 0,
+    received_at: datetime | None = None,
+) -> MqttMessage:
+    kwargs: dict[str, Any] = {
+        "topic": topic,
+        "payload": json.dumps(payload).encode("utf-8"),
+        "retained": retained,
+        "qos": qos,
+    }
+    if received_at is not None:
+        kwargs["received_at"] = received_at
+    return MqttMessage(**kwargs)
+
+
+_FIXED_TS = datetime(2026, 7, 15, 10, 0, 0, tzinfo=UTC)
 
 
 class FakeCapture:
-    """Records what it was asked to capture and replays canned messages."""
+    """Records what it was asked to capture and replays canned messages.
+
+    Emulates the real ``subscribe_and_capture``: it fires ``on_message`` for
+    every accepted message (before dedup) and, under ``retain_latest``, keeps
+    one LATEST message per topic in first-seen order with ``max_messages`` as a
+    distinct-topic cap. A test that constructs FakeCapture but calls it with the
+    defaults (no ``retain_latest``) still gets the old append-every-message-up-
+    to-the-cap behavior.
+    """
 
     def __init__(self, messages: list[MqttMessage]) -> None:
         self._messages = messages
@@ -73,12 +100,30 @@ class FakeCapture:
 
     def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
                  timeout_seconds: float | None, max_messages: int,
-                 cancel_check: Any = None, qos: int = 0) -> list[MqttMessage]:
+                 cancel_check: Any = None, qos: int = 0,
+                 retain_latest: bool = False,
+                 on_message: Any = None) -> list[MqttMessage]:
         self.calls.append({"settings": settings, "topics": list(topics),
                            "timeout_seconds": timeout_seconds, "max_messages": max_messages,
-                           "cancel_check": cancel_check, "qos": qos})
-        # Honour the max_messages cap the way the real capture would.
-        return list(self._messages[:max_messages])
+                           "cancel_check": cancel_check, "qos": qos,
+                           "retain_latest": retain_latest, "on_message": on_message})
+        result: list[MqttMessage] = []
+        positions: dict[str, int] = {}
+        for message in self._messages:
+            # max_messages caps the raw list (raw mode) or the distinct-topic
+            # set (retain_latest) — mirror the transport's top-of-loop check.
+            if len(result) >= max_messages:
+                break
+            if on_message is not None:
+                on_message(message)
+            if not retain_latest:
+                result.append(message)
+            elif message.topic in positions:
+                result[positions[message.topic]] = message
+            else:
+                positions[message.topic] = len(result)
+                result.append(message)
+        return result
 
 
 class TopicFilterTests(unittest.TestCase):
@@ -187,6 +232,157 @@ class AggregationTests(unittest.TestCase):
         self.assertNotIn("hunter2", result["error_message"])
 
 
+class RetainLatestAggregationTests(unittest.TestCase):
+    """The retain-latest capture bounds memory to one message per topic while
+    the observer keeps per-topic counts honest across the dedup."""
+
+    def test_duplicate_heavy_stream_is_memory_bounded_but_counts_stay_honest(self) -> None:
+        store = FakeRunStore()
+        # 1000 messages cycling three topics: the retained list must collapse to
+        # three records, but the counts must still total the full 1000 seen.
+        messages = [_json_msg(f"t/{i % 3}", {"i": i}) for i in range(1000)]
+        capture = FakeCapture(messages)
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        result = mqtt_discovery.process_mqtt_discovery_run(
+            "run_dupe", {**_AUTH, "max_messages": 500},
+            run_store=store, execution_mode="dramatiq_worker",
+            live_capture=capture, build_settings=_stub_build,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["topics_discovered"], 3)
+        # Total honest count, not the deduped list length.
+        self.assertEqual(summary["messages_captured"], 1000)
+        self.assertEqual(summary["capture_retention"], "latest_per_topic")
+        self.assertFalse(summary["topic_limit_reached"])
+
+        _rid, records = persisted[0]
+        self.assertEqual(len(records), 3)  # memory-bounded: one record per topic
+        self.assertEqual(sum(r["message_count"] for r in records), 1000)
+        # Last payload on t/0 wins (i=999 is the final t/0 message).
+        topic0 = next(r for r in records if r["topic"] == "t/0")
+        self.assertEqual(topic0["last_payload"], {"i": 999})
+
+    def test_distinct_topic_cap_is_reached_and_flagged(self) -> None:
+        store = FakeRunStore()
+        messages = [_json_msg(f"t/{i}", {"i": i}) for i in range(5)]
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_topic_cap", {**_AUTH, "max_messages": 3},
+            run_store=store, execution_mode="dramatiq_worker",
+            live_capture=FakeCapture(messages), build_settings=_stub_build,
+        )
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["topics_discovered"], 3)
+        self.assertTrue(summary["topic_limit_reached"])
+        self.assertTrue(summary["message_limit_reached"])
+
+    def test_counts_fall_back_to_returned_list_when_observer_is_ignored(self) -> None:
+        # An ad-hoc fake that never calls on_message: counts must fall back to
+        # the returned message list instead of collapsing to zero.
+        class _NoObserverCapture:
+            def __init__(self, messages: list[MqttMessage]) -> None:
+                self._messages = messages
+
+            def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
+                         timeout_seconds: float | None, max_messages: int,
+                         cancel_check: Any = None, qos: int = 0,
+                         retain_latest: bool = False, on_message: Any = None) -> list[MqttMessage]:
+                return list(self._messages[:max_messages])
+
+        store = FakeRunStore()
+        messages = [
+            _json_msg("udmi/AHU-1/pointset", {"present_value": 1}),
+            _json_msg("udmi/AHU-1/pointset", {"present_value": 2}),
+            _json_msg("udmi/AHU-1/state", {"online": True}),
+        ]
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_fallback", {**_AUTH, "topic_prefix": "udmi"},
+            run_store=store, execution_mode="x",
+            live_capture=_NoObserverCapture(messages), build_settings=_stub_build,
+        )
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["topics_discovered"], 2)
+        self.assertEqual(summary["messages_captured"], 3)
+
+    def test_max_messages_is_clamped_to_the_topic_cap(self) -> None:
+        # A silly operator value cannot buy unbounded retained-payload memory.
+        self.assertEqual(
+            mqtt_discovery._max_messages({"max_messages": 10_000_000}),
+            mqtt_discovery.MAX_TOPIC_CAP,
+        )
+
+
+class MessageMetadataTests(unittest.TestCase):
+    """Per-topic last-message metadata (retained / delivery QoS / received-at)
+    rides the structured record attributes for the v0.1.13 inspector, and the
+    subscription QoS cap is echoed in result_summary. Describes the SAME message
+    as last_payload by construction.
+    """
+
+    def _run(
+        self, messages: list[MqttMessage], params: dict[str, Any] | None = None
+    ) -> tuple[dict[str, Any], FakeRunStore, list[tuple[str, list[dict[str, Any]]]]]:
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+        result = mqtt_discovery.process_mqtt_discovery_run(
+            "run_meta", {**_AUTH, **(params or {})},
+            run_store=store, execution_mode="dramatiq_worker",
+            live_capture=FakeCapture(messages), build_settings=_stub_build,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        return result, store, persisted
+
+    def test_metadata_carried_into_structured_record(self) -> None:
+        messages = [
+            _json_msg("udmi/AHU-1/state", {"online": True}, retained=True, qos=1, received_at=_FIXED_TS)
+        ]
+        result, _store, persisted = self._run(messages)
+        self.assertEqual(result["status"], "succeeded")
+        _rid, records = persisted[0]
+        attrs = records[0]["attributes"]
+        self.assertIs(attrs["last_retained"], True)
+        self.assertEqual(attrs["last_qos"], 1)
+        self.assertEqual(attrs["last_received_at"], _FIXED_TS.isoformat())
+
+    def test_metadata_describes_the_last_message_on_a_topic(self) -> None:
+        earlier = datetime(2026, 7, 15, 9, 0, 0, tzinfo=UTC)
+        messages = [
+            _json_msg("t/1", {"v": 1}, retained=True, qos=0, received_at=earlier),
+            _json_msg("t/1", {"v": 2}, retained=False, qos=1, received_at=_FIXED_TS),
+        ]
+        _result, _store, persisted = self._run(messages)
+        _rid, records = persisted[0]
+        # The metadata must describe the SAME (last) message as last_payload.
+        self.assertEqual(records[0]["last_payload"], {"v": 2})
+        attrs = records[0]["attributes"]
+        self.assertIs(attrs["last_retained"], False)
+        self.assertEqual(attrs["last_qos"], 1)
+        self.assertEqual(attrs["last_received_at"], _FIXED_TS.isoformat())
+
+    def test_non_json_payload_still_carries_metadata(self) -> None:
+        messages = [
+            MqttMessage(topic="raw/topic", payload=b"\x00not-json", retained=True, qos=2, received_at=_FIXED_TS)
+        ]
+        _result, _store, persisted = self._run(messages)
+        _rid, records = persisted[0]
+        self.assertEqual(records[0]["last_payload"], {"_raw_present": True})
+        attrs = records[0]["attributes"]
+        self.assertIs(attrs["last_retained"], True)
+        self.assertEqual(attrs["last_qos"], 2)
+        self.assertEqual(attrs["last_received_at"], _FIXED_TS.isoformat())
+
+    def test_subscribe_qos_echoed_in_summary(self) -> None:
+        _result, store, _persisted = self._run([_json_msg("t/1", {"v": 1})], params={"qos": 2})
+        self.assertEqual(store.summary_calls[-1]["subscribe_qos"], 2)
+
+    def test_subscribe_qos_defaults_to_zero_when_absent(self) -> None:
+        _result, store, _persisted = self._run([_json_msg("t/1", {"v": 1})])
+        self.assertEqual(store.summary_calls[-1]["subscribe_qos"], 0)
+
+
 class BoundTests(unittest.TestCase):
     def test_capture_window_and_max_messages_passed_through(self) -> None:
         store = FakeRunStore()
@@ -277,7 +473,8 @@ class CancelDuringCaptureTests(unittest.TestCase):
         class CancellingCapture:
             def __call__(self, settings: MqttConnectionSettings, *, topics: list[str],
                          timeout_seconds: float | None, max_messages: int,
-                         cancel_check: Any = None, qos: int = 0) -> list[MqttMessage]:
+                         cancel_check: Any = None, qos: int = 0,
+                         retain_latest: bool = False, on_message: Any = None) -> list[MqttMessage]:
                 captured: list[MqttMessage] = []
                 for index in range(max_messages):
                     captured.append(_json_msg(f"t/{index}", {"i": index}))

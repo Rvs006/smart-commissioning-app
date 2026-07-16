@@ -148,6 +148,10 @@ class DiscoveryResultsResponse(BaseModel):
     devices: list[dict[str, object]] = Field(default_factory=list)
     points: list[dict[str, object]] = Field(default_factory=list)
     topics: list[dict[str, object]] = Field(default_factory=list)
+    # MQTT-only: whole-broker scan compared against the uploaded register. None
+    # for non-MQTT runs and for runs that observed nothing (dry/failed) — computed
+    # at read time so it is additive and back-compatible.
+    register_comparison: dict[str, object] | None = None
 
 
 class DiscoveryPointsResponse(BaseModel):
@@ -162,6 +166,7 @@ class DiscoveryTopicsResponse(BaseModel):
     job_type: JobType
     status: JobStatus
     topics: list[dict[str, object]] = Field(default_factory=list)
+    register_comparison: dict[str, object] | None = None
 
 
 class ValidationIssuesResponse(BaseModel):
@@ -201,6 +206,14 @@ class ReportSummary(BaseModel):
     output_format: ReportFormat
     status: JobStatus
     file_name: str
+    # When the report run was created, and which runs it was scoped to. Both are
+    # read straight off the stored run record (Run.created_at is non-null with a
+    # utcnow default; source_run_ids is persisted in parameters at creation), so
+    # this is a projection change, not a migration. created_at is deliberately
+    # REQUIRED: every report run has one, and an Optional field would silently
+    # mask a construction site that forgot to pass it.
+    created_at: datetime
+    source_run_ids: list[str] = Field(default_factory=list)
 
 
 class ReportListResponse(BaseModel):

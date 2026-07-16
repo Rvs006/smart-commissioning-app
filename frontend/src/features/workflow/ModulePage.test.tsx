@@ -99,10 +99,48 @@ describe("ModulePage discovery wiring", () => {
   });
 
   it("blocks a real scan until authorization is confirmed, then queues and renders live results", async () => {
+    // A sweep that now reports every scanned host: the responder plus an
+    // unregistered silent host (neutral) and a register-expected silent host
+    // (amber/inconclusive). The engine emits "no response on scanned ports" —
+    // a TCP-connect miss, never proof a host is absent.
+    const liveResultsPayload = {
+      ...resultsPayload,
+      result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+      discovered_assets: [
+        ...resultsPayload.discovered_assets,
+        {
+          asset_id: null,
+          ip_address: "10.10.25.9",
+          mac_address: null,
+          hostname: null,
+          observed_ports: [],
+          match_basis: "none",
+          last_seen_at: null,
+          status_detail: "no response on scanned ports (4 probed)",
+        },
+        {
+          asset_id: "AHU-7",
+          ip_address: "10.10.25.11",
+          mac_address: null,
+          hostname: null,
+          observed_ports: [],
+          match_basis: "none",
+          last_seen_at: null,
+          status_detail:
+            "no response on scanned ports (2 probed) | EXPECTED BY REGISTER: expected from the " +
+            "register import but did not answer this scan — inconclusive, not proof the host is offline",
+        },
+      ],
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -113,7 +151,7 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(acceptedRun);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
-          return jsonResponse(resultsPayload);
+          return jsonResponse(liveResultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
           return jsonResponse(terminalRun);
@@ -139,16 +177,28 @@ describe("ModulePage discovery wiring", () => {
     // hostname is unique to the live results payload (not present in sample rows);
     // it now appears in both the results table and the selected-result detail aside.
     expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
-    // Live banner is shown, not a fabricated "Result" verdict column.
+    // Live banner is shown (its ip-scanner copy still opens with this phrase).
     expect(screen.getByText(/Live discovery observations/i)).toBeInTheDocument();
-    // Pass/fail row shading is a UDMI-validation verdict; discovery rows carry
-    // no verdict, so they must never be shaded.
+    // The Result column now reports each host's scan verdict.
+    expect(screen.getByRole("columnheader", { name: "Result" })).toBeInTheDocument();
+    // Both silent hosts surface the honest "no response" copy.
+    expect((await screen.findAllByText("No response on scanned ports")).length).toBeGreaterThan(0);
+    // jsdom cannot see theme CSS, so assert on classNames only: the register-
+    // expected silent host shades amber (warn); the plain responder and the
+    // unregistered silent host carry no pass/fail shading.
+    expect(document.querySelector("tr.row-warn")).not.toBeNull();
     expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
 
     // Headline metric now reflects the real run (hosts_responsive: 1), never the
     // old hardcoded "118" sample.
     expect(await screen.findByText("responsive hosts")).toBeInTheDocument();
     expect(screen.queryByText("118")).not.toBeInTheDocument();
+
+    // A run the operator started here auto-advances to Results on success. Only
+    // a *restored* run is exempt (see the run retention suite below).
+    await waitFor(() =>
+      expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
+    );
   });
 
   it("renders import warnings as a non-blocking amber panel distinct from errors", async () => {
@@ -156,6 +206,11 @@ describe("ModulePage discovery wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -219,6 +274,11 @@ describe("ModulePage discovery wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -266,11 +326,478 @@ describe("ModulePage discovery wiring", () => {
     expect(parameters).not.toHaveProperty("scan_authorization");
   });
 
+  const mqttAccepted = {
+    run_id: "run-mqtt-1",
+    job_type: "mqtt_discovery",
+    status: "queued",
+    message: "MQTT discovery accepted.",
+  };
+
+  const mqttTerminal = {
+    run_id: "run-mqtt-1",
+    job_type: "mqtt_discovery",
+    status: "succeeded",
+    stage: "capture",
+    progress_percent: 100,
+    created_at: "2026-07-15T09:00:00Z",
+    updated_at: "2026-07-15T09:05:00Z",
+    project_id: "demo-project",
+    site_id: "demo-site",
+    parameters: {},
+    result_summary: { topics_discovered: 0, messages_captured: 0 },
+    error_message: null,
+  };
+
+  function stubMqttRunFetch(onPost: (body: { parameters: Record<string, unknown> }) => void) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          onPost(JSON.parse(String(init.body)) as { parameters: Record<string, unknown> });
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: "run-mqtt-1", discovered_assets: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse(mqttTerminal);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("converts an hours capture duration to seconds on the MQTT discovery wire", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+      target: { value: "2" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.capture_seconds).toBe(7200);
+  });
+
+  it("refuses an MQTT capture duration over the 48-hour cap without posting", async () => {
+    let posted = false;
+    stubMqttRunFetch(() => {
+      posted = true;
+    });
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+      target: { value: "49" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
+    const runButton = screen.getByRole("button", { name: "Run" });
+    expect(runButton).toBeDisabled();
+    fireEvent.click(runButton);
+    expect(posted).toBe(false);
+  });
+
+  it("keeps a blank MQTT capture duration as the 0 indefinite sentinel regardless of unit", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    // Clear the default "10" so the duration is blank, then pick an hours unit:
+    // the unit multiplier must not turn a blank (indefinite) into a bounded 0.
+    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+      target: { value: "" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.capture_seconds).toBe(0);
+  });
+
+  it("selects an MQTT topic row to inspect its real payload with honest metadata and no fabricated issues", async () => {
+    const mqttResultsPayload = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      // subscribe_qos 0 is the delivery-QoS cap the run requested.
+      result_summary: { topics_discovered: 2, messages_captured: 5, subscribe_qos: 0 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "udmi/AHU-1/state",
+          message_count: 3,
+          last_payload: { online: true, firmware: "1.2.3" },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: {
+            device_ref: "AHU-1",
+            position: 0,
+            last_retained: true,
+            last_qos: 1,
+            last_received_at: "2026-07-15T10:00:00+00:00",
+          },
+        },
+        {
+          topic: "sensors/raw/blob",
+          message_count: 1,
+          // Engine presence marker for a non-JSON payload — no raw bytes stored.
+          last_payload: { _raw_present: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: {
+            device_ref: null,
+            position: 1,
+            last_retained: false,
+            last_qos: 0,
+            last_received_at: "2026-07-15T10:01:00+00:00",
+          },
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(mqttResultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // Table populates; the inspector defaults to the first row (AHU-1, JSON),
+    // so its payload panel (unique heading) and JSON tree are shown up front.
+    expect(await screen.findByText(/Last payload on udmi\/AHU-1\/state/)).toBeInTheDocument();
+    expect(screen.getByText("Explore JSON tree")).toBeInTheDocument();
+
+    // The fabricated sample MQTT issue (operatorData) must NOT render on this
+    // live discovery route — the old workspace?.issues fallback is suppressed.
+    expect(
+      screen.queryByText(/Telemetry interval exceeds configured tolerance/i),
+    ).not.toBeInTheDocument();
+
+    // Clicking the SECOND row's <tr> (via a cell) moves the inspector to that
+    // topic; the non-JSON marker shows an honest sentence and NO json tree.
+    // Capture the row before selecting (its topic string becomes ambiguous once
+    // the inspector also echoes it).
+    const rawCell = screen.getByText("sensors/raw/blob");
+    const rawRow = rawCell.closest("tr");
+    fireEvent.click(rawCell);
+    expect(await screen.findByText(/Non-JSON payload observed/i)).toBeInTheDocument();
+    expect(screen.queryByText("Explore JSON tree")).not.toBeInTheDocument();
+
+    // The clicked row carries the selection class (drives the inspector without
+    // opening the View modal).
+    expect(rawRow?.className).toContain("row-selected");
+
+    // Metadata detail items are present with honesty-rule labels; a timestamp is
+    // NEVER labelled "Published" (MQTT 3.1.1 carries no publish time on the wire).
+    expect(screen.getByText("Retained")).toBeInTheDocument();
+    expect(screen.getByText("Delivery QoS")).toBeInTheDocument();
+    expect(screen.getByText("Received at")).toBeInTheDocument();
+    expect(screen.queryByText("Published")).not.toBeInTheDocument();
+  });
+
+  it("shows 'Not recorded' MQTT metadata for a run that predates metadata capture", async () => {
+    // An old persisted run: topics carry no last_retained/last_qos/last_received_at
+    // and the summary has no subscribe_qos. The inspector must render without
+    // crashing and never fabricate values.
+    const legacyResults = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 1, messages_captured: 2 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "udmi/AHU-1/state",
+          message_count: 2,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: "AHU-1", position: 0 },
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(legacyResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: legacyResults.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // The topic appears in both the table cell and the inspector — wait for it.
+    expect((await screen.findAllByText("udmi/AHU-1/state")).length).toBeGreaterThan(0);
+    // The metadata labels render, and the values honestly read "Not recorded".
+    expect(screen.getByText("Retained")).toBeInTheDocument();
+    expect(screen.getAllByText(/Not recorded/).length).toBeGreaterThan(0);
+  });
+
+  it("shades register-matched and register-foreign MQTT rows and shows the compare banner", async () => {
+    const comparedResults = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 2, messages_captured: 4 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "334os/b1/ahu-1/state",
+          message_count: 3,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: {
+            device_ref: "AHU-1",
+            position: 0,
+            register_match: "matched",
+            register_matched_filter: "334os/b1/ahu-1/#",
+            register_asset_id: "AHU-1",
+          },
+        },
+        {
+          topic: "334os/rogue/x/state",
+          message_count: 1,
+          last_payload: { present_value: 1 },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: null, position: 1, register_match: "unmatched" },
+        },
+      ],
+      register_comparison: {
+        register_available: true,
+        import_filename: "register.csv",
+        matched_count: 1,
+        unmatched_count: 1,
+        expected_filter_count: 2,
+        unobserved_filters: [{ asset_id: "FCU-2", filter: "334os/b1/fcu-2/state" }],
+      },
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(comparedResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: comparedResults.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // Banner switches to the register-comparison copy (route-aware).
+    expect(
+      await screen.findByText(/Green rows match a topic in the uploaded MQTT register/),
+    ).toBeInTheDocument();
+    // The counts note is present on its own line.
+    expect(screen.getByText(/1 topic matches the register/)).toBeInTheDocument();
+    expect(screen.getByText(/334os\/b1\/fcu-2\/state/)).toBeInTheDocument();
+
+    // The matched row shades green, the foreign row red. Assert on classes only
+    // (jsdom cannot see the theme CSS that hides/reveals rows).
+    const passRow = document.querySelector("tr.row-pass");
+    const failRow = document.querySelector("tr.row-fail");
+    expect(passRow?.textContent).toContain("334os/b1/ahu-1/state");
+    expect(failRow?.textContent).toContain("334os/rogue/x/state");
+  });
+
+  it("prompts to upload a register when no MQTT register import exists", async () => {
+    const noRegisterResults = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 1, messages_captured: 1 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "334os/rogue/x/state",
+          message_count: 1,
+          last_payload: { present_value: 1 },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: null, position: 0 },
+        },
+      ],
+      register_comparison: { register_available: false },
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(noRegisterResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: noRegisterResults.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    expect(
+      await screen.findByText(/No accepted MQTT register import for this project\/site/),
+    ).toBeInTheDocument();
+    // No register means NO verdicts — never all-red.
+    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+  });
+
   it("renders the MAC column and opens a per-host detail dialog from the row View button", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -322,6 +849,11 @@ describe("ModulePage discovery wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -346,6 +878,11 @@ describe("ModulePage discovery wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -362,6 +899,104 @@ describe("ModulePage discovery wiring", () => {
     const previewButton = await screen.findByRole("button", { name: "Preview" });
     // Enabled once the engineer role resolves (no scan-auth needed for dry run).
     await waitFor(() => expect(previewButton).toBeEnabled());
+  });
+
+  // A scan that completed and genuinely found nothing used to land on the same
+  // "No results yet" as a head that had never run (Pete 2026-07-15). These are
+  // text-content assertions on the always-in-DOM results section: jsdom applies
+  // no theme CSS, so step-gating visibility is not assertable here.
+  it("states what was probed when a scan completes and finds nothing", async () => {
+    const emptySummary = { hosts_responsive: 0, hosts_scanned: 254 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            result_summary: emptySummary,
+            discovered_assets: [],
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse({ ...terminalRun, result_summary: emptySummary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const queueButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(queueButton).toBeEnabled());
+    fireEvent.click(queueButton);
+
+    expect(await screen.findByText(/Scan complete — no responsive hosts found/i)).toBeInTheDocument();
+    expect(screen.getByText(/254 hosts probed/i)).toBeInTheDocument();
+    expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
+    // Honesty: a succeeded run that observed nothing is a real observation and
+    // must never be dressed up as a failure.
+    expect(document.querySelector(".empty-workspace")?.textContent).not.toMatch(/fail/i);
+  });
+
+  it("labels an empty dry-run preview as a preview, not a negative finding", async () => {
+    // The engine stamps hosts_scanned: 0 on a dry run because it sends no
+    // packets; without the dry_run gate this would read as "0 hosts were
+    // probed" — a network claim about a run that never touched the network.
+    const dryRunSummary = { dry_run: true, hosts_responsive: 0, hosts_scanned: 0 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            result_summary: dryRunSummary,
+            discovered_assets: [],
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse({ ...terminalRun, result_summary: dryRunSummary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    expect(await screen.findByText(/Dry run complete — preview only/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no responsive hosts found/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 hosts were probed/i)).not.toBeInTheDocument();
   });
 });
 
@@ -409,6 +1044,11 @@ describe("ModulePage BACnet backend provenance", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -463,9 +1103,81 @@ describe("ModulePage BACnet backend provenance", () => {
       screen.queryByText(/SIMULATED — demo data, not a real BACnet scan\./i),
     ).not.toBeInTheDocument();
   });
+
+  // Lives here rather than with the label tests because the results table only
+  // exists once a real run has produced rows — there is no sample table to read
+  // the columns off any more.
+  it("shows IP Address and Network Number columns on the live BACnet results table", async () => {
+    await runBacnetWithBackend("bacpypes3");
+    expect(await screen.findByRole("columnheader", { name: "IP Address" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Network Number" })).toBeInTheDocument();
+  });
 });
 
 describe("ModulePage reports wiring", () => {
+  // Mirrors the API projection: created_at + source_run_ids come back on every
+  // report (GET /reports), which is what the Generated / Source runs columns read.
+  const reportsPayload = {
+    reports: [
+      {
+        report_id: "rep-1",
+        report_type: "issue_report",
+        output_format: "xlsx",
+        status: "succeeded",
+        file_name: "issue_report.xlsx",
+        created_at: "2026-07-15T10:00:00Z",
+        source_run_ids: ["run-1"],
+      },
+      {
+        report_id: "rep-2",
+        report_type: "evidence_pack",
+        output_format: "docx",
+        status: "queued",
+        file_name: "evidence_pack.docx",
+        created_at: "2026-07-15T11:30:00Z",
+        source_run_ids: [],
+      },
+      // A SECOND succeeded report, deliberately not first in the list: the
+      // per-row Download tests drive this one, so a row map that ignores its own
+      // row and re-downloads liveReports[0] fails instead of passing by accident.
+      {
+        report_id: "rep-3",
+        report_type: "evidence_pack",
+        output_format: "zip",
+        status: "succeeded",
+        file_name: "handover_pack.zip",
+        created_at: "2026-07-15T12:45:00Z",
+        source_run_ids: ["run-2", "run-3"],
+      },
+    ],
+  };
+
+  // downloadFile() reads .blob() and the Content-Disposition header; the file's
+  // jsonResponse helper models neither. Same hand-rolled-Response style.
+  function blobResponse(filename: string): Response {
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      blob: async () => new Blob(["x"]),
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "content-disposition"
+            ? `attachment; filename="${filename}"`
+            : null,
+      },
+    } as unknown as Response;
+  }
+
+  beforeEach(() => {
+    // jsdom implements no object-URL APIs; triggerBlobDownload uses them.
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:mock"),
+      revokeObjectURL: vi.fn(),
+    });
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     clearApiKey();
@@ -476,6 +1188,11 @@ describe("ModulePage reports wiring", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -497,28 +1214,15 @@ describe("ModulePage reports wiring", () => {
   });
 
   it("lists generated reports with per-report selection and an Export selected action", async () => {
-    const reportsPayload = {
-      reports: [
-        {
-          report_id: "rep-1",
-          report_type: "issue_report",
-          output_format: "xlsx",
-          status: "succeeded",
-          file_name: "issue_report.xlsx",
-        },
-        {
-          report_id: "rep-2",
-          report_type: "evidence_pack",
-          output_format: "docx",
-          status: "queued",
-          file_name: "evidence_pack.docx",
-        },
-      ],
-    };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -545,6 +1249,129 @@ describe("ModulePage reports wiring", () => {
     fireEvent.click(succeededCheckbox);
     await waitFor(() => expect(exportSelected).toBeEnabled());
   });
+
+  function stubReports(
+    onDownload?: (url: string) => void,
+    payload: unknown = reportsPayload,
+  ) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (/\/api\/v1\/reports\/[^/]+\/download$/.test(url)) {
+          onDownload?.(url);
+          return blobResponse("issue_report.xlsx");
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse(payload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  // A report is only traceable evidence if the operator can see WHEN it was cut
+  // and WHICH runs fed it — that is the whole point for an ITP handover pack.
+  it("shows a Generated timestamp and the source run ids for each report", async () => {
+    stubReports();
+    renderModule("reports");
+
+    expect(await screen.findByRole("columnheader", { name: "Generated" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Source runs" })).toBeInTheDocument();
+
+    // Assert against the app's own formatter so the check is locale/timezone
+    // agnostic (same approach as RunHistoryPage.test.tsx).
+    const generated = new Date("2026-07-15T10:00:00Z").toLocaleString();
+    expect(screen.getByRole("cell", { name: generated })).toBeInTheDocument();
+    expect(screen.getByRole("cell", { name: "run-1" })).toBeInTheDocument();
+
+    // A report scoped to no runs says so honestly rather than inventing a source.
+    const queuedRow = screen.getByLabelText(/Select report evidence_pack\.docx/i).closest("tr")!;
+    expect(within(queuedRow).getByRole("cell", { name: "—" })).toBeInTheDocument();
+  });
+
+  // Drives rep-3 (succeeded, but NOT the first row) so the click has to resolve
+  // its own row's report id rather than falling back to the first one.
+  it("downloads a single completed report from its own row", async () => {
+    const downloaded: string[] = [];
+    stubReports((url) => downloaded.push(url));
+    renderModule("reports");
+
+    const row = (await screen.findByLabelText(/Select report handover_pack\.zip/i)).closest("tr")!;
+    fireEvent.click(within(row).getByRole("button", { name: "Download" }));
+
+    await waitFor(() => expect(downloaded).toHaveLength(1));
+    expect(downloaded[0]).toMatch(/\/api\/v1\/reports\/rep-3\/download$/);
+    // The blob actually reached the browser's download path.
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  // Only a succeeded report has real bytes behind it; offering a download for a
+  // queued one would hand the operator an error, not a file.
+  it("disables the row Download for a report that has not completed", async () => {
+    stubReports();
+    renderModule("reports");
+
+    const queuedRow = (await screen.findByLabelText(/Select report evidence_pack\.docx/i)).closest(
+      "tr",
+    )!;
+    expect(within(queuedRow).getByRole("button", { name: "Download" })).toBeDisabled();
+
+    const succeededRow = screen.getByLabelText(/Select report issue_report\.xlsx/i).closest("tr")!;
+    expect(within(succeededRow).getByRole("button", { name: "Download" })).toBeEnabled();
+  });
+
+  // End-state guard, NOT a guard on the fixture itself: item 8 already removed
+  // the `workspace?.rows` fallback, so this passes even with the fabricated rows
+  // present (verified by mutation). It earns its place by pinning the OUTCOME —
+  // no invented report reaches the reports page by ANY route, including a
+  // re-introduced fallback. The fixture itself is pinned in operatorData.test.ts.
+  it("shows an honest empty state, with no fabricated report rows, when no report exists", async () => {
+    stubReports(undefined, { reports: [] });
+    renderModule("reports");
+
+    expect(await screen.findByText("No reports yet")).toBeInTheDocument();
+    for (const fabricated of [
+      "Excel issue report",
+      "Word handover report",
+      "Blocked report",
+      "commissioning_handover.docx",
+      "Awaiting validation",
+    ]) {
+      expect(screen.queryByText(fabricated)).toBeNull();
+    }
+  });
+
+  // An older backend (or a stale cached payload) carries neither new field; the
+  // row must still render rather than throwing on .join of undefined.
+  it("renders a report that carries neither created_at nor source_run_ids", async () => {
+    stubReports(undefined, {
+      reports: [
+        {
+          report_id: "rep-legacy",
+          report_type: "issue_report",
+          output_format: "xlsx",
+          status: "succeeded",
+          file_name: "legacy.xlsx",
+        },
+      ],
+    });
+    renderModule("reports");
+
+    const row = (await screen.findByLabelText(/Select report legacy\.xlsx/i)).closest("tr")!;
+    // Both new cells degrade to the em-dash rather than crashing the table.
+    expect(within(row).getAllByRole("cell", { name: "—" })).toHaveLength(2);
+    expect(within(row).getByRole("button", { name: "Download" })).toBeEnabled();
+  });
 });
 
 describe("ModulePage labels and templates", () => {
@@ -558,6 +1385,11 @@ describe("ModulePage labels and templates", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -600,13 +1432,24 @@ describe("ModulePage labels and templates", () => {
     expect(screen.getAllByRole("button", { name: "CSV" })).toHaveLength(5);
   });
 
-  it("shows IP Address and Network Number columns for BACnet discovery", async () => {
+  // The module hero renders `workspace?.title ?? module.title`, so the
+  // operatorData workspace title shadows the moduleData one on every head that
+  // has a workspace — i.e. all five. These assert the string an operator
+  // actually reads, whichever layer supplies it.
+  it("titles the ip-scanner hero 'IP Discovery', matching its menu entry", async () => {
+    stubBasic();
+    renderModule("ip-scanner");
+    expect(await screen.findByRole("heading", { level: 2, name: "IP Discovery" })).toBeInTheDocument();
+  });
+
+  it("titles the bacnet-discovery hero 'BACnet Discovery'", async () => {
     stubBasic();
     renderModule("bacnet-discovery");
-    // Sample BACnet table is shown until a run; it now carries the new columns.
-    expect(await screen.findByRole("columnheader", { name: "IP Address" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Network Number" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "BACnet Discovery" }),
+    ).toBeInTheDocument();
   });
+
 });
 
 describe("ModulePage UDMI workbench live results", () => {
@@ -696,11 +1539,16 @@ describe("ModulePage UDMI workbench live results", () => {
     ],
   };
 
-  it("replaces the sample rows with real per-asset payload rows after a terminal run", async () => {
+  it("shows no rows until a terminal run, then real per-asset payload rows", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -725,10 +1573,15 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    // Before a run the labelled sample rows are shown.
-    expect(await screen.findByText(/Sample preview/i)).toBeInTheDocument();
+    // Before a run there are no result rows at all — no sample preview, just
+    // the honest empty state. Fabricated rows here read as real findings.
+    // MDB5-00-044-BLR-2 is unique to the old sample rows (the sample *issues*
+    // fallback in the inspector is a separate surface and still stands).
+    expect(await screen.findByText("No results yet")).toBeInTheDocument();
+    expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("MDB5-00-044-BLR-2")).not.toBeInTheDocument();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     // After the terminal run the table shows REAL per-asset payload rows —
     // the version-mismatch verdict and the run's asset id, not the sample rows.
@@ -739,7 +1592,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getAllByText("EM-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
     // Row cells also render in the selected-result detail aside, so match >=1.
-    expect(screen.getAllByText("Fail — 1 issue (1 critical)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Non-compliant — 1 issue (1 critical)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
     // The old illustrative sample asset never appears as a live result.
     expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
@@ -762,6 +1615,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -785,31 +1643,33 @@ describe("ModulePage UDMI workbench live results", () => {
     );
   }
 
-  it("shades live UDMI rows red on fail and green on pass, leaving sample rows unshaded", async () => {
+  it("shades live UDMI rows amber on non-compliant and green on pass (RAG)", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
     renderModule("udmi-validation");
 
-    // Sample preview rows carry no verdict shading.
-    expect(await screen.findByText(/Sample preview/i)).toBeInTheDocument();
-    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    // Nothing has run, so there are no rows to shade — and no sample rows
+    // masquerading as results either.
+    expect(await screen.findByText("No results yet")).toBeInTheDocument();
+    expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
 
     // Wait for the issues query to merge in (the live banner can render from
-    // payload views alone, a beat before the fail verdict lands on the row).
-    await screen.findAllByText("Fail — 1 issue (1 critical)");
+    // payload views alone, a beat before the verdict lands on the row).
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
-    // pointset (1 critical issue) shades red; metadata (observed, no issues)
-    // shades green. The payload-type text also renders in the aside detail, so
-    // pick the occurrence inside a table row.
+    // Under the RAG scheme a PUBLISHING device with a critical issue is amber
+    // (row-warn), not red — red is reserved for offline / not-publishing. The
+    // clean observed metadata row stays green. The payload-type text also
+    // renders in the aside detail, so pick the occurrence inside a table row.
     const pointsetRow = screen
       .getAllByText("UDMI pointset")
       .map((cell) => cell.closest("tr"))
       .find((row) => row !== null);
-    expect(pointsetRow).toHaveClass("row-fail");
+    expect(pointsetRow).toHaveClass("row-warn");
     const metadataRow = screen
       .getAllByText("UDMI metadata")
       .map((cell) => cell.closest("tr"))
@@ -821,12 +1681,12 @@ describe("ModulePage UDMI workbench live results", () => {
     stubUdmiRunFetch(udmiIssuesPayload);
     renderModule("udmi-validation");
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     // Ensure the issues query has merged before opening the detail.
-    await screen.findAllByText("Fail — 1 issue (1 critical)");
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
     // First View = the pointset row, which carries the run's single critical
     // issue; the modal shows its id and full message inline.
@@ -858,12 +1718,12 @@ describe("ModulePage UDMI workbench live results", () => {
     stubUdmiRunFetch(manyIssues);
     renderModule("udmi-validation");
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     // Ensure the issues query has merged before opening the detail.
-    await screen.findAllByText("Fail — 3 issues (1 critical)");
+    await screen.findAllByText("Non-compliant — 3 issues (1 critical)");
 
     fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
     const dialog = await screen.findByRole("dialog");
@@ -874,24 +1734,140 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(dialog).queryByText(/Pointset problem 1\./)).not.toBeInTheDocument();
   });
 
-  it("stamps the shared PASS/FAIL verdict on the per-asset payload sections", async () => {
+  it("stamps the shared RAG verdict on the per-asset payload sections", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
     renderModule("udmi-validation");
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     // Ensure the issues query has merged before expanding the asset group.
-    await screen.findAllByText("Fail — 1 issue (1 critical)");
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
     fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
-    const fail = await screen.findByText("FAIL — please see details below");
-    expect(fail).toHaveClass("payload-verdict", "fail");
-    expect(fail.closest(".payload-type-group")).toHaveClass("section-fail");
+    // Publishing device with a critical issue → amber "NON-COMPLIANT" section.
+    const nonCompliant = await screen.findByText("NON-COMPLIANT — please see details below");
+    expect(nonCompliant).toHaveClass("payload-verdict", "warn");
+    expect(nonCompliant.closest(".payload-type-group")).toHaveClass("section-warn");
     const pass = screen.getByText("PASS — UDMI Compliant");
     expect(pass).toHaveClass("payload-verdict", "pass");
     expect(pass.closest(".payload-type-group")).toHaveClass("section-pass");
+  });
+
+  it("shades silent devices red (offline) on a succeeded run (RAG)", async () => {
+    // EM-1 publishes with one major issue → amber. EM-2 was CAPTURED (a real
+    // attempt) but stayed silent: pointset + state observed_present false, an
+    // engine "not_publishing" issue, and the run summary's not_publishing_devices
+    // list. Every EM-2 row must read red "Offline — did not publish", even
+    // though the RUN itself SUCCEEDED — the ask as Pete experiences it.
+    const silentRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        expected_devices: 2,
+        publishing_seen: 1,
+        not_publishing: 1,
+        not_publishing_devices: ["EM-2"],
+        payload_views: [
+          {
+            asset_id: "EM-1",
+            payload_types: [
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: { version: "1.5.2", points: { energy_sensor: { present_value: 12.5 } } },
+                observed_present: true,
+              },
+            ],
+          },
+          {
+            asset_id: "EM-2",
+            payload_types: [
+              { payload_type: "pointset", expected: { version: "1.5.2", points: {} }, observed: null, observed_present: false },
+              { payload_type: "state", expected: { version: "1.5.2" }, observed: null, observed_present: false },
+            ],
+          },
+        ],
+      },
+    };
+    const silentIssues = {
+      run_id: "run-udmi-1",
+      issues: [
+        {
+          issue_id: "UDMI-PS-010",
+          asset_id: "EM-1",
+          issue_type: "pointset_validation",
+          severity: "medium",
+          description: "Units mismatch on the pointset payload.",
+          point_name: null,
+          expected_value: null,
+          observed_value: null,
+          suggested_action: null,
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+        {
+          issue_id: "UDMI-NP-001",
+          asset_id: "EM-2",
+          issue_type: "not_publishing",
+          severity: "high",
+          description: "No UDMI messages received from this device during the capture window.",
+          point_name: null,
+          expected_value: null,
+          observed_value: null,
+          suggested_action: null,
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") return jsonResponse(udmiAccepted);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(silentIssues);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(silentRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    // Wait for the offline verdict to land (issues merged).
+    await screen.findAllByText("Offline — did not publish");
+
+    // Every EM-2 result row (pointset, state, and the derived not_publishing
+    // "other" row) is red offline; EM-1 is amber (publishing but non-compliant).
+    const em2Rows = screen
+      .getAllByText("EM-2")
+      .map((cell) => cell.closest("tr"))
+      .filter((row): row is HTMLTableRowElement => row !== null);
+    expect(em2Rows.length).toBeGreaterThan(0);
+    for (const row of em2Rows) {
+      expect(row).toHaveClass("row-fail");
+      expect(within(row).getByText("Offline — did not publish")).toBeInTheDocument();
+    }
+    const em1Row = screen
+      .getAllByText("EM-1")
+      .map((cell) => cell.closest("tr"))
+      .find((row) => row !== null);
+    expect(em1Row).toHaveClass("row-warn");
+
+    // The EM-2 section line reads OFFLINE once its asset group is expanded.
+    fireEvent.click(screen.getByRole("button", { name: /EM-2.*issue/i }));
+    expect(
+      (await screen.findAllByText("OFFLINE — device did not publish during the capture window")).length,
+    ).toBeGreaterThan(0);
   });
 
   it("keeps verdicts neutral (Verdict pending, no green Pass) while the issues query is loading", async () => {
@@ -901,15 +1877,16 @@ describe("ModulePage UDMI workbench live results", () => {
     stubUdmiRunFetch(null, () => new Promise<Response>(() => {}));
     renderModule("udmi-validation");
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
 
     // Rows render from the payload views with a neutral pending verdict...
     expect((await screen.findAllByText("Verdict pending")).length).toBeGreaterThan(0);
-    // ...and no pass/fail shading or PASS text anywhere.
-    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    // ...and no pass/fail/warn shading or PASS text anywhere: a summary-derived
+    // offline signal must not paint amber/red before the issues query settles.
+    expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
     expect(screen.queryByText("Pass")).not.toBeInTheDocument();
     expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
   });
@@ -928,7 +1905,7 @@ describe("ModulePage UDMI workbench live results", () => {
     );
     renderModule("udmi-validation");
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
@@ -937,7 +1914,7 @@ describe("ModulePage UDMI workbench live results", () => {
       await screen.findByText(/Could not load validation issues.*issues backend unavailable/i),
     ).toBeInTheDocument();
     expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
-    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
     expect(screen.queryByText("Pass")).not.toBeInTheDocument();
     expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
   });
@@ -948,6 +1925,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -974,7 +1956,7 @@ describe("ModulePage UDMI workbench live results", () => {
     renderModule("udmi-validation");
 
     fireEvent.click(await screen.findByLabelText(/Validate against the imported MQTT register/i));
-    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
     const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
@@ -996,6 +1978,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1060,7 +2047,7 @@ describe("ModulePage UDMI workbench live results", () => {
     await waitFor(() => expect(registerMode).toBeChecked());
     expect(liveCapture).toBeChecked();
 
-    fireEvent.click(screen.getByRole("button", { name: "Run" }));
+    fireEvent.click(screen.getByRole("button", { name: "Execute capture" }));
     await waitFor(() => expect(postedBody).not.toBeNull());
     const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
     expect(parameters.use_register).toBe(true);
@@ -1082,6 +2069,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1113,6 +2105,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1141,7 +2138,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // The run-time input renders once live broker capture is ticked.
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "45" } });
-    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
     const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
@@ -1154,6 +2151,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1175,7 +2177,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "45s" } });
-    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     // "45s" must not silently coerce to the 0 = indefinite sentinel: the run is
     // rejected client-side with a visible error and no parameters are posted.
@@ -1189,6 +2191,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1217,7 +2224,7 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "2" } });
     fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
-    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
     const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
@@ -1230,6 +2237,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1254,13 +2266,12 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
 
     expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
-    // BOTH triggers of the UDMI run action refuse the over-cap window: the Run
-    // Controls card's Run button and the Schedule section's Execute capture.
-    const runButton = screen.getByRole("button", { name: "Run" });
+    // Execute capture is now the ONLY trigger of the UDMI run action — the Run
+    // Controls card is hidden — and it refuses the over-cap window. Hiding the
+    // card must not lose the cap gate, so assert both the absence and the guard.
+    expect(screen.queryByRole("button", { name: "Run" })).not.toBeInTheDocument();
     const executeButton = screen.getByRole("button", { name: "Execute capture" });
-    expect(runButton).toBeDisabled();
     expect(executeButton).toBeDisabled();
-    fireEvent.click(runButton);
     fireEvent.click(executeButton);
     expect(posted).toBe(false);
   });
@@ -1305,6 +2316,11 @@ describe("ModulePage UDMI workbench live results", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1340,12 +2356,163 @@ describe("ModulePage UDMI workbench live results", () => {
     renderModule("udmi-validation");
 
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
-    // Terminal run -> the report affordance appears with the PDF default.
-    fireEvent.click(await screen.findByRole("button", { name: /Generate report from this run/i }));
+    // Terminal run -> the report affordance appears with the PDF default, once
+    // in the run monitor and once at the end of Results. Drive the Results one:
+    // that is the copy the operator actually lands on when a run finishes.
+    const generateButtons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    expect(generateButtons).toHaveLength(2);
+    fireEvent.click(generateButtons[1]);
     await waitFor(() => expect(reportBody).not.toBeNull());
     expect((reportBody as unknown as Record<string, unknown>).output_format).toBe("pdf");
+  });
+
+  // THE BREAKAGE-CATCHER. The Run Controls card for this action is hidden, which
+  // makes its moduleData entry look unused — but Execute capture resolves it by
+  // ARRAY INDEX. Delete the entry and mutationFn throws "Unknown run action."
+  // before any fetch, so no POST lands and this test fails.
+  it("Execute capture still resolves the hidden UDMI run action by index (do not delete the moduleData entry)", async () => {
+    let postedUrl: string | null = null;
+    let postedBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedUrl = url;
+          postedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          return jsonResponse(udmiTerminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+    // Execute capture is engineer-gated, so it stays disabled until /me resolves.
+    const executeButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(executeButton).toBeEnabled());
+    fireEvent.click(executeButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    // The URL pins runKind and job_type pins jobType, so dispatching the WRONG
+    // action (index drift) fails here rather than silently running something else.
+    expect(postedUrl as unknown as string).toContain("/api/v1/validation/udmi/runs");
+    expect((postedBody as unknown as Record<string, unknown>).job_type).toBe("udmi_validation");
+    // onSuccess resolved the same action by index and attached the run.
+    expect(await screen.findByText(/Validation run monitor/i)).toBeInTheDocument();
+  });
+
+  it("hides the Run UDMI Validation card from Run Controls and signposts Execute capture", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    // Pete 2026-07-15: the run control belongs at the bottom, after the options.
+    // The card is genuinely absent from the DOM — a render assertion, not a CSS
+    // one, so the jsdom step-gating caveat does not apply here.
+    expect(await screen.findByRole("button", { name: "Execute capture" })).toBeInTheDocument();
+    expect(screen.queryByText("Run UDMI Validation")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run" })).not.toBeInTheDocument();
+
+    // An empty Execution card would be its own confusion: point the operator at
+    // the real trigger instead.
+    expect(screen.getByText(/Run controls are at the bottom of Setup/i)).toBeInTheDocument();
+    // The all-hidden branch must stay distinct from the no-actions branch — this
+    // head DOES need a worker, so the synchronous copy would be a lie.
+    expect(screen.queryByText("Saved synchronously")).not.toBeInTheDocument();
+  });
+
+  // Index-integrity pin. The fix maps the FULL runActions array and skips hidden
+  // entries in place; a refactor to `visibleRunActions.map(...)` would renumber
+  // cards and silently dispatch the wrong action the moment any earlier entry on
+  // a multi-action head gets flagged. Card N must run runActions[N].
+  it("dispatches the run action matching each card's own index on a multi-action head", async () => {
+    let postedUrl: string | null = null;
+    let postedBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.includes("/api/v1/validation/") && url.endsWith("/runs") && init?.method === "POST") {
+          postedUrl = url;
+          postedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse({
+            run_id: "run-bacnet-1",
+            job_type: "bacnet_validation",
+            status: "queued",
+            message: "BACnet validation accepted.",
+          });
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-bacnet-1")) {
+          return jsonResponse({ ...udmiTerminalRun, run_id: "run-bacnet-1", job_type: "bacnet_validation" });
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-bacnet-1/issues")) {
+          return jsonResponse({ run_id: "run-bacnet-1", issues: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("data-validation");
+
+    // data-validation renders all three cards (none hidden); the SECOND is the
+    // BACnet Point Check at runActions[1].
+    const runButtons = await screen.findAllByRole("button", { name: "Run" });
+    expect(runButtons).toHaveLength(3);
+    await waitFor(() => expect(runButtons[1]).toBeEnabled());
+    fireEvent.click(runButtons[1]);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect(postedUrl as unknown as string).toContain("/api/v1/validation/bacnet/runs");
+    expect((postedBody as unknown as Record<string, unknown>).job_type).toBe("bacnet_validation");
   });
 });
 
@@ -1380,6 +2547,11 @@ describe("ModulePage UDMI schema set uploads", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1433,6 +2605,11 @@ describe("ModulePage UDMI schema set uploads", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        // Run rehydration asks for this head's last succeeded run on arrival.
+        // The "?" keeps this off /discovery/runs/... and the SSE events path.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
         if (url.endsWith("/api/v1/me")) {
           return jsonResponse(mePayload);
         }
@@ -1456,5 +2633,1005 @@ describe("ModulePage UDMI schema set uploads", () => {
     await waitFor(() => expect(deleteButton).toBeEnabled());
     fireEvent.click(deleteButton);
     await waitFor(() => expect(deletedUrl).toMatch(/\/api\/v1\/udmi\/schemas\/nonpub\.1$/));
+  });
+
+  it("downloads the schema-set template zip from the public template endpoint", async () => {
+    // jsdom implements no object-URL APIs; triggerBlobDownload uses them.
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:mock"),
+      revokeObjectURL: vi.fn(),
+    });
+    let templateUrl: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas/template")) {
+          templateUrl = url;
+          // downloadFile() reads .blob() and the Content-Disposition header.
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["zip"]),
+            headers: {
+              get: (name: string) =>
+                name.toLowerCase() === "content-disposition"
+                  ? 'attachment; filename="udmi-schema-template-1.5.2.zip"'
+                  : null,
+            },
+          } as unknown as Response;
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    const downloadButton = await screen.findByRole("button", {
+      name: "Download schema template (1.5.2)",
+    });
+    fireEvent.click(downloadButton);
+
+    await waitFor(() => expect(templateUrl).toMatch(/\/udmi\/schemas\/template$/));
+    // The blob actually reached the browser's download path.
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+});
+
+// Step visibility is CSS-driven (.module-steps > [data-stepgroup] { display:none }
+// in the theme), and jsdom does not load that stylesheet. So these tests assert
+// on the data-step / data-stepgroup attributes that drive it, never on
+// toBeVisible() — which would pass vacuously here.
+function stepOf() {
+  return document.querySelector(".module-steps")?.getAttribute("data-step");
+}
+
+describe("ModulePage run retention", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  // What GET /runs?job_type=ip_discovery&status=succeeded&limit=1 returns: a
+  // JobSummary, not the full RunRecord.
+  const ipRunSummary = {
+    run_id: "run-ip-1",
+    job_type: "ip_discovery",
+    status: "succeeded",
+    stage: "register_comparison",
+    progress_percent: 100,
+    created_at: "2026-06-11T09:00:00Z",
+    updated_at: "2026-06-11T09:05:00Z",
+    edge_id: null,
+  };
+
+  // Serves the last-succeeded-run lookup per job type, so an ip-scanner render
+  // rehydrates run-ip-1 while every other head finds nothing of its own.
+  function stubWithLastRun() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=ip_discovery") ? [ipRunSummary] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("re-attaches the last succeeded run on arrival without the operator running anything", async () => {
+    stubWithLastRun();
+    renderModule("ip-scanner");
+
+    // No Run click anywhere in this test: the monitor comes back on its own.
+    expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+    expect((await screen.findAllByText("run-ip-1")).length).toBeGreaterThan(0);
+  });
+
+  it("leaves a restored run on the Setup step instead of hijacking it to Results", async () => {
+    stubWithLastRun();
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+    // The operator came here to set something up. A run they did not just start
+    // must not yank them to Results, even though it is terminal-succeeded.
+    expect(stepOf()).toBe("setup");
+    // Give the terminal-success effect a chance to fire before trusting that.
+    await waitFor(() => expect(screen.getAllByText("run-ip-1").length).toBeGreaterThan(0));
+    expect(stepOf()).toBe("setup");
+  });
+
+  it("shows the restored run's live results once the operator clicks through to Results", async () => {
+    stubWithLastRun();
+    renderModule("ip-scanner");
+    expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+
+    // Results is one click away and holds the real rows from the restored run.
+    fireEvent.click(screen.getByRole("button", { name: /Results/i }));
+    await waitFor(() => expect(stepOf()).toBe("results"));
+    expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
+  });
+
+  it("offers Generate report from this run for a restored terminal run", async () => {
+    stubWithLastRun();
+    renderModule("ip-scanner");
+
+    // A restored run satisfies the engineer + terminal gates just like a fresh
+    // one, so the report affordance survives navigating away and back — both
+    // the run-monitor copy and the end-of-Results copy.
+    expect(
+      await screen.findAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(2);
+  });
+
+  it("never bleeds one head's restored run into another head", async () => {
+    stubWithLastRun();
+    setApiKey("engineer-key");
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const tree = (route: string) => (
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>
+          <MemoryRouter>
+            <ModulePage moduleRoute={route} />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>
+    );
+    const view = render(tree("ip-scanner"));
+    expect((await screen.findAllByText("run-ip-1")).length).toBeGreaterThan(0);
+
+    // Sibling ModulePage routes share one component instance (no key prop), so
+    // this rerender — not a remount — is the real cross-head bleed vector.
+    // MQTT has no succeeded run of its own, so nothing may be re-attached.
+    view.rerender(tree("mqtt-discovery"));
+    await waitFor(() => expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument());
+    expect(screen.queryByText(/Discovery run monitor/i)).not.toBeInTheDocument();
+    expect(stepOf()).toBe("setup");
+  });
+
+  it("still advances an operator-started run to the Run step", async () => {
+    // This run stays non-terminal, isolating the queued -> Run advance from the
+    // succeeded -> Results one the discovery wiring suite covers.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse({ ...terminalRun, status: "running", progress_percent: 40 });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    expect(stepOf()).toBe("setup");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(stepOf()).toBe("run"));
+  });
+
+  it("shows no results and no sample rows on a head that has never run", async () => {
+    stubWithLastRun();
+    renderModule("mqtt-discovery");
+
+    // "Boiler 1 Controller" is an old fixture row; nothing fabricated may stand
+    // in for a run that never happened.
+    expect(await screen.findByText("No results yet")).toBeInTheDocument();
+    expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Boiler 1 Controller")).not.toBeInTheDocument();
+  });
+});
+
+describe("ModulePage reports visibility", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  const reportsPayload = {
+    reports: [
+      {
+        report_id: "rep-1",
+        report_type: "issue_report",
+        output_format: "xlsx",
+        status: "succeeded",
+        file_name: "issue_report.xlsx",
+        created_at: "2026-07-15T10:00:00Z",
+        source_run_ids: ["run-1"],
+      },
+    ],
+  };
+
+  it("shows the Generated Reports table on arrival, before any step click", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse(reportsPayload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+    expect(await screen.findByLabelText(/Select report issue_report\.xlsx/i)).toBeInTheDocument();
+
+    // The page lands on Setup and stays there, so the reports table has to be
+    // in the Setup step group or the CSS hides it — which is the bug this fixes.
+    expect(stepOf()).toBe("setup");
+    const section = screen.getByRole("heading", { name: "Generated Reports" }).closest("section");
+    expect(section?.getAttribute("data-stepgroup")).toContain("setup");
+  });
+
+  it("says Loading reports while the list is in flight, not No reports yet", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          // Never resolves: the list is still loading.
+          return new Promise<Response>(() => {});
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+
+    // Scoped to the hero metric: the results table already handled the loading
+    // case, so an unscoped query would match that instead and pass regardless.
+    // "No reports yet" while we are still asking is a claim we cannot make.
+    await waitFor(() =>
+      expect(document.querySelector(".module-metrics-empty")).toHaveTextContent(
+        "Loading reports...",
+      ),
+    );
+    expect(document.querySelector(".module-metrics-empty")).not.toHaveTextContent(
+      "No reports yet",
+    );
+  });
+
+  it("invalidates the reports list after generating a report from a run", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+          return jsonResponse({
+            file_name: "ip_discovery_rep-7.pdf",
+            output_format: "pdf",
+            report_id: "rep-7",
+            report_type: "ip_discovery",
+            status: "succeeded",
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    setApiKey("engineer-key");
+    // Seed the cache the reports page would populate, so invalidation has
+    // something to mark stale.
+    queryClient.setQueryData(["reports-list"], { reports: [] });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>
+          <MemoryRouter>
+            <ModulePage moduleRoute="ip-scanner" />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    const generateButtons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    fireEvent.click(generateButtons[1]);
+
+    // The toast tells the operator to look in the Reports tab, so the cached
+    // list behind that tab must not still be the pre-report one.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["reports-list"])?.isInvalidated).toBe(true),
+    );
+  });
+});
+
+describe("ModulePage report controls placement", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  const ipRunSummary = {
+    run_id: "run-ip-1",
+    job_type: "ip_discovery",
+    status: "succeeded",
+    stage: "register_comparison",
+    progress_percent: 100,
+    created_at: "2026-06-11T09:00:00Z",
+    updated_at: "2026-06-11T09:05:00Z",
+    edge_id: null,
+  };
+
+  // Run rehydration hands us a terminal run with no clicks at all, which is the
+  // only way to put a *viewer* in front of one — viewers cannot start runs.
+  function stubTerminalRun(options: { role?: string; lastRun?: boolean } = {}) {
+    const { role = "engineer", lastRun = true } = options;
+    const captured: { reportBody: Record<string, unknown> | null } = { reportBody: null };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: lastRun && url.includes("job_type=ip_discovery") ? [ipRunSummary] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({ ...mePayload, role });
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+          captured.reportBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse({
+            file_name: "ip_discovery_rep-11.pdf",
+            output_format: "pdf",
+            report_id: "rep-11",
+            report_type: "ip_discovery",
+            status: "succeeded",
+          });
+        }
+        // The reports route lists them on arrival.
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse({ reports: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    return captured;
+  }
+
+  // Pete's walkthrough bug: a finished run auto-advances to Results, and the
+  // report controls — which live in the "setup run" group — go with it.
+  it("renders the report controls in both the run-monitor and the results step group", async () => {
+    stubTerminalRun();
+    renderModule("ip-scanner");
+
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    expect(buttons).toHaveLength(2);
+
+    // jsdom does not apply the theme CSS, so both copies are always in the DOM
+    // and visibility assertions would be meaningless. What is assertable — and
+    // what the CSS gate actually keys on — is the step group each one sits in.
+    expect(buttons[0].closest("[data-stepgroup]")).toHaveAttribute("data-stepgroup", "setup run");
+    expect(buttons[1].closest("[data-stepgroup]")).toHaveAttribute("data-stepgroup", "results");
+  });
+
+  // The gate is `.module-steps > [data-stepgroup]` — a DIRECT child selector. A
+  // results section nested one level deeper still looks right in jsdom and in
+  // the test above, but would render on every step in a real browser.
+  it("hangs the results-step report section directly off .module-steps so the CSS gate applies", async () => {
+    stubTerminalRun();
+    renderModule("ip-scanner");
+
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    const resultsSection = buttons[1].closest("[data-stepgroup]");
+    expect(resultsSection?.parentElement).toHaveClass("module-steps");
+  });
+
+  it("shares one format selection between both report control instances", async () => {
+    const captured = stubTerminalRun();
+    renderModule("ip-scanner");
+
+    const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
+    expect(pickers).toHaveLength(2);
+
+    // Change the results-step picker; the run-monitor one must follow it. Give
+    // the extracted component its own useState and the two drift apart — you
+    // get a picker that lies about the format it is going to generate.
+    fireEvent.change(pickers[1], { target: { value: "docx" } });
+    expect(pickers[0].value).toBe("docx");
+
+    // ...and the POST reads the shared state, whichever button you press.
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    fireEvent.click(buttons[0]);
+    await waitFor(() => expect(captured.reportBody).not.toBeNull());
+    expect(captured.reportBody?.output_format).toBe("docx");
+  });
+
+  it("renders no report controls until a run exists", async () => {
+    stubTerminalRun({ lastRun: false });
+    renderModule("ip-scanner");
+
+    // Wait for the page to settle before trusting an absence assertion.
+    expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
+    expect(
+      screen.queryAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(0);
+  });
+
+  it("renders no report controls for a viewer, even with a terminal run attached", async () => {
+    stubTerminalRun({ role: "viewer" });
+    renderModule("ip-scanner");
+
+    // The monitor proves the terminal run really is attached — so the absence
+    // below is the engineer gate doing its job in the new section, not a page
+    // that simply has no run.
+    expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+    expect(
+      screen.queryAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(0);
+  });
+
+  // Pins the reports route's shape, NOT the `route !== "reports"` clause in the
+  // new section's guard: report actions never set activeRun, so that clause is
+  // unreachable and this test passes with or without it. Deleting it here would
+  // be a silent no-op — it earns its place upstream as defence, not as a fix.
+  it("leaves the reports route with a single set of report controls", async () => {
+    stubTerminalRun({ lastRun: false });
+    renderModule("reports");
+
+    expect(await screen.findByText(/Generated Reports/i)).toBeInTheDocument();
+    expect(
+      screen.queryAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(0);
+  });
+});
+
+describe("ModulePage snap-to-top when results open", () => {
+  afterEach(() => {
+    // Restores the setup.ts no-op that the spy wrapped.
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  // jsdom has no layout, so scrollIntoView only exists because src/test/setup.ts
+  // installs a no-op — vi.spyOn would throw on an undefined property. The spy
+  // calls through to that no-op, so nothing here depends on real scrolling.
+  function spyOnScroll() {
+    return vi.spyOn(window.HTMLElement.prototype, "scrollIntoView");
+  }
+
+  // The element the page scrolled to, recorded by the spy as its `this`.
+  function scrollTarget(spy: ReturnType<typeof spyOnScroll>, call = 0) {
+    return spy.mock.contexts[call] as HTMLElement;
+  }
+
+  const ipRunSummary = {
+    run_id: "run-ip-1",
+    job_type: "ip_discovery",
+    status: "succeeded",
+    stage: "register_comparison",
+    progress_percent: 100,
+    created_at: "2026-06-11T09:00:00Z",
+    updated_at: "2026-06-11T09:05:00Z",
+    edge_id: null,
+  };
+
+  // `lastRun` decides whether this head has a previous succeeded run to
+  // rehydrate — the difference between a run the operator just started and one
+  // restored on arrival, which must NOT snap.
+  function stubIpScanner(options: { lastRun?: boolean } = {}) {
+    const { lastRun = false } = options;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: lastRun && url.includes("job_type=ip_discovery") ? [ipRunSummary] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  // Pete's walkthrough ask: after a run finishes, the page stays where the
+  // operator left it mid-Run, so the headline results land off-screen.
+  it("snaps to the hero when a succeeded run advances to Results", async () => {
+    const scrollSpy = spyOnScroll();
+    stubIpScanner();
+    renderModule("ip-scanner");
+
+    const queueButton = await screen.findByRole("button", { name: "Run" });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    await waitFor(() => expect(queueButton).toBeEnabled());
+
+    // Nothing has opened Results yet, so setting up must not move the page.
+    expect(scrollSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(queueButton);
+
+    // jsdom does not apply the step-gating CSS, so `data-step` is the assertable
+    // signal that Results actually opened.
+    await waitFor(() =>
+      expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
+    );
+    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+    // ...and it scrolled the hero, not some arbitrary element.
+    expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
+  });
+
+  // The report branch of runMutation sets the step directly rather than going
+  // through the terminal-run effect — a second, easily-missed route into Results.
+  it("snaps to the hero when generating a report opens Results", async () => {
+    const scrollSpy = spyOnScroll();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+          return jsonResponse({
+            file_name: "issue_report.xlsx",
+            output_format: "xlsx",
+            report_id: "rep-1",
+            report_type: "issue_report",
+            status: "succeeded",
+          });
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse({ reports: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("reports");
+
+    // The reports route has one card per format and every button just says
+    // "Generate", so scope the query to the Excel card by its label.
+    const card = (await screen.findByText("Generate Excel Report")).closest(
+      ".run-card",
+    ) as HTMLElement;
+    const generate = within(card).getByRole("button", { name: "Generate" });
+    await waitFor(() => expect(generate).toBeEnabled());
+    expect(scrollSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(generate);
+
+    await waitFor(() =>
+      expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
+    );
+    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+    expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
+  });
+
+  // A run restored on arrival never advances the step, so it must never snap
+  // either — the operator came here to set something up, and yanking the page to
+  // the top for a run they did not just start would be exactly the hijack the
+  // step-retention work took care to avoid.
+  it("does not snap for a run rehydrated on arrival", async () => {
+    const scrollSpy = spyOnScroll();
+    stubIpScanner({ lastRun: true });
+    renderModule("ip-scanner");
+
+    // The monitor proves the restored run really did attach, so the absence
+    // below is the restored guard holding, not a page with nothing on it.
+    expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByText("plant-controller").length).toBeGreaterThan(0));
+
+    expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "setup");
+    expect(scrollSpy).not.toHaveBeenCalled();
+  });
+
+  // The snap follows the step, not the run: a manual jump to Results must move
+  // the page too, or clicking "3 Results" from a scrolled-down Run step leaves
+  // the operator staring at the middle of the results they asked to see.
+  it("snaps to the hero on a manual step click to Results", async () => {
+    const scrollSpy = spyOnScroll();
+    stubIpScanner({ lastRun: true });
+    renderModule("ip-scanner");
+
+    const resultsStep = await screen.findByRole("button", { name: /Results/i });
+    await waitFor(() => expect(resultsStep).toBeEnabled());
+    expect(scrollSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(resultsStep);
+
+    await waitFor(() =>
+      expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
+    );
+    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+    expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
+  });
+});
+
+// A rejected import used to report only "N accepted / M rejected" — the reasons
+// were produced and persisted by the backend but never fetched. These cover the
+// reasons panel plus the same-filename re-pick fix on the file input.
+describe("ModulePage import rejection reasons", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearApiKey();
+  });
+
+  function rejectedSummary(overrides: Record<string, unknown> = {}) {
+    return {
+      import_id: "import-ip-2",
+      import_type: "ip_register",
+      file_name: "ip_register.csv",
+      file_type: "csv",
+      project_id: "demo-project",
+      site_id: "demo-site",
+      total_rows: 4,
+      accepted_rows: 0,
+      rejected_rows: 4,
+      status: "rejected",
+      missing_columns: [],
+      warnings: [],
+      stored_file_name: "import-ip-2.csv",
+      created_at: "2026-07-15T09:00:00Z",
+      ...overrides,
+    };
+  }
+
+  // Stubs /me + /imports/profiles + POST /imports, and routes the errors GET to
+  // `errors`. `onErrors` (when given) replaces the default success response.
+  function stubImport(options: {
+    summary?: Record<string, unknown>;
+    errors?: unknown;
+    onErrorsUrl?: (url: string) => void;
+    errorsFails?: boolean;
+  }) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/runs?")) {
+        return jsonResponse({ runs: [] });
+      }
+      if (url.endsWith("/api/v1/me")) {
+        return jsonResponse(mePayload);
+      }
+      if (url.endsWith("/api/v1/imports/profiles")) {
+        return jsonResponse(profilesPayload);
+      }
+      if (url.endsWith("/api/v1/imports") && init?.method === "POST") {
+        return jsonResponse(options.summary ?? rejectedSummary());
+      }
+      if (url.includes("/errors")) {
+        options.onErrorsUrl?.(url);
+        if (options.errorsFails) {
+          return {
+            ok: false,
+            status: 404,
+            statusText: "Not Found",
+            json: async () => ({ detail: "Import errors for 'import-ip-2' were not found." }),
+          } as unknown as Response;
+        }
+        return jsonResponse(options.errors ?? { import_id: "import-ip-2", errors: [] });
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  async function uploadFile(name = "ip_register.csv") {
+    fireEvent.change(await screen.findByLabelText(/CSV or XLSX file/i), {
+      target: { files: [new File(["reg"], name)] },
+    });
+    const upload = screen.getByRole("button", { name: "Upload and validate" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
+  }
+
+  it("fetches and renders per-row rejection reasons in a red panel", async () => {
+    const errorUrls: string[] = [];
+    stubImport({
+      onErrorsUrl: (url) => errorUrls.push(url),
+      errors: {
+        import_id: "import-ip-2",
+        errors: [
+          {
+            row_number: 3,
+            field: "Expected topic",
+            code: "invalid_topic",
+            message: "Topic must not contain wildcards.",
+          },
+          {
+            row_number: 5,
+            field: null,
+            code: "duplicate_row",
+            message: "Duplicate record detected for asset_id AHU-01.",
+          },
+        ],
+      },
+    });
+
+    renderModule("ip-scanner");
+    await uploadFile();
+
+    // Row + field + message + code, with the reason the operator has to act on.
+    expect(await screen.findByText(/Row 3 — Expected topic: Topic must not contain wildcards\./))
+      .toBeInTheDocument();
+    expect(screen.getByText(/\(invalid_topic\)/)).toBeInTheDocument();
+
+    // field is null on duplicate_row records, so no stray ": " prefix.
+    const duplicate = screen.getByText(/Duplicate record detected for asset_id AHU-01\./);
+    expect(duplicate.textContent).toContain("Row 5 — Duplicate record detected");
+    expect(duplicate.textContent).not.toContain("null");
+
+    // Red rejection styling, never the amber warning panel (whose rows are kept).
+    const panel = duplicate.closest(".state-panel");
+    expect(panel).toHaveClass("error");
+    expect(panel).toHaveClass("import-errors");
+    expect(panel).not.toHaveClass("warning");
+
+    // The reasons came from the real endpoint, keyed by this import's id.
+    await waitFor(() => expect(errorUrls).toHaveLength(1));
+    expect(errorUrls[0]).toMatch(/\/api\/v1\/imports\/import-ip-2\/errors$/);
+  });
+
+  it("names the missing columns without repeating them as bullets", async () => {
+    stubImport({
+      summary: rejectedSummary({
+        total_rows: 0,
+        rejected_rows: 0,
+        missing_columns: ["Asset ID", "Expected topic"],
+      }),
+      errors: {
+        import_id: "import-ip-2",
+        errors: [
+          {
+            row_number: null,
+            field: "Asset ID",
+            code: "missing_required_column",
+            message: "Required column 'Asset ID' is missing.",
+          },
+          {
+            row_number: null,
+            field: "Expected topic",
+            code: "missing_required_column",
+            message: "Required column 'Expected topic' is missing.",
+          },
+        ],
+      },
+    });
+
+    renderModule("ip-scanner");
+    await uploadFile();
+
+    // The summary already carries the columns, so this line needs no fetch...
+    expect(
+      await screen.findByText("Missing required columns: Asset ID, Expected topic"),
+    ).toBeInTheDocument();
+    // ...and the per-column records that would repeat it verbatim are filtered out.
+    expect(screen.queryByText(/Required column 'Asset ID' is missing\./)).not.toBeInTheDocument();
+
+    // rejected_rows is 0 for a missing-columns file (_status() still says
+    // "rejected"), so the panel must not be gated on rejected_rows > 0.
+    expect(screen.getByText("Import rejected — reasons below")).toBeInTheDocument();
+  });
+
+  it("does not fetch reasons for an accepted import", async () => {
+    const errorUrls: string[] = [];
+    stubImport({
+      summary: rejectedSummary({
+        import_id: "import-ip-3",
+        total_rows: 2,
+        accepted_rows: 2,
+        rejected_rows: 0,
+        status: "accepted",
+      }),
+      onErrorsUrl: (url) => errorUrls.push(url),
+    });
+
+    renderModule("ip-scanner");
+    await uploadFile();
+
+    expect(await screen.findByText("ACCEPTED")).toBeInTheDocument();
+    expect(screen.queryByText(/reasons below/)).not.toBeInTheDocument();
+    expect(errorUrls).toEqual([]);
+  });
+
+  it("says so honestly when the reasons cannot be loaded", async () => {
+    stubImport({ errorsFails: true });
+
+    renderModule("ip-scanner");
+    await uploadFile();
+
+    // An empty list must never masquerade as "no reasons" when the fetch failed.
+    expect(await screen.findByText(/Could not load rejection reasons:/)).toBeInTheDocument();
+  });
+
+  it("caps the rendered rows and states the honest remainder", async () => {
+    stubImport({
+      // A partial import: 5 rows landed, 60 did not. Exercises the partial
+      // headline as well as the cap.
+      summary: rejectedSummary({
+        total_rows: 65,
+        accepted_rows: 5,
+        rejected_rows: 60,
+        status: "partial",
+      }),
+      errors: {
+        import_id: "import-ip-2",
+        errors: Array.from({ length: 60 }, (_, index) => ({
+          row_number: index + 2,
+          field: "Expected topic",
+          code: "invalid_topic",
+          message: `Row ${index + 2} topic is malformed.`,
+        })),
+      },
+    });
+
+    renderModule("ip-scanner");
+    await uploadFile();
+
+    const panel = (await screen.findByText("60 of 65 rows rejected — reasons below")).closest(
+      ".state-panel",
+    ) as HTMLElement;
+    await waitFor(() => expect(within(panel).getAllByRole("listitem")).toHaveLength(50));
+    expect(within(panel).getByText(/and 10 more rejected rows not shown/)).toBeInTheDocument();
+  });
+
+  it("clears the file input's value on selection so a re-picked same-name file is re-read", async () => {
+    stubImport({ summary: rejectedSummary({ status: "accepted", accepted_rows: 4 }) });
+    renderModule("ip-scanner");
+
+    const input = (await screen.findByLabelText(/CSV or XLSX file/i)) as HTMLInputElement;
+
+    // jsdom cannot reproduce Chromium's real behaviour here (no change event
+    // when the same path is re-picked), and neither `input.value` nor
+    // `input.files` can witness the clear: fireEvent installs `files` as an own
+    // property that shadows jsdom's getter and never fills jsdom's internal
+    // selected-file list, so `value` reads "" before the handler even runs and
+    // `files` keeps its array afterwards. Both would-be assertions are
+    // therefore vacuous. Spy on the assignment itself instead — that IS the fix.
+    const descriptor =
+      Object.getOwnPropertyDescriptor(input, "value") ??
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!;
+    const valueAssignments: string[] = [];
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get: () => descriptor.get!.call(input),
+      set: (next: string) => {
+        valueAssignments.push(next);
+        descriptor.set!.call(input, next);
+      },
+    });
+
+    fireEvent.change(input, { target: { files: [new File(["reg"], "ip_register.csv")] } });
+
+    expect(valueAssignments).toContain("");
+
+    // The File lives in state, so clearing the DOM input costs nothing: the
+    // staged name is still shown and the upload still goes through.
+    expect(await screen.findByText("Selected: ip_register.csv")).toBeInTheDocument();
+    const upload = screen.getByRole("button", { name: "Upload and validate" });
+    await waitFor(() => expect(upload).toBeEnabled());
+    fireEvent.click(upload);
+    expect(await screen.findByText("ACCEPTED")).toBeInTheDocument();
   });
 });
