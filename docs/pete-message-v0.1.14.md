@@ -42,6 +42,26 @@ v0.1.13? Just replace the app folder with this one - your settings and
 results are kept. And any reports for the ITP pack, generate them on this
 build.
 
+For the full picture, everything from this week's builds is in this one
+download:
+
+- Version number on the front page, Electracom logo and look throughout
+- Menus named properly: IP Discovery, BACnet Discovery, MQTT Discovery
+- Reports show up in the Reports tab the moment they're generated, with
+  Electracom headers and footers and a list of what was actually found
+- Every page remembers its last run when you navigate away and back
+- Register imports explain exactly which rows were rejected and why, and
+  Excel-saved files import without fuss
+- BACnet scans reach devices behind your BBMD (foreign device registration)
+- IP scan keeps the quiet hosts - "no response on scanned ports" instead of
+  disappearing
+- MQTT capture over hours or days, checked against your register (green
+  matched, red unexpected), with a topic inspector
+- UDMI red/amber/green results, one silent device no longer fails the whole
+  run, and a schema template download for the non-published sets
+- Certificates pill tells the truth, and logs can be saved to file or
+  uploaded so nobody needs remote access to fetch them
+
 Windows may warn when you first run it because the app isn't signed - pick
 "More info" then "Run anyway", same as the last builds.
 
