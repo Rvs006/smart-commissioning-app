@@ -15,6 +15,11 @@ only known after the bundle builds, so pinning it in a repo file would always
 leave main one commit ahead of the tag it describes. Release notes can carry
 it without a commit.
 
+Pete's environment (2026-07-16): he tests on his **personal laptop**, and the
+MSI server has **no ThreatLocker/allowlisting** — so the hash-approval drill
+does not apply to his machines (it is only the dev laptop that is locked
+down). The message therefore carries the SmartScreen note, not the IT one.
+
 ## The message (simplified for a non-technical read)
 
 ```text
@@ -37,9 +42,8 @@ v0.1.13? Just replace the app folder with this one - your settings and
 results are kept. And any reports for the ITP pack, generate them on this
 build.
 
-If IT locks down what can run on your machines, they'll need to approve
-this new version like last time - the approval code they need is in the
-notes on the download page above.
+Windows may warn when you first run it because the app isn't signed - pick
+"More info" then "Run anyway", same as the last builds.
 
 Monday is unchanged - same plan, same prep.
 
