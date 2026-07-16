@@ -403,6 +403,12 @@ class UploadRouteTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls) -> None:
         cls._log_dir_patch.stop()
+        # A config save during a test re-points the live file handler at the
+        # patched (temp) LOG_DIR, so it holds app.log open. Close it BEFORE the
+        # temp dir is removed or Windows refuses the deletion (WinError 32) and
+        # the Windows Compatibility CI job goes red — same guard FileLoggingTests
+        # uses. No-op when no handler is attached.
+        _remove_sct_file_handlers()
         cls._temp_dir.cleanup()
         cls._api.tearDownClass()
 

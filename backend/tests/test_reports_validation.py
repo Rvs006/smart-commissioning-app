@@ -398,7 +398,10 @@ class ValidationReportApiTests(ApiTestCase):
         self.assertEqual(content.count(b"ELECTRACOM"), 2 * pages)
         # The report run id sits in the footer-right on every page (and nowhere in
         # the body — the body carries source-run ids, not the report's own id).
-        self.assertGreaterEqual(content.count(run_id.encode("ascii")), pages)
+        # report_id IS the report-generation run's id; run_id is the SOURCE run,
+        # which lives only in the body, so counting it here (as this once did) made
+        # the assertion depend on body length rather than page count.
+        self.assertGreaterEqual(content.count(report_id.encode("ascii")), pages)
 
     def test_docx_branding_parts_and_references(self) -> None:
         run_id = self._seed_validation_run(_UPGRADED_SUMMARY, [_POINT_ISSUE])
