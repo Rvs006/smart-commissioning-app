@@ -10,6 +10,11 @@ audit sweep found three placeholder leftovers that survived the v0.1.13 purge
 dead sample rows in the bundle) plus one flaky Windows CI test. No engine or
 report behaviour changed. Full detail in `CHANGELOG.md` `[0.1.14]`.
 
+The exe SHA-256 lives in the Release notes, NOT here, on purpose: the hash is
+only known after the bundle builds, so pinning it in a repo file would always
+leave main one commit ahead of the tag it describes. Release notes can carry
+it without a commit.
+
 ## The message
 
 ```text
@@ -38,9 +43,8 @@ ITP pack, do them on this build so the report and the templates in the
 evidence line up.
 
 If your machines allowlist by hash, the new exe needs approving again, same
-drill as before:
-SmartCommissioningApp.exe SHA-256:
-92176E5EDC3991B855ACA113C6BA021F4FDA3875C9FFBF6A8461F0BCE3FCD2DA
+drill as before - the SmartCommissioningApp.exe SHA-256 is pinned in the
+release notes at the link above.
 
 Monday is unchanged - same runbook, same prep.
 
