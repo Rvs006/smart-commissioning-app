@@ -120,6 +120,13 @@ Full detail: `CHANGELOG.md` `[Unreleased]` (this content should be cut to a date
 
 ---
 
+## After publishing: tell Pete
+
+Once all three Releases are live, a ready-to-send plain-text message for Pete
+(what changed across v0.1.11–13, keyed to his walkthrough list) is in
+`docs/pete-message-2026-07-16.md` — send it with the v0.1.13 Release URL. His
+open follow-up questions are in `docs/pete-followups-2026-07-16.md`.
+
 ## Optional: attach a version-stamped exe to each Release
 
 The exes built by the auto-triggered Windows Portable Bundle runs are
