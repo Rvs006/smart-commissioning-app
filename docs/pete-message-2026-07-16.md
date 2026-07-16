@@ -1,65 +1,47 @@
 # Message to Pete — v0.1.11–v0.1.13 wrap-up (ready to send)
 
-**Written 2026-07-16.** Companion to `docs/release-publishing-handoff.md`.
-Self-contained: the message below is final (three drafts iterated down to this
-one) and needs no prior conversation to use.
+**Written 2026-07-16, updated same day after the Releases went live.** All three
+GitHub Releases are published with portable zips attached (v0.1.13 = latest), so
+this message is true as written — paste it into Teams or email as-is.
 
-## When and how to send
-
-- **Send AFTER the three GitHub Releases are published** (the job described in
-  `docs/release-publishing-handoff.md`) — the message tells Pete the builds are
-  up, which is only true once the Releases page shows v0.1.11/12/13.
-- Paste as plain text into Teams or email, and add the v0.1.13 Release URL so
-  Pete can grab the build directly.
-- The message assumes Pete already has **the follow-up questions**
-  (`docs/pete-followups-2026-07-16.md`) and **the lab-day runbook**
-  (`docs/lab-day-2026-07-20-runbook.md`) — "the runbook" it mentions is that
-  file. If those haven't gone to him yet, send them alongside.
+The follow-up questions (`docs/pete-followups-2026-07-16.md`) and the lab-day
+runbook (`docs/lab-day-2026-07-20-runbook.md`) should reach Pete alongside this
+if he doesn't have them yet — "the runbook" below means that file.
 
 ## The message
 
 ```text
 Hi Pete,
 
-Ran your walkthrough notes against what's now in. The early ones (version on
-the front page, the logo, import telling you why a row got rejected, the menu
-naming) went in with v0.1.11, and the BACnet scan is v0.1.12, Monday's build.
-This is the rest of your list, all in the latest build:
+All three updates are now up on GitHub as proper releases. Grab v0.1.13 only,
+here:
+https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.13
+(Smart_Commissioning_App_Windows_Portable.zip, about 32MB)
 
-- Reports with Electracom headers and footers for the ITP/witnessing pack — in
-- A proper handover report per silo that lists what was actually found, not
-  just run info — in
-- IP scan showing every register entry, including the ones that didn't
-  answer — in
-- MQTT comparing the whole-broker scan against your template, green for a
-  match, red for anything foreign — in
-- MQTT able to run over hours or days, same as the UDMI capture — in
-- The MQTT inspector actually digging into a topic you click: payload,
-  retained flag, QoS, when we saw it — in
-- UDMI not binning the whole run over one silent device; it finishes and shows
-  that one red as offline — in
-- Red/amber/green on the UDMI results, exactly the way you described it — in
-- Schema-template download on the validation page for the non-published
-  sets — in
-- Certs pill reading correctly after you load keys, instead of stuck on
-  "not configured" — in
-- Logging to a local file or up to a URL, so no AnyDesk just to pull logs off
-  site — in
-- Placeholder junk gone: Block B Plantroom, the sample dashboard, the fake
-  "last backup: success"
-- Scrolling stuck inside those bound windows — fixed
+No need to touch v0.1.11 or v0.1.12. Each release contains everything before
+it, so 13 has the lot; the other two are just there for the record of what
+changed when.
 
-Two I've left for you to decide: the amber rule is strict, so a minor-notes
-pass shows amber rather than green (say the word and I flip it), and the MQTT
-QoS column reads 0 until you okay me raising the subscribe QoS on your live
-broker.
+What that one zip gets you:
 
-One still on you: the general nmap-style scanner. Which ports it checks is the
-heart of it, so send me your list and I'll build it round that.
+From 0.1.11: reports actually showing up on the Reports tab, imports telling
+you which rows got rejected and why, the logo, the version number on the front
+page, tidier menus.
 
-And the catch worth repeating: saved settings don't update themselves, so BBMD
-and Foreign Device get set by hand on your kit for the BACnet side. Step one
-in the runbook.
+From 0.1.12: the BACnet fix for Monday. The scan can now register with your
+BBMD as a foreign device and reach devices past the local subnet, which is
+what the third-party browser was doing and we weren't.
+
+New in 0.1.13: Electracom headers and footers on reports, and reports that
+list the actual devices, points and topics found. IP scan keeps the quiet
+hosts instead of dropping them. MQTT checks the broker against your register
+(green matched, red foreign), runs for hours or days, and the inspector shows
+payload, retained, QoS and received time. UDMI finishes the run when a device
+is silent and shows it red, with the red/amber/green as you described. Plus
+honest config pills, log upload, and the placeholder junk gone.
+
+Only reminder: BBMD and Foreign Device still get set by hand on your kit
+before Monday. Step one in the runbook.
 
 Cheers,
 Raj
@@ -67,7 +49,7 @@ Raj
 
 ## Related docs
 
-- `docs/release-publishing-handoff.md` — publish the Releases first.
+- `docs/release-publishing-handoff.md` — the publish job (executed 2026-07-16).
 - `docs/pete-followups-2026-07-16.md` — the pre-Monday questions (decisions
   shipped with defaults that want Pete's confirmation).
 - `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.
