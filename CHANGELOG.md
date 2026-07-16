@@ -5,7 +5,7 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.14] - 2026-07-16
 
 ### Fixed
 
@@ -19,6 +19,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   never-rendered sample workspace rows still shipped in the frontend bundle,
   under a stale comment claiming they appear as a "Sample preview" — deleted
   outright, comment corrected, and a data-layer test pins the fields gone.
+
+- **The Windows Server 2022 CI smoke no longer flakes on the snap-to-results
+  test.** A test-timing race, not an app bug: the snap runs in a passive React
+  effect fed by a react-query poll outside `act()`, and the test asserted the
+  scroll spy synchronously after seeing the committed step change — on a slow
+  runner the check could land before the effect flushed. The test now polls for
+  the spy; what it demands of the app is unchanged.
 
 ## [0.1.13] - 2026-07-16
 
