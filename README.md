@@ -6,7 +6,7 @@
 
 ![CI](https://github.com/Rvs006/smart-commissioning-app/actions/workflows/ci.yml/badge.svg)
 ![status](https://img.shields.io/badge/status-pre--production%20(pending%20on--site%20validation)-orange)
-![version](https://img.shields.io/badge/version-0.1.1-blue)
+![version](https://img.shields.io/badge/version-0.1.14-blue)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
@@ -20,7 +20,7 @@
 
 ### Path 1 — Windows portable app (nothing to install)
 
-1. Download `SmartCommissioningApp_Windows_Portable.zip` from the
+1. Download `Smart_Commissioning_App_Windows_Portable.zip` from the
    **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**.
 2. Right-click the zip → **Extract All** to a normal folder (Desktop is fine).
 3. Double-click `SmartCommissioningApp.exe`. Keep the black console window open.
@@ -39,15 +39,16 @@ For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-
 > ⚠️ **Windows SmartScreen may warn** — this is an internal unsigned build. Choose
 > **More info → Run anyway**, only if you got the zip from the project owner or the releases page
 > above. On a locked-down company laptop with application allow-listing (e.g. ThreatLocker), ask
-> IT to approve the exe first.
+> IT to approve the exe first — its SHA-256 is pinned in the release notes.
 
 > **Stop the app:** press `Ctrl+C` in the console window, or just close the window.
 
 ### Path 2 — Docker Desktop (recommended for team consistency)
 
 **Prerequisites:** Docker Desktop installed and running; ~32 GB RAM recommended for the full
-stack; the repository cloned. The repository is **private** — your engineer needs to be added as
-a collaborator (GitHub → repo → **Settings → Collaborators**) before they can clone it.
+stack; the repository cloned. The repository is **public**, so no collaborator invitation is
+needed to clone it — but keep site names, real addresses, and commercial detail out of anything
+you push back.
 
 ```bash
 git clone https://github.com/Rvs006/smart-commissioning-app.git
@@ -292,12 +293,15 @@ Smart Commissioning Tool Specification.pdf
 
 ### Project status & roadmap
 
-> **Repo status - last verified Friday, 2026-07-03:** local Python/frontend gates
-> passed and the CI `python`/`frontend` jobs are green. The Windows portable build
-> was repaired (a PowerShell 5.1 file-cleanup bug, default `cryptography` bundling,
-> and an explicit PowerShell 7 requirement), and engineer actions now auto-enable
-> on the local/portable loopback profile. Live IP/BACnet/MQTT hardware validation
-> remains Phase 5 work before production rollout.
+> **Repo status - last verified 2026-07-16:** v0.1.11 through v0.1.14 are released,
+> each with a workflow-built, boot-smoked portable bundle attached (exe SHA-256
+> pinned in the release notes). CI, Windows Compatibility, and Windows Portable
+> Bundle are all green on `main`. Placeholder/demo content is fully purged as of
+> v0.1.14. Live IP/BACnet/MQTT hardware validation remains Phase 5 work — first
+> hardware contact is the 2026-07-20 lab session
+> ([docs/lab-day-2026-07-20-runbook.md](docs/lab-day-2026-07-20-runbook.md));
+> remaining production-gating items are tracked in
+> [issue #4](https://github.com/Rvs006/smart-commissioning-app/issues/4).
 
 **Code-complete and hardened, pending on-site sign-off.** Phases 0–4b are built and merged:
 persistence, auth + secret encryption, real discovery/validation engines with scan-safety,

@@ -116,7 +116,7 @@ to `AUTH_MODE=local` — so **no API key** is needed for loopback clients.
 ### 1. Start the app
 
 **Shipped portable app (engineers):** download
-`SmartCommissioningApp_Windows_Portable.zip` from the
+`Smart_Commissioning_App_Windows_Portable.zip` from the
 [latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest),
 right-click → Extract All, and double-click `SmartCommissioningApp.exe`. It picks
 a free port starting at 8000, applies migrations on startup, opens a browser,

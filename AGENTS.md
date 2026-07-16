@@ -70,16 +70,17 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: active work state lives in
-  `docs/handoff-2026-07-15-pete-walkthrough.md` (the 2026-07-15 v0.1.10
-  walkthrough punch list, with root causes and file:line evidence). Read it
-  before starting new work; update or supersede it when the state changes.
-  Status as of 2026-07-15: **v0.1.11 is released** (on `main`, CI green — its
-  §6 prompt is spent). **v0.1.12** (BACnet foreign-device registration) is
-  implemented on `fix/v0.1.12-bacnet-foreign-device` and is hard-dated to a
-  live lab session on **2026-07-20** — see `docs/lab-day-2026-07-20-runbook.md`.
-  Note §3a carries two claims later disproven by source verification; the
-  corrections are marked inline.
+- **Current handoff**: status as of 2026-07-16 — the 2026-07-15 walkthrough
+  punch list is spent: **v0.1.11 through v0.1.14 are all released** (`main`,
+  CI green, workflow-built boot-smoked portable bundles attached; exe SHA-256
+  lives in each Release's notes, deliberately not in repo files). The two
+  handoff docs (`docs/handoff-2026-07-15-pete-walkthrough.md`,
+  `docs/handoff-v0.1.13-remaining-punchlist.md`) carry SPENT/SHIPPED banners
+  and are historical; the punchlist's §4 deferred items and §5 open Pete
+  decisions are the live backlog, alongside GitHub issue #4 (production
+  gates). Next hard date: the **2026-07-20** live lab session —
+  `docs/lab-day-2026-07-20-runbook.md`. Update or supersede this block when
+  the state changes.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational

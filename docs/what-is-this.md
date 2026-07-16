@@ -91,5 +91,5 @@ Follow the **[README](../README.md)** quickstart — three ways to start (the Do
 easiest). Then use **[review-comments-verification.md](review-comments-verification.md)** to see
 every feature, where it lives in the code, and the exact screen to see it on.
 
-> The repository is **private** — a new engineer must be added as a collaborator
-> (GitHub → repo → **Settings → Collaborators**) before they can clone it.
+> The repository is **public** — a new engineer can clone it directly, no
+> collaborator invitation needed.

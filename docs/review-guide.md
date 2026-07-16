@@ -12,8 +12,9 @@ It covers how to run it, what to look at, and what is in scope for this round.
 
 ## 1. Access
 
-The repository is **private** — you need to be added as a collaborator
-(GitHub → repo → **Settings → Collaborators**) before you can clone it.
+The repository is **public** — clone it directly, no collaborator invitation
+needed. (Keep site names, real addresses, and commercial detail out of anything
+you push back — see the conventions in `AGENTS.md`.)
 
 ```bash
 git clone https://github.com/Rvs006/smart-commissioning-app.git
@@ -25,7 +26,7 @@ cd smart-commissioning-app
 ## 2. Run it
 
 > ⬇️ **Windows + just want to run it (no setup)?** Download
-> `SmartCommissioningApp_Windows_Portable.zip` from the
+> `Smart_Commissioning_App_Windows_Portable.zip` from the
 > **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**,
 > unzip it, and double-click `SmartCommissioningApp.exe` — it serves the whole app at
 > <http://127.0.0.1:8000/>. No clone, Node, Python, Docker, or key needed — the action

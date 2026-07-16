@@ -7,12 +7,13 @@ Installation & Setup**; this is the short version.
 ## Before you leave the office
 
 - [ ] Windows laptop with an **Intel/AMD (x64)** CPU — not a Snapdragon/ARM one.
-- [ ] `SmartCommissioningApp_Windows_Portable.zip` downloaded from the repo's
+- [ ] `Smart_Commissioning_App_Windows_Portable.zip` downloaded from the repo's
       GitHub **Releases** page. Check the asset date is current.
 - [ ] A wired connection to the target network: built-in Ethernet, or a
       **USB-C-to-Ethernet adapter** if the laptop has no RJ45 port.
 - [ ] Locked-down laptop (ThreatLocker or similar)? Get IT to approve the exe by
-      SHA-256 hash BEFORE you leave: `Get-FileHash .\SmartCommissioningApp.exe`
+      SHA-256 hash BEFORE you leave — the hash is pinned in the release notes,
+      or compute it yourself: `Get-FileHash .\SmartCommissioningApp.exe`
       in PowerShell prints it. Every release is a new file with a new hash, so
       re-approval is per release.
 

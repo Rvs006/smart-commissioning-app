@@ -1,7 +1,14 @@
 # Handoff — Pete's 2026-07-15 v0.1.10 walkthrough punch list
 
+> **✅ SPENT 2026-07-16.** Every release this document drove is shipped:
+> v0.1.11, v0.1.12, v0.1.13 and the v0.1.14 follow-up are all released with
+> portable bundles attached. This is a historical record now — do NOT work
+> from it. Current state: the status block in `AGENTS.md`, the deferred items
+> in `docs/handoff-v0.1.13-remaining-punchlist.md` §4–5, GitHub issue #4, and
+> the 2026-07-20 lab session (`docs/lab-day-2026-07-20-runbook.md`).
+
 **Audience:** the next Claude Code session (any account/machine). This document
-is the single source of truth for the current work state. Read it fully before
+was the single source of truth for the work state when written. Read it fully before
 touching code. Everything below was verified against `main @ 82e838c`
 (the v0.1.10 changelog cut) by a 9-agent code investigation on 2026-07-15;
 every claim carries file:line evidence you can re-check.

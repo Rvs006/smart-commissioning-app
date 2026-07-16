@@ -1,9 +1,16 @@
 # Handoff — Smart Commissioning App v0.1.13 (the rest of Pete's punch list)
 
+> **✅ SHIPPED 2026-07-16.** v0.1.13 merged, CI-verified (including the backend
+> Python this banner's original status said was unrun), released with a
+> boot-smoked portable bundle, and followed same-day by v0.1.14 (placeholder
+> residue + a Windows CI flake). The pickup steps in §6 are spent. What stays
+> live here: **§4 (deferred items)** and **§5 (open decisions for Pete)** —
+> plus §7's honesty caveats, which hold until the 2026-07-20 lab session.
+
 **Written:** 2026-07-16. **Audience:** whoever picks this up next — any account, fresh session.
 You do **not** need the conversation that produced this. Everything you need is below.
 
-**One-line status:** v0.1.13 is code-complete on a branch, frontend checks are green, but **no
+**One-line status (superseded — see banner):** v0.1.13 is code-complete on a branch, frontend checks are green, but **no
 backend Python has run yet** — it is CI-unverified until a PR runs it. Pick it up **after the
 v0.1.12 BACnet exe is built**.
 
