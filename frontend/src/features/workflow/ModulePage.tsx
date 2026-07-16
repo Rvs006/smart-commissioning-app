@@ -815,17 +815,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
 
   // Live issues for ANY terminal validation run (UDMI, BACnet, mapping), not
-  // only UDMI. Falls back to the labelled sample workspace.issues otherwise.
+  // only UDMI. There is deliberately NO sample fallback: validation routes used
+  // to render fabricated operatorData issues (ISS-####) as findings before any
+  // run existed — the last placeholder surface to survive the v0.1.13 purge.
+  // Pre-run the list is empty and the inspector shows its "Run a validation"
+  // empty state below.
   const liveIssues =
     activeRun?.kind === "validation" && validationIssuesQuery.data
       ? validationIssuesQuery.data.issues.map(toIssueRow)
       : null;
-  // Discovery routes never have live validation issues (activeRun.kind is not
-  // "validation"), so the workspace?.issues fallback would render fabricated
-  // sample operatorData issues as findings. Suppress it there — the MQTT
-  // inspector shows the real captured payload instead, and other discovery
-  // routes show a neutral note. Validation routes keep the sample fallback.
-  const visibleIssues = liveIssues ?? (isDiscoveryModule ? [] : (workspace?.issues ?? []));
+  const visibleIssues = liveIssues ?? [];
 
   // Per-asset / per-payload-type grouping for UDMI live issues (mq9m4bnv).
   // Collapsed shows a cross-payload-type summary per asset; expanding an asset

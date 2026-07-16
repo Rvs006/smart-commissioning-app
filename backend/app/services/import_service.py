@@ -603,7 +603,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
 
 EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
     "ip_register": {
-        "Project/site": "ElectraCom / Block B Plantroom",
+        "Project/site": "Example Site / Plant Room",
         "System": "BMS",
         "Asset ID": "AHU-L03-017",
         "Asset name": "Level 3 AHU",
@@ -613,7 +613,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "Ports that should not be enabled": "23/tcp, 21/tcp",
     },
     "bacnet_register": {
-        "Project/site": "ElectraCom / Block B Plantroom",
+        "Project/site": "Example Site / Plant Room",
         "System": "BMS",
         "Asset ID": "AHU-L03-017",
         "Asset name": "Level 3 AHU",
@@ -622,7 +622,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "IP address": "10.10.25.117",
     },
     "mqtt_register": {
-        "Project/site": "ElectraCom / Block B Plantroom",
+        "Project/site": "Example Site / Plant Room",
         "System": "BMS",
         "Asset ID": "MTR-ENERGY-009",
         "Asset name": "Energy Meter 9",
@@ -637,7 +637,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "Expected reporting interval": "60",
         "Source protocol": "MQTT",
         "Notes": "",
-        "Site": "Block B",
+        "Site": "Example Site",
         "Serial number": "EM-009-SN-00421",
         "Room": "Level 3 plantroom",
         "GUID": "ifc://electracom/EM-1001001",
@@ -646,7 +646,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "Firmware": "1.4.2",
     },
     "asset_validation": {
-        "Project/site": "ElectraCom / Block B Plantroom",
+        "Project/site": "Example Site / Plant Room",
         "System": "BMS",
         "Asset ID": "AHU-L03-017",
         "Asset name": "Level 3 AHU",
