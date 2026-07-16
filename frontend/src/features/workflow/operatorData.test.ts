@@ -3,6 +3,9 @@ import type { UdmiAssetPayloadView } from "../../api/client";
 import {
   mergeAssetGroups,
   moduleWorkspaces,
+  udmiPayloadVerdict,
+  udmiVerdictForIssues,
+  udmiVerdictTone,
   type AssetIssueGroup,
   type IssueRow,
 } from "./operatorData";
@@ -84,5 +87,80 @@ describe("reports workspace fixture", () => {
   // the next fallback to surface. Assert on the fixture itself, at the source.
   it("carries no fabricated sample rows", () => {
     expect(moduleWorkspaces.reports.rows).toEqual([]);
+  });
+});
+
+// Pure unit matrix for the UDMI RAG verdict mapping (mqf-udmi-rag). No DOM, so
+// it is immune to the jsdom-cannot-see-theme-CSS constraint — every assertion
+// is on the verdict kind, its label, and its tone string.
+describe("udmiPayloadVerdict / udmiVerdictTone — RAG scheme (mqf-udmi-rag)", () => {
+  function sev(severity: IssueRow["severity"]): IssueRow {
+    return { id: "i", assetId: "A", severity, area: "pointset validation", message: "m" };
+  }
+
+  it("red offline wins only when a capture was attempted AND nothing was observed", () => {
+    const verdict = udmiVerdictForIssues([sev("major")], false, true);
+    expect(verdict.verdict).toBe("offline");
+    expect(verdict.label).toBe("Offline — did not publish");
+    expect(udmiVerdictTone("offline")).toBe("fail"); // offline shades RED
+  });
+
+  it("never paints an observed payload offline (honesty guard)", () => {
+    // assetOffline=true but the payload WAS observed → offline must not win;
+    // it falls through to the issue-based verdict. Pins the honesty rule so a
+    // summary/issue mislabel can never override direct observation.
+    const verdict = udmiVerdictForIssues([sev("critical")], true, true);
+    expect(verdict.verdict).toBe("fail");
+    expect(verdict.label).toBe("Non-compliant — 1 issue (1 critical)");
+  });
+
+  it("amber for a publishing device with a critical issue", () => {
+    const verdict = udmiVerdictForIssues([sev("critical")], true);
+    expect(verdict.verdict).toBe("fail");
+    expect(verdict.label).toBe("Non-compliant — 1 issue (1 critical)");
+    expect(udmiVerdictTone("fail")).toBe("warn"); // non-compliant shades AMBER
+  });
+
+  it("amber for a publishing device with a major issue (medium/high mapped)", () => {
+    const verdict = udmiVerdictForIssues([sev("major"), sev("major")], true);
+    expect(verdict.verdict).toBe("fail");
+    expect(verdict.label).toBe("Non-compliant — 2 issues");
+    expect(udmiVerdictTone("fail")).toBe("warn");
+  });
+
+  it("amber for minor-only issues (strict default; Pete flip point is udmiVerdictTone)", () => {
+    // OPEN Pete question (2026-07-15): strict reading demotes minor-only
+    // "Pass with notes" to amber. To restore green, change the single
+    // `pass-notes` branch in udmiVerdictTone to return "pass" — this test and
+    // that one line move together.
+    const verdict = udmiVerdictForIssues([sev("minor")], true);
+    expect(verdict.verdict).toBe("pass-notes");
+    expect(verdict.label).toBe("Pass with notes");
+    expect(udmiVerdictTone("pass-notes")).toBe("warn");
+  });
+
+  it("green for a clean observed payload", () => {
+    const verdict = udmiVerdictForIssues([], true);
+    expect(verdict.verdict).toBe("pass");
+    expect(verdict.label).toBe("Pass");
+    expect(udmiVerdictTone("pass")).toBe("pass");
+  });
+
+  it("neutral (no shade) for a clean, unobserved, online payload — Not received", () => {
+    const verdict = udmiVerdictForIssues([], false, false);
+    expect(verdict.verdict).toBe("none");
+    expect(verdict.label).toBe("Not received");
+    expect(udmiVerdictTone("none")).toBeNull();
+  });
+
+  it("udmiPayloadVerdict offline guard mirrors the convenience wrapper", () => {
+    expect(
+      udmiPayloadVerdict({ criticalCount: 1, majorCount: 0, totalIssues: 1, observedPresent: false, assetOffline: true })
+        .verdict,
+    ).toBe("offline");
+    expect(
+      udmiPayloadVerdict({ criticalCount: 1, majorCount: 0, totalIssues: 1, observedPresent: true, assetOffline: true })
+        .verdict,
+    ).toBe("fail");
   });
 });

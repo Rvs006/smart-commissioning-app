@@ -87,6 +87,13 @@ class MqttMessage:
     payload: bytes
     retained: bool = False
     received_at: datetime = field(default_factory=lambda: datetime.now(UTC), compare=False)
+    # DELIVERY QoS of the inbound PUBLISH = min(publisher's QoS, our subscription
+    # QoS). NOT the publisher's QoS: with a QoS-0 subscription every delivery
+    # reads 0 regardless of what the publisher used. Appended LAST so every
+    # existing (topic, payload[, retained, received_at]) construction is
+    # unaffected. compare left default (participates in equality) — a plain
+    # (topic, payload) construction defaults qos=0, matching prior behavior.
+    qos: int = 0
 
     def json_payload(self) -> object | None:
         try:
@@ -312,6 +319,7 @@ class MqttClient:
             topic=topic,
             payload=payload[payload_offset:],
             retained=bool(packet_type & 0x01),
+            qos=qos,
         )
         if qos == 2 and packet_id is not None:
             self._qos2_pending_messages[packet_id] = message
@@ -545,6 +553,8 @@ def subscribe_and_capture(
     cancel_check: Callable[[], bool] | None = None,
     stop_when: Callable[[list[MqttMessage]], bool] | None = None,
     qos: int = 0,
+    retain_latest: bool = False,
+    on_message: Callable[[MqttMessage], None] | None = None,
 ) -> list[MqttMessage]:
     """Subscribe to ``topics`` and collect messages up to ``max_messages``.
 
@@ -554,10 +564,20 @@ def subscribe_and_capture(
     short slices so cancellation is observed promptly in both modes. ``qos`` is
     the requested max subscribe QoS (0-2; broker grants min of this and publish).
     ``stop_when`` (optional) is a completion predicate called with the messages
-    captured so far after each new one; returning True ends the capture. In this
-    mode one latest message is retained per concrete topic, so ``max_messages``
-    is a distinct-topic cap and duplicates cannot starve quiet topics. Raw
-    captures (no predicate) retain every message up to the ordinary cap.
+    captured so far after each new one; returning True ends the capture.
+
+    ``retain_latest`` (independently of ``stop_when``) bounds memory on a long /
+    indefinite capture: one latest message is kept per concrete topic, so
+    ``max_messages`` becomes a DISTINCT-TOPIC cap (hitting it ends the capture,
+    identical to completion-mode semantics) and duplicates cannot starve quiet
+    topics. The same retention is implied whenever ``stop_when`` is set. Raw
+    captures (no predicate, ``retain_latest=False``) retain every message up to
+    the ordinary cap.
+
+    ``on_message`` (optional) is called with EVERY accepted message BEFORE
+    dedup, including a message that merely replaces an earlier one on the same
+    topic. It lets a caller keep an honest per-topic total that the deduped
+    return list can no longer show under retention.
     """
     messages: list[MqttMessage] = []
     topic_positions: dict[str, int] = {}
@@ -595,7 +615,11 @@ def subscribe_and_capture(
             except (OSError, MqttTransportError) as error:
                 raise MqttCaptureInterrupted(messages, error) from error
             if message is not None:
-                if stop_when is None:
+                if on_message is not None:
+                    # Fires for every accepted message, including one that
+                    # replaces a duplicate below — keeps per-topic counts honest.
+                    on_message(message)
+                if stop_when is None and not retain_latest:
                     messages.append(message)
                 elif message.topic in topic_positions:
                     index = topic_positions[message.topic]

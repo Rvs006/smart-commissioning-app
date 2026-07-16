@@ -99,6 +99,39 @@ describe("ModulePage discovery wiring", () => {
   });
 
   it("blocks a real scan until authorization is confirmed, then queues and renders live results", async () => {
+    // A sweep that now reports every scanned host: the responder plus an
+    // unregistered silent host (neutral) and a register-expected silent host
+    // (amber/inconclusive). The engine emits "no response on scanned ports" —
+    // a TCP-connect miss, never proof a host is absent.
+    const liveResultsPayload = {
+      ...resultsPayload,
+      result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+      discovered_assets: [
+        ...resultsPayload.discovered_assets,
+        {
+          asset_id: null,
+          ip_address: "10.10.25.9",
+          mac_address: null,
+          hostname: null,
+          observed_ports: [],
+          match_basis: "none",
+          last_seen_at: null,
+          status_detail: "no response on scanned ports (4 probed)",
+        },
+        {
+          asset_id: "AHU-7",
+          ip_address: "10.10.25.11",
+          mac_address: null,
+          hostname: null,
+          observed_ports: [],
+          match_basis: "none",
+          last_seen_at: null,
+          status_detail:
+            "no response on scanned ports (2 probed) | EXPECTED BY REGISTER: expected from the " +
+            "register import but did not answer this scan — inconclusive, not proof the host is offline",
+        },
+      ],
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -118,7 +151,7 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(acceptedRun);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
-          return jsonResponse(resultsPayload);
+          return jsonResponse(liveResultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
           return jsonResponse(terminalRun);
@@ -144,10 +177,16 @@ describe("ModulePage discovery wiring", () => {
     // hostname is unique to the live results payload (not present in sample rows);
     // it now appears in both the results table and the selected-result detail aside.
     expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
-    // Live banner is shown, not a fabricated "Result" verdict column.
+    // Live banner is shown (its ip-scanner copy still opens with this phrase).
     expect(screen.getByText(/Live discovery observations/i)).toBeInTheDocument();
-    // Pass/fail row shading is a UDMI-validation verdict; discovery rows carry
-    // no verdict, so they must never be shaded.
+    // The Result column now reports each host's scan verdict.
+    expect(screen.getByRole("columnheader", { name: "Result" })).toBeInTheDocument();
+    // Both silent hosts surface the honest "no response" copy.
+    expect((await screen.findAllByText("No response on scanned ports")).length).toBeGreaterThan(0);
+    // jsdom cannot see theme CSS, so assert on classNames only: the register-
+    // expected silent host shades amber (warn); the plain responder and the
+    // unregistered silent host carry no pass/fail shading.
+    expect(document.querySelector("tr.row-warn")).not.toBeNull();
     expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
 
     // Headline metric now reflects the real run (hosts_responsive: 1), never the
@@ -285,6 +324,468 @@ describe("ModulePage discovery wiring", () => {
     // authenticated principal, so no fabricated scan_authorization block.
     expect(parameters.authorized).toBe(true);
     expect(parameters).not.toHaveProperty("scan_authorization");
+  });
+
+  const mqttAccepted = {
+    run_id: "run-mqtt-1",
+    job_type: "mqtt_discovery",
+    status: "queued",
+    message: "MQTT discovery accepted.",
+  };
+
+  const mqttTerminal = {
+    run_id: "run-mqtt-1",
+    job_type: "mqtt_discovery",
+    status: "succeeded",
+    stage: "capture",
+    progress_percent: 100,
+    created_at: "2026-07-15T09:00:00Z",
+    updated_at: "2026-07-15T09:05:00Z",
+    project_id: "demo-project",
+    site_id: "demo-site",
+    parameters: {},
+    result_summary: { topics_discovered: 0, messages_captured: 0 },
+    error_message: null,
+  };
+
+  function stubMqttRunFetch(onPost: (body: { parameters: Record<string, unknown> }) => void) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          onPost(JSON.parse(String(init.body)) as { parameters: Record<string, unknown> });
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: "run-mqtt-1", discovered_assets: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse(mqttTerminal);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("converts an hours capture duration to seconds on the MQTT discovery wire", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+      target: { value: "2" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.capture_seconds).toBe(7200);
+  });
+
+  it("refuses an MQTT capture duration over the 48-hour cap without posting", async () => {
+    let posted = false;
+    stubMqttRunFetch(() => {
+      posted = true;
+    });
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+      target: { value: "49" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
+    const runButton = screen.getByRole("button", { name: "Run" });
+    expect(runButton).toBeDisabled();
+    fireEvent.click(runButton);
+    expect(posted).toBe(false);
+  });
+
+  it("keeps a blank MQTT capture duration as the 0 indefinite sentinel regardless of unit", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    // Clear the default "10" so the duration is blank, then pick an hours unit:
+    // the unit multiplier must not turn a blank (indefinite) into a bounded 0.
+    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+      target: { value: "" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+      target: { value: "hours" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.capture_seconds).toBe(0);
+  });
+
+  it("selects an MQTT topic row to inspect its real payload with honest metadata and no fabricated issues", async () => {
+    const mqttResultsPayload = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      // subscribe_qos 0 is the delivery-QoS cap the run requested.
+      result_summary: { topics_discovered: 2, messages_captured: 5, subscribe_qos: 0 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "udmi/AHU-1/state",
+          message_count: 3,
+          last_payload: { online: true, firmware: "1.2.3" },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: {
+            device_ref: "AHU-1",
+            position: 0,
+            last_retained: true,
+            last_qos: 1,
+            last_received_at: "2026-07-15T10:00:00+00:00",
+          },
+        },
+        {
+          topic: "sensors/raw/blob",
+          message_count: 1,
+          // Engine presence marker for a non-JSON payload — no raw bytes stored.
+          last_payload: { _raw_present: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: {
+            device_ref: null,
+            position: 1,
+            last_retained: false,
+            last_qos: 0,
+            last_received_at: "2026-07-15T10:01:00+00:00",
+          },
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(mqttResultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // Table populates; the inspector defaults to the first row (AHU-1, JSON),
+    // so its payload panel (unique heading) and JSON tree are shown up front.
+    expect(await screen.findByText(/Last payload on udmi\/AHU-1\/state/)).toBeInTheDocument();
+    expect(screen.getByText("Explore JSON tree")).toBeInTheDocument();
+
+    // The fabricated sample MQTT issue (operatorData) must NOT render on this
+    // live discovery route — the old workspace?.issues fallback is suppressed.
+    expect(
+      screen.queryByText(/Telemetry interval exceeds configured tolerance/i),
+    ).not.toBeInTheDocument();
+
+    // Clicking the SECOND row's <tr> (via a cell) moves the inspector to that
+    // topic; the non-JSON marker shows an honest sentence and NO json tree.
+    // Capture the row before selecting (its topic string becomes ambiguous once
+    // the inspector also echoes it).
+    const rawCell = screen.getByText("sensors/raw/blob");
+    const rawRow = rawCell.closest("tr");
+    fireEvent.click(rawCell);
+    expect(await screen.findByText(/Non-JSON payload observed/i)).toBeInTheDocument();
+    expect(screen.queryByText("Explore JSON tree")).not.toBeInTheDocument();
+
+    // The clicked row carries the selection class (drives the inspector without
+    // opening the View modal).
+    expect(rawRow?.className).toContain("row-selected");
+
+    // Metadata detail items are present with honesty-rule labels; a timestamp is
+    // NEVER labelled "Published" (MQTT 3.1.1 carries no publish time on the wire).
+    expect(screen.getByText("Retained")).toBeInTheDocument();
+    expect(screen.getByText("Delivery QoS")).toBeInTheDocument();
+    expect(screen.getByText("Received at")).toBeInTheDocument();
+    expect(screen.queryByText("Published")).not.toBeInTheDocument();
+  });
+
+  it("shows 'Not recorded' MQTT metadata for a run that predates metadata capture", async () => {
+    // An old persisted run: topics carry no last_retained/last_qos/last_received_at
+    // and the summary has no subscribe_qos. The inspector must render without
+    // crashing and never fabricate values.
+    const legacyResults = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 1, messages_captured: 2 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "udmi/AHU-1/state",
+          message_count: 2,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: "AHU-1", position: 0 },
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(legacyResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: legacyResults.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // The topic appears in both the table cell and the inspector — wait for it.
+    expect((await screen.findAllByText("udmi/AHU-1/state")).length).toBeGreaterThan(0);
+    // The metadata labels render, and the values honestly read "Not recorded".
+    expect(screen.getByText("Retained")).toBeInTheDocument();
+    expect(screen.getAllByText(/Not recorded/).length).toBeGreaterThan(0);
+  });
+
+  it("shades register-matched and register-foreign MQTT rows and shows the compare banner", async () => {
+    const comparedResults = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 2, messages_captured: 4 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "334os/b1/ahu-1/state",
+          message_count: 3,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: {
+            device_ref: "AHU-1",
+            position: 0,
+            register_match: "matched",
+            register_matched_filter: "334os/b1/ahu-1/#",
+            register_asset_id: "AHU-1",
+          },
+        },
+        {
+          topic: "334os/rogue/x/state",
+          message_count: 1,
+          last_payload: { present_value: 1 },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: null, position: 1, register_match: "unmatched" },
+        },
+      ],
+      register_comparison: {
+        register_available: true,
+        import_filename: "register.csv",
+        matched_count: 1,
+        unmatched_count: 1,
+        expected_filter_count: 2,
+        unobserved_filters: [{ asset_id: "FCU-2", filter: "334os/b1/fcu-2/state" }],
+      },
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(comparedResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: comparedResults.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // Banner switches to the register-comparison copy (route-aware).
+    expect(
+      await screen.findByText(/Green rows match a topic in the uploaded MQTT register/),
+    ).toBeInTheDocument();
+    // The counts note is present on its own line.
+    expect(screen.getByText(/1 topic matches the register/)).toBeInTheDocument();
+    expect(screen.getByText(/334os\/b1\/fcu-2\/state/)).toBeInTheDocument();
+
+    // The matched row shades green, the foreign row red. Assert on classes only
+    // (jsdom cannot see the theme CSS that hides/reveals rows).
+    const passRow = document.querySelector("tr.row-pass");
+    const failRow = document.querySelector("tr.row-fail");
+    expect(passRow?.textContent).toContain("334os/b1/ahu-1/state");
+    expect(failRow?.textContent).toContain("334os/rogue/x/state");
+  });
+
+  it("prompts to upload a register when no MQTT register import exists", async () => {
+    const noRegisterResults = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 1, messages_captured: 1 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "334os/rogue/x/state",
+          message_count: 1,
+          last_payload: { present_value: 1 },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: null, position: 0 },
+        },
+      ],
+      register_comparison: { register_available: false },
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(noRegisterResults);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: noRegisterResults.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    expect(
+      await screen.findByText(/No accepted MQTT register import for this project\/site/),
+    ).toBeInTheDocument();
+    // No register means NO verdicts — never all-red.
+    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
   });
 
   it("renders the MAC column and opens a per-host detail dialog from the row View button", async () => {
@@ -1091,7 +1592,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getAllByText("EM-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
     // Row cells also render in the selected-result detail aside, so match >=1.
-    expect(screen.getAllByText("Fail — 1 issue (1 critical)").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Non-compliant — 1 issue (1 critical)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
     // The old illustrative sample asset never appears as a live result.
     expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
@@ -1142,14 +1643,14 @@ describe("ModulePage UDMI workbench live results", () => {
     );
   }
 
-  it("shades live UDMI rows red on fail and green on pass", async () => {
+  it("shades live UDMI rows amber on non-compliant and green on pass (RAG)", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
     renderModule("udmi-validation");
 
     // Nothing has run, so there are no rows to shade — and no sample rows
     // masquerading as results either.
     expect(await screen.findByText("No results yet")).toBeInTheDocument();
-    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
 
     const runButton = await screen.findByRole("button", { name: "Execute capture" });
     await waitFor(() => expect(runButton).toBeEnabled());
@@ -1157,17 +1658,18 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
 
     // Wait for the issues query to merge in (the live banner can render from
-    // payload views alone, a beat before the fail verdict lands on the row).
-    await screen.findAllByText("Fail — 1 issue (1 critical)");
+    // payload views alone, a beat before the verdict lands on the row).
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
-    // pointset (1 critical issue) shades red; metadata (observed, no issues)
-    // shades green. The payload-type text also renders in the aside detail, so
-    // pick the occurrence inside a table row.
+    // Under the RAG scheme a PUBLISHING device with a critical issue is amber
+    // (row-warn), not red — red is reserved for offline / not-publishing. The
+    // clean observed metadata row stays green. The payload-type text also
+    // renders in the aside detail, so pick the occurrence inside a table row.
     const pointsetRow = screen
       .getAllByText("UDMI pointset")
       .map((cell) => cell.closest("tr"))
       .find((row) => row !== null);
-    expect(pointsetRow).toHaveClass("row-fail");
+    expect(pointsetRow).toHaveClass("row-warn");
     const metadataRow = screen
       .getAllByText("UDMI metadata")
       .map((cell) => cell.closest("tr"))
@@ -1184,7 +1686,7 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     // Ensure the issues query has merged before opening the detail.
-    await screen.findAllByText("Fail — 1 issue (1 critical)");
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
     // First View = the pointset row, which carries the run's single critical
     // issue; the modal shows its id and full message inline.
@@ -1221,7 +1723,7 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     // Ensure the issues query has merged before opening the detail.
-    await screen.findAllByText("Fail — 3 issues (1 critical)");
+    await screen.findAllByText("Non-compliant — 3 issues (1 critical)");
 
     fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
     const dialog = await screen.findByRole("dialog");
@@ -1232,7 +1734,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(dialog).queryByText(/Pointset problem 1\./)).not.toBeInTheDocument();
   });
 
-  it("stamps the shared PASS/FAIL verdict on the per-asset payload sections", async () => {
+  it("stamps the shared RAG verdict on the per-asset payload sections", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
     renderModule("udmi-validation");
 
@@ -1241,15 +1743,131 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     // Ensure the issues query has merged before expanding the asset group.
-    await screen.findAllByText("Fail — 1 issue (1 critical)");
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
     fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
-    const fail = await screen.findByText("FAIL — please see details below");
-    expect(fail).toHaveClass("payload-verdict", "fail");
-    expect(fail.closest(".payload-type-group")).toHaveClass("section-fail");
+    // Publishing device with a critical issue → amber "NON-COMPLIANT" section.
+    const nonCompliant = await screen.findByText("NON-COMPLIANT — please see details below");
+    expect(nonCompliant).toHaveClass("payload-verdict", "warn");
+    expect(nonCompliant.closest(".payload-type-group")).toHaveClass("section-warn");
     const pass = screen.getByText("PASS — UDMI Compliant");
     expect(pass).toHaveClass("payload-verdict", "pass");
     expect(pass.closest(".payload-type-group")).toHaveClass("section-pass");
+  });
+
+  it("shades silent devices red (offline) on a succeeded run (RAG)", async () => {
+    // EM-1 publishes with one major issue → amber. EM-2 was CAPTURED (a real
+    // attempt) but stayed silent: pointset + state observed_present false, an
+    // engine "not_publishing" issue, and the run summary's not_publishing_devices
+    // list. Every EM-2 row must read red "Offline — did not publish", even
+    // though the RUN itself SUCCEEDED — the ask as Pete experiences it.
+    const silentRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        expected_devices: 2,
+        publishing_seen: 1,
+        not_publishing: 1,
+        not_publishing_devices: ["EM-2"],
+        payload_views: [
+          {
+            asset_id: "EM-1",
+            payload_types: [
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: { version: "1.5.2", points: { energy_sensor: { present_value: 12.5 } } },
+                observed_present: true,
+              },
+            ],
+          },
+          {
+            asset_id: "EM-2",
+            payload_types: [
+              { payload_type: "pointset", expected: { version: "1.5.2", points: {} }, observed: null, observed_present: false },
+              { payload_type: "state", expected: { version: "1.5.2" }, observed: null, observed_present: false },
+            ],
+          },
+        ],
+      },
+    };
+    const silentIssues = {
+      run_id: "run-udmi-1",
+      issues: [
+        {
+          issue_id: "UDMI-PS-010",
+          asset_id: "EM-1",
+          issue_type: "pointset_validation",
+          severity: "medium",
+          description: "Units mismatch on the pointset payload.",
+          point_name: null,
+          expected_value: null,
+          observed_value: null,
+          suggested_action: null,
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+        {
+          issue_id: "UDMI-NP-001",
+          asset_id: "EM-2",
+          issue_type: "not_publishing",
+          severity: "high",
+          description: "No UDMI messages received from this device during the capture window.",
+          point_name: null,
+          expected_value: null,
+          observed_value: null,
+          suggested_action: null,
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") return jsonResponse(udmiAccepted);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(silentIssues);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(silentRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    // Wait for the offline verdict to land (issues merged).
+    await screen.findAllByText("Offline — did not publish");
+
+    // Every EM-2 result row (pointset, state, and the derived not_publishing
+    // "other" row) is red offline; EM-1 is amber (publishing but non-compliant).
+    const em2Rows = screen
+      .getAllByText("EM-2")
+      .map((cell) => cell.closest("tr"))
+      .filter((row): row is HTMLTableRowElement => row !== null);
+    expect(em2Rows.length).toBeGreaterThan(0);
+    for (const row of em2Rows) {
+      expect(row).toHaveClass("row-fail");
+      expect(within(row).getByText("Offline — did not publish")).toBeInTheDocument();
+    }
+    const em1Row = screen
+      .getAllByText("EM-1")
+      .map((cell) => cell.closest("tr"))
+      .find((row) => row !== null);
+    expect(em1Row).toHaveClass("row-warn");
+
+    // The EM-2 section line reads OFFLINE once its asset group is expanded.
+    fireEvent.click(screen.getByRole("button", { name: /EM-2.*issue/i }));
+    expect(
+      (await screen.findAllByText("OFFLINE — device did not publish during the capture window")).length,
+    ).toBeGreaterThan(0);
   });
 
   it("keeps verdicts neutral (Verdict pending, no green Pass) while the issues query is loading", async () => {
@@ -1266,8 +1884,9 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Rows render from the payload views with a neutral pending verdict...
     expect((await screen.findAllByText("Verdict pending")).length).toBeGreaterThan(0);
-    // ...and no pass/fail shading or PASS text anywhere.
-    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    // ...and no pass/fail/warn shading or PASS text anywhere: a summary-derived
+    // offline signal must not paint amber/red before the issues query settles.
+    expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
     expect(screen.queryByText("Pass")).not.toBeInTheDocument();
     expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
   });
@@ -1295,7 +1914,7 @@ describe("ModulePage UDMI workbench live results", () => {
       await screen.findByText(/Could not load validation issues.*issues backend unavailable/i),
     ).toBeInTheDocument();
     expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
-    expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
+    expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
     expect(screen.queryByText("Pass")).not.toBeInTheDocument();
     expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
   });
@@ -2014,6 +2633,62 @@ describe("ModulePage UDMI schema set uploads", () => {
     await waitFor(() => expect(deleteButton).toBeEnabled());
     fireEvent.click(deleteButton);
     await waitFor(() => expect(deletedUrl).toMatch(/\/api\/v1\/udmi\/schemas\/nonpub\.1$/));
+  });
+
+  it("downloads the schema-set template zip from the public template endpoint", async () => {
+    // jsdom implements no object-URL APIs; triggerBlobDownload uses them.
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:mock"),
+      revokeObjectURL: vi.fn(),
+    });
+    let templateUrl: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.endsWith("/api/v1/udmi/schemas/template")) {
+          templateUrl = url;
+          // downloadFile() reads .blob() and the Content-Disposition header.
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["zip"]),
+            headers: {
+              get: (name: string) =>
+                name.toLowerCase() === "content-disposition"
+                  ? 'attachment; filename="udmi-schema-template-1.5.2.zip"'
+                  : null,
+            },
+          } as unknown as Response;
+        }
+        if (url.endsWith("/api/v1/udmi/schemas")) {
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    const downloadButton = await screen.findByRole("button", {
+      name: "Download schema template (1.5.2)",
+    });
+    fireEvent.click(downloadButton);
+
+    await waitFor(() => expect(templateUrl).toMatch(/\/udmi\/schemas\/template$/));
+    // The blob actually reached the browser's download path.
+    expect(URL.createObjectURL).toHaveBeenCalled();
   });
 });
 

@@ -12,6 +12,7 @@ import { formatRelativeTime } from "./runFormat";
 // response — they come from validation result_summary).
 export const ipResultColumns = [
   "Asset",
+  "Result",
   "Observed IP",
   "MAC Address",
   "Hostname",
@@ -36,6 +37,7 @@ export const bacnetResultColumns = [
 export const mqttResultColumns = [
   "Topic",
   "Asset",
+  "Register Match",
   "Message Count",
   "Last Payload Seen",
   "Detailed Status",
@@ -95,18 +97,80 @@ export const expectedPortsOk = (statusDetail: string | undefined | null): string
   return match ? match[1].trim() : "";
 };
 
-// IP discovery rows come from discovered_assets (DiscoveryAssetObservation).
+// Engine marker spellings owned on the Python side by
+// core/smart_commissioning_core/engines/ip_scan.py (NO_RESPONSE_DETAIL,
+// MARKER_EXPECTED_BY_REGISTER). TypeScript cannot import that module, so they
+// are mirrored here ONCE, by name — the same cross-language contract as
+// SUMMARY_BACNET_MODE below. The vitest cases pin the current spellings so the
+// mirror cannot drift silently.
+const NO_RESPONSE_DETAIL = "no response on scanned ports";
+const MARKER_EXPECTED_BY_REGISTER = "EXPECTED BY REGISTER";
+
+// True when a silent host's status_detail carries the register-expected marker.
+// Used by the results table to render an amber "expected by register" chip
+// without re-spelling the marker at the call site.
+export const expectedByRegisterSilent = (statusDetail: string | undefined | null): boolean =>
+  (statusDetail ?? "").includes(MARKER_EXPECTED_BY_REGISTER);
+
+// The "Result" column label and row tone for one IP discovery row, derived from
+// the same status_detail markers the chips already read — no new engine field.
+//
+// Precedence is LOAD-BEARING (honesty rule): a silent host is checked FIRST so
+// it can never fall through to the red "Missing expected ports" verdict — a host
+// we never heard from must never be coloured as a hard failure. Amber is
+// reserved for register-expected silence (mirrors the BACnet expected-but-silent
+// semantics); an unregistered silent host stays neutral so a wide CIDR sweep
+// does not drown the table in amber. A responsive host with a demonstrably
+// closed expected port IS a real finding (fail), unlike full silence.
+export function ipRowVerdict(asset: DiscoveryAssetObservation): {
+  label: string;
+  tone: "pass" | "fail" | "warn" | null;
+} {
+  const detail = asset.status_detail ?? "";
+  if (detail.startsWith(NO_RESPONSE_DETAIL)) {
+    return {
+      label: "No response on scanned ports",
+      tone: detail.includes(MARKER_EXPECTED_BY_REGISTER) ? "warn" : null,
+    };
+  }
+  if (forbiddenOpenPorts(detail)) {
+    return { label: "Forbidden ports open", tone: "fail" };
+  }
+  if (missingExpectedPorts(detail)) {
+    return { label: "Missing expected ports", tone: "fail" };
+  }
+  if (unexpectedOpenPorts(detail)) {
+    return { label: "Unexpected ports open", tone: "warn" };
+  }
+  if (/HOSTNAME MISMATCH/.test(detail)) {
+    return { label: "Hostname mismatch", tone: "warn" };
+  }
+  if (expectedPortsOk(detail)) {
+    return { label: "Expected ports OK", tone: "pass" };
+  }
+  return { label: "Responsive", tone: null };
+}
+
+// IP discovery rows come from discovered_assets (DiscoveryAssetObservation),
+// which now includes a row for every scanned host — responders and silent hosts
+// alike. Each row carries a "Result" verdict label and a __tone key for row
+// shading; __tone is NOT in ipResultColumns, so it never renders as a cell.
 export function ipRowsFromResults(results: DiscoveryResultsResponse): Record<string, string>[] {
-  return results.discovered_assets.map((asset: DiscoveryAssetObservation) => ({
-    Asset: str(asset.asset_id),
-    "Observed IP": str(asset.ip_address),
-    "MAC Address": str(asset.mac_address),
-    Hostname: str(asset.hostname),
-    Ports: formatPorts(asset.observed_ports),
-    "Match Basis": str(asset.match_basis ?? "none"),
-    "Last Seen": asset.last_seen_at ? formatRelativeTime(asset.last_seen_at) : "—",
-    "Detailed Status": str(asset.status_detail),
-  }));
+  return results.discovered_assets.map((asset: DiscoveryAssetObservation) => {
+    const verdict = ipRowVerdict(asset);
+    return {
+      Asset: str(asset.asset_id),
+      Result: verdict.label,
+      "Observed IP": str(asset.ip_address),
+      "MAC Address": str(asset.mac_address),
+      Hostname: str(asset.hostname),
+      Ports: formatPorts(asset.observed_ports),
+      "Match Basis": str(asset.match_basis ?? "none"),
+      "Last Seen": asset.last_seen_at ? formatRelativeTime(asset.last_seen_at) : "—",
+      "Detailed Status": str(asset.status_detail),
+      __tone: verdict.tone ?? "",
+    };
+  });
 }
 
 // BACnet device rows come from the structured devices[] (with per-engine
@@ -149,22 +213,87 @@ export function bacnetRowsFromResults(
   });
 }
 
-// MQTT topic rows come from the structured topics[].
+// MQTT topic rows come from the structured topics[]. Per-message metadata
+// (retained flag / delivery QoS / received-at) rides the free-form attributes
+// column and is stamped onto HIDDEN keys (not in mqttResultColumns, so they
+// never render as cells) for the inspector and the View detail — the same
+// pattern as UDMI's __tone. Runs predating this capture carry no metadata keys,
+// so every hidden key falls back to "" and the UI reads "Not recorded".
 export function mqttRowsFromResults(results: DiscoveryResultsResponse): Record<string, string>[] {
+  // Delivery-QoS cap (the subscription QoS this run requested), stamped once on
+  // the whole run's result_summary rather than per topic.
+  const subscribeQosRaw = results.result_summary?.subscribe_qos;
+  const subscribeQos =
+    typeof subscribeQosRaw === "number" || typeof subscribeQosRaw === "string"
+      ? String(subscribeQosRaw)
+      : "";
   return results.topics.map((topic: DiscoveryRowRecord) => {
     const attributes = (topic.attributes as Record<string, unknown> | undefined) ?? {};
     const lastPayload = topic.last_payload;
-    return {
+    // last_retained is a JSON boolean; check identity so an absent value (old
+    // run) yields "" rather than String(undefined). Never str() a boolean here —
+    // "true"/"false" strings would defeat the absent-vs-false distinction.
+    const retained =
+      attributes.last_retained === true ? "yes" : attributes.last_retained === false ? "no" : "";
+    const qos =
+      attributes.last_qos === undefined || attributes.last_qos === null
+        ? ""
+        : String(attributes.last_qos);
+    const receivedAt =
+      attributes.last_received_at === undefined || attributes.last_received_at === null
+        ? ""
+        : String(attributes.last_received_at);
+    // Register-comparison verdict (stamped at read time by the backend, MQTT
+    // only). "matched" shows the basis so a single "prefix/#" register row that
+    // green-lights dozens of observed topics is visible on every one of them;
+    // "unmatched" is a topic seen on the broker but absent from the register.
+    // No register_match key => no register imported (or a dry/failed run) => the
+    // row stays neutral (no __tone key at all), which keeps every existing
+    // fixture that carries no annotation rendering exactly as before.
+    const registerMatch = attributes.register_match;
+    const matchedFilter =
+      typeof attributes.register_matched_filter === "string"
+        ? attributes.register_matched_filter
+        : "";
+    let registerCell = "—";
+    let registerTone: "pass" | "fail" | null = null;
+    if (registerMatch === "matched") {
+      registerCell = matchedFilter.includes("#")
+        ? `In register (wildcard ${matchedFilter})`
+        : "In register";
+      registerTone = "pass";
+    } else if (registerMatch === "unmatched") {
+      registerCell = "Not in register";
+      registerTone = "fail";
+    }
+    const row: Record<string, string> = {
       Topic: str(topic.topic),
       Asset: str(attributes.device_ref),
+      "Register Match": registerCell,
       "Message Count": str(topic.message_count),
-      "Last Payload Seen": topic.created_at ? formatRelativeTime(String(topic.created_at)) : "—",
+      // Prefer the real last-message receive time over the DB row-insert time
+      // (created_at is stamped when the run persists, NOT when the message
+      // arrived); falls back to created_at for runs predating metadata capture.
+      "Last Payload Seen": receivedAt
+        ? formatRelativeTime(receivedAt)
+        : topic.created_at
+          ? formatRelativeTime(String(topic.created_at))
+          : "—",
       "Detailed Status": str(attributes.status_detail ?? attributes.broker_status_detail),
       "Raw Payload":
         lastPayload && typeof lastPayload === "object" && Object.keys(lastPayload).length > 0
           ? JSON.stringify(lastPayload)
           : "",
+      __retained: retained,
+      __qos: qos,
+      __receivedAt: receivedAt,
+      __subscribeQos: subscribeQos,
     };
+    // Only stamp __tone when there is a verdict; absent key = neutral row.
+    if (registerTone !== null) {
+      row.__tone = registerTone;
+    }
+    return row;
   });
 }
 
@@ -329,7 +458,13 @@ export function discoveryMetrics(
   };
 
   if (route === "ip-scanner") {
-    const responsive = num("hosts_responsive") ?? results.discovered_assets.length;
+    // New runs stamp hosts_responsive; pre-upgrade runs contained ONLY
+    // responders in discovered_assets, so counting assets with an open port is
+    // correct for both — and never miscounts the new silent (non-responder)
+    // rows, which carry observed_ports: [], as live.
+    const responsive =
+      num("hosts_responsive") ??
+      results.discovered_assets.filter((asset) => (asset.observed_ports?.length ?? 0) > 0).length;
     const scanned = num("hosts_scanned") ?? responsive;
     return {
       primary: String(responsive),
@@ -359,6 +494,39 @@ export function discoveryMetrics(
     };
   }
   return null;
+}
+
+// A one-line summary of the MQTT register comparison for the results banner.
+// Returns null when there is no comparison, or when no register was imported
+// (register_available false — the banner shows the upload hint for that case).
+//
+// HONESTY: an expected register topic that no observed topic matched is worded
+// "had no matching topic observed", never "device absent" — a silent topic is
+// not proof the device is gone (the capture window may simply not have caught
+// its publish).
+export function mqttRegisterCompareNote(results: DiscoveryResultsResponse): string | null {
+  const comparison = results.register_comparison;
+  if (!comparison || !comparison.register_available) {
+    return null;
+  }
+  const matched = comparison.matched_count ?? 0;
+  const unmatched = comparison.unmatched_count ?? 0;
+  const unobservedFilters = comparison.unobserved_filters ?? [];
+  const parts = [
+    `${matched} ${matched === 1 ? "topic matches" : "topics match"} the register`,
+    `${unmatched} not in register`,
+    `${unobservedFilters.length} register ${
+      unobservedFilters.length === 1 ? "topic" : "topics"
+    } had no matching topic observed`,
+  ];
+  let note = parts.join(" · ");
+  if (unobservedFilters.length > 0) {
+    const shown = unobservedFilters.slice(0, 5).map((entry) => entry.filter);
+    const remainder = unobservedFilters.length - shown.length;
+    const list = remainder > 0 ? `${shown.join(", ")} (+${remainder} more)` : shown.join(", ");
+    note += ` — unobserved: ${list}`;
+  }
+  return note;
 }
 
 // Honest primary/secondary metrics for the validation routes, derived from a

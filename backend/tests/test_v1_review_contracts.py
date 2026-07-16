@@ -74,6 +74,41 @@ class ConfigurationReviewTests(unittest.TestCase):
         merged_secure = ConfigurationService()._merge_with_defaults(secure)
         self.assertEqual(merged_secure.mqtt.values["Use TLS"], "Enabled")
 
+    def test_defaults_do_not_fabricate_observations(self) -> None:
+        # Honesty rule: a fresh install has made no observations, so the seeded
+        # defaults must not claim a backup that never ran or health never checked.
+        configuration = DEFAULT_CONFIGURATION
+        self.assertEqual(configuration.backups.values["Last Backup Status"], "Never run")
+        self.assertEqual(configuration.backups.status, "Manual only")
+        self.assertEqual(configuration.mqtt.status, "Not checked")
+        self.assertEqual(configuration.device.status, "Not checked")
+
+        # The new neutral literals are non-empty, so validate() still passes on a
+        # default snapshot (backup-section non-empty rules stay satisfied).
+        result = ConfigurationService().validate(DEFAULT_CONFIGURATION.model_copy(deep=True))
+        backup_errors = [error for error in result.errors if "Backup" in error]
+        self.assertEqual(backup_errors, [])
+
+    def test_persisted_seeded_placeholders_are_migrated(self) -> None:
+        # An install persisted under an earlier release carries the OLD fabricated
+        # seeds; _merge_with_defaults rewrites them to the honest labels on load.
+        legacy = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        legacy.backups.values["Last Backup Status"] = "Success"
+        legacy.backups.status = "Success"
+        legacy.mqtt.status = "Connected"
+
+        merged = ConfigurationService()._merge_with_defaults(legacy)
+        self.assertEqual(merged.backups.values["Last Backup Status"], "Never run")
+        self.assertEqual(merged.backups.status, "Manual only")
+        self.assertEqual(merged.mqtt.status, "Not checked")
+
+        # A non-seed value (impossible today, but future-proofing the exact match)
+        # is left untouched — the migration only rewrites the exact old seed.
+        custom = DEFAULT_CONFIGURATION.model_copy(deep=True)
+        custom.backups.values["Last Backup Status"] = "custom note"
+        merged_custom = ConfigurationService()._merge_with_defaults(custom)
+        self.assertEqual(merged_custom.backups.values["Last Backup Status"], "custom note")
+
     def test_validation_rejects_bad_network_and_backup_values(self) -> None:
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.device.values["Subnet Mask"] = "bad-mask"

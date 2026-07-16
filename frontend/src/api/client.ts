@@ -294,6 +294,19 @@ export type DiscoveryAssetObservation = {
 // survive without a rigid model; consumers read known keys defensively.
 export type DiscoveryRowRecord = Record<string, unknown>;
 
+// MQTT-only: the whole-broker scan compared against the uploaded register.
+// register_available false means no register was imported (the banner prompts an
+// upload); the counts describe how many observed topics matched, and
+// unobserved_filters lists register topics that no observed topic matched.
+export type RegisterComparison = {
+  register_available: boolean;
+  import_filename?: string | null;
+  matched_count?: number;
+  unmatched_count?: number;
+  expected_filter_count?: number;
+  unobserved_filters?: { asset_id?: string; filter: string }[];
+};
+
 export type DiscoveryResultsResponse = {
   run_id: string;
   job_type: JobType;
@@ -303,6 +316,7 @@ export type DiscoveryResultsResponse = {
   devices: DiscoveryRowRecord[];
   points: DiscoveryRowRecord[];
   topics: DiscoveryRowRecord[];
+  register_comparison?: RegisterComparison | null;
 };
 
 export type DiscoveryTopicsResponse = {
@@ -310,6 +324,7 @@ export type DiscoveryTopicsResponse = {
   job_type: JobType;
   status: JobStatus;
   topics: DiscoveryRowRecord[];
+  register_comparison?: RegisterComparison | null;
 };
 
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
@@ -659,6 +674,25 @@ export function importConfiguration(
   );
 }
 
+// Outcome of POST /logs/upload. `outcome` is the honest terminal result: the
+// server accepted the bundle ("uploaded"), rejected it ("rejected", with the
+// HTTP status), or did not respond at all ("no_response") — never a fabricated
+// success. `detail` never contains the upload token.
+export type LogUploadResult = {
+  outcome: "uploaded" | "rejected" | "no_response";
+  status_code: number | null;
+  detail: string;
+  bundle_bytes: number;
+  files: string[];
+};
+
+// Uploads the masked local log bundle to the configured Log Upload URL. The
+// server reads the URL/token from the stored configuration; nothing is sent in
+// the request body here.
+export function uploadLogs(): Promise<LogUploadResult> {
+  return request<LogUploadResult>("/logs/upload", { method: "POST" });
+}
+
 export function storeSecretMaterial(input: {
   field: string;
   content: string;
@@ -744,6 +778,13 @@ export function deleteUdmiSchemaSet(versionLabel: string): Promise<void> {
 
 export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
   return `/imports/templates/${encodeURIComponent(importType)}.${format}`;
+}
+
+// Public zip of the vendored UDMI 1.5.2 schema set (roots + full $ref closure +
+// README + LICENSE): a starting point an engineer edits and re-uploads under a
+// nonpub label. Unauthenticated, no side effects.
+export function getUdmiSchemaTemplatePath(): string {
+  return "/udmi/schemas/template";
 }
 
 export function getReportDownloadPath(reportId: string): string {

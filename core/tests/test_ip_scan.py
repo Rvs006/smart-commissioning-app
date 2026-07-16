@@ -303,7 +303,7 @@ class FakeConnectScanTests(unittest.TestCase):
         store = FakeRunStore()
 
         async def fake_connect(host: str, port: int, timeout: float) -> bool:
-            # 10.0.0.1 has 80 open; 10.0.0.2 has nothing open.
+            # 10.0.0.1 has 80 open; 10.0.0.2 has nothing open (silent).
             return host == "10.0.0.1" and port == 80
 
         result = ip_scan.process_ip_discovery_run(
@@ -313,15 +313,29 @@ class FakeConnectScanTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
         assets = summary["discovered_assets"]
-        self.assertEqual(len(assets), 1)
-        self.assertEqual(assets[0]["ip_address"], "10.0.0.1")
-        self.assertEqual(assets[0]["match_basis"], "ip")
-        self.assertEqual([p["port"] for p in assets[0]["observed_ports"]], [80])
-        self.assertEqual(assets[0]["observed_ports"][0]["service"], "http")
+        # Every scanned host now gets a row: the responder AND the silent host.
+        # Select by ip_address — silent rows interleave in host order, so
+        # positional indexing would silently test the wrong row.
+        self.assertEqual(len(assets), 2)
+        by_address = {a["ip_address"]: a for a in assets}
+        responder = by_address["10.0.0.1"]
+        self.assertEqual(responder["match_basis"], "ip")
+        self.assertEqual([p["port"] for p in responder["observed_ports"]], [80])
+        self.assertEqual(responder["observed_ports"][0]["service"], "http")
+        self.assertIsNotNone(responder["last_seen_at"])
+        # The silent host is reported honestly, not dropped.
+        silent = by_address["10.0.0.2"]
+        self.assertEqual(silent["observed_ports"], [])
+        self.assertEqual(silent["match_basis"], "none")
+        self.assertIsNone(silent["last_seen_at"])
+        self.assertTrue(silent["status_detail"].startswith("no response on scanned ports"))
         self.assertEqual(summary["hosts_scanned"], 2)
         self.assertEqual(summary["hosts_responsive"], 1)
 
-    def test_closed_port_host_absent(self) -> None:
+    def test_silent_hosts_reported_not_dropped(self) -> None:
+        # Rewritten from test_closed_port_host_absent: silent hosts are no longer
+        # dropped. An all-closed /30 succeeds and reports BOTH hosts honestly as
+        # "no response on scanned ports" (not proof they are absent).
         store = FakeRunStore()
 
         async def fake_connect(host: str, port: int, timeout: float) -> bool:
@@ -332,8 +346,77 @@ class FakeConnectScanTests(unittest.TestCase):
             run_store=store, execution_mode="x", connect=fake_connect,
         )
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(store.summary_calls[-1]["discovered_assets"], [])
-        self.assertEqual(store.summary_calls[-1]["hosts_responsive"], 0)
+        summary = store.summary_calls[-1]
+        assets = summary["discovered_assets"]
+        self.assertEqual(len(assets), 2)
+        for asset in assets:
+            self.assertEqual(asset["observed_ports"], [])
+            self.assertEqual(asset["match_basis"], "none")
+            self.assertIsNone(asset["last_seen_at"])
+            self.assertTrue(asset["status_detail"].startswith("no response on scanned ports"))
+            # Unregistered silence stays neutral — no register marker, no red
+            # MISSING verdict.
+            self.assertNotIn("EXPECTED BY REGISTER", asset["status_detail"])
+            self.assertNotIn("MISSING EXPECTED PORTS", asset["status_detail"])
+        self.assertEqual(summary["hosts_responsive"], 0)
+        self.assertEqual(summary["hosts_scanned"], 2)
+
+    def test_register_listed_silent_host_marked_inconclusive(self) -> None:
+        # Two silent hosts: 10.0.0.1 is in the register (asset mapping + expected
+        # ports), 10.0.0.2 is not. The registered one carries the EXPECTED BY
+        # REGISTER inconclusive note plus its asset_id; the unregistered one does
+        # not. Neither is verdicted MISSING EXPECTED PORTS — a TCP-connect miss is
+        # not a closed-port finding.
+        store = FakeRunStore()
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return False  # both hosts silent
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_reg_silent",
+            {**_AUTH, "cidr": "10.0.0.0/30", "ports": [80],
+             "asset_id_by_address": {"10.0.0.1": "AHU-1"},
+             "expected_ports_by_address": {"10.0.0.1": "445/tcp"}},
+            run_store=store, execution_mode="x", connect=fake_connect,
+        )
+        self.assertEqual(result["status"], "succeeded")
+        by_address = {a["ip_address"]: a for a in store.summary_calls[-1]["discovered_assets"]}
+        registered = by_address["10.0.0.1"]
+        self.assertIn("EXPECTED BY REGISTER", registered["status_detail"])
+        self.assertIn("inconclusive, not proof the host is offline", registered["status_detail"])
+        self.assertNotIn("MISSING EXPECTED PORTS", registered["status_detail"])
+        self.assertEqual(registered["asset_id"], "AHU-1")
+        unregistered = by_address["10.0.0.2"]
+        self.assertNotIn("EXPECTED BY REGISTER", unregistered["status_detail"])
+        self.assertIsNone(unregistered["asset_id"])
+
+    def test_persist_records_only_for_responders(self) -> None:
+        # A mixed /30: 10.0.0.1 answers on 80, 10.0.0.2 is silent. persist_records
+        # must receive a structured record for the RESPONDER ONLY — a host we
+        # never heard from is not a discovered device and must not enter the
+        # device inventory or reports — while both hosts appear on the display
+        # surface (discovered_assets).
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            return host == "10.0.0.1" and port == 80
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_persist_split",
+            {**_AUTH, "cidr": "10.0.0.0/30", "ports": [80]},
+            run_store=store, execution_mode="x", connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(len(persisted), 1)
+        _rid, records = persisted[0]
+        self.assertEqual(
+            [r["address"] for r in records],
+            ["10.0.0.1"],
+            "only the responder becomes a device record",
+        )
+        self.assertEqual(len(store.summary_calls[-1]["discovered_assets"]), 2)
 
     def test_structured_records_built_for_persistence(self) -> None:
         store = FakeRunStore()

@@ -1045,7 +1045,11 @@ label {
 
 .data-table-wrap {
   max-width: 100%;
-  overflow: auto;
+  /* Safety valve only: body sets overflow-x:hidden, so an ultra-wide table with
+     no scroller here would be clipped and unreachable. After the min-width and
+     cell-nowrap removals below, content wraps into page flow and this should
+     not engage at desktop widths. Do NOT add a max-height. */
+  overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -1054,7 +1058,6 @@ label {
 
 .data-table {
   width: 100%;
-  min-width: 680px;
   border-collapse: collapse;
   background: var(--surface);
 }
@@ -1066,6 +1069,9 @@ label {
   font-weight: 760;
   text-align: left;
   text-transform: uppercase;
+  /* Headers stay on one line; cells wrap (see td rule) so wide content flows
+     into the page instead of scrolling inside a bound box. */
+  white-space: nowrap;
 }
 
 .data-table th,
@@ -1073,12 +1079,12 @@ label {
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-soft);
   vertical-align: top;
-  white-space: nowrap;
 }
 
 .data-table td {
   color: var(--text);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .data-table tr:hover td {
@@ -1829,10 +1835,15 @@ input.field-expired {
   text-transform: uppercase;
 }
 
-/* Boolean pass/fail shading for live UDMI validation result rows. Subtle tints
-   via the --green-bg / --red-bg tokens so the [data-theme="dark"] overrides in
-   electracom-theme.css apply automatically; declared after the tr:hover rule so
-   the verdict colour stays put under the pointer. */
+/* Row shading for live result rows: pass/fail for UDMI verdicts AND IP
+   discovery register verdicts; warn is the inconclusive amber (expected-but-
+   silent host, unexpected/hostname-mismatch findings), shared with the UDMI RAG
+   amber work. Subtle tints via the --green-bg / --amber-bg / --red-bg tokens so
+   the [data-theme="dark"] overrides in electracom-theme.css apply automatically;
+   declared after the tr:hover rule so the verdict colour stays put under the
+   pointer. NOTE: the separate v0.1.13 "UDMI RAG third state (amber)" item needs
+   the identical .row-warn rule — whichever lands first adds it, the other
+   reuses. */
 .data-table tr.row-pass td {
   background: var(--green-bg);
 }
@@ -1841,9 +1852,29 @@ input.field-expired {
   background: var(--red-bg);
 }
 
+.data-table tr.row-warn td {
+  background: var(--amber-bg);
+}
+
+/* Result rows are clickable to drive the Inspector (MQTT discovery inspector,
+   v0.1.13). row-selected outlines the active row; declared after the tone rules
+   so the selection cue reads over any pass/fail/warn tint. The inset shadow (not
+   a border) avoids shifting row height/layout. */
+.data-table tbody tr {
+  cursor: pointer;
+}
+
+.data-table tbody tr.row-selected td {
+  box-shadow: inset 0 0 0 1px var(--accent, #4f7cff);
+}
+
 /* Matching tone for the per-asset payload sections (state/metadata/pointset),
-   so scrolling the groups draws the eye to red without re-reading the table. */
+   so scrolling the groups draws the eye to the RAG verdict without re-reading
+   the table: green = compliant, amber (warn) = publishing-but-non-compliant,
+   red = offline / not publishing. --amber-bg / --red-bg carry the dark-theme
+   overrides via electracom-theme.css automatically. */
 .payload-type-group.section-pass,
+.payload-type-group.section-warn,
 .payload-type-group.section-fail {
   padding: 8px 10px;
   border-radius: var(--radius-sm);
@@ -1853,11 +1884,16 @@ input.field-expired {
   background: var(--green-bg);
 }
 
+.payload-type-group.section-warn {
+  background: var(--amber-bg);
+}
+
 .payload-type-group.section-fail {
   background: var(--red-bg);
 }
 
-/* The short PASS / FAIL verdict line under each payload-type heading. */
+/* The short RAG verdict line under each payload-type heading (PASS / PASS WITH
+   NOTES / NON-COMPLIANT / OFFLINE). */
 .payload-verdict {
   margin: 0;
   font-size: 11px;
@@ -1867,6 +1903,10 @@ input.field-expired {
 
 .payload-verdict.pass {
   color: var(--green);
+}
+
+.payload-verdict.warn {
+  color: var(--amber);
 }
 
 .payload-verdict.fail {
@@ -1980,10 +2020,6 @@ input.field-expired {
   .primary-button,
   .secondary-button {
     width: 100%;
-  }
-
-  .data-table {
-    min-width: 640px;
   }
 
   .port-row {

@@ -94,6 +94,32 @@ NONPUB_SCHEMA_ROOTS = {
 }
 _SCHEMA_DIRECTORY = Path(__file__).resolve().parent / "schemas" / "udmi"
 
+
+def canonical_schema_file_bytes(version: str) -> dict[str, bytes]:
+    """Raw ``{filename: bytes}`` of the vendored schema set for ``version``.
+
+    Template/download support: returns the on-disk bytes verbatim (NOT
+    re-serialized dicts) so a downloaded template byte-matches the upstream
+    vendored files. ``version`` keys the same subdirectory the runtime
+    validator reads and matches ``_SCHEMA_ROOTS`` (currently only ``'1.5.2'``);
+    an unknown version yields an empty mapping. ``_SCHEMA_DIRECTORY`` itself
+    stays private.
+    """
+    return {
+        path.name: path.read_bytes()
+        for path in sorted((_SCHEMA_DIRECTORY / version).glob("*.json"))
+    }
+
+
+def schema_license_bytes() -> bytes:
+    """Raw bytes of the Apache-2.0 LICENSE vendored with the UDMI schema set.
+
+    Redistribution of the schema files (e.g. in a downloadable template zip)
+    must carry this license.
+    """
+    return (_SCHEMA_DIRECTORY / "LICENSE").read_bytes()
+
+
 # Accepts "nonpub", "nonpub.1", "nonpub-siteA" etc. after _normalise_version
 # (strip + leading v removed); matching is case-insensitive.
 _NONPUB_PATTERN = re.compile(r"^nonpub([.\-_].+)?$", re.IGNORECASE)

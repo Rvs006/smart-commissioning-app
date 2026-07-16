@@ -636,7 +636,10 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         self.assertIn(".xlsx", resp.headers["content-disposition"])
         sheet = load_workbook(BytesIO(resp.content)).active
         rows = list(sheet.iter_rows(values_only=True))
-        self.assertEqual(rows[0], ("Topic", "Asset", "Last Seen", "Message Count", "Latest Payload"))
+        self.assertEqual(
+            rows[0],
+            ("Topic", "Asset", "Last Seen", "Message Count", "Latest Payload", "Register Match"),
+        )
         self.assertEqual(len(rows), 1, "empty capture stays empty — no fabricated data rows")
 
     def test_topics_xlsx_export_includes_persisted_rows(self) -> None:

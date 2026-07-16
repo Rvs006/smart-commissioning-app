@@ -9,19 +9,25 @@ set into the run parameters, so the inline path and the Dramatiq worker (which
 shares only the database) validate declared-nonpub payloads identically.
 """
 
+import io
 import json
 import re
+import zipfile
+from functools import cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from jsonschema import Draft7Validator
 from jsonschema.exceptions import SchemaError
 from smart_commissioning_core.db.repositories import UdmiSchemaSetRepository
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.udmi_schema import (
     NONPUB_SCHEMA_ROOTS,
+    canonical_schema_file_bytes,
     is_nonpub_version,
     nonpub_version_key,
+    schema_license_bytes,
 )
 
 from app.api.uploads import check_content_length, read_upload_capped, upload_too_large
@@ -31,6 +37,55 @@ from app.core.db import get_engine
 from app.schemas.udmi_schemas import UdmiSchemaSetSummary
 
 router = APIRouter()
+
+# RBAC posture (mirrors imports.public_router in routes/imports.py): the schema
+# template is the vendored public-upstream faucetsdn/udmi 1.5.2 schema set
+# (Apache-2.0) — format documentation carrying zero project data — so it is
+# served unauthenticated like GET /imports/templates. Registered on api_router
+# (not protected_router) in api/router.py so the download button never 401s in
+# hosted api_key mode.
+public_router = APIRouter()
+
+# 1.5.2 is the only vendored published version. ponytail: if another UDMI
+# version is vendored, this constant and the frontend filename literal both need
+# a touch (getUdmiSchemaTemplatePath / the download call in ModulePage.tsx).
+_TEMPLATE_VERSION = "1.5.2"
+_TEMPLATE_FILENAME = f"udmi-schema-template-{_TEMPLATE_VERSION}.zip"
+
+_TEMPLATE_README = """\
+UDMI 1.5.2 schema-set template
+==============================
+
+This zip is the complete, published UDMI 1.5.2 Draft-7 JSON Schema set:
+the three roots state.json / metadata.json / events_pointset.json plus their
+full "file:" $ref closure. It is vendored verbatim from
+github.com/faucetsdn/udmi tag 1.5.2 and redistributed under the Apache-2.0
+license included here as LICENSE.
+
+Use it to build a NON-PUBLISHED (nonpub.*) schema set for a project that
+deliberately deviates from published UDMI:
+
+1. Extract the .json files and edit them to match your project's payloads
+   (for a quick smoke test, add a required property to state.json).
+2. On the UDMI Validation page, Non-Published UDMI Schema Sets section, upload
+   ALL of the .json files together under a label that starts with "nonpub"
+   (e.g. nonpub.1 or nonpub-siteA).
+3. Have your payloads declare that same version string so validation runs
+   against your uploaded set instead of a published UDMI release.
+
+Upload only the .json files. README.txt and LICENSE are not schemas and the
+upload rejects any non-.json file.
+
+The upload enforces:
+  - all three root files (state.json, metadata.json, events_pointset.json);
+  - every "file:<name>.json" $ref must resolve within the files you upload;
+  - each file is a valid Draft 7 JSON Schema;
+  - at most 64 files per set;
+  - a 2 MB combined ceiling across all stored sets.
+
+Because these rules require the whole $ref closure, keep the full set together:
+the closure of the three roots IS every .json file in this zip.
+"""
 
 # RBAC: seeing which sets exist is viewer+; uploading or deleting a set changes
 # what every FUTURE UDMI run validates against, so it is engineer+.
@@ -300,3 +355,42 @@ def delete_udmi_schema_set(version_label: str) -> None:
             status_code=404,
             detail=f"UDMI schema set '{version_label}' was not found.",
         )
+
+
+@cache
+def _template_zip_bytes() -> bytes:
+    """The downloadable UDMI 1.5.2 template zip (README + LICENSE + all schemas).
+
+    Ships the FULL vendored set: the $ref closure of the three roots IS every
+    vendored .json file (verified 2026-07-16: 34 files, 40,879 raw bytes ~ 2%
+    of _MAX_TOTAL_STORED_SCHEMA_BYTES when re-uploaded), so nothing is trimmable
+    without breaking _require_refs_resolve on re-upload. Cached because the
+    vendored files are immutable per release; combined with fixed ZipInfo
+    timestamps every download is byte-identical.
+    """
+    # Fixed timestamp (the zip epoch floor) so repeated downloads byte-match:
+    # ZipFile.writestr with a str name would stamp wall-clock time instead.
+    fixed_date = (1980, 1, 1, 0, 0, 0)
+    members: list[tuple[str, bytes]] = [
+        ("README.txt", _TEMPLATE_README.encode("utf-8")),
+        ("LICENSE", schema_license_bytes()),
+    ]
+    members.extend(sorted(canonical_schema_file_bytes(_TEMPLATE_VERSION).items()))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in members:
+            info = zipfile.ZipInfo(filename=name, date_time=fixed_date)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, content)
+    return buffer.getvalue()
+
+
+@public_router.get("/template")
+def download_udmi_schema_template() -> Response:
+    return Response(
+        content=_template_zip_bytes(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{_TEMPLATE_FILENAME}"',
+        },
+    )

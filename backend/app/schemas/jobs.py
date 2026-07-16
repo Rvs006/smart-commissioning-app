@@ -148,6 +148,10 @@ class DiscoveryResultsResponse(BaseModel):
     devices: list[dict[str, object]] = Field(default_factory=list)
     points: list[dict[str, object]] = Field(default_factory=list)
     topics: list[dict[str, object]] = Field(default_factory=list)
+    # MQTT-only: whole-broker scan compared against the uploaded register. None
+    # for non-MQTT runs and for runs that observed nothing (dry/failed) — computed
+    # at read time so it is additive and back-compatible.
+    register_comparison: dict[str, object] | None = None
 
 
 class DiscoveryPointsResponse(BaseModel):
@@ -162,6 +166,7 @@ class DiscoveryTopicsResponse(BaseModel):
     job_type: JobType
     status: JobStatus
     topics: list[dict[str, object]] = Field(default_factory=list)
+    register_comparison: dict[str, object] | None = None
 
 
 class ValidationIssuesResponse(BaseModel):

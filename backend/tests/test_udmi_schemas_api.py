@@ -18,6 +18,7 @@ would be embedded into every later UDMI run's parameters.
 import io
 import json
 import unittest
+import zipfile
 
 from harness import ApiTestCase
 
@@ -474,6 +475,103 @@ class UdmiSchemaSetChunkedTotalCapTests(ApiTestCase):
             "nonpub.chunked",
             {entry["version_label"] for entry in listed.json()},
         )
+
+
+class UdmiSchemaTemplateTests(ApiTestCase):
+    """Public downloadable UDMI 1.5.2 schema-set template (GET /template).
+
+    The template is the vendored public-upstream faucetsdn/udmi 1.5.2 schema set
+    (Apache-2.0): format documentation with zero project data, so it answers
+    without a key even in api_key mode (like GET /imports/templates). The
+    round-trip test is load-bearing — it proves the downloaded zip survives the
+    strict upload validation, encoding the field workflow (download, edit,
+    re-upload under a nonpub label).
+    """
+
+    env = _ENV_OVERRIDES
+    client_headers = {"X-API-Key": _API_KEY}
+
+    def _template_response(self) -> object:
+        return self.client.get("/api/v1/udmi/schemas/template")
+
+    def _template_json_members(self) -> dict[str, bytes]:
+        response = self._template_response()
+        self.assertEqual(response.status_code, 200, response.text)
+        members: dict[str, bytes] = {}
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            for name in archive.namelist():
+                if name.endswith(".json"):
+                    members[name] = archive.read(name)
+        return members
+
+    def test_template_is_public(self) -> None:
+        from fastapi.testclient import TestClient
+
+        # No auth header in api_key mode still returns the zip — mounted on
+        # api_router, not protected_router (regression guard for the button
+        # 401ing in hosted mode, as the import templates once did).
+        keyless = TestClient(self.app)
+        response = keyless.get("/api/v1/udmi/schemas/template")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "application/zip")
+        self.assertIn(
+            'filename="udmi-schema-template-1.5.2.zip"',
+            response.headers["content-disposition"],
+        )
+        # Contrast: the sibling protected list route still 401s without a key.
+        self.assertEqual(keyless.get("/api/v1/udmi/schemas").status_code, 401)
+
+    def test_template_contents(self) -> None:
+        from smart_commissioning_core.udmi_schema import (
+            NONPUB_SCHEMA_ROOTS,
+            canonical_schema_file_bytes,
+        )
+
+        response = self._template_response()
+        self.assertEqual(response.status_code, 200, response.text)
+        vendored = canonical_schema_file_bytes("1.5.2")
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            names = set(archive.namelist())
+            self.assertIn("README.txt", names)
+            self.assertIn("LICENSE", names)
+            json_members = {name for name in names if name.endswith(".json")}
+            # The shipped .json set is exactly the vendored set — no hardcoded
+            # file count, no trimming (the $ref closure IS the full set).
+            self.assertEqual(json_members, set(vendored))
+            for name, raw in vendored.items():
+                self.assertEqual(archive.read(name), raw)
+        for root in NONPUB_SCHEMA_ROOTS.values():
+            self.assertIn(root, json_members)
+
+    def test_template_round_trips_through_upload(self) -> None:
+        from smart_commissioning_core.udmi_schema import canonical_schema_file_bytes
+
+        members = self._template_json_members()
+        upload = self.client.post(
+            "/api/v1/udmi/schemas",
+            data={"version_label": "nonpub.template-roundtrip"},
+            files=[
+                ("files", (name, io.BytesIO(content), "application/json"))
+                for name, content in members.items()
+            ],
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        # Stored sets outlive this module in the shared per-process database.
+        self.addCleanup(
+            self.client.delete,
+            "/api/v1/udmi/schemas/nonpub.template-roundtrip",
+        )
+        self.assertEqual(
+            set(upload.json()["filenames"]),
+            set(canonical_schema_file_bytes("1.5.2")),
+        )
+
+    def test_template_bytes_are_stable(self) -> None:
+        first = self._template_response()
+        second = self._template_response()
+        self.assertEqual(first.status_code, 200, first.text)
+        # Fixed ZipInfo timestamps => repeated downloads are byte-identical.
+        self.assertEqual(first.content, second.content)
 
 
 if __name__ == "__main__":
