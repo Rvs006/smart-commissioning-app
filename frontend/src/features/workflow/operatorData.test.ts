@@ -75,18 +75,20 @@ describe("mergeAssetGroups (mq9m4bnv)", () => {
   });
 });
 
-describe("reports workspace fixture", () => {
-  // The reports workspace shipped four invented rows ("Excel issue report",
-  // "Word handover report", "Evidence pack", "Blocked report") that a reviewer
-  // read as reports the app had really produced. Real reports come from
-  // GET /reports and are listed by the Generated Reports table.
-  //
-  // This is a DATA-layer assertion on purpose. No DOM test can pin it: the
-  // `workspace?.rows` fallback that used to render these is gone, so restoring
-  // the rows changes nothing on screen — it just re-plants dead fixture data for
-  // the next fallback to surface. Assert on the fixture itself, at the source.
-  it("carries no fabricated sample rows", () => {
-    expect(moduleWorkspaces.reports.rows).toEqual([]);
+describe("module workspace fixtures", () => {
+  // moduleWorkspaces used to ship sample `rows` (register-comparison verdicts
+  // no run had produced — the reports head's four invented rows were read by a
+  // reviewer as reports the app had really made) and fallback `issues`
+  // (ISS-#### copy rendered on validation routes before any run). Both are
+  // deleted at the source, fields and all. This is a DATA-layer assertion on
+  // purpose: nothing renders these fields any more, so no DOM test can pin
+  // them — re-adding them changes nothing on screen, it just re-plants dead
+  // fixture data for a future fallback to surface.
+  it("carries no sample rows or fallback issues on any workspace", () => {
+    for (const workspace of Object.values(moduleWorkspaces)) {
+      expect(workspace).not.toHaveProperty("rows");
+      expect(workspace).not.toHaveProperty("issues");
+    }
   });
 });
 

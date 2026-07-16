@@ -1,22 +1,15 @@
-// Sample / preview data for UI areas that have no backing endpoint yet.
+// Live-data helpers and per-route workspace chrome for the module pages.
 //
-// What is REAL elsewhere (not here): recent runs (GET /runs), discovery
-// devices/points/topics (GET /discovery/runs/{id}/results), validation issues
-// (GET /validation/runs/{id}/issues), and the report queue (GET /reports).
+// Everything rendered as results or findings is REAL: recent runs (GET /runs),
+// discovery devices/points/topics (GET /discovery/runs/{id}/results),
+// validation issues (GET /validation/runs/{id}/issues), and the report queue
+// (GET /reports). Before a run exists the UI shows a neutral empty state.
 //
-// What stays sample (kept here, labelled in the UI as "Sample preview"):
-//  - moduleWorkspaces.*.rows + the "Result" interpretation columns for
-//    validation modules: register-comparison verdicts are produced by a
-//    validation run, not returned by discovery results.
-//
-// Headline metric numbers are NOT sample data: they derive from the latest live
-// run (discoveryMetrics / validationMetrics in discoveryRows.ts, and the report
-// queue for /reports). When no run exists the card shows a neutral empty state.
-//  - issueRows: illustrative issue copy used only as a labelled fallback when no
-//    live validation run has been executed yet.
-//
-// Removed as dead (no consumer, no endpoint): projectSummary, runRows,
-// assetRows — replaced by the live queries listed above.
+// moduleWorkspaces carries static page chrome only (titles, headlines, table
+// titles, result columns, evidence labels). Its former sample `rows` and
+// fallback `issues` fixtures — like projectSummary, runRows and assetRows
+// before them — were dead data shipped in the bundle and are deleted;
+// operatorData.test.ts pins that the fields stay gone.
 
 import type { UdmiAssetPayloadView, ValidationIssueRecord } from "../../api/client";
 
@@ -267,44 +260,9 @@ export type ModuleWorkspace = {
   title: string;
   headline: string;
   tableTitle: string;
-  rows: Array<Record<string, string>>;
   columns: string[];
-  issues: IssueRow[];
   evidence: string[];
 };
-
-// Labelled sample issues. Used only as a fallback in the module inspector when
-// no live validation run has been executed; live runs replace these.
-export const issueRows: IssueRow[] = [
-  {
-    id: "ISS-1042",
-    assetId: "MDB5-00-043-BLR-1",
-    severity: "critical",
-    area: "UDMI pointset",
-    message: "fault_status expected STRING but received NUMBER.",
-  },
-  {
-    id: "ISS-1037",
-    assetId: "AHU-L03-017",
-    severity: "major",
-    area: "BACnet discovery",
-    message: "Four required points are absent from the live object list.",
-  },
-  {
-    id: "ISS-1028",
-    assetId: "MDB5-00-043-BLR-1",
-    severity: "major",
-    area: "MQTT discovery",
-    message: "Telemetry interval exceeds configured tolerance by 70 seconds.",
-  },
-  {
-    id: "ISS-1019",
-    assetId: "MTR-ENERGY-009",
-    severity: "minor",
-    area: "Report metadata",
-    message: "Asset location is missing floor reference in imported register.",
-  },
-];
 
 export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
   "ip-scanner": {
@@ -316,12 +274,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Find reachable, missing, and rogue network hosts against the expected register.",
     tableTitle: "Network Scan Results",
     columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
-    rows: [
-      { Asset: "Boiler 1 Controller", "Expected IP": "10.10.25.101", Observed: "Online", "MAC Address": "90:2C:D0:B0:03:36", Ports: "80/tcp, 443/tcp", "Match Basis": "MAC", "Last Seen": "48 sec ago", "Detailed Status": "Responded to HTTP and HTTPS TCP checks", Result: "Matched" },
-      { Asset: "AHU Level 3", "Expected IP": "10.10.25.117", Observed: "Online", "MAC Address": "5C:A1:1D:8D:6F:FF", Ports: "443/tcp", "Match Basis": "IP", "Last Seen": "7 min ago", "Detailed Status": "HTTPS reachable on TCP 443, HTTP missing", Result: "Service mismatch" },
-      { Asset: "Unknown host", "Expected IP": "-", Observed: "10.10.25.214", "MAC Address": "C0:A6:F3:F2:F3:2F", Ports: "80/tcp, 443/tcp", "Match Basis": "None", "Last Seen": "Now", "Detailed Status": "Matched no imported MAC address", Result: "Rogue" },
-    ],
-    issues: [],
     evidence: [],
   },
   "bacnet-discovery": {
@@ -330,12 +282,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Discover BACnet devices, object lists, and property health before validation.",
     tableTitle: "BACnet Devices",
     columns: ["Device", "Instance", "IP Address", "Network Number", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
-    rows: [
-      { Device: "Boiler 1 Controller", Instance: "1532001", "IP Address": "10.10.25.101", "Network Number": "2001", Objects: "118", "Device Last Discovered": "48 sec ago", "Detailed Status": "I-Am received and object list captured", Result: "Object list captured" },
-      { Device: "Level 3 AHU", Instance: "1532117", "IP Address": "10.10.25.117", "Network Number": "2001", Objects: "204", "Device Last Discovered": "7 min ago", "Detailed Status": "BACnet reliability flagged stale on four points", Result: "Four required points missing" },
-      { Device: "CHW Pump Panel", Instance: "1532041", "IP Address": "—", "Network Number": "5", Objects: "96", "Device Last Discovered": "2 min ago", "Detailed Status": "MS/TP segment behind router; no IP", Result: "Ready" },
-    ],
-    issues: issueRows.filter((issue) => issue.area === "BACnet discovery"),
     evidence: ["Who-Is/I-Am capture", "Device object index", "Property read sample"],
   },
   "mqtt-discovery": {
@@ -344,12 +290,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Subscribe to broker topics, capture payloads, and compare telemetry to the register.",
     tableTitle: "MQTT Topic Observations",
     columns: ["Topic", "Asset", "Payload Last Seen", "Message Count", "Detailed Connection Status", "Raw Payload", "Result"],
-    rows: [
-      { Topic: "electracom/sct/1532/boiler/1/pointset", Asset: "MDB5-00-043-BLR-1", "Payload Last Seen": "2 min ago", "Message Count": "47", "Detailed Connection Status": "Connected; payload type mismatch", "Raw Payload": "{\"points\":{\"fault_status\":{\"present_value\":1}}}", Result: "Type mismatch" },
-      { Topic: "electracom/sct/1532/meter/009/pointset", Asset: "MTR-ENERGY-009", "Payload Last Seen": "15 sec ago", "Message Count": "126", "Detailed Connection Status": "Connected; TLS session healthy", "Raw Payload": "{\"points\":{\"energy_sensor\":{\"present_value\":1294.4}}}", Result: "Ready" },
-      { Topic: "electracom/sct/1532/ahu/l03/state", Asset: "AHU-L03-017", "Payload Last Seen": "7 min ago", "Message Count": "8", "Detailed Connection Status": "Connected; reporting slower than expected", "Raw Payload": "{\"system\":{\"operation\":{\"operational\":true}}}", Result: "Slow interval" },
-    ],
-    issues: issueRows.filter((issue) => issue.area.includes("MQTT")),
     evidence: ["Broker subscription log", "Payload samples", "Topic register comparison"],
   },
   "udmi-validation": {
@@ -358,12 +298,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Inspect state, metadata, pointset, and controlled publish payloads in detail.",
     tableTitle: "UDMI Payload Checks",
     columns: ["Asset", "State", "Pointset", "Payload Last Seen", "Message Count", "Raw Payload", "Result"],
-    rows: [
-      { Asset: "MDB5-00-043-BLR-1", State: "Present", Pointset: "Present", "Payload Last Seen": "2 min ago", "Message Count": "47", "Raw Payload": "{\"pointset\":{\"points\":{\"fault_status\":{\"present_value\":1}}}}", Result: "Fail — fault_status type mismatch" },
-      { Asset: "MDB5-00-044-BLR-2", State: "Present", Pointset: "Present", "Payload Last Seen": "48 sec ago", "Message Count": "52", "Raw Payload": "{\"pointset\":{\"points\":{\"supply_air_temperature_setpoint\":{\"present_value\":22}}}}", Result: "Pass" },
-      { Asset: "AHU-L03-017", State: "Present", Pointset: "Late", "Payload Last Seen": "7 min ago", "Message Count": "8", "Raw Payload": "{\"system\":{\"hardware\":{\"make\":\"Schneider\",\"model\":\"PM5111\"}}}", Result: "Fail — pointset reporting interval exceeded" },
-    ],
-    issues: issueRows.filter((issue) => issue.area === "UDMI pointset"),
     evidence: ["State payload evidence", "Pointset payload evidence", "Validation issue JSON"],
   },
   "data-validation": {
@@ -372,12 +306,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Run MQTT payload checks, BACnet point checks, and BACnet-to-MQTT live value comparisons.",
     tableTitle: "Live Validation Results",
     columns: ["Asset", "Point", "BACnet", "MQTT", "Tolerance", "Result"],
-    rows: [
-      { Asset: "Boiler 1", Point: "supply_temp", BACnet: "71.2 C", MQTT: "71.1 C", Tolerance: "0.5 C", Result: "Pass" },
-      { Asset: "Boiler 1", Point: "fault_status", BACnet: "normal", MQTT: "0", Tolerance: "Exact", Result: "Needs mapping rule" },
-      { Asset: "AHU L03", Point: "fan_enable", BACnet: "active", MQTT: "active", Tolerance: "Exact", Result: "Pass" },
-    ],
-    issues: issueRows.filter((issue) => issue.area !== "Report metadata"),
     evidence: ["Comparison matrix", "Tolerance file", "Mapping delta register"],
   },
   reports: {
@@ -386,13 +314,6 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     headline: "Create evidence packs, issue reports, and commissioning handover outputs.",
     tableTitle: "Report Queue",
     columns: ["Report", "Source", "Status", "File"],
-    // Deliberately empty. This held four fabricated rows ("Excel issue report",
-    // "Word handover report", "Evidence pack", "Blocked report") that a reviewer
-    // read as real reports the app had produced. The real, generated reports are
-    // listed by the Generated Reports table above, from GET /reports. Do not
-    // re-add sample rows here — an empty table honestly says "nothing yet".
-    rows: [],
-    issues: issueRows,
     evidence: ["Evidence pack ZIP", "Issue report XLSX", "Executive summary PDF"],
   },
 };

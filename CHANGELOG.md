@@ -5,6 +5,21 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Residual placeholder content removed** (follow-up to v0.1.13's "Placeholder
+  and stale content removed" — an adversarial audit found three survivors). The
+  downloadable import templates' example rows named the fictional site
+  ("ElectraCom / Block B Plantroom"); they now read as self-describing examples
+  ("Example Site / Plant Room"). Validation module pages rendered four
+  fabricated sample issues (ISS-1042 et al.) as findings before any run had
+  executed; they now show the honest "Run a validation" empty state. And the
+  never-rendered sample workspace rows still shipped in the frontend bundle,
+  under a stale comment claiming they appear as a "Sample preview" — deleted
+  outright, comment corrected, and a data-layer test pins the fields gone.
+
 ## [0.1.13] - 2026-07-16
 
 The rest of the 2026-07-15 walkthrough punch list — the items an audit found

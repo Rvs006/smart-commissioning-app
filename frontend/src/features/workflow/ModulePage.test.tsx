@@ -537,8 +537,9 @@ describe("ModulePage discovery wiring", () => {
     expect(await screen.findByText(/Last payload on udmi\/AHU-1\/state/)).toBeInTheDocument();
     expect(screen.getByText("Explore JSON tree")).toBeInTheDocument();
 
-    // The fabricated sample MQTT issue (operatorData) must NOT render on this
-    // live discovery route — the old workspace?.issues fallback is suppressed.
+    // The fabricated sample MQTT issue must NOT render on this live discovery
+    // route. The operatorData issueRows fixture and the workspace?.issues
+    // fallback are deleted outright now; this stays as the end-state guard.
     expect(
       screen.queryByText(/Telemetry interval exceeds configured tolerance/i),
     ).not.toBeInTheDocument();
@@ -1334,7 +1335,8 @@ describe("ModulePage reports wiring", () => {
   // the `workspace?.rows` fallback, so this passes even with the fabricated rows
   // present (verified by mutation). It earns its place by pinning the OUTCOME —
   // no invented report reaches the reports page by ANY route, including a
-  // re-introduced fallback. The fixture itself is pinned in operatorData.test.ts.
+  // re-introduced fallback. operatorData.test.ts pins the source side: the
+  // fixture rows/issues fields are deleted from moduleWorkspaces entirely.
   it("shows an honest empty state, with no fabricated report rows, when no report exists", async () => {
     stubReports(undefined, { reports: [] });
     renderModule("reports");
