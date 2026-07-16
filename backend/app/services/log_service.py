@@ -33,6 +33,7 @@ import re
 import urllib.parse
 import zipfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 import httpx
@@ -93,6 +94,37 @@ def retention_days(values: dict[str, str]) -> int:
     except ValueError:
         return _DEFAULT_RETENTION_DAYS
     return parsed if parsed > 0 else _DEFAULT_RETENTION_DAYS
+
+
+def purge_old_logs(directory: Path, days: int) -> None:
+    """Delete log files under ``directory`` older than ``days`` days.
+
+    Removes rotated ``app.log.*`` history and the launcher's ``crash-*.log`` /
+    ``faulthandler-*.log`` forensics under one uniform retention window; the
+    active ``app.log`` (owned by the rotating handler) is always kept. Called
+    once at startup — retention is a boot-time sweep, not a running timer — so a
+    long-lived process is tidied at its next launch.
+
+    Non-positive ``days`` disables the sweep (keep everything). Best-effort and
+    never fatal: a file that cannot be stat'd or removed — held open on Windows,
+    already gone, permission denied — is logged at debug and skipped, because
+    failing to tidy old logs must never stop the app from booting.
+    """
+    if days <= 0:
+        return
+    cutoff = datetime.now(UTC).timestamp() - days * 86_400
+    try:
+        entries = list(directory.glob("*.log*"))
+    except OSError:
+        return
+    for path in entries:
+        if path.name == "app.log":
+            continue
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError as error:  # locked / vanished / denied — tidying is optional
+            logger.debug("could not purge old log %s: %s", path, error)
 
 
 def apply_logging_settings(values: dict[str, str]) -> None:
