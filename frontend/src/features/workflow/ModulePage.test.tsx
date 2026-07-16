@@ -3270,7 +3270,13 @@ describe("ModulePage snap-to-top when results open", () => {
     await waitFor(() =>
       expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
     );
-    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+    // The snap lives in a passive effect and the step update arrives from a
+    // react-query poll outside act(), so the waitFor above can observe the
+    // commit BEFORE React flushes the effect — seen flaking on the slower
+    // windows-2022 runner. Poll for the spy; the assertion itself is unchanged.
+    await waitFor(() =>
+      expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" }),
+    );
     // ...and it scrolled the hero, not some arbitrary element.
     expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
   });
@@ -3324,7 +3330,11 @@ describe("ModulePage snap-to-top when results open", () => {
     await waitFor(() =>
       expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
     );
-    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" });
+    // Same passive-effect race as the run-advance test above: the step update
+    // comes from the mutation's onSuccess, outside act().
+    await waitFor(() =>
+      expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" }),
+    );
     expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
   });
 
