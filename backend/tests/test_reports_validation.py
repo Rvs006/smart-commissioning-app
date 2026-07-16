@@ -418,10 +418,12 @@ class ValidationReportApiTests(ApiTestCase):
 
         self.assertIn("ELECTRACOM", header_xml)
         self.assertIn("ELECTRACOM", footer_xml)
-        # Footer carries the PAGE/NUMPAGES fields and the report run id.
+        # Footer carries the PAGE/NUMPAGES fields and the report's OWN run id
+        # (report_id == the report-generation run's run_id; the source validation
+        # runs are listed in the report body, not the footer).
         self.assertIn(" PAGE ", footer_xml)
         self.assertIn(" NUMPAGES ", footer_xml)
-        self.assertIn(run_id, footer_xml)
+        self.assertIn(report_id, footer_xml)
 
         # Relationships point header/footer types at the parts.
         self.assertIn(

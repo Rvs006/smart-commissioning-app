@@ -21,7 +21,13 @@ from openpyxl import load_workbook
 from smart_commissioning_core.db.repositories import ImportRepository
 from test_engines_api import _EngineApiTestCase
 
-from app.api.routes import discovery as discovery_routes
+# NOTE: app.api.routes.discovery is imported LAZILY inside the methods below, never
+# at module top. Importing it at collection time constructs the module-level
+# `service = RunService()` singleton, which caches get_engine() for whatever
+# DATABASE_URL is set THEN — i.e. the default DB, before the harness points the
+# process at its migrated temp database. That stale engine then poisons every
+# test in the run (services read `import_records` from a DB that has no such
+# table). test_engines_api imports it lazily for the same reason.
 
 _SITE = "lab-site"
 
@@ -48,6 +54,8 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
 
     def _succeeded_run(self, project_id: str, topics: list[dict]) -> str:
         """A run that looks like a real (non-dry) succeeded MQTT capture."""
+        from app.api.routes import discovery as discovery_routes
+
         run_id = self._new_run(project_id)
         # Strip the dry_run flag (merge=False replaces the summary) and force a
         # terminal succeeded status so _annotate_register_matches will compare.
@@ -69,6 +77,8 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         filename: str = "register.csv",
         created_at: datetime | None = None,
     ) -> None:
+        from app.api.routes import discovery as discovery_routes
+
         ImportRepository(discovery_routes.service.engine).create(
             import_id=import_id,
             import_type="mqtt_register",
@@ -158,6 +168,8 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         self.assertEqual(by_topic["334os/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
 
     def test_dry_run_carries_no_comparison(self) -> None:
+        from app.api.routes import discovery as discovery_routes
+
         project = "reg-compare-dry"
         # A register exists and topics are (artificially) present, but the run's
         # summary still carries dry_run=true — a dry run sent no packets, so

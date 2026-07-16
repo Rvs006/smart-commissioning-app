@@ -379,7 +379,12 @@ class DiscoveryInventoryReportApiTests(ApiTestCase):
             b"Discovered MQTT topics",
             b"AHU Controller",
             b"site/ahu/1/temp",
-            b"present_value_read_failed",
+            # The PDF's fixed-width Value column truncates a long cell with an
+            # ellipsis, so the read-error marker renders as a visible prefix here;
+            # the full "present_value_read_failed" string is asserted against the
+            # structured data in test_bacnet_points_inventory (widening the PDF
+            # column would shift every report's bytes and break reproducibility).
+            b"present_value_rea",
         ):
             self.assertIn(expected, content)
 
