@@ -7,13 +7,20 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
 from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary
 from app.services.report_pdf import PdfDocument
 from app.services.reports_integrity import INTEGRITY_KEY, build_integrity_metadata
-from app.services.run_service import REPORT_JOB_TYPES, VALIDATION_JOB_TYPES, RunService
+from app.services.run_service import (
+    DISCOVERY_JOB_TYPES,
+    REPORT_JOB_TYPES,
+    VALIDATION_JOB_TYPES,
+    RunService,
+)
 
 router = APIRouter()
 service = RunService()
@@ -207,6 +214,16 @@ def _report_rows(run: object) -> list[tuple[str, str]]:
     ]
 
 
+# Report branding furniture (field ask 2026-07-15, ITP witnessing packs). One
+# wordmark, one look across pdf/docx/xlsx page furniture: header = wordmark +
+# document title with a thin rule; footer = wordmark + page number + the run id
+# (traceability back to a run record on a printed page). The run id is stable
+# per run, so the bytes stay reproducible. Phase 1 is text only — logo image
+# embedding is deferred to a later release. The zip and topics.xlsx export are
+# deliberately NOT branded (zip has no page concept; the export is not a report).
+_BRAND_NAME = "ELECTRACOM"
+_BRAND_DOC_TITLE = "Smart Commissioning Report"
+
 # Section titles for the end-to-end validation report (field ask 2026-07-14).
 # The frontend references these strings — keep them stable across formats.
 _SUMMARY_SECTION_TITLE = "Summary"
@@ -249,6 +266,92 @@ _VALIDATION_SUMMARY_COLUMNS = (
 )
 
 _SILENT_COLUMNS = ("Source Run", "Device ID")
+
+# Discovery inventory sections (field ask 2026-07-15, per-head handover packs).
+# The frontend / API may reference these titles — keep them stable across
+# formats, same convention as the validation section titles above.
+_INVENTORY_SUMMARY_TITLE = "Discovery summary"
+_INVENTORY_IP_TITLE = "Discovered IP hosts"
+_INVENTORY_BACNET_DEVICES_TITLE = "Discovered BACnet devices"
+_INVENTORY_BACNET_POINTS_TITLE = "Discovered BACnet points"
+_INVENTORY_BACNET_SILENT_TITLE = "Expected BACnet devices not responding"
+_INVENTORY_MQTT_TITLE = "Discovered MQTT topics"
+
+_INVENTORY_SUMMARY_COLUMNS = ("Source Run", "Type", "Status", "Counts")
+_IP_INVENTORY_COLUMNS = (
+    "Source Run",
+    "Address",
+    "Hostname",
+    "MAC",
+    "Open Ports",
+    "Forbidden Open",
+    "Unexpected Open",
+    "Missing Expected",
+)
+_BACNET_DEVICE_COLUMNS = (
+    "Source Run",
+    "Instance",
+    "Address",
+    "Name",
+    "Vendor",
+    "Model",
+    "Register Asset",
+    "Points",
+)
+_BACNET_POINT_COLUMNS = ("Source Run", "Device", "Point ID", "Point Name", "Value", "Units")
+_BACNET_SILENT_COLUMNS = ("Source Run", "Register Asset", "Instance", "Address", "Directed Who-Is")
+_MQTT_TOPIC_COLUMNS = ("Source Run", "Topic", "Messages", "Device Ref")
+
+# Honesty-rule wording for the expected-but-silent section: it mirrors the
+# engine's own framing (bacnet_discovery: "amber, never a failure, never device
+# absent") and the BACnet-135 rationale. It must never read "fail" or "absent".
+_BACNET_SILENT_NOTE = (
+    "Expected devices that did not answer during the scan window. Directed-Who-Is silence is "
+    "inconclusive under BACnet-135 (an off-subnet device may reply with a local broadcast we "
+    "cannot hear); these rows are neither confirmed present nor absent."
+)
+# Shown when a discovery head was scoped but recorded no rows: an empty scan is
+# a recorded result, not a gap in the report.
+_INVENTORY_EMPTY_NOTE = (
+    "No rows recorded by the scoped discovery runs (an empty scan is a recorded result, "
+    "not an omission)."
+)
+
+# Excel caps sheet names at 31 chars; only the silent title exceeds it, so map
+# it to a short unique name (the full title is surfaced in the sheet's row 1).
+_INVENTORY_SHEET_NAMES = {_INVENTORY_BACNET_SILENT_TITLE: "Expected not responding"}
+
+# xlsx column widths by column name (reused across every inventory sheet — the
+# names are unique enough that one map covers all sections). Wide free-text
+# columns (Topic/Point Name/Counts) get room; id-like columns a fixed width.
+_INVENTORY_COLUMN_WIDTHS = {
+    "Source Run": 26,
+    "Address": 22,
+    "Hostname": 24,
+    "MAC": 20,
+    "Open Ports": 24,
+    "Forbidden Open": 16,
+    "Unexpected Open": 16,
+    "Missing Expected": 16,
+    "Instance": 12,
+    "Name": 28,
+    "Vendor": 18,
+    "Model": 18,
+    "Register Asset": 26,
+    "Points": 10,
+    "Device": 20,
+    "Point ID": 18,
+    "Point Name": 40,
+    "Value": 20,
+    "Units": 12,
+    "Directed Who-Is": 16,
+    "Topic": 40,
+    "Messages": 12,
+    "Device Ref": 24,
+    "Type": 18,
+    "Status": 14,
+    "Counts": 60,
+}
 
 
 def _source_runs(run: object) -> list[object]:
@@ -445,6 +548,262 @@ def _validation_summary(run: object) -> dict[str, object] | None:
     }
 
 
+def _inv_cell(value: object) -> str:
+    """Render a single inventory cell: str() a real value, _NO_VALUE for blank/None.
+
+    Never fabricates: an absent value or an empty list is shown as a blank, never
+    a synthesised verdict (honesty rule).
+    """
+    if value is None:
+        return _NO_VALUE
+    text = str(value)
+    return text if text else _NO_VALUE
+
+
+def _inv_ports(value: object) -> str:
+    """Join a persisted port list; an empty/absent list renders as _NO_VALUE.
+
+    The engine stamps these lists (open_ports, forbidden_open_ports, …); the
+    report renders the recorded fact, never a recomputed "fail" for an empty
+    list (a host with no open ports is a recorded result).
+    """
+    if isinstance(value, list) and value:
+        return ", ".join(str(port) for port in value)
+    return _NO_VALUE
+
+
+def _inv_count(value: object) -> str:
+    """A count fragment for the Discovery-summary Counts cell.
+
+    A missing key renders as _NO_VALUE — never an invented number.
+    """
+    count = _int_or_none(value)
+    return str(count) if count is not None else _NO_VALUE
+
+
+def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
+    """Ordered inventory sections for a report scoped to discovery runs.
+
+    Returns None when no source run is a discovery run (non-discovery reports
+    omit the inventory entirely), otherwise a list of section dicts
+    ``{title, columns, rows, note}`` so every format builder is one generic loop.
+
+    Determinism: device/point/topic rows inherit DiscoveryRepository's
+    ``ORDER BY (position, id)`` over the immutable terminal-run rows; the only
+    rows not already DB-ordered are the expected-not-responding rows, sorted here
+    by (asset_id, device_instance, source run). No repository ``id`` or
+    ``created_at`` field is ever placed in a rendered row — including one would
+    break byte-reproducibility of the signed artifact.
+    """
+    sources = [source for source in _source_runs(run) if source.job_type in DISCOVERY_JOB_TYPES]
+    if not sources:
+        return None
+
+    repo = DiscoveryRepository(service.engine)
+
+    summary_rows: list[dict[str, str]] = []
+    ip_rows: list[dict[str, str]] = []
+    device_rows: list[dict[str, str]] = []
+    point_rows: list[dict[str, str]] = []
+    topic_rows: list[dict[str, str]] = []
+    # (sort key, row) so the silent rows can be ordered independently of scope.
+    silent_entries: list[tuple[tuple[str, str, str], dict[str, str]]] = []
+
+    has_ip = has_bacnet = has_mqtt = has_silent = False
+
+    for source in sources:
+        run_id = str(source.run_id)
+        summary = source.result_summary if isinstance(source.result_summary, dict) else {}
+
+        if source.job_type == "ip_discovery":
+            has_ip = True
+            devices = [
+                device
+                for device in repo.list_devices(source.run_id)
+                if device.get("device_type") == "ip_host"
+            ]
+            for device in devices:
+                attributes = device.get("attributes") or {}
+                ip_rows.append(
+                    {
+                        "Source Run": run_id,
+                        "Address": _inv_cell(device.get("address")),
+                        "Hostname": _inv_cell(device.get("name")),
+                        "MAC": _inv_cell(attributes.get("mac_address")),
+                        "Open Ports": _inv_ports(attributes.get("open_ports")),
+                        "Forbidden Open": _inv_ports(attributes.get("forbidden_open_ports")),
+                        "Unexpected Open": _inv_ports(attributes.get("unexpected_open_ports")),
+                        "Missing Expected": _inv_ports(attributes.get("missing_expected_ports")),
+                    }
+                )
+            counts = f"{_inv_count(summary.get('hosts_scanned'))} hosts scanned, "
+            counts += f"{_inv_count(summary.get('hosts_responsive'))} responsive"
+
+        elif source.job_type == "bacnet_discovery":
+            has_bacnet = True
+            devices = [
+                device
+                for device in repo.list_devices(source.run_id)
+                if device.get("device_type") == "bacnet_device"
+            ]
+            points = repo.list_points(source.run_id)
+            # Points per device: the point's device_ref is the device's asset_id.
+            points_by_asset: dict[object, int] = {}
+            for point in points:
+                points_by_asset[point.get("device_ref")] = points_by_asset.get(point.get("device_ref"), 0) + 1
+            for device in devices:
+                attributes = device.get("attributes") or {}
+                register = attributes.get("register_asset_name") or attributes.get("register_asset_id")
+                device_rows.append(
+                    {
+                        "Source Run": run_id,
+                        "Instance": _inv_cell(attributes.get("device_instance")),
+                        "Address": _inv_cell(device.get("address")),
+                        "Name": _inv_cell(device.get("name")),
+                        "Vendor": _inv_cell(device.get("vendor")),
+                        "Model": _inv_cell(device.get("model")),
+                        "Register Asset": _inv_cell(register),
+                        "Points": str(points_by_asset.get(attributes.get("asset_id"), 0)),
+                    }
+                )
+            for point in points:
+                attributes = point.get("attributes") or {}
+                read_error = attributes.get("read_error")
+                if read_error:
+                    # A read failure is rendered as the error, never a value.
+                    value = str(read_error)
+                else:
+                    observed = point.get("observed_value") or {}
+                    value = _inv_cell(observed.get("value"))
+                point_rows.append(
+                    {
+                        "Source Run": run_id,
+                        "Device": _inv_cell(point.get("device_ref")),
+                        "Point ID": _inv_cell(point.get("point_id")),
+                        "Point Name": _inv_cell(point.get("point_name")),
+                        "Value": value,
+                        "Units": _inv_cell(point.get("units")),
+                    }
+                )
+            counts = f"{len(devices)} devices, {len(points)} points read"
+            if "expected_responding_count" in summary and "expected_device_count" in summary:
+                responding = _inv_count(summary.get("expected_responding_count"))
+                expected = _inv_count(summary.get("expected_device_count"))
+                counts += f", {responding}/{expected} expected devices responding"
+            # Pre-v0.1.12 bacnet runs never persisted expected_not_responding;
+            # gate the silent section on the key's presence, not truthiness.
+            if "expected_not_responding" in summary:
+                has_silent = True
+                silent_list = summary.get("expected_not_responding")
+                if isinstance(silent_list, list):
+                    for entry in silent_list:
+                        if not isinstance(entry, dict):
+                            continue
+                        asset_id = entry.get("asset_id")
+                        asset_name = entry.get("asset_name")
+                        instance = entry.get("device_instance")
+                        if asset_name and asset_id is not None:
+                            register = f"{asset_name} ({asset_id})"
+                        else:
+                            register = asset_name or asset_id
+                        directed = "sent" if entry.get("directed_probe_sent") else "not sent"
+                        silent_entries.append(
+                            (
+                                (str(asset_id), str(instance), run_id),
+                                {
+                                    "Source Run": run_id,
+                                    "Register Asset": _inv_cell(register),
+                                    "Instance": _inv_cell(instance),
+                                    "Address": _inv_cell(entry.get("address")),
+                                    "Directed Who-Is": directed,
+                                },
+                            )
+                        )
+
+        else:  # mqtt_discovery
+            has_mqtt = True
+            for topic in repo.list_topics(source.run_id):
+                attributes = topic.get("attributes") or {}
+                # last_payload is deliberately excluded — non-tabular, and a
+                # signed shareable artifact should not embed captured payloads.
+                topic_rows.append(
+                    {
+                        "Source Run": run_id,
+                        "Topic": _inv_cell(topic.get("topic")),
+                        "Messages": _inv_cell(topic.get("message_count")),
+                        "Device Ref": _inv_cell(attributes.get("device_ref")),
+                    }
+                )
+            counts = f"{_inv_count(summary.get('topics_discovered'))} topics, "
+            counts += f"{_inv_count(summary.get('messages_captured'))} messages"
+
+        summary_rows.append(
+            {
+                "Source Run": run_id,
+                "Type": str(source.job_type),
+                "Status": str(source.status),
+                "Counts": counts,
+            }
+        )
+
+    silent_entries.sort(key=lambda item: item[0])
+    silent_rows = [row for _, row in silent_entries]
+
+    def _section(
+        title: str,
+        columns: tuple[str, ...],
+        rows: list[dict[str, str]],
+        *,
+        note: str | None = None,
+    ) -> dict[str, object]:
+        # Non-silent sections with no rows carry the empty note so every builder
+        # renders "empty scan is a recorded result" instead of a bare heading.
+        effective_note = note if note is not None else (None if rows else _INVENTORY_EMPTY_NOTE)
+        return {"title": title, "columns": columns, "rows": rows, "note": effective_note}
+
+    sections: list[dict[str, object]] = [
+        _section(_INVENTORY_SUMMARY_TITLE, _INVENTORY_SUMMARY_COLUMNS, summary_rows)
+    ]
+    if has_ip:
+        sections.append(_section(_INVENTORY_IP_TITLE, _IP_INVENTORY_COLUMNS, ip_rows))
+    if has_bacnet:
+        sections.append(_section(_INVENTORY_BACNET_DEVICES_TITLE, _BACNET_DEVICE_COLUMNS, device_rows))
+        sections.append(_section(_INVENTORY_BACNET_POINTS_TITLE, _BACNET_POINT_COLUMNS, point_rows))
+    if has_silent:
+        sections.append(
+            _section(
+                _INVENTORY_BACNET_SILENT_TITLE,
+                _BACNET_SILENT_COLUMNS,
+                silent_rows,
+                note=_BACNET_SILENT_NOTE,
+            )
+        )
+    if has_mqtt:
+        sections.append(_section(_INVENTORY_MQTT_TITLE, _MQTT_TOPIC_COLUMNS, topic_rows))
+    return sections
+
+
+def _apply_xlsx_branding(workbook: Workbook, run_id: str) -> None:
+    """Apply the text-only branding band to every sheet's page header/footer.
+
+    Header: wordmark (left) + document title (right). Footer: wordmark (left) +
+    "Page N of M" (center) + run id (right). These surface in Excel's Page
+    Layout view and on print — exactly the ITP-pack use. openpyxl serializes
+    header/footer as a static <headerFooter> element per sheet, so the bytes are
+    deterministic and survive _normalize_zip_bytes unchanged. Called once, after
+    all sheets exist, so every sheet is covered regardless of which conditional
+    validation sections were created.
+    """
+    for sheet in workbook.worksheets:
+        sheet.oddHeader.left.text = _BRAND_NAME
+        sheet.oddHeader.right.text = _BRAND_DOC_TITLE
+        sheet.oddFooter.left.text = _BRAND_NAME
+        # openpyxl's friendly page tokens: &[Page] -> &P, &[Pages] would -> &N;
+        # &N is written directly. Serialized into each sheet XML as &amp;P/&amp;N.
+        sheet.oddFooter.center.text = "Page &[Page] of &N"
+        sheet.oddFooter.right.text = run_id
+
+
 def _build_xlsx_report(run: object) -> bytes:
     workbook = Workbook()
     # openpyxl stamps docProps/core.xml with the current time on save; pin the
@@ -470,6 +829,27 @@ def _build_xlsx_report(run: object) -> bytes:
         summary_sheet.append([validation["overall_row"][column] for column in _VALIDATION_SUMMARY_COLUMNS])
         for column, width in {"A": 26, "B": 18, "C": 12, "D": 16, "E": 12, "F": 10, "G": 16, "H": 18}.items():
             summary_sheet.column_dimensions[column].width = width
+    # Discovery inventory sheets (one per section) when the scoped source runs
+    # include discovery runs; other report types keep their prior shape.
+    inventory = _discovery_inventory(run)
+    if inventory is not None:
+        for section in inventory:
+            columns = section["columns"]
+            sheet_title = _INVENTORY_SHEET_NAMES.get(section["title"], section["title"])
+            inventory_sheet = workbook.create_sheet(sheet_title)
+            # A remapped (truncated) sheet name loses the full title — surface it
+            # as row 1 so the abbreviation is never the only record of the head.
+            if sheet_title != section["title"]:
+                inventory_sheet.append([section["title"]])
+            if section["note"]:
+                inventory_sheet.append([section["note"]])
+            inventory_sheet.append(list(columns))
+            for row in section["rows"]:
+                inventory_sheet.append([row[column] for column in columns])
+            for index, column in enumerate(columns, start=1):
+                width = _INVENTORY_COLUMN_WIDTHS.get(column)
+                if width:
+                    inventory_sheet.column_dimensions[get_column_letter(index)].width = width
     # Failure detail: findings from the scoped source runs (the actual report
     # content, not just the metadata above). Empty source runs -> header-only.
     findings = _source_run_findings(run)
@@ -488,6 +868,8 @@ def _build_xlsx_report(run: object) -> bytes:
             silent_sheet.append([row[column] for column in _SILENT_COLUMNS])
         silent_sheet.column_dimensions["A"].width = 30
         silent_sheet.column_dimensions["B"].width = 46
+    # Branding must run after every create_sheet so all sheets carry the band.
+    _apply_xlsx_branding(workbook, str(run.run_id))
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
@@ -520,6 +902,66 @@ def _docx_table(columns: tuple[str, ...], rows: list[dict[str, str]]) -> str:
     )
 
 
+# --- DOCX branding parts (real OOXML header/footer) --------------------------
+# Word requires the header/footer as separate parts referenced from the section
+# properties via relationship ids. The header is a constant; the footer carries
+# the run id so it is built per run. fldSimple PAGE/NUMPAGES fields hold a "1"
+# placeholder that Word recomputes on open/print (kept static so the bytes stay
+# reproducible — do NOT precompute it into a real page count).
+_DOCX_HEADER_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    "<w:p><w:pPr>"
+    '<w:pBdr><w:bottom w:val="single" w:sz="4" w:space="1" w:color="auto"/></w:pBdr>'
+    '<w:tabs><w:tab w:val="right" w:pos="9026"/></w:tabs>'
+    "</w:pPr>"
+    f'<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">{escape(_BRAND_NAME)}</w:t></w:r>'
+    "<w:r><w:tab/></w:r>"
+    f'<w:r><w:t xml:space="preserve">{escape(_BRAND_DOC_TITLE)}</w:t></w:r>'
+    "</w:p></w:hdr>"
+)
+
+# Two relationships from word/document.xml to the header and footer parts. This
+# file does not exist in the base 3-member docx — it must be created.
+_DOCX_DOCUMENT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdHdr1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rIdFtr1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>"""
+
+# Section properties wiring the header/footer references in and declaring A4 (to
+# match the PDF; a sectPr-less docx defaults to Letter in Word). Child order —
+# headerReference, footerReference, pgSz, pgMar — follows the ECMA-376 sequence.
+_DOCX_SECTPR = (
+    "<w:sectPr>"
+    '<w:headerReference w:type="default" r:id="rIdHdr1"/>'
+    '<w:footerReference w:type="default" r:id="rIdFtr1"/>'
+    '<w:pgSz w:w="11906" w:h="16838"/>'
+    '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>'
+    "</w:sectPr>"
+)
+
+
+def _build_docx_footer_xml(run_id: str) -> str:
+    """word/footer1.xml: wordmark + Page N of M (PAGE/NUMPAGES fields) + run id."""
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:p><w:pPr>"
+        '<w:tabs><w:tab w:val="center" w:pos="4513"/><w:tab w:val="right" w:pos="9026"/></w:tabs>'
+        "</w:pPr>"
+        f'<w:r><w:t xml:space="preserve">{escape(_BRAND_NAME)}</w:t></w:r>'
+        "<w:r><w:tab/></w:r>"
+        '<w:r><w:t xml:space="preserve">Page </w:t></w:r>'
+        '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+        '<w:r><w:t xml:space="preserve"> of </w:t></w:r>'
+        '<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+        "<w:r><w:tab/></w:r>"
+        f'<w:r><w:t xml:space="preserve">{escape(run_id)}</w:t></w:r>'
+        "</w:p></w:ftr>"
+    )
+
+
 def _build_docx_report(run: object) -> bytes:
     blocks: list[str] = [_docx_paragraph("Smart Commissioning Report", bold=True)]
     blocks.extend(_docx_paragraph(f"{label}: {value}") for label, value in _report_rows(run))
@@ -531,6 +973,17 @@ def _build_docx_report(run: object) -> bytes:
         # The paragraph after each table doubles as the Word-required trailing
         # paragraph (a body may not end <w:tbl><w:sectPr/>).
         blocks.append(_docx_paragraph(validation["overall_text"]))
+
+    inventory = _discovery_inventory(run)
+    if inventory is not None:
+        for section in inventory:
+            blocks.append(_docx_paragraph(section["title"], bold=True))
+            if section["note"]:
+                blocks.append(_docx_paragraph(section["note"]))
+            if section["rows"]:
+                blocks.append(_docx_table(section["columns"], section["rows"]))
+                # Trailing paragraph so a body never ends on <w:tbl> (Word rule).
+                blocks.append(_docx_paragraph(""))
 
     blocks.append(_docx_paragraph(_FAILURE_SECTION_TITLE, bold=True))
     findings = _source_run_findings(run)
@@ -551,10 +1004,10 @@ def _build_docx_report(run: object) -> bytes:
 
     body_xml = "\n    ".join(blocks)
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <w:body>
     {body_xml}
-    <w:sectPr/>
+    {_DOCX_SECTPR}
   </w:body>
 </w:document>"""
     buffer = BytesIO()
@@ -566,6 +1019,8 @@ def _build_docx_report(run: object) -> bytes:
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>
 </Types>""",
         )
         archive.writestr(
@@ -576,6 +1031,9 @@ def _build_docx_report(run: object) -> bytes:
 </Relationships>""",
         )
         archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/_rels/document.xml.rels", _DOCX_DOCUMENT_RELS)
+        archive.writestr("word/header1.xml", _DOCX_HEADER_XML)
+        archive.writestr("word/footer1.xml", _build_docx_footer_xml(str(run.run_id)))
     return buffer.getvalue()
 
 
@@ -605,6 +1063,28 @@ def _build_zip_report(run: object) -> bytes:
                 "silent_systems.json",
                 json.dumps({"note": _SILENT_NOTE, "rows": validation["silent_rows"]}, indent=2),
             )
+        # Discovery inventory (parity with the document formats): its own member
+        # when the source runs include discovery runs, absent otherwise. Key
+        # order is fixed by construction so the member bytes stay reproducible.
+        inventory = _discovery_inventory(run)
+        if inventory is not None:
+            archive.writestr(
+                "discovery_inventory.json",
+                json.dumps(
+                    {
+                        "sections": [
+                            {
+                                "title": section["title"],
+                                "columns": list(section["columns"]),
+                                "rows": section["rows"],
+                                **({"note": section["note"]} if section["note"] else {}),
+                            }
+                            for section in inventory
+                        ]
+                    },
+                    indent=2,
+                ),
+            )
     return buffer.getvalue()
 
 
@@ -626,9 +1106,34 @@ _PDF_FINDING_IDENTITY_COLUMNS = ("Source Run", "Issue ID", "Asset", "Severity", 
 _PDF_FINDING_IDENTITY_WEIGHTS = (136, 62, 72, 47, 86, 92)
 _PDF_FINDING_DETAIL_FIELDS = ("Expected", "Observed", "Suggested Action", "Description")
 
+# Relative column weights for the fixed-width inventory PDF tables. Long text
+# columns (Counts, Topic, Point Name) get more room; every cell still truncates
+# with an ellipsis. Truncation is acceptable ONLY because the xlsx and zip
+# artifacts carry the full untruncated values — same honesty trade-off as
+# _PDF_SUMMARY_WEIGHTS; do not "fix" truncation by dropping columns.
+_PDF_INVENTORY_SUMMARY_WEIGHTS = (80, 60, 45, 220)
+_PDF_IP_WEIGHTS = (92, 74, 70, 58, 62, 46, 46, 46)
+_PDF_BACNET_DEVICE_WEIGHTS = (92, 42, 62, 74, 52, 52, 74, 30)
+_PDF_BACNET_POINT_WEIGHTS = (86, 60, 56, 104, 78, 40)
+_PDF_BACNET_SILENT_WEIGHTS = (86, 96, 44, 72, 58)
+_PDF_MQTT_WEIGHTS = (72, 214, 46, 80)
+_PDF_INVENTORY_WEIGHTS = {
+    _INVENTORY_SUMMARY_TITLE: _PDF_INVENTORY_SUMMARY_WEIGHTS,
+    _INVENTORY_IP_TITLE: _PDF_IP_WEIGHTS,
+    _INVENTORY_BACNET_DEVICES_TITLE: _PDF_BACNET_DEVICE_WEIGHTS,
+    _INVENTORY_BACNET_POINTS_TITLE: _PDF_BACNET_POINT_WEIGHTS,
+    _INVENTORY_BACNET_SILENT_TITLE: _PDF_BACNET_SILENT_WEIGHTS,
+    _INVENTORY_MQTT_TITLE: _PDF_MQTT_WEIGHTS,
+}
+
 
 def _build_pdf_report(run: object) -> bytes:
-    document = PdfDocument()
+    document = PdfDocument(
+        header_left=_BRAND_NAME,
+        header_right=_BRAND_DOC_TITLE,
+        footer_left=_BRAND_NAME,
+        footer_right=str(run.run_id),
+    )
     document.add_heading("Smart Commissioning Report", level=1)
     for label, value in _report_rows(run):
         document.add_paragraph(f"{label}: {value}")
@@ -643,6 +1148,22 @@ def _build_pdf_report(run: object) -> bytes:
             size=_PDF_DENSE_TABLE_SIZE,
         )
         document.add_paragraph(validation["overall_text"])
+
+    inventory = _discovery_inventory(run)
+    if inventory is not None:
+        for section in inventory:
+            document.add_heading(section["title"])
+            if section["note"]:
+                document.add_paragraph(section["note"])
+            rows = section["rows"]
+            if rows:
+                columns = section["columns"]
+                document.add_table(
+                    columns,
+                    [[row[column] for column in columns] for row in rows],
+                    widths=_PDF_INVENTORY_WEIGHTS.get(section["title"]),
+                    size=_PDF_DENSE_TABLE_SIZE,
+                )
 
     document.add_heading(_FAILURE_SECTION_TITLE)
     findings = _source_run_findings(run)
