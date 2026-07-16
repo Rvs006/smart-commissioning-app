@@ -573,9 +573,17 @@ class Bacpypes3BackendGuardTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         # A real, recorded failure — not a silent success with fabricated data.
         self.assertIsNotNone(store.last_error)
-        # No simulated fallback: no result summary (no "simulated" backend label)
-        # and NO devices/points were persisted.
-        self.assertEqual(store.summary_calls, [])
+        # A diagnostics summary IS recorded: v0.1.12 seeds it before the scan so
+        # every hard failure (including "the real backend isn't installed") is
+        # reconstructible from the run record alone. It must stay HONEST, though —
+        # a real bacpypes3-backend failure, never a simulated fallback and never
+        # fabricated data: the "bacpypes3" label (not "simulated"), zero devices,
+        # transport unverified, and no device/point records persisted.
+        self.assertEqual(len(store.summary_calls), 1)
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["backend"], "bacpypes3")
+        self.assertEqual(summary["device_count"], 0)
+        self.assertFalse(summary["bacnet_diagnostics"]["transport_verified"])
         self.assertEqual(persisted, [])
 
     def test_authorized_bacpypes3_run_without_source_interface_fails_with_reason(self) -> None:
