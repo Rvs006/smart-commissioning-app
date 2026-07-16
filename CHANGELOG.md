@@ -5,7 +5,7 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.13] - 2026-07-16
 
 The rest of the 2026-07-15 walkthrough punch list — the items an audit found
 still missing after v0.1.11 shipped. Like v0.1.11, none of this changes how a
@@ -93,7 +93,7 @@ refactor (no user-visible change, real rebase risk under the dated BACnet fix).
 > seeded defaults. Fabricated *statuses* are healed on load, but any new default
 > values a site should run with still need setting by hand on existing installs.
 
-## [0.1.12 — pending] BACnet foreign-device registration
+## [0.1.12] - 2026-07-16 — BACnet foreign-device registration
 
 **Two things to know before you rely on any of it.**
 
@@ -992,5 +992,7 @@ validation before production rollout:
 See [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) for the
 full checklist.
 
-[Unreleased]: https://github.com/Rvs006/smart-commissioning-app/commits/main
+[0.1.13]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.13
+[0.1.12]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.12
+[0.1.11]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.11
 [0.1.1]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.1
