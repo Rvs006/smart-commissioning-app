@@ -201,10 +201,9 @@ class DiscoveryInventoryReportApiTests(ApiTestCase):
         points: list[dict] | None = None,
         topics: list[dict] | None = None,
     ) -> str:
-        from smart_commissioning_core.db.repositories import DiscoveryRepository
-
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from smart_commissioning_core.db.repositories import DiscoveryRepository
 
         run_service = RunService()
         run = run_service.create_job_run(

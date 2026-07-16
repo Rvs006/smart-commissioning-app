@@ -19,7 +19,6 @@ from pathlib import Path
 from unittest import mock
 
 import httpx
-
 from app.core.logging import (
     _SCT_FILE_HANDLER_FLAG,
     configure_file_logging,

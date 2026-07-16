@@ -48,6 +48,7 @@ from app.services.engine_dispatch import (
     make_import_loader,
 )
 from app.services.job_queue import JobQueueService, JobQueueUnavailable
+
 # Relocated to app.services.register_topics (shared with the MQTT discovery
 # register-comparison); imported under the original private name so the single
 # call site in _asset_entry_from_row and the direct test import in
