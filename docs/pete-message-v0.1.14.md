@@ -25,25 +25,11 @@ down). The message therefore carries the SmartScreen note, not the IT one.
 ```text
 Hi Pete,
 
-One more build on top of this morning's - v0.1.14. Use this one:
+New build - v0.1.14. Use this one:
 https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.14
 Download: Smart_Commissioning_App_Windows_Portable.zip (about 32MB)
 
-It clears out the last of the demo content that shouldn't have been there:
-
-- The example row in the import templates named a made-up site - it now
-  says "Example Site / Plant Room" so it can't be confused with a real one
-- The validation pages used to show a few made-up example issues before
-  you'd run anything - now they stay empty until you run a validation
-- Some leftover demo data inside the app is gone completely
-
-Nothing about how scans, checks or reports work has changed. Already on
-v0.1.13? Just replace the app folder with this one - your settings and
-results are kept. And any reports for the ITP pack, generate them on this
-build.
-
-For the full picture, everything from this week's builds is in this one
-download:
+What's in the app:
 
 - Version number on the front page, Electracom logo and look throughout
 - Menus named properly: IP Discovery, BACnet Discovery, MQTT Discovery
@@ -61,11 +47,8 @@ download:
   run, and a schema template download for the non-published sets
 - Certificates pill tells the truth, and logs can be saved to file or
   uploaded so nobody needs remote access to fetch them
-
-Windows may warn when you first run it because the app isn't signed - pick
-"More info" then "Run anyway", same as the last builds.
-
-Monday is unchanged - same plan, same prep.
+- All demo content gone: templates use neutral example values and results
+  pages stay empty until a real run
 
 Cheers,
 Raj
