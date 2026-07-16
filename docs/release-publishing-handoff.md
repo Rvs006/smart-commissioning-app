@@ -1,5 +1,9 @@
 # Handoff — publish the GitHub Releases for v0.1.11 / v0.1.12 / v0.1.13
 
+> **✅ EXECUTED 2026-07-16.** All three Releases are published (v0.1.13 is
+> marked latest) and the CHANGELOG sections are cut. Do not re-run this doc;
+> it is kept for the notes text and the optional exe-attachment steps below.
+
 **Written 2026-07-16.** For the next Claude Code session, on an account that HAS
 GitHub credentials (the session that produced this did not, so it could tag and
 push but could not publish Releases). Self-contained: you do not need the prior
