@@ -15,6 +15,7 @@ from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.logging import (
     REQUEST_ID_HEADER,
+    configure_file_logging,
     configure_logging,
     new_request_id,
     reset_request_id,
@@ -27,6 +28,12 @@ from app.core.observability import (
     route_template,
 )
 from app.core.runtime import ensure_runtime_directories
+from app.services.log_service import (
+    LOG_DIR,
+    apply_logging_settings,
+    purge_old_logs,
+    retention_days,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +47,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     startup_settings = get_settings()
     # Install the structured JSON log formatter + correlation filter before
     # anything else logs during startup.
-    configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
+    startup_level = os.environ.get("LOG_LEVEL", "INFO")
+    configure_logging(startup_level)
+    # Always install the local rotating file handler with env/INFO defaults, so
+    # file logging exists even if the configured settings below cannot be read
+    # (fresh or unmigrated DB). apply_logging_settings re-points it on success.
+    configure_file_logging(LOG_DIR, startup_level)
     if startup_settings.auth_mode == "api_key" and not (startup_settings.api_key or "").strip():
         logger.warning(
             "AUTH_MODE is 'api_key' but API_KEY is not set; "
@@ -50,6 +62,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # The backend owns the schema: create/upgrade it before serving.
         ensure_runtime_directories()
         upgrade_to_head(startup_settings.database_url)
+    # Apply the operator-configured logging level and run the startup retention
+    # purge. Fully guarded (the metrics scrape / crash-logger precedent: startup
+    # side-effects must never block boot); the DB read must follow the migration
+    # above. When auto_migrate is False on a virgin DB this simply falls through
+    # to the console+file defaults installed above.
+    try:
+        from app.services.configuration_service import ConfigurationService
+
+        logging_values = ConfigurationService().load(mask_secrets=False).logging.values
+        apply_logging_settings(logging_values)
+        purge_old_logs(LOG_DIR, retention_days(logging_values))
+    except Exception:  # noqa: BLE001 (configured logging is best-effort; never block startup)
+        logger.debug("Could not apply configured logging settings.", exc_info=True)
     yield
 
 

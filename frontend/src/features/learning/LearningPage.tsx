@@ -7,8 +7,8 @@ import { getTheme, toggleTheme } from "../../app/theme";
 // Mirrors the Electracom reference course: pick a role, get a goal + a guided
 // walkthrough of the real modules (Configuration, IP Discovery, BACnet/MQTT/UDMI
 // discovery, Data Validation, Reports, Hub) grounded in that role's site job.
-// An "Installation & Setup" panel sits above the role paths: pick an install
-// path (Windows portable / Docker), then the shared first-run steps.
+// An "Installation & Setup" panel sits above the role paths: install the
+// Windows portable app, then the shared first-run steps.
 
 type WalkRow = { lab: string; text: ReactNode };
 type Lesson = { num: string; title: string; rows: WalkRow[] };
@@ -525,7 +525,7 @@ const SETUP_PATHS: SetupPath[] = [
     note: {
       kind: "warn",
       title: "Locked-down company laptop?",
-      text: "If your laptop uses application allow-listing (for example ThreatLocker), the unsigned exe may be blocked from running at all. Ask IT to approve it, or use the Docker path instead.",
+      text: "If your laptop uses application allow-listing (for example ThreatLocker), the unsigned exe may be blocked from running at all. Ask IT to approve it by file hash: open PowerShell in the extracted folder, run Get-FileHash .\\SmartCommissioningApp.exe, and send IT the printed SHA-256 value with the release page link. Approval is per file hash, so every new release needs a fresh approval.",
     },
     lessons: [
       {
@@ -599,70 +599,6 @@ const SETUP_PATHS: SetupPath[] = [
           {
             lab: "Why",
             text: "The portable app trusts your own machine (loopback), so no API key or sign-in is needed. When you are done, stop the app with Ctrl+C in the console or close the console window.",
-          },
-        ],
-      },
-    ],
-  },
-  {
-    id: "docker",
-    label: "Docker Desktop (shared / team)",
-    icon: "🐳",
-    blurb: "One command brings up the identical full stack for everyone.",
-    note: {
-      kind: "warn",
-      title: "Before you start",
-      text: "Docker Desktop must be installed and running; a machine with around 32 GB RAM is recommended for the full stack; and you need the repository cloned — it is private, so ask your project lead for access.",
-    },
-    lessons: [
-      {
-        num: "1",
-        title: "Generate a key and start the stack",
-        rows: [
-          {
-            lab: "Do",
-            text: (
-              <>
-                From the repository folder run <code>./scripts/bootstrap-env.ps1</code> (Windows,
-                PowerShell 7) or <code>./scripts/bootstrap-env.sh</code> (Linux/macOS), then{" "}
-                <code>
-                  docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
-                </code>
-                .
-              </>
-            ),
-          },
-          {
-            lab: "See",
-            text: "The script writes infra/.env with fresh random secrets and prints your API_KEY — keep a copy: it is your sign-in key. Then the containers build, start, and report healthy.",
-          },
-          {
-            lab: "Why",
-            text: "UI, API, worker, database and queue start together — identically on every machine, which is why this path is recommended for shared team servers.",
-          },
-        ],
-      },
-      {
-        num: "2",
-        title: "Open and sign in",
-        rows: [
-          {
-            lab: "Go to",
-            text: <code>http://127.0.0.1:8080</code>,
-          },
-          {
-            lab: "Do",
-            text: (
-              <>
-                Click <strong>Set API key</strong> at the top-right of the header, paste the
-                API_KEY value you generated, and save.
-              </>
-            ),
-          },
-          { lab: "See", text: "The page reloads and shows your role." },
-          {
-            lab: "Why",
-            text: "Hosted deployments require a key for every action — without one, Run / Upload / Export stay disabled by design.",
           },
         ],
       },
@@ -797,31 +733,33 @@ export function LearningPage() {
             <div className="dc-kicker">Installation &amp; Setup</div>
             <h1 className="dc-h1">Get the tool running first.</h1>
             <p className="dc-lead">
-              Two ways to run it — pick the one that matches how you work, then do the two
-              first-run steps below.
+              One supported way to run it — the Windows portable app — then the two first-run
+              steps below.
             </p>
           </div>
 
-          <div className="dc-role-picker">
-            <div className="dc-role-picker-label">
-              Install using…
-              <small>Pick the way you will run the tool.</small>
+          {SETUP_PATHS.length > 1 && (
+            <div className="dc-role-picker">
+              <div className="dc-role-picker-label">
+                Install using…
+                <small>Pick the way you will run the tool.</small>
+              </div>
+              <div className="dc-role-pills">
+                {SETUP_PATHS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    aria-pressed={p.id === setupPathId}
+                    className={`dc-role-pill${p.id === setupPathId ? " active" : ""}`}
+                    onClick={() => setSetupPathId(p.id)}
+                  >
+                    <span className="dc-role-pill-icon">{p.icon}</span>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
             </div>
-            <div className="dc-role-pills">
-              {SETUP_PATHS.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  aria-pressed={p.id === setupPathId}
-                  className={`dc-role-pill${p.id === setupPathId ? " active" : ""}`}
-                  onClick={() => setSetupPathId(p.id)}
-                >
-                  <span className="dc-role-pill-icon">{p.icon}</span>
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          </div>
+          )}
 
           <div className="dc-hero">
             <div className="dc-hero-kicker">This path</div>

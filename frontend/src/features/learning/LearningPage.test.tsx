@@ -13,30 +13,29 @@ function renderLearning() {
 }
 
 describe("LearningPage — Installation & Setup", () => {
-  it("shows the setup section with the Windows portable path selected by default", () => {
+  it("shows the setup section with the portable steps and no Docker path", () => {
     renderLearning();
 
     expect(screen.getByText("Installation & Setup")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Windows portable app/ }),
-    ).toBeInTheDocument();
 
     // Portable steps are visible: the exe name renders as a code chip.
     expect(screen.getAllByText("SmartCommissioningApp.exe").length).toBeGreaterThan(0);
     expect(screen.getByText("You are already signed in")).toBeInTheDocument();
+
+    // The single-entry install picker is hidden, and Docker is gone entirely.
+    expect(screen.queryByRole("button", { name: /Docker/i })).not.toBeInTheDocument();
   });
 
-  it("switches to the Docker path: bootstrap script, compose command and Set API key appear, exe steps go", () => {
+  it("purges the Docker path and names the SHA-256 allow-listing flow instead", () => {
     renderLearning();
 
-    fireEvent.click(screen.getByRole("button", { name: /Docker Desktop/ }));
+    // No Docker container instructions survive anywhere on the page.
+    expect(screen.queryByText(/docker compose/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("./scripts/bootstrap-env.ps1")).not.toBeInTheDocument();
 
-    expect(screen.getByText("./scripts/bootstrap-env.ps1")).toBeInTheDocument();
-    expect(
-      screen.getByText(/docker compose -f infra\/docker-compose\.yml --env-file infra\/\.env up/),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Set API key")).toBeInTheDocument();
-    expect(screen.queryByText("SmartCommissioningApp.exe")).not.toBeInTheDocument();
+    // The locked-down-laptop note now describes the IT hash-approval flow.
+    expect(screen.getByText(/Get-FileHash/)).toBeInTheDocument();
+    expect(screen.getByText(/SHA-256/)).toBeInTheDocument();
   });
 
   it("always shows the shared first-run steps", () => {
@@ -44,10 +43,6 @@ describe("LearningPage — Installation & Setup", () => {
 
     expect(screen.getByText("Source Interface")).toBeInTheDocument();
     expect(screen.getByText(/no packets are sent and no authorization is needed/)).toBeInTheDocument();
-
-    // Still there after switching install path.
-    fireEvent.click(screen.getByRole("button", { name: /Docker Desktop/ }));
-    expect(screen.getByText("Source Interface")).toBeInTheDocument();
   });
 });
 

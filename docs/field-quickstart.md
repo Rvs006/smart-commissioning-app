@@ -11,6 +11,10 @@ Installation & Setup**; this is the short version.
       GitHub **Releases** page. Check the asset date is current.
 - [ ] A wired connection to the target network: built-in Ethernet, or a
       **USB-C-to-Ethernet adapter** if the laptop has no RJ45 port.
+- [ ] Locked-down laptop (ThreatLocker or similar)? Get IT to approve the exe by
+      SHA-256 hash BEFORE you leave: `Get-FileHash .\SmartCommissioningApp.exe`
+      in PowerShell prints it. Every release is a new file with a new hash, so
+      re-approval is per release.
 
 ## Get it running (about 2 minutes)
 
@@ -83,8 +87,9 @@ copy as sensitive.
 
 - **Scan finds nothing and no firewall popup appeared** → Windows Firewall is the
   first suspect, not the app. Allow it and retry.
-- **Source Interface dropdown shows only "Auto"** → you are on the Docker build,
-  not the portable exe (Docker cannot see the laptop's NICs). Use the exe.
+- **Source Interface dropdown shows only "Auto"** → you are on a discontinued
+  container (Docker-era) build. Use the portable exe from the latest release — it
+  reads the laptop's real NICs.
 - **A device is unreachable / broker won't connect** → the tool records a real
   failure status. It never fakes a pass — a red result is real, chase the network.
 - **Anything else** → close the console window to stop the app, then send the

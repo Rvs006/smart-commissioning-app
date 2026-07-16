@@ -5,7 +5,6 @@
 // (GET /validation/runs/{id}/issues), and the report queue (GET /reports).
 //
 // What stays sample (kept here, labelled in the UI as "Sample preview"):
-//  - workflowStages: no workflow-status aggregate endpoint exists.
 //  - moduleWorkspaces.*.rows + the "Result" interpretation columns for
 //    validation modules: register-comparison verdicts are produced by a
 //    validation run, not returned by discovery results.
@@ -176,10 +175,12 @@ export function mergeAssetGroups(
 
 // Single source of truth for the per-payload-type UDMI verdict, shared by the
 // results-table rows, the row "View" detail, and the per-asset payload sections
-// so the three surfaces can never disagree. Boolean pass/fail per the field ask:
-// "Pass with notes" (minor issues only) still counts green; "Not received"
-// (nothing observed, nothing flagged) is neutral — no shade either way.
-export type UdmiVerdictKind = "pass" | "pass-notes" | "fail" | "none";
+// so the three surfaces can never disagree. RAG scheme per the 2026-07-15 field
+// ask: red = device offline / not publishing (only ever when a capture was
+// actually attempted), amber = publishing but not UDMI compliant (any severity,
+// no issue weighting), green = compliant and observed. "Not received" — no
+// capture evidence either way — stays neutral: no shade, no claim.
+export type UdmiVerdictKind = "pass" | "pass-notes" | "fail" | "offline" | "none";
 
 export type UdmiVerdict = {
   verdict: UdmiVerdictKind;
@@ -191,17 +192,25 @@ export function udmiPayloadVerdict(input: {
   majorCount: number;
   totalIssues: number;
   observedPresent: boolean;
+  assetOffline?: boolean;
 }): UdmiVerdict {
-  const { criticalCount, majorCount, totalIssues, observedPresent } = input;
+  const { criticalCount, majorCount, totalIssues, observedPresent, assetOffline } = input;
+  // Offline wins FIRST — before the issue counts — so the asset's own
+  // "not_publishing" issue cannot shadow it. The !observedPresent guard keeps
+  // an actually-observed payload from ever being painted offline (honesty rule:
+  // never render an observation the app did not make).
+  if (assetOffline && !observedPresent) {
+    return { label: "Offline — did not publish", verdict: "offline" };
+  }
   if (criticalCount > 0) {
     return {
-      label: `Fail — ${totalIssues} issue${totalIssues === 1 ? "" : "s"} (${criticalCount} critical)`,
+      label: `Non-compliant — ${totalIssues} issue${totalIssues === 1 ? "" : "s"} (${criticalCount} critical)`,
       verdict: "fail",
     };
   }
   if (majorCount > 0) {
     return {
-      label: `Fail — ${totalIssues} issue${totalIssues === 1 ? "" : "s"}`,
+      label: `Non-compliant — ${totalIssues} issue${totalIssues === 1 ? "" : "s"}`,
       verdict: "fail",
     };
   }
@@ -213,32 +222,45 @@ export function udmiPayloadVerdict(input: {
     : { label: "Not received", verdict: "none" };
 }
 
-// Boolean shading tone for a verdict: green for pass / pass-notes, red for
-// fail, and null (no shade) for "Not received".
-export function udmiVerdictTone(verdict: UdmiVerdictKind): "pass" | "fail" | null {
-  if (verdict === "fail") {
+// Shading tone for a verdict under the RAG scheme: green (pass) for a compliant
+// observed payload; amber (warn) for a publishing-but-non-compliant payload —
+// both hard fails (critical/major) AND minor-only "Pass with notes"; red (fail)
+// for an offline / not-publishing device; null (no shade) for "Not received".
+//
+// Pete-pending (2026-07-15 field ask): the strict reading maps minor-only
+// "Pass with notes" to amber. If he wants minor-only to stay green instead,
+// flip the single `pass-notes` line below to `return "pass"` — this function is
+// the one and only place that decision lives.
+export function udmiVerdictTone(verdict: UdmiVerdictKind): "pass" | "warn" | "fail" | null {
+  if (verdict === "offline") {
     return "fail";
+  }
+  if (verdict === "fail") {
+    return "warn";
+  }
+  if (verdict === "pass-notes") {
+    return "warn";
   }
   return verdict === "none" ? null : "pass";
 }
 
 // Convenience for callers holding an issue list: counts by severity, then
-// delegates to udmiPayloadVerdict.
-export function udmiVerdictForIssues(issues: IssueRow[], observedPresent: boolean): UdmiVerdict {
+// delegates to udmiPayloadVerdict. assetOffline flags a device a capture
+// attempt found silent (not_publishing) — never inferred from observed_present
+// alone.
+export function udmiVerdictForIssues(
+  issues: IssueRow[],
+  observedPresent: boolean,
+  assetOffline = false,
+): UdmiVerdict {
   return udmiPayloadVerdict({
+    assetOffline,
     criticalCount: issues.filter((issue) => issue.severity === "critical").length,
     majorCount: issues.filter((issue) => issue.severity === "major").length,
     observedPresent,
     totalIssues: issues.length,
   });
 }
-
-export type WorkflowStage = {
-  name: string;
-  state: HealthState;
-  summary: string;
-  action: string;
-};
 
 export type ModuleWorkspace = {
   route: string;
@@ -250,33 +272,6 @@ export type ModuleWorkspace = {
   issues: IssueRow[];
   evidence: string[];
 };
-
-export const workflowStages: WorkflowStage[] = [
-  {
-    name: "Configuration",
-    state: "ready",
-    summary: "Network, BACnet, MQTT, certificate, time, backup, and logging settings are loaded.",
-    action: "Review settings",
-  },
-  {
-    name: "Registers",
-    state: "warning",
-    summary: "IP and MQTT registers are accepted. BACnet point register still needs upload.",
-    action: "Upload missing register",
-  },
-  {
-    name: "Discovery",
-    state: "running",
-    summary: "IP and MQTT discovery are queued. BACnet discovery awaits approved network window.",
-    action: "Monitor runs",
-  },
-  {
-    name: "Validation",
-    state: "failed",
-    summary: "UDMI payload checks found pointset mismatches and silent devices.",
-    action: "Resolve issues",
-  },
-];
 
 // Labelled sample issues. Used only as a fallback in the module inspector when
 // no live validation run has been executed; live runs replace these.

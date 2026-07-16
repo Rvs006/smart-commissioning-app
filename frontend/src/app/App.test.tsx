@@ -159,6 +159,9 @@ describe("App shell", () => {
     expect(screen.getByRole("link", { name: /UDMI Workbench/ })).toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: "Homepage" })).toBeInTheDocument();
 
+    // The fictional "Block B Plantroom" site pill was purged from the header.
+    expect(screen.queryByText("Block B Plantroom")).not.toBeInTheDocument();
+
     // Wait for the mocked health query so nothing resolves after teardown.
     expect(await screen.findByText("ok")).toBeInTheDocument();
   });

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from smart_commissioning_core.rbac import Role
 
@@ -9,6 +11,9 @@ from app.schemas.configuration import (
     SecretMaterialResponse,
 )
 from app.services.configuration_service import DEFAULT_PROJECT_ID, DEFAULT_SITE_ID, ConfigurationService
+from app.services.log_service import apply_logging_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 service = ConfigurationService()
@@ -37,7 +42,16 @@ def update_configuration(
     result = service.validate(configuration)
     if not result.valid:
         raise HTTPException(status_code=400, detail=result.errors)
-    return service.save(configuration, project_id=project_id, site_id=site_id)
+    saved = service.save(configuration, project_id=project_id, site_id=site_id)
+    # Make a Log Level / Diagnostics Mode change take effect in the live process,
+    # not only at next boot. The masked snapshot is fine here: only the plain
+    # Log Level / Diagnostics Mode / Log Retention words are read. Guarded so a
+    # logging hiccup can never fail a config save.
+    try:
+        apply_logging_settings(saved.logging.values)
+    except Exception:  # noqa: BLE001 (applying logging settings is best-effort)
+        logger.debug("Could not apply logging settings after save.", exc_info=True)
+    return saved
 
 
 @router.post(

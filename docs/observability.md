@@ -52,7 +52,69 @@ asyncio task / per worker message and never leak across concurrent requests.
   `frontend`, `postgres`, `redis`) and forward to your aggregator. Because every
   line is JSON with `request_id`/`run_id`, a single request or job can be traced
   across the api and worker by filtering on the id.
-- **Edge/portable:** stdout of the portable process / launcher.
+- **Edge/portable:** stdout of the portable process / launcher, **and** a local
+  rotating JSON log file (below).
+
+### Local rotating log file
+
+Alongside the console handler, the API installs a **rotating file handler**
+(`configure_file_logging`, `backend/app/core/logging.py`) that writes the same
+single-line JSON to **`<RUNTIME_ROOT>/logs/app.log`**. It rotates by **size**
+(5 MiB per file, 10 rollovers kept — a ~50 MiB hard cap so a chatty capture can
+never fill a field laptop's disk); `app.log.1` … `app.log.10` are the rollovers.
+The handler opens the file lazily (`delay=True`), so importing the app never
+creates an empty `app.log` and Windows holds no open handle while logging is
+quiet.
+
+**Level precedence** (resolved by `effective_log_level`,
+`backend/app/services/log_service.py`, applied at startup and after a
+Configuration save):
+
+1. **Diagnostics Mode = Enabled → `DEBUG`.**
+2. else the **`LOG_LEVEL`** environment variable, if set (keeps existing
+   deployments and CI byte-identical when the new fields are untouched).
+3. else the configured **Log Level** word (`Info` → `INFO`).
+4. else `INFO`.
+
+**Retention** is *time-based pruning of rotated/crash files only*, run once at
+startup: `purge_old_logs` deletes `*.log*` files older than the configured
+**Log Retention** days (default 30). Live rotation stays size-based — the days
+value does not shorten `app.log` itself.
+
+> Windows file-locking caveat: `RotatingFileHandler` rollover renames the file,
+> which fails if another process holds it open. Do **not** hold `app.log` open
+> in Notepad/an editor while the app runs; `logging` degrades to stderr on a
+> rollover error rather than crashing, but the rotation is silently lost.
+
+**Scope:** this file destination is for the **API** process (single-process
+edge/portable target). The hosted **worker** stays **console-only** — each
+container has its own log pipeline, and a `RotatingFileHandler` shared across
+processes would be a Windows-locking / rename race. Do not point the worker at a
+shared file.
+
+### Retrieving logs — `/logs/bundle` and `/logs/upload`
+
+Two **engineer-gated** endpoints (`backend/app/api/routes/logs.py`) let an
+operator collect logs without remote-desktop access:
+
+- **`GET /api/v1/logs/bundle`** — downloads every `*.log*` file under the local
+  logs directory as a single zip (masked; see below). Empty logs dir → 404.
+- **`POST /api/v1/logs/upload`** — builds the same masked bundle and POSTs it
+  (multipart `file` field) to the configured **Log Upload URL**, with the
+  **Log Upload Token** sent only as an `Authorization: Bearer` header. The
+  response reports the **honest outcome**: `uploaded` (2xx), `rejected` (≥400,
+  with the status), or `no_response` (the endpoint did not answer) — never a
+  fabricated success, never a retry, and all three return HTTP 200 (the
+  `outcome` field is the result). A missing/invalid URL is a 400.
+
+**Masking guarantee (stated honestly):** the bundler redacts values under known
+credential-shaped keys (`password`/`token`/`secret`/`api_key`/`authorization`/
+`private_key`) in both JSON and `key=value` forms. It is **not** a DLP scanner
+and cannot catch a secret embedded in free text by a future log call. The
+primary control is **containment**: the bundle only ever contains files from the
+local logs directory — the secrets store, the database, and uploaded import
+files are never included. The upload token never appears in the URL, the
+response, or any log line.
 
 ### Portable crash log
 

@@ -4,12 +4,14 @@ import {
   ConfigurationExport,
   ConfigurationSectionKey,
   ConfigurationSnapshot,
+  downloadFile,
   exportConfiguration,
   getConfiguration,
   getSystemInterfaces,
   importConfiguration,
   storeSecretMaterial,
   updateConfiguration,
+  uploadLogs,
   validateConfiguration,
 } from "../../api/client";
 import { isSecretSentinel, maskSecretValue } from "./secretField";
@@ -62,7 +64,8 @@ const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
   certificates: "TLS trust and client authentication material. Paste content or select local files; only masked server references are saved.",
   device:
     "Planned network identity of the gateway device being commissioned — reference values used by validation, not this laptop's settings. The adapter this laptop scans from is chosen under Source Interface.",
-  logging: "Runtime diagnostics, log retention, syslog, and current logging health.",
+  logging:
+    "Runtime logging to a local rotating file (logs/app.log under the app runtime directory), retention of rotated files, and optional upload of a masked log bundle to a URL.",
   mqtt: "Broker, client identity, topic, QoS, keep-alive, and optional Mosquitto-style credentials.",
   time: "Timezone and NTP settings used to timestamp evidence and validate stale data.",
 };
@@ -162,7 +165,9 @@ const fieldDefinitions: Partial<Record<ConfigurationSectionKey, Record<string, F
     "IP Assignment": { kind: "select", options: ["Static IP", "DHCP"] },
   },
   logging: {
+    "Log Level": { kind: "select", options: ["Debug", "Info", "Warning", "Error"] },
     "Diagnostics Mode": { kind: "select", options: ["Enabled", "Disabled"] },
+    "Log Upload Token": { kind: "password" },
   },
   mqtt: {
     "Use TLS": { kind: "select", options: ["Enabled", "Disabled"] },
@@ -225,12 +230,21 @@ const CERT_EXPIRY_FIELD = "Certificate Expiry";
 // like "Healthy"/"Connected"/"Valid" (green), "Degraded"/"Stale"/"Warning"
 // (amber), or "Error"/"Failed"/"Unreachable" (red). Unknown strings stay
 // neutral-green so a long fault string still renders in a single pill.
+//
+// Honesty rule: the neutral placeholders a fresh install shows for something it
+// has NOT yet observed ("Not checked"/"Not configured"/"Never run"/"Manual
+// only") render amber, never green — green reads as "good" for a check that
+// never ran.
 function statusTone(status: string): "green" | "amber" | "red" {
   const normalized = status.trim().toLowerCase();
   if (/(fail|error|unreachable|invalid|expired|disconnected|critical|down)/.test(normalized)) {
     return "red";
   }
-  if (/(warn|degrad|stale|pending|partial|retry|unknown|attention)/.test(normalized)) {
+  if (
+    /(warn|degrad|stale|pending|partial|retry|unknown|attention|not checked|not configured|never run|manual only)/.test(
+      normalized,
+    )
+  ) {
     return "amber";
   }
   return "green";
@@ -400,6 +414,22 @@ export function ConfigurationPage() {
       setSecretFiles((current) => ({ ...current, [response.field]: response.file_name }));
       queryClient.invalidateQueries({ queryKey: ["configuration"] });
     },
+  });
+
+  // Download the masked local log bundle (GET /logs/bundle) and save it via a
+  // transient object-URL anchor. Errors surface on the mutation state.
+  const downloadLogsMutation = useMutation({
+    mutationFn: () => downloadFile("/logs/bundle"),
+    onSuccess: (file) => {
+      saveBlob(file.blob, file.filename ?? "smart_commissioning_logs.zip");
+    },
+  });
+
+  // Upload the masked bundle to the configured URL (POST /logs/upload). HTTP 200
+  // carries the honest outcome (uploaded / rejected / no_response); a missing or
+  // invalid URL is an ApiError surfaced on the mutation error state.
+  const uploadLogsMutation = useMutation({
+    mutationFn: () => uploadLogs(),
   });
 
   // Export reads the current snapshot (via exportConfiguration -> GET
@@ -773,6 +803,84 @@ export function ConfigurationPage() {
                       value={draft.device.values[SOURCE_INTERFACE_FIELD] ?? ""}
                     />
                   )}
+                  {section === "logging" && (
+                    <div className="logging-actions">
+                      <p className="field-note">
+                        Logs are written to <code>logs/app.log</code> under the app runtime directory,
+                        rotating by size (5 MiB × 10). Download a masked bundle for offline review, or
+                        upload it to the configured URL. Only local log files are included and
+                        credential-shaped values are masked.
+                      </p>
+                      <div className="inline-actions">
+                        <button
+                          className="secondary-button compact"
+                          disabled={downloadLogsMutation.isPending}
+                          onClick={() => downloadLogsMutation.mutate()}
+                          type="button"
+                        >
+                          {downloadLogsMutation.isPending ? "Preparing..." : "Download log bundle"}
+                        </button>
+                        <button
+                          className="secondary-button compact"
+                          disabled={
+                            uploadLogsMutation.isPending ||
+                            !canEngineer ||
+                            (draft.logging.values["Log Upload URL"] ?? "").trim() === ""
+                          }
+                          onClick={() => uploadLogsMutation.mutate()}
+                          title={
+                            !canEngineer
+                              ? ENGINEER_REQUIRED_TOOLTIP
+                              : (draft.logging.values["Log Upload URL"] ?? "").trim() === ""
+                                ? "Set a Log Upload URL above to enable upload."
+                                : undefined
+                          }
+                          type="button"
+                        >
+                          {uploadLogsMutation.isPending ? "Uploading..." : "Upload logs now"}
+                        </button>
+                      </div>
+                      {downloadLogsMutation.isError && (
+                        <div className="state-panel error">
+                          <strong>Log bundle download failed</strong>
+                          <span>{downloadLogsMutation.error.message}</span>
+                        </div>
+                      )}
+                      {uploadLogsMutation.isError && (
+                        <div className="state-panel error">
+                          <strong>Log upload failed</strong>
+                          <span>{uploadLogsMutation.error.message}</span>
+                        </div>
+                      )}
+                      {uploadLogsMutation.isSuccess &&
+                        uploadLogsMutation.data.outcome === "uploaded" && (
+                          <div className="state-panel success">
+                            <strong>Logs uploaded</strong>
+                            <span>
+                              Uploaded {uploadLogsMutation.data.files.length} file(s) (
+                              {formatBytes(uploadLogsMutation.data.bundle_bytes)}). The server
+                              answered {uploadLogsMutation.data.status_code ?? "OK"}.
+                            </span>
+                          </div>
+                        )}
+                      {uploadLogsMutation.isSuccess &&
+                        uploadLogsMutation.data.outcome === "rejected" && (
+                          <div className="state-panel error">
+                            <strong>Upload rejected</strong>
+                            <span>{uploadLogsMutation.data.detail}</span>
+                          </div>
+                        )}
+                      {uploadLogsMutation.isSuccess &&
+                        uploadLogsMutation.data.outcome === "no_response" && (
+                          <div className="state-panel error">
+                            <strong>Upload endpoint did not respond</strong>
+                            <span>
+                              The upload endpoint did not respond: {uploadLogsMutation.data.detail}
+                            </span>
+                          </div>
+                        )}
+                    </div>
+                  )}
                 </div>
               )}
             </article>
@@ -890,11 +998,16 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "Last Backup Status": "Result of the most recent backup.",
   "Restore Action": "Restore readiness / available restore action.",
   // Logging & Diagnostics
-  "Log Level": "Verbosity of runtime logs (Info, Debug, etc.).",
-  "Log Retention": "How long log files are kept.",
-  "Remote Syslog Target": "IP/host of a remote syslog collector, if used.",
-  "Syslog Port": "Port of the remote syslog target.",
-  "Diagnostics Mode": "Extra diagnostic logging toggle.",
+  "Log Level":
+    "Verbosity of the local log file and console (Debug, Info, Warning, Error). Takes effect immediately on Save. Overridden to Debug while Diagnostics Mode is Enabled, and by a LOG_LEVEL environment variable if one is set.",
+  "Log Retention":
+    "How many days of rotated and crash log files to keep. Pruned once at startup. The live app.log rotates by size (5 MiB x 10), not by time.",
+  "Diagnostics Mode":
+    "Forces Debug-level logging regardless of Log Level. Enable to capture verbose detail while reproducing an issue, then disable.",
+  "Log Upload URL":
+    "HTTPS endpoint that receives the masked log bundle when you press Upload logs now. Leave blank to keep logs local-only.",
+  "Log Upload Token":
+    "Optional bearer token sent as an Authorization header with the upload (stored masked, never shown again).",
 };
 
 type FieldControlProps = {
@@ -1080,20 +1193,35 @@ function FieldControl({
   );
 }
 
-// Serialises an exported envelope to a downloadable JSON file via a transient
-// object-URL anchor. No secret values are present in the envelope: password
-// fields are masked and certificate material is a secret:// reference.
-function downloadConfigurationEnvelope(envelope: ConfigurationExport): void {
-  const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
+// Saves a Blob to a file via a transient object-URL anchor (the technique jsdom
+// stubs createObjectURL/revokeObjectURL for in tests). Shared by the config
+// export and the log-bundle download.
+function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
-  const stamp = envelope.exported_at.replace(/[:.]/g, "-");
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `smart-commissioning-configuration-${stamp}.json`;
+  anchor.download = filename;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+// Compact human-readable byte size for the upload result panel.
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+// Serialises an exported envelope to a downloadable JSON file. No secret values
+// are present in the envelope: password fields are masked and certificate
+// material is a secret:// reference.
+function downloadConfigurationEnvelope(envelope: ConfigurationExport): void {
+  const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
+  const stamp = envelope.exported_at.replace(/[:.]/g, "-");
+  saveBlob(blob, `smart-commissioning-configuration-${stamp}.json`);
 }
 
 type ParsedConfiguration =

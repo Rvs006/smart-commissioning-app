@@ -121,10 +121,6 @@ export function App() {
               Learning
             </Link>
             <ThemeToggle />
-            <span className="site-pill" title="Active commissioning site">
-              <span className="site-pill-dot" />
-              Block B Plantroom
-            </span>
             <span className="site-pill subtle" title="Connected to the backend API workspace">
               API workspace
             </span>

@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 from secrets import token_hex
 from typing import Literal
+from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.fernet import Fernet, InvalidToken
@@ -50,7 +51,9 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             # the dropdown, so a stored sentinel is an explicit choice.
             "Source Interface": "",
         },
-        status="Healthy",
+        # Honesty rule: a fresh install has made no observations. Neutral labels,
+        # not fabricated "Healthy"/"Listening"/"Connected" verdicts.
+        status="Not checked",
     ),
     bacnet=ConfigurationSection(
         values={
@@ -76,7 +79,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Foreign Device": "Disabled",
             "TTL": "300",
         },
-        status="Listening",
+        status="Not checked",
     ),
     mqtt=ConfigurationSection(
         values={
@@ -90,7 +93,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "MQTT Username": "",
             "MQTT Password": "********",
         },
-        status="Connected",
+        status="Not checked",
     ),
     certificates=ConfigurationSection(
         # No cert material ships pre-installed: a fresh install has NOTHING
@@ -114,7 +117,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Secondary NTP Server": "1.pool.ntp.org",
             "NTP Update Interval": "64",
         },
-        status="Synchronised",
+        status="Not checked",
     ),
     backups=ConfigurationSection(
         values={
@@ -122,20 +125,28 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Backup Retention": "30 days",
             "Encrypted Backups": "Enabled",
             "Backup Location": "/data/backups",
-            "Last Backup Status": "Success",
+            # No scheduler exists; backups only happen via the manual
+            # POST /evidence/backup. A fresh install has run none.
+            "Last Backup Status": "Never run",
             "Restore Action": "Available",
         },
-        status="Success",
+        status="Manual only",
     ),
     logging=ConfigurationSection(
         values={
             "Log Level": "Info",
             "Log Retention": "30 days",
-            "Remote Syslog Target": "10.10.25.60",
-            "Syslog Port": "514",
             "Diagnostics Mode": "Disabled",
+            # Upload-to-URL replaces the never-wired Remote Syslog Target/Port:
+            # an isolated site has no syslog server, which is why upload-to-URL
+            # was asked for. Blank URL keeps logging local-only. The token is a
+            # password-kind sentinel (all-asterisk default), so it inherits the
+            # write-only + API-masking semantics via PASSWORD_KIND_FIELDS.
+            "Log Upload URL": "",
+            "Log Upload Token": "********",
         },
-        status="Healthy",
+        # Honest: a fresh install logs to the local rotating file only.
+        status="Local file",
     ),
 )
 
@@ -263,6 +274,10 @@ class ConfigurationService:
             snapshot = self._persist(DEFAULT_CONFIGURATION, project_id, site_id)
         else:
             snapshot = self._merge_with_defaults(ConfigurationSnapshot.model_validate(payload))
+        # Answer Pete's question ("why does it say Not configured?") from disk:
+        # GET /configuration reports what is verifiably present right now, whether
+        # or not anything was re-saved since the material was uploaded.
+        self._derive_certificates_status(snapshot)
         return self._mask_for_api(snapshot) if mask_secrets else snapshot
 
     def save(
@@ -362,6 +377,10 @@ class ConfigurationService:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
         self._drop_dangling_secret_refs(configuration)
+        # Derive AFTER dropping dangling refs so a blanked ref persists as
+        # "Not configured", not "needs attention". This overwrites any stale
+        # status the client echoed back, so the stored payload holds the truth.
+        self._derive_certificates_status(configuration)
         self._repository.save(project_id, site_id, configuration.model_dump(mode="json"))
         return configuration
 
@@ -435,6 +454,68 @@ class ConfigurationService:
         if not any_cert_resolvable:
             values["Certificate Expiry"] = ""
 
+    def _derive_certificates_status(self, configuration: ConfigurationSnapshot) -> None:
+        """Overwrite the certificates section status from evidence on disk.
+
+        Honesty rule: the pill only claims what this load/persist just VERIFIED —
+        that a ``secret://`` reference resolves to a real file, and (for CA/Client
+        certs) that its PEM parses to a notAfter date. It never reads "stored"
+        for material the app cannot actually resolve. Expiry is re-derived from
+        the resolved PEM rather than trusting the stored "Certificate Expiry"
+        string, so the pill stays honest even if the file changed out of band.
+
+        Total by construction: every helper it calls (``_secret_path``,
+        ``_stored_certificate_expiry`` -> ``read_secret_material``) already
+        contains its own errors. load() feeds run dispatch
+        (``mqtt_subscribe_defaults`` / ``bacnet_transport_defaults``), so a raise
+        here would break every configuration read and every run start — do not
+        add a raising path.
+        """
+        values = configuration.certificates.values
+        stored: list[str] = []
+        broken: list[str] = []
+        expiries: list[str] = []
+        for field, label in (
+            ("CA Certificate", "CA"),
+            ("Client Certificate", "Client cert"),
+            ("Private Key", "Private key"),
+        ):
+            value = str(values.get(field, "")).strip()
+            if not value:
+                continue
+            resolvable = False
+            if value.startswith("secret://"):
+                try:
+                    resolvable = _secret_path(value).exists()
+                except ValueError:
+                    # Malformed ref (e.g. path traversal) — treat as unresolvable.
+                    resolvable = False
+            # A non-secret:// value is a legacy inline filename the app cannot
+            # load, so it counts as broken (needs re-upload), never as stored.
+            if resolvable:
+                stored.append(label)
+                expiry = self._stored_certificate_expiry(field, value)
+                if expiry is not None:
+                    expiries.append(expiry)
+            else:
+                broken.append(label)
+        # Strings are chosen to hit the frontend statusTone regexes
+        # (ConfigurationPage.tsx): "expired" -> red, "attention" -> amber, else
+        # green. "expires" deliberately does NOT match the /expired/ red rule.
+        if expiries and min(expiries) < datetime.now(UTC).date().isoformat():
+            configuration.certificates.status = f"Certificate expired {min(expiries)}"
+        elif stored and broken:
+            configuration.certificates.status = (
+                f"{', '.join(stored)} stored; {', '.join(broken)} needs attention - re-upload"
+            )
+        elif stored:
+            suffix = f" (expires {min(expiries)})" if expiries else ""
+            configuration.certificates.status = f"{', '.join(stored)} stored{suffix}"
+        elif broken:
+            configuration.certificates.status = f"Needs attention - re-upload {', '.join(broken)}"
+        else:
+            configuration.certificates.status = "Not configured"
+
     def validate(self, configuration: ConfigurationSnapshot) -> ConfigurationValidationResult:
         errors: list[str] = []
         configuration = self._merge_with_defaults(configuration)
@@ -492,6 +573,19 @@ class ConfigurationService:
         self._validate_non_empty(errors, "Backup Location", configuration.backups.values.get("Backup Location", ""))
         self._validate_non_empty(errors, "Last Backup Status", configuration.backups.values.get("Last Backup Status", ""))
         self._validate_non_empty(errors, "Restore Action", configuration.backups.values.get("Restore Action", ""))
+        self._validate_choice(
+            errors,
+            "Log Level",
+            configuration.logging.values.get("Log Level", ""),
+            choices=("Debug", "Info", "Warning", "Error"),
+        )
+        self._validate_positive_int_from_prefix(
+            errors, "Log Retention", configuration.logging.values.get("Log Retention", "")
+        )
+        self._validate_enabled_disabled(
+            errors, "Diagnostics Mode", configuration.logging.values.get("Diagnostics Mode", "")
+        )
+        self._validate_log_upload_url(errors, configuration.logging.values.get("Log Upload URL", ""))
 
         return ConfigurationValidationResult(valid=not errors, errors=errors)
 
@@ -549,6 +643,8 @@ class ConfigurationService:
 
     def _merge_with_defaults(self, configuration: ConfigurationSnapshot) -> ConfigurationSnapshot:
         self._migrate_mqtt_fields(configuration)
+        self._migrate_logging_fields(configuration)
+        self._migrate_seeded_placeholders(configuration)
         for section_name in ConfigurationSnapshot.model_fields:
             loaded_section = getattr(configuration, section_name)
             default_section = getattr(DEFAULT_CONFIGURATION, section_name)
@@ -572,6 +668,54 @@ class ConfigurationService:
         port = str(mqtt_values.get("Port", "")).strip()
         if "Use TLS" not in mqtt_values and port:
             mqtt_values["Use TLS"] = "Enabled" if port == "8883" else "Disabled"
+
+    # The Remote Syslog Target / Syslog Port fields were never wired to any
+    # SysLogHandler — no consumer ever read them (grep-verified) — and an
+    # isolated site has no syslog server anyway. They are removed in favour of
+    # local-file logging + upload-to-URL. Dropping the keys here (like
+    # _migrate_mqtt_fields) is LOAD-BEARING: _merge_with_defaults unions
+    # {**default, **loaded}, so a persisted snapshot on a field machine would
+    # otherwise keep the stale keys alive and the UI would keep rendering them.
+    # Any value an operator typed into these fields was never consumed; its loss
+    # is noted in the CHANGELOG.
+    _REMOVED_LOGGING_FIELDS = ("Remote Syslog Target", "Syslog Port")
+
+    def _migrate_logging_fields(self, configuration: ConfigurationSnapshot) -> None:
+        logging_values = configuration.logging.values
+        for field in self._REMOVED_LOGGING_FIELDS:
+            logging_values.pop(field, None)
+
+    # Honesty rule: earlier releases SEEDED fabricated observation verdicts
+    # ("Last Backup Status": "Success", section pills "Healthy"/"Listening"/
+    # "Connected"/"Synchronised"/"Success"/"Healthy") into fresh installs, so a
+    # field machine showed a backup that never ran and health it never checked.
+    # Those seeds are now neutral labels. This rewrites the OLD seed literals in
+    # an already-persisted snapshot on load, exactly like _migrate_mqtt_fields:
+    # the operator sees honest values immediately, made durable on next save.
+    #
+    # Safe by provenance: grep proves NO code path ever wrote these fields or any
+    # section status — the DEFAULT_CONFIGURATION seeds were the only writers — and
+    # the UI renders "Last Backup Status" as readonly, so a stored value equal to
+    # a seed literal is provably seed data, never an operator observation. Any
+    # other string (e.g. a future status-writer feature or a hand-edited PUT)
+    # survives untouched. If such a writer is ever added, remove this migration.
+    _SEEDED_STATUS_MIGRATIONS = {
+        "device": ("Healthy", "Not checked"),
+        "bacnet": ("Listening", "Not checked"),
+        "mqtt": ("Connected", "Not checked"),
+        "time": ("Synchronised", "Not checked"),
+        "backups": ("Success", "Manual only"),
+        "logging": ("Healthy", "Not checked"),
+    }
+
+    def _migrate_seeded_placeholders(self, configuration: ConfigurationSnapshot) -> None:
+        backup_values = configuration.backups.values
+        if backup_values.get("Last Backup Status") == "Success":
+            backup_values["Last Backup Status"] = "Never run"
+        for section_name, (old_status, new_status) in self._SEEDED_STATUS_MIGRATIONS.items():
+            section = getattr(configuration, section_name)
+            if section.status == old_status:
+                section.status = new_status
 
     def _validate_ip_field(self, errors: list[str], label: str, value: str) -> None:
         value = value.strip()
@@ -662,6 +806,29 @@ class ConfigurationService:
         normalized = value.strip().casefold()
         if normalized not in {"enabled", "disabled"}:
             errors.append(f"{label} must be Enabled or Disabled.")
+
+    def _validate_choice(self, errors: list[str], label: str, value: str, *, choices: tuple[str, ...]) -> None:
+        allowed = {choice.casefold() for choice in choices}
+        if value.strip().casefold() not in allowed:
+            errors.append(f"{label} must be one of: {', '.join(choices)}.")
+
+    def _validate_log_upload_url(self, errors: list[str], value: str) -> None:
+        """Empty (local-only) is valid; otherwise require an http(s) URL with a
+        host and no embedded credentials (the upload token rides an Authorization
+        header, never the URL)."""
+        value = value.strip()
+        if not value:
+            return
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            errors.append(
+                "Log Upload URL must be an http:// or https:// URL, or left blank to keep logs local-only."
+            )
+            return
+        if parts.username or parts.password:
+            errors.append(
+                "Log Upload URL must not embed credentials (user:pass@host); use the Log Upload Token field."
+            )
 
     def _validate_certificate(self, errors: list[str], label: str, value: str) -> None:
         value = value.strip()

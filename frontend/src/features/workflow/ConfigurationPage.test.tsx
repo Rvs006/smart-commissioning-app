@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { clearApiKey, setApiKey } from "../../api/client";
+import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
 import { SessionProvider } from "../../app/session";
 import { ConfigurationPage } from "./ConfigurationPage";
 
@@ -90,6 +91,26 @@ function payloadWithSourceInterface(value: string) {
     device: {
       ...base.device,
       values: { ...base.device.values, "Source Interface": value },
+    },
+  };
+}
+
+// A configuration payload whose logging section carries the real v0.1.13 fields
+// (no syslog fields), so the logging-destination tests render the section.
+function loggingPayload(loggingOverrides: Record<string, string> = {}) {
+  const base = configurationPayload();
+  return {
+    ...base,
+    logging: {
+      values: {
+        "Log Level": "Info",
+        "Log Retention": "30 days",
+        "Diagnostics Mode": "Disabled",
+        "Log Upload URL": "",
+        "Log Upload Token": "********",
+        ...loggingOverrides,
+      },
+      status: "Local file",
     },
   };
 }
@@ -1041,5 +1062,143 @@ describe("ConfigurationPage", () => {
     fireEvent.change(fileInput, { target: { files: [file] } });
 
     expect(await screen.findByText(/MQTT Port must be between/i)).toBeInTheDocument();
+  });
+
+  // v0.1.13 — logging destinations. The Logging & Diagnostics section is
+  // collapsed by default, so each test expands it via its toggle first.
+  it("renders the logging section with a Log Level select and a masked upload token, and no syslog fields", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+
+    const logLevelLabel = (await screen.findByText("Log Level")).closest("label");
+    const levelSelect = within(logLevelLabel as HTMLElement).getByRole("combobox") as HTMLSelectElement;
+    expect(Array.from(levelSelect.options).map((option) => option.value)).toEqual([
+      "Debug",
+      "Info",
+      "Warning",
+      "Error",
+    ]);
+
+    const tokenLabel = (await screen.findByText("Log Upload Token")).closest("label");
+    const tokenInput = within(tokenLabel as HTMLElement).getByDisplayValue("********") as HTMLInputElement;
+    expect(tokenInput.type).toBe("password");
+    expect(
+      within(tokenLabel as HTMLElement).getByRole("button", { name: /Show Log Upload Token/i }),
+    ).toBeInTheDocument();
+
+    // The never-wired syslog fields are gone.
+    expect(screen.queryByText("Remote Syslog Target")).not.toBeInTheDocument();
+    expect(screen.queryByText("Syslog Port")).not.toBeInTheDocument();
+  });
+
+  it("disables Upload logs now until a Log Upload URL is set", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    const uploadButton = await screen.findByRole("button", { name: /Upload logs now/i });
+    // Blank URL -> disabled with an explanatory title.
+    expect(uploadButton).toBeDisabled();
+
+    const urlLabel = (await screen.findByText("Log Upload URL")).closest("label");
+    const urlInput = within(urlLabel as HTMLElement).getByRole("textbox") as HTMLInputElement;
+    fireEvent.change(urlInput, { target: { value: "https://logs.example/up" } });
+    expect(uploadButton).toBeEnabled();
+  });
+
+  it("gates Upload logs now behind the engineer role", async () => {
+    // A viewer principal (not the default engineer) so canEngineer is false.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({ username: "viewer-1", role: "viewer", source: "user_key" });
+        }
+        if (url.endsWith("/api/v1/system/interfaces")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/configuration")) {
+          return jsonResponse(loggingPayload({ "Log Upload URL": "https://logs.example/up" }));
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    const uploadButton = await screen.findByRole("button", { name: /Upload logs now/i });
+    // Even with a URL set, a viewer cannot upload.
+    expect(uploadButton).toBeDisabled();
+    expect(uploadButton).toHaveAttribute("title", ENGINEER_REQUIRED_TOOLTIP);
+  });
+
+  it("renders an honest error panel when the upload endpoint does not respond", async () => {
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/logs/upload") && init?.method === "POST") {
+        return jsonResponse({
+          outcome: "no_response",
+          status_code: null,
+          detail: "ConnectError: no route to host",
+          bundle_bytes: 0,
+          files: [],
+        });
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload({ "Log Upload URL": "https://logs.example/up" }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Upload logs now/i }));
+
+    expect(
+      await screen.findByText(/The upload endpoint did not respond:/i),
+    ).toBeInTheDocument();
+    // Never a fabricated success.
+    expect(screen.queryByText(/Logs uploaded/i)).not.toBeInTheDocument();
+  });
+
+  it("renders a success panel naming the uploaded file count", async () => {
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/logs/upload") && init?.method === "POST") {
+        return jsonResponse({
+          outcome: "uploaded",
+          status_code: 200,
+          detail: "Server accepted the bundle (200).",
+          bundle_bytes: 1024,
+          files: ["app.log"],
+        });
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(loggingPayload({ "Log Upload URL": "https://logs.example/up" }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Logging & Diagnostics/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Upload logs now/i }));
+
+    expect(await screen.findByText(/Uploaded 1 file/i)).toBeInTheDocument();
   });
 });

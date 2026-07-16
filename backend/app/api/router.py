@@ -9,6 +9,7 @@ from app.api.routes import (
     health,
     hub,
     imports,
+    logs,
     reports,
     runs,
     system,
@@ -31,6 +32,17 @@ api_router.include_router(health.router, tags=["health"])
 # the protected /imports routes so GET /imports/profiles resolves here rather
 # than matching the protected GET /imports/{import_id}.
 api_router.include_router(imports.public_router, prefix="/imports", tags=["imports"])
+
+# Downloadable UDMI schema-set template (GET /udmi/schemas/template): a zip of
+# the vendored public-upstream faucetsdn/udmi 1.5.2 schema set (Apache-2.0) —
+# format documentation with no project data, so public like the import
+# templates above. Mounted on api_router (not protected_router) so the download
+# button never 401s in hosted api_key mode. The protected /udmi/schemas router
+# has no GET path-param route, so /template cannot be shadowed; registered here
+# before the protected includes anyway, matching the imports precedent.
+api_router.include_router(
+    udmi_schemas.public_router, prefix="/udmi/schemas", tags=["udmi-schemas"]
+)
 
 # Every other /api/v1 route requires authentication (app.core.auth). RBAC is
 # then layered per-route inside each router (require_role on the data/mutation
@@ -57,6 +69,8 @@ protected_router.include_router(reports.router, prefix="/reports", tags=["report
 # Evidence integrity (verify), backup, and retention. Verify stays behind auth
 # too: it can regenerate report artifacts, so it is not treated as public.
 protected_router.include_router(evidence.router, prefix="/evidence", tags=["evidence"])
+# Engineer-gated log bundle download/upload; masked; local logs dir only.
+protected_router.include_router(logs.router, prefix="/logs", tags=["logs"])
 # Edge->hub sync: hub ingest endpoint (POST /hub/runs/ingest). The router is
 # always mounted but every route returns 404 unless deployment_role == 'hub'
 # (the role-guard lives in the route so toggling the setting needs no remount).
