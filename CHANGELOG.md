@@ -7,11 +7,84 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
-BACnet discovery against a real device behind a BBMD returned nothing — no
-devices, no error, no reason. There were three separate causes, all silent, plus
-a fourth that had never been reported because it does not look like a bug. This
-is that fix. Everything below is implemented and awaiting CI and a session
-against real BACnet hardware.
+The rest of the 2026-07-15 walkthrough punch list — the items an audit found
+still missing after v0.1.11 shipped. Like v0.1.11, none of this changes how a
+scan works; every item is about the app telling the operator the truth about
+what it found and stopping it from showing things that never happened. Two
+items were deferred to a later release: a general nmap-style discovery pane
+(needs the operator's curated port list first) and a pure component-extraction
+refactor (no user-visible change, real rebase risk under the dated BACnet fix).
+
+### Added
+
+- **Reports carry ELECTRACOM branding and a per-head discovery inventory.** PDF,
+  DOCX and XLSX reports gain an ELECTRACOM header band and a footer with the run
+  id, so a generated report reads as an ITP/witnessing document. Each report now
+  inventories what was discovered — IP hosts, BACnet devices and points, MQTT
+  topics — instead of only run metadata. (Logo-image embedding is a later phase;
+  this is the text wordmark.) All artifact bytes change, but reports stay
+  byte-reproducible under their Ed25519/SHA-256 signatures. After upgrading, a
+  report generated under an older version reads as hash-mismatched until
+  re-downloaded — old exported files keep valid signatures over their own bytes.
+
+- **Local file logging and log upload.** Runtime logs now write to a rotating
+  `logs/app.log` under the app runtime directory, and an engineer can upload a
+  secrets-masked log bundle to a configured URL — so retrieving logs from an
+  isolated site no longer needs remote-desktop access to the laptop. The
+  never-wired Remote Syslog Target / Syslog Port fields are removed; if a value
+  was typed into them it is dropped (nothing ever read it).
+
+- **Downloadable UDMI schema template.** A "Download schema template (1.5.2)"
+  button on the UDMI Validation page returns the vendored published schema set
+  as a starting point for authoring a non-published (project-deviation) set.
+
+- **MQTT discovery: long-duration capture, template compare, and a live
+  inspector.** The capture window can now run up to 48h (memory-bounded by
+  retaining the latest message per topic); a day-scale capture needs the hosted
+  worker profile, which the panel states. Discovered topics are compared against
+  the imported register — green if matched, red if a foreign/unmatched publisher
+  — the operator's "turn the full-broker scan into a template check". Selecting a
+  topic shows its payload plus the retained flag, delivery QoS, and received-at
+  time. (Received-at, not published-at: an MQTT 3.1.1 message carries no publish
+  timestamp. Delivery QoS reflects the current subscribe QoS.)
+
+- **UDMI RAG (red / amber / green) on the results page.** Green = online,
+  publishing and UDMI-compliant; amber = publishing but non-compliant; red =
+  offline / not publishing. Read strictly, a device that passes with only minor
+  notes now shows amber rather than green.
+
+### Fixed
+
+- **A silent device no longer fails the whole UDMI validation.** A capture that
+  completed but timed out waiting for one device ended the run as FAILED, so the
+  operator never reached the results. It now succeeds (under a distinct stage)
+  and the silent device reads red as offline. Broker/transport failures still
+  fail the run — if we could not reach the broker we did not validate anything.
+  Historical FAILED runs stay failed; re-run to get the new behaviour.
+
+- **The certificates status pill tells the truth.** It was a static seeded
+  string that read "Not configured" even after keys were uploaded. It is now
+  derived on every load from the stored material and its expiry, so it reflects
+  what is actually configured. No migration — it heals on the next page load.
+
+- **IP scan shows every register entry, including non-responders.** Hosts that
+  answered on no scanned port were silently dropped from the results; they now
+  appear with an honest "no response on scanned ports" — never "offline" or
+  "fail", because a TCP-connect miss is not proof a device is absent.
+
+- **Placeholder and stale content removed.** The fictional "Block B Plantroom"
+  site pill, the sample dashboard "Current Stage" board, and seeded statuses that
+  described events that never happened ("Last Backup Status: Success", devices
+  "Healthy", broker "Connected") are gone; existing installs heal on load. The
+  Learning page's dropped Docker path is removed — with it a false statement that
+  the repository is private — and the locked-down-machine guidance now documents
+  the real IT hash-approval route.
+
+> Field note: persisted configuration snapshots do not automatically adopt new
+> seeded defaults. Fabricated *statuses* are healed on load, but any new default
+> values a site should run with still need setting by hand on existing installs.
+
+## [0.1.12 — pending] BACnet foreign-device registration
 
 **Two things to know before you rely on any of it.**
 
