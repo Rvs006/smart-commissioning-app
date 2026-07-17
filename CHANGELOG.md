@@ -5,6 +5,19 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The run-creation "Source Interface not present / is down" errors no longer
+  steer BACnet users into a dead end.** Both messages advised falling back to
+  "Auto (OS default route)", but a live BACnet scan refuses to run on Auto (a
+  real Who-Is must bind a specific interface), so following the advice just
+  traded one error for another. The guard runs for IP, MQTT, and BACnet run
+  creation alike, so the advice is now engine-neutral: re-select a current
+  adapter; Auto also works for IP and MQTT runs, while a BACnet scan requires
+  a specific adapter.
+
 ## [0.1.14] - 2026-07-16
 
 ### Fixed
