@@ -5,6 +5,7 @@ import {
   discoveryEmptyStateFor,
   discoveryMetrics,
   expectedPortsOk,
+  filterResultRows,
   forbiddenOpenPorts,
   ipResultColumns,
   ipRowVerdict,
@@ -858,5 +859,81 @@ describe("mqttRegisterCompareNote", () => {
     expect(
       mqttRegisterCompareNote(mqttResultsWithComparison({ register_available: false })),
     ).toBeNull();
+  });
+});
+
+describe("filterResultRows (ISSUE-4)", () => {
+  const rows: Record<string, string>[] = [
+    { Topic: "site/asset-1/state", Asset: "AHU-1", "Register Match": "In register", __tone: "pass" },
+    { Topic: "site/asset-2/points", Asset: "EM-2", "Register Match": "Not in register", __tone: "fail" },
+    { Topic: "other/asset-9/state", Asset: "PMP-9", "Register Match": "—" },
+  ];
+
+  it("matches an MQTT wildcard against the Topic column with broker semantics", () => {
+    const matched = filterResultRows(rows, { text: "site/+/state", tone: "all" }, "Topic");
+    expect(matched.map((row) => row.Topic)).toEqual(["site/asset-1/state"]);
+  });
+
+  it("treats # as capture-all against the Topic column", () => {
+    const matched = filterResultRows(rows, { text: "site/#", tone: "all" }, "Topic");
+    expect(matched.map((row) => row.Topic)).toEqual([
+      "site/asset-1/state",
+      "site/asset-2/points",
+    ]);
+  });
+
+  it("falls back to a case-insensitive substring for a plain (non-wildcard) query", () => {
+    // An asset name is not a topic filter; matchesTopicFilter's level semantics
+    // would match nothing, so a plain query must use substring matching.
+    const matched = filterResultRows(rows, { text: "em-2", tone: "all" }, "Topic");
+    expect(matched.map((row) => row.Asset)).toEqual(["EM-2"]);
+  });
+
+  it("substring-matches across visible cells but never the hidden __-prefixed keys", () => {
+    // "pass"/"fail" are only ever __tone values here, never a visible cell — so a
+    // text query for them must NOT match via the hidden key.
+    expect(filterResultRows(rows, { text: "pass", tone: "all" }, "Topic")).toEqual([]);
+    expect(filterResultRows(rows, { text: "fail", tone: "all" }, "Topic")).toEqual([]);
+    // A visible cell value (the asset id) does match, case-insensitively.
+    expect(
+      filterResultRows(rows, { text: "ahu-1", tone: "all" }, "Topic").map((row) => row.Asset),
+    ).toEqual(["AHU-1"]);
+  });
+
+  it("filters by verdict tone, including 'none' for rows with no verdict", () => {
+    expect(filterResultRows(rows, { text: "", tone: "pass" }, "Topic").map((r) => r.Asset)).toEqual([
+      "AHU-1",
+    ]);
+    expect(filterResultRows(rows, { text: "", tone: "fail" }, "Topic").map((r) => r.Asset)).toEqual([
+      "EM-2",
+    ]);
+    // "none" = the row carrying no __tone key at all.
+    expect(filterResultRows(rows, { text: "", tone: "none" }, "Topic").map((r) => r.Asset)).toEqual([
+      "PMP-9",
+    ]);
+  });
+
+  it("combines a text and a tone filter (AND)", () => {
+    expect(
+      filterResultRows(rows, { text: "site", tone: "pass" }, "Topic").map((r) => r.Asset),
+    ).toEqual(["AHU-1"]);
+    expect(filterResultRows(rows, { text: "other", tone: "pass" }, "Topic")).toEqual([]);
+  });
+
+  it("returns every row when the filter is empty and tone is 'all'", () => {
+    expect(filterResultRows(rows, { text: "  ", tone: "all" }, "Topic")).toHaveLength(3);
+  });
+
+  it("uses substring matching when there is no Topic column even for a wildcard query", () => {
+    const noTopic: Record<string, string>[] = [
+      { Asset: "AHU-1", "Observed IP": "10.0.0.1" },
+      { Asset: "AHU-2", "Observed IP": "10.0.0.2" },
+    ];
+    // No Topic column, so a "#" query cannot match a topic and falls back to
+    // substring (which finds nothing here) rather than throwing.
+    expect(filterResultRows(noTopic, { text: "#", tone: "all" })).toEqual([]);
+    expect(filterResultRows(noTopic, { text: "ahu-2", tone: "all" }).map((r) => r.Asset)).toEqual([
+      "AHU-2",
+    ]);
   });
 });

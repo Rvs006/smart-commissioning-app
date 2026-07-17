@@ -1067,6 +1067,175 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertNotIn("metadata pointset", descriptions)
 
 
+class PointsetMisnamePairingTests(unittest.TestCase):
+    """A typo point name is one root cause, not two pointset faults.
+
+    A missing expected point whose spelling nearly matches an unexpected
+    received point is reported ONCE, naming both spellings, instead of a
+    separate UDMI-PS 'not received' plus 'not in the expected schedule' pair.
+    Genuinely different names still report as two issues, and the metadata
+    point-coverage checks stay independent per the AGENTS.md contract.
+    """
+
+    _MERGED = "probably a single misnamed"
+    _MISSING = "was not received in the pointset payload"
+    _UNEXPECTED = "was not found in the expected schedule"
+
+    def test_single_typo_reports_one_pointset_issue_naming_both_spellings(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(points=["phase2_line_current_sensor"], units={}),
+                "pointset_payload": _pointset(points={"phas2_line_current_sensor": {"present_value": 1.2}}),
+            }
+        )
+        merged = [issue for issue in issues if self._MERGED in issue.description]
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].issue_type, "pointset_validation")
+        self.assertTrue(merged[0].issue_id.startswith("UDMI-PS"))
+        self.assertEqual(merged[0].severity, "high")
+        self.assertEqual(merged[0].point_name, "phase2_line_current_sensor")
+        self.assertEqual(merged[0].expected_value, "phase2_line_current_sensor")
+        self.assertEqual(merged[0].observed_value, "phas2_line_current_sensor")
+        self.assertIn("phase2_line_current_sensor", merged[0].description)
+        self.assertIn("phas2_line_current_sensor", merged[0].description)
+        # Neither single-sided message survives for the paired names.
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertNotIn(self._MISSING, descriptions)
+        self.assertNotIn(self._UNEXPECTED, descriptions)
+
+    def test_dissimilar_missing_and_received_points_stay_two_issues(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(points=["supply_air_temperature"], units={}),
+                "pointset_payload": _pointset(points={"totally_different_flow": {"present_value": 3}}),
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertIn(
+            "Expected point supply_air_temperature was not received in the pointset payload.",
+            descriptions,
+        )
+        self.assertIn(
+            "Received point totally_different_flow was not found in the expected schedule.",
+            descriptions,
+        )
+        self.assertNotIn(self._MERGED, descriptions)
+
+    def test_digit_indexed_points_stay_two_independent_issues(self) -> None:
+        # phase1 vs phase2 score ~0.96 but are distinct physical measurements,
+        # not one misspelling. Merging them would drop two faults to one and
+        # steer the operator to rename phase-2 current onto the phase-1 row.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(points=["phase1_line_current_sensor"], units={}),
+                "pointset_payload": _pointset(points={"phase2_line_current_sensor": {"present_value": 2}}),
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertNotIn(self._MERGED, descriptions)
+        self.assertIn(
+            "Expected point phase1_line_current_sensor was not received in the pointset payload.",
+            descriptions,
+        )
+        self.assertIn(
+            "Received point phase2_line_current_sensor was not found in the expected schedule.",
+            descriptions,
+        )
+
+    def test_indexed_siblings_do_not_arbitrarily_merge_one(self) -> None:
+        # expected [phase1_x], observed [phase2_x, phase3_x]: the two candidates
+        # tie on ratio, so a merge would arbitrarily rename one sibling and leave
+        # the other unexpected. All three stay independent faults.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(points=["phase1_flow_sensor"], units={}),
+                "pointset_payload": _pointset(
+                    points={
+                        "phase2_flow_sensor": {"present_value": 1},
+                        "phase3_flow_sensor": {"present_value": 2},
+                    }
+                ),
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertNotIn(self._MERGED, descriptions)
+        self.assertIn(
+            "Expected point phase1_flow_sensor was not received in the pointset payload.",
+            descriptions,
+        )
+        self.assertIn(
+            "Received point phase2_flow_sensor was not found in the expected schedule.",
+            descriptions,
+        )
+        self.assertIn(
+            "Received point phase3_flow_sensor was not found in the expected schedule.",
+            descriptions,
+        )
+
+    def test_two_simultaneous_typos_pair_one_to_one(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(
+                    points=["phase1_power_sensor", "phase2_line_current_sensor"], units={}
+                ),
+                "pointset_payload": _pointset(
+                    points={
+                        "phas1_power_sensor": {"present_value": 1},
+                        "phas2_line_current_sensor": {"present_value": 2},
+                    }
+                ),
+            }
+        )
+        merged = [issue for issue in issues if self._MERGED in issue.description]
+        self.assertEqual(len(merged), 2)
+        pairs = {(issue.expected_value, issue.observed_value) for issue in merged}
+        self.assertEqual(
+            pairs,
+            {
+                ("phase1_power_sensor", "phas1_power_sensor"),
+                ("phase2_line_current_sensor", "phas2_line_current_sensor"),
+            },
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertNotIn(self._MISSING, descriptions)
+        self.assertNotIn(self._UNEXPECTED, descriptions)
+
+    def test_offline_device_with_no_pointset_payload_is_not_a_rename(self) -> None:
+        # No pointset payload => nothing 'unexpected' to pair against, so a
+        # missing expected point stays the plain 'not received' fault.
+        descriptions = _descriptions(
+            {"expected_schedule": _schedule(points=["phase2_line_current_sensor"], units={})}
+        )
+        self.assertIn(
+            "Expected point phase2_line_current_sensor was not received in the pointset payload.",
+            descriptions,
+        )
+        self.assertNotIn(self._MERGED, descriptions)
+
+    def test_pointset_typo_merges_while_metadata_typo_stays_independent(self) -> None:
+        # AGENTS.md: schema/register checks are independent. The pointset side
+        # pairs the typo into one issue; the metadata point-coverage check still
+        # reports the same typo both ways (missing-expected + extra-metadata).
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(points=["phase2_line_current_sensor"], units={}),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"phas2_line_current_sensor": {"units": "amperes"}}}
+                ),
+                "pointset_payload": _pointset(points={"phas2_line_current_sensor": {"present_value": 2}}),
+            }
+        )
+        pointset_issues = [issue for issue in issues if issue.issue_type == "pointset_validation"]
+        self.assertEqual(len(pointset_issues), 1)
+        self.assertIn(self._MERGED, pointset_issues[0].description)
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertIn(
+            "Expected point phase2_line_current_sensor is not defined in the metadata pointset.",
+            descriptions,
+        )
+        self.assertIn("Metadata defines point phas2_line_current_sensor", descriptions)
+
+
 class RegisterDrivenAssetsTests(unittest.TestCase):
     def test_assets_only_parameters_use_inline_report_not_fixture(self) -> None:
         result = validate_udmi_full_report(

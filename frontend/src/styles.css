@@ -1048,12 +1048,63 @@ label {
   /* Safety valve only: body sets overflow-x:hidden, so an ultra-wide table with
      no scroller here would be clipped and unreachable. After the min-width and
      cell-nowrap removals below, content wraps into page flow and this should
-     not engage at desktop widths. Do NOT add a max-height. */
+     not engage at desktop widths. Do NOT add a max-height to the BASE class —
+     the deliberate exception is the .results-scroll modifier below, which keeps
+     overflow on both axes so nothing is ever clipped unreachable. */
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+/* Opt-in bounded, scrollable results table (ISSUE-4): a long results/capture
+   table scrolls inside its own box instead of taking over the page. overflow is
+   kept on BOTH axes so a wide table is never clipped unreachable (the reason the
+   base class forbids a blanket max-height). */
+.data-table-wrap.results-scroll {
+  max-height: min(60vh, 560px);
+  overflow: auto;
+}
+
+/* Sticky header for the scrollable results table so column names stay visible
+   while the body scrolls. th already carries an opaque --surface-2 background. */
+.results-scroll .data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* Results filter bar (ISSUE-4): free-text + verdict-tone filters above the
+   scrollable results table, with an honest "showing N of M" count. */
+.results-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.results-filter-bar label {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.results-filter-text {
+  flex: 1 1 220px;
+}
+
+.results-filter-count {
+  margin-left: auto;
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .data-table {
@@ -1302,6 +1353,16 @@ input.field-expired {
 .password-field input {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* Non-revealing indicator shown in place of the Show/Hide toggle when a
+   password field holds a stored (write-only) secret — it can never be shown. */
+.secret-stored-note {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 .secret-field {
@@ -1911,6 +1972,49 @@ input.field-expired {
 
 .payload-verdict.fail {
   color: var(--red);
+}
+
+/* Expected-vs-observed payload panels sit side by side wherever there's room
+   (~560px+), collapsing to stacked on narrow widths with no media query
+   (ISSUE-8). min-width:0 lets the <pre> children shrink and scroll instead of
+   forcing the grid wide. */
+.payload-compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.payload-compare > div {
+  min-width: 0;
+}
+
+/* The 320px cap that keeps table payload cells compact would cramp these full
+   panels; lift it here and let long lines scroll inside the panel instead. */
+.payload-compare .payload-cell {
+  max-width: none;
+  overflow-x: auto;
+}
+
+/* Per-line presence-diff highlight for the payload panels: a key present on
+   only one side is tinted. Amber on the expected side (registered but no
+   observed counterpart), red on the observed side (received but absent from the
+   expected template). --amber-bg / --red-bg carry the dark-theme overrides
+   automatically. */
+.payload-diff-line {
+  display: block;
+  white-space: pre;
+}
+
+.payload-diff-line.only-expected {
+  background: var(--amber-bg);
+}
+
+.payload-diff-line.only-observed {
+  background: var(--red-bg);
+}
+
+.payload-diff-legend {
+  margin-top: 4px;
 }
 
 /* Inline report-linking confirmation in the run monitor. */

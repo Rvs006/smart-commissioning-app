@@ -91,11 +91,19 @@ function parseBlockingFinding(issue: ValidationIssueRecord): ParsedFinding {
   const expected = issue.expected_value?.trim();
   const observed = issue.observed_value?.trim();
 
+  // A present-but-empty value reads as the explicit word "empty" (ISSUE-10),
+  // matching ModulePage's issue detail; an absent value stays "n/a". `undefined`
+  // means the field was absent, "" means present-but-blank (after trim).
+  const showValue = (value: string | undefined): string =>
+    value === undefined ? "n/a" : value === "" ? "empty" : value;
+
   // Prefer a structured expected/observed comparison; fall back to the
-  // human description, then to the issue type humanized.
+  // human description, then to the issue type humanized. The comparison is used
+  // whenever EITHER side is present (including present-but-empty), so an empty
+  // value is flagged rather than silently dropping the whole clause.
   let problem: string;
-  if (expected || observed) {
-    problem = `expected ${expected || "n/a"} but received ${observed || "n/a"}`;
+  if (expected !== undefined || observed !== undefined) {
+    problem = `expected ${showValue(expected)} but received ${showValue(observed)}`;
   } else if (issue.description?.trim()) {
     problem = issue.description.trim();
   } else {

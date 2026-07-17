@@ -10,6 +10,7 @@ import {
   getDiscoveryRun,
   getDiscoveryTopicsXlsxPath,
   getHealth,
+  getLatestImport,
   getMe,
   listReports,
   listRuns,
@@ -410,6 +411,53 @@ describe("getDiscoveryTopicsXlsxPath", () => {
 
   it("encodes the run id", () => {
     expect(getDiscoveryTopicsXlsxPath("run/1")).toBe("/discovery/runs/run%2F1/topics.xlsx");
+  });
+});
+
+describe("getLatestImport (ISSUE-5)", () => {
+  afterEach(() => {
+    clearApiKey();
+    vi.unstubAllGlobals();
+  });
+
+  const summary = {
+    import_id: "import-9",
+    import_type: "ip_register",
+    file_name: "ip_register.csv",
+    file_type: "csv",
+    project_id: "demo-project",
+    site_id: "demo-site",
+    total_rows: 12,
+    accepted_rows: 12,
+    rejected_rows: 0,
+    status: "accepted",
+    missing_columns: [],
+    stored_file_name: "import-9.csv",
+    created_at: "2026-07-16T09:00:00Z",
+  };
+
+  it("queries /imports/latest with the type and the demo project/site defaults", async () => {
+    const fetchMock = stubFetch(jsonResponse(summary));
+
+    await expect(getLatestImport("ip_register")).resolves.toEqual(summary);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/v1/imports/latest?import_type=ip_register&project_id=demo-project&site_id=demo-site",
+    );
+  });
+
+  it("resolves to null on a 404 (no import on file) rather than throwing", async () => {
+    stubFetch(errorResponse(404, "Not Found", { detail: "no import" }));
+
+    await expect(getLatestImport("mqtt_register")).resolves.toBeNull();
+  });
+
+  it("rethrows non-404 errors so the note never masks a real failure", async () => {
+    stubFetch(errorResponse(500, "Internal Server Error", { detail: "boom" }));
+
+    const failure = getLatestImport("mqtt_register");
+    await expect(failure).rejects.toBeInstanceOf(ApiError);
+    await expect(failure).rejects.toMatchObject({ status: 500 });
   });
 });
 

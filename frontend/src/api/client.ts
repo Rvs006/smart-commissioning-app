@@ -739,6 +739,34 @@ export function getImportErrors(importId: string): Promise<ImportErrorReport> {
   return request<ImportErrorReport>(`/imports/${encodeURIComponent(importId)}/errors`);
 }
 
+// Newest usable (non-empty) import of a given type for the current project/site.
+// The Setup card reads this so it can tell the operator a register is already
+// imported and stored server-side — surviving a restart — instead of the native
+// file input always reading "No file chosen" (ISSUE-5). Sends the SAME
+// project/site defaults createImport sends, or the lookup would miss the upload.
+// Returns null on a 404 (none on file) so the caller renders nothing rather than
+// a false "register on file" claim; other errors propagate so the note never
+// masks a genuine failure with a false negative.
+export function getLatestImport(
+  importType: ImportType,
+  projectId = "demo-project",
+  siteId = "demo-site",
+): Promise<ImportBatchSummary | null> {
+  const query = new URLSearchParams({
+    import_type: importType,
+    project_id: projectId,
+    site_id: siteId,
+  });
+  return request<ImportBatchSummary>(`/imports/latest?${query.toString()}`).catch(
+    (error: unknown) => {
+      if (error instanceof ApiError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    },
+  );
+}
+
 // One uploaded non-published UDMI schema set: payloads that declare this
 // version label (e.g. "nonpub.1") are validated against these schema files
 // instead of a published canonical UDMI release.

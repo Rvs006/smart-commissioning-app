@@ -11,6 +11,7 @@ import {
   getDiscoveryTopics,
   getDiscoveryTopicsXlsxPath,
   getImportErrors,
+  getLatestImport,
   getValidationIssues,
   getValidationRun,
   getImportTemplatePath,
@@ -56,10 +57,12 @@ import {
   matchesTopicFilter,
   missingExpectedPorts,
   mqttRegisterCompareNote,
+  resultRowMatchesFilter,
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
-import { formatAbsoluteTime, isTerminalStatus, toHealthState } from "./runFormat";
+import { formatAbsoluteTime, formatRelativeTime, isTerminalStatus, toHealthState } from "./runFormat";
+import { diffPayloadLines, isPlainObject, type DiffLine } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
@@ -272,6 +275,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [schemaSetLabel, setSchemaSetLabel] = useState("");
   const [schemaSetFiles, setSchemaSetFiles] = useState<File[]>([]);
   const [selectedResultIndex, setSelectedResultIndex] = useState(0);
+  // Results-table client-side filter (ISSUE-4): free-text (substring across the
+  // visible cells, or an MQTT wildcard against the Topic column) plus a verdict
+  // tone filter. Row selection stays positional into the FULL resultRows, so the
+  // filtered view preserves original indices (see visibleResultRows).
+  const [resultsTextFilter, setResultsTextFilter] = useState("");
+  const [resultsToneFilter, setResultsToneFilter] = useState("all");
   // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
   // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
@@ -288,7 +297,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [reportExportFormat, setReportExportFormat] = useState<ReportFormat>("pdf");
   // MQTT Explorer-like capture inputs (mq9nhbzu). The live broker capture itself
   // is on-site-untested; this drives the existing mqtt discovery run + topics.
-  const [captureTopicFilter, setCaptureTopicFilter] = useState("#");
+  // Default BLANK, not "#": a blank filter is omitted from the run parameters so
+  // the backend inherits the saved Root Topic (discovery route), instead of a
+  // literal "#" silently overriding it and capturing every topic (ISSUE-3).
+  const [captureTopicFilter, setCaptureTopicFilter] = useState("");
   const [captureSeconds, setCaptureSeconds] = useState("10");
   // Field ask 2026-07-14: day-scale windows are real (metadata often every 24h),
   // so the capture duration carries a unit. The wire value stays SECONDS — only
@@ -417,6 +429,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: ["import-errors", importOutcome?.import_id],
   });
 
+  // Server-truth "already imported" lookup for the Setup card (ISSUE-5): the
+  // newest usable import of the selected type for this project/site. Drives a
+  // note telling the operator a register is on file and stored server-side
+  // (survives restart / DB is the source of truth), instead of the native file
+  // input's permanent "No file chosen". Disabled on report-only routes (no
+  // import types) and until a type is selected. A 404 resolves to null and any
+  // error leaves data undefined, so the note only ever renders on a real hit.
+  const latestImportQuery = useQuery({
+    enabled: module.importTypes.length > 0 && selectedImportType !== "",
+    queryFn: () => getLatestImport(selectedImportType as ImportType),
+    queryKey: ["latest-import", selectedImportType],
+  });
+
   // Run retention: the page state is wiped on every navigation, so arriving at a
   // head used to look like nothing had ever run there. Ask the run store for the
   // most recent succeeded run of this head's own job types and re-attach it, so
@@ -476,6 +501,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setActiveRun(null);
     setCopyFeedback(null);
     setSelectedResultIndex(0);
+    setResultsTextFilter("");
+    setResultsToneFilter("all");
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
     setReportToast(null);
@@ -592,6 +619,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     onSuccess: (summary) => {
       setImportOutcome(summary);
+      // Refresh the "already imported" note so it reflects this upload the next
+      // time the file input is empty (ISSUE-5).
+      void queryClient.invalidateQueries({ queryKey: ["latest-import"] });
       // Default accepted MQTT registers to uploaded-row validation against live
       // broker payloads; both options remain editable.
       if (summary.import_type === "mqtt_register" && summary.status !== "rejected") {
@@ -957,6 +987,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (hasUdmiLiveResults) {
       setSelectedResultIndex(0);
       setDetailRow(null);
+      // A fresh result set starts unfiltered so a stale filter never hides new
+      // rows behind a "no rows match" note (ISSUE-4).
+      setResultsTextFilter("");
+      setResultsToneFilter("all");
     }
   }, [hasUdmiLiveResults]);
 
@@ -975,6 +1009,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   useEffect(() => {
     if (discoveryView) {
       setSelectedResultIndex(0);
+      setResultsTextFilter("");
+      setResultsToneFilter("all");
     }
   }, [discoveryView]);
 
@@ -1002,11 +1038,69 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // enough to stop them being read as real findings, and a head with history
   // now re-attaches its last real run (see lastRunQuery) instead. When there
   // are no rows the table renders the "No results yet" empty state below.
-  const resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? [];
-  const selectedResult = resultRows[selectedResultIndex] ?? resultRows[0] ?? null;
+  // Memoised so the filtered-view useMemo below has a stable input identity (the
+  // `?? []` fallback would otherwise be a fresh array every render).
+  const resultRows = useMemo(
+    () => discoveryView?.rows ?? udmiLiveResults?.rows ?? [],
+    [discoveryView, udmiLiveResults],
+  );
+  // Results-table filtering (ISSUE-4). MQTT-route rows carry a Topic column, so a
+  // +/# query is matched with broker wildcard semantics; every other route (and
+  // any plain query) uses substring matching. Rows keep their ORIGINAL index so
+  // selection, the Inspector, and the View modal never point at the wrong row.
+  const resultsTopicColumn = tableColumns.includes("Topic") ? "Topic" : undefined;
+  const isResultsFilterActive = resultsTextFilter.trim() !== "" || resultsToneFilter !== "all";
+  const visibleResultRows = useMemo(
+    () =>
+      resultRows
+        .map((row, index) => ({ index, row }))
+        .filter(({ row }) =>
+          resultRowMatchesFilter(row, { text: resultsTextFilter, tone: resultsToneFilter }, resultsTopicColumn),
+        ),
+    [resultRows, resultsTextFilter, resultsToneFilter, resultsTopicColumn],
+  );
+  // The selected row, resolved WITHIN the filtered view so the Inspector can
+  // never show a row the table is hiding (ISSUE-4): when the active selection is
+  // filtered out we fall back to the first visible row, and when NOTHING matches
+  // the filter the selection is null so the Inspector renders its own empty state
+  // instead of a hidden row's detail (which the table simultaneously denies).
+  const selectedResult =
+    visibleResultRows.length === 0
+      ? null
+      : (visibleResultRows.find(({ index }) => index === selectedResultIndex) ?? visibleResultRows[0]).row;
   const resultDetails = selectedResult
     ? buildResultDetailItems(module.route, selectedResult, usingLiveResults, mergedAssetGroups)
     : [];
+  // Verdict-tone filter options, worded per route: MQTT discovery's pass/fail is
+  // register membership, other routes are the RAG pass/fail/warn verdicts.
+  const resultsToneOptions =
+    module.route === "mqtt-discovery"
+      ? [
+          { label: "All verdicts", value: "all" },
+          { label: "In register", value: "pass" },
+          { label: "Not in register", value: "fail" },
+          { label: "No verdict", value: "none" },
+        ]
+      : [
+          { label: "All verdicts", value: "all" },
+          { label: "Pass", value: "pass" },
+          { label: "Fail", value: "fail" },
+          { label: "Warn", value: "warn" },
+          { label: "No verdict", value: "none" },
+        ];
+
+  // Keep the selected row inside the FILTERED view: if the active selection is
+  // filtered out, move it to the first visible row's ORIGINAL index so the
+  // Inspector never shows a row hidden from the table (ISSUE-4). Settles because
+  // once the selection is visible the guard stops firing setState.
+  useEffect(() => {
+    if (visibleResultRows.length === 0) {
+      return;
+    }
+    if (!visibleResultRows.some(({ index }) => index === selectedResultIndex)) {
+      setSelectedResultIndex(visibleResultRows[0].index);
+    }
+  }, [visibleResultRows, selectedResultIndex]);
 
   // The structured DiscoveredTopic record for the selected MQTT row, matched by
   // topic (topics are distinct per run by aggregation construction). Yields the
@@ -1346,6 +1440,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   control always reads "No file chosen" — the staged file is
                   named here from state instead. */}
               {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
+              {/* When nothing is staged in this session, surface the server's
+                  own record of the last import so the empty file input does not
+                  imply nothing was ever uploaded (ISSUE-5). Only ever shown on a
+                  real hit — a 404/error leaves data undefined. */}
+              {!selectedFile && latestImportQuery.data && (
+                <div className="state-panel success import-on-file">
+                  <strong>Register already imported</strong>
+                  <span>
+                    {latestImportQuery.data.file_name} — {latestImportQuery.data.accepted_rows} of{" "}
+                    {latestImportQuery.data.total_rows} rows accepted,{" "}
+                    {formatRelativeTime(latestImportQuery.data.created_at)}. This register is stored
+                    and used by runs on this page; upload again only if the file changed.
+                  </span>
+                </div>
+              )}
 
               <button
                 className="primary-button"
@@ -1972,9 +2081,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               Topic filter (MQTT wildcards: + and #)
               <input
                 onChange={(event) => setCaptureTopicFilter(event.target.value)}
-                placeholder="334os/+/+/#"
+                placeholder="Blank = saved Root Topic from Configuration"
                 value={captureTopicFilter}
               />
+              <small>
+                Leave blank to inherit the saved Root Topic (e.g. site/asset-1/#). Type # to
+                capture every topic regardless of the Root Topic.
+              </small>
             </label>
             <label>
               Capture duration (0 or blank = run until stopped)
@@ -2024,7 +2137,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 long captures on the hosted worker profile.
               </span>
             )}
-          <div className="data-table-wrap">
+          <div className="data-table-wrap results-scroll">
             {captureRows.length > 0 ? (
               <table className="data-table">
                 <thead>
@@ -2724,8 +2837,82 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             ))}
 
-          <div className="data-table-wrap">
-            {resultRows.length > 0 ? (
+          {resultRows.length > 0 && (
+            <div className="results-filter-bar">
+              <label className="results-filter-text">
+                Filter results
+                <input
+                  onChange={(event) => setResultsTextFilter(event.target.value)}
+                  placeholder={
+                    resultsTopicColumn
+                      ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
+                      : "Asset, host, status, or any visible value"
+                  }
+                  value={resultsTextFilter}
+                />
+              </label>
+              <label className="results-filter-tone">
+                Verdict
+                <select
+                  onChange={(event) => setResultsToneFilter(event.target.value)}
+                  value={resultsToneFilter}
+                >
+                  {resultsToneOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span className="results-filter-count">
+                Showing {visibleResultRows.length} of {resultRows.length}{" "}
+                {resultRows.length === 1 ? "row" : "rows"}
+              </span>
+              {isResultsFilterActive && (
+                <button
+                  className="secondary-button compact"
+                  onClick={() => {
+                    setResultsTextFilter("");
+                    setResultsToneFilter("all");
+                  }}
+                  type="button"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="data-table-wrap results-scroll">
+            {resultRows.length === 0 ? (
+              <div className="empty-workspace">
+                <strong>
+                  {discoveryEmptyState
+                    ? discoveryEmptyState.title
+                    : isDiscoveryModule && activeRun && !activeRunTerminal
+                      ? "Run in progress..."
+                      : "No results yet"}
+                </strong>
+                <span>
+                  {discoveryEmptyState
+                    ? discoveryEmptyState.detail
+                    : isDiscoveryModule
+                      ? "Run a discovery; observed devices, points, or topics appear here once it completes."
+                      : "Run a job to populate results."}
+                </span>
+              </div>
+            ) : visibleResultRows.length === 0 ? (
+              // The filter matched nothing. This is a claim about the FILTER,
+              // never the scan — never fall through to the discovery empty state,
+              // whose copy asserts what the network did (ISSUE-4).
+              <div className="empty-workspace">
+                <strong>No rows match the current filters</strong>
+                <span>
+                  Adjust or clear the filters to see the {resultRows.length}{" "}
+                  captured {resultRows.length === 1 ? "row" : "rows"}.
+                </span>
+              </div>
+            ) : (
               <table className="data-table">
                 <thead>
                   <tr>
@@ -2736,7 +2923,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   </tr>
                 </thead>
                 <tbody>
-                  {resultRows.map((row, rowIndex) => (
+                  {visibleResultRows.map(({ row, index: rowIndex }) => (
                     // Row shading: live UDMI verdicts (pass green / fail red),
                     // IP discovery register verdicts (pass/fail plus warn amber
                     // for expected-but-silent and other inconclusive findings)
@@ -2750,6 +2937,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     // the modal (Pete: "select a scan result"). row-selected marks
                     // the active row; the nested "Copy payload" click bubbles here
                     // and also selects — benign and desirable, no stopPropagation.
+                    // rowIndex is the row's ORIGINAL index in resultRows, so
+                    // selection stays correct while the list is filtered (ISSUE-4).
                     <tr
                       className={`${row.__tone ? `row-${row.__tone}` : ""}${
                         selectedResultIndex === rowIndex ? " row-selected" : ""
@@ -2776,23 +2965,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ))}
                 </tbody>
               </table>
-            ) : (
-              <div className="empty-workspace">
-                <strong>
-                  {discoveryEmptyState
-                    ? discoveryEmptyState.title
-                    : isDiscoveryModule && activeRun && !activeRunTerminal
-                      ? "Run in progress..."
-                      : "No results yet"}
-                </strong>
-                <span>
-                  {discoveryEmptyState
-                    ? discoveryEmptyState.detail
-                    : isDiscoveryModule
-                      ? "Run a discovery; observed devices, points, or topics appear here once it completes."
-                      : "Run a job to populate results."}
-                </span>
-              </div>
             )}
           </div>
         </article>
@@ -2942,31 +3114,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                         {payloadOpen ? "Hide" : "Show"} expected vs observed payload
                                       </button>
                                       {payloadOpen && (
-                                        <div className="payload-compare">
-                                          <div>
-                                            <h6>Expected UDMI template</h6>
-                                            <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
-                                            <pre className="payload-cell">
-                                              {entry.expected
-                                                ? JSON.stringify(entry.expected, null, 2)
-                                                : "—"}
-                                            </pre>
-                                          </div>
-                                          <div>
-                                            <h6>Observed</h6>
-                                            <pre className="payload-cell">
-                                              {entry.observedPresent
-                                                ? JSON.stringify(entry.observed, null, 2)
-                                                : "not captured"}
-                                            </pre>
-                                            {entry.observedPresent && entry.observed !== null && entry.observed !== undefined && (
-                                              <details className="json-inspector">
-                                                <summary>Explore JSON tree</summary>
-                                                <JsonTree value={entry.observed} />
-                                              </details>
-                                            )}
-                                          </div>
-                                        </div>
+                                        <PayloadComparePanels
+                                          expected={entry.expected}
+                                          observed={entry.observed}
+                                          observedPresent={entry.observedPresent}
+                                        />
                                       )}
                                     </div>
                                   )}
@@ -3348,6 +3500,76 @@ function MqttPayloadPanel({ topic }: { topic: DiscoveryRowRecord }) {
   );
 }
 
+// Renders a payload as per-line spans carrying the presence-diff highlight
+// class. Text is byte-identical to JSON.stringify(value, null, 2) (see
+// payloadDiff); only the class differs, so the panel content is unchanged.
+function renderPayloadDiffLines(lines: DiffLine[]) {
+  return lines.map((line, index) => (
+    <span className={`payload-diff-line${line.mark ? ` ${line.mark}` : ""}`} key={index}>
+      {line.text}
+    </span>
+  ));
+}
+
+// Expected-vs-observed UDMI payload panels (ISSUE-8): side by side via the
+// .payload-compare grid, with a per-line PRESENCE diff. A key present on only
+// one side is highlighted on that side (amber = expected only, red = observed
+// only). VALUES are never diffed — the expected side is a template of sentinel
+// values, so value marks would fabricate findings on every healthy payload; the
+// engine's issue cards above remain the authority on values. When nothing was
+// observed there is no diff at all (an observation-shaped claim would be
+// dishonest), so the panels fall back to today's plain rendering.
+function PayloadComparePanels({
+  expected,
+  observed,
+  observedPresent,
+}: {
+  expected: unknown;
+  observed: unknown;
+  observedPresent: boolean;
+}) {
+  const diff =
+    observedPresent && isPlainObject(expected) && isPlainObject(observed)
+      ? diffPayloadLines(expected, observed)
+      : null;
+  return (
+    <>
+      <div className="payload-compare">
+        <div>
+          <h6>Expected UDMI template</h6>
+          <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
+          <pre className="payload-cell">
+            {diff ? renderPayloadDiffLines(diff.expected) : expected ? JSON.stringify(expected, null, 2) : "—"}
+          </pre>
+        </div>
+        <div>
+          <h6>Observed</h6>
+          <pre className="payload-cell">
+            {diff
+              ? renderPayloadDiffLines(diff.observed)
+              : observedPresent
+                ? JSON.stringify(observed, null, 2)
+                : "not captured"}
+          </pre>
+          {observedPresent && observed !== null && observed !== undefined && (
+            <details className="json-inspector">
+              <summary>Explore JSON tree</summary>
+              <JsonTree value={observed} />
+            </details>
+          )}
+        </div>
+      </div>
+      {diff && (
+        <p className="section-copy payload-diff-legend">
+          Highlights mark keys present on only one side (amber = expected only, red = observed
+          only). Values are not compared here — expected values are template sentinels; see the
+          issues above for value checks.
+        </p>
+      )}
+    </>
+  );
+}
+
 function JsonTree({ value }: { value: unknown }) {
   if (value === null || typeof value !== "object") {
     return <span>{JSON.stringify(value)}</span>;
@@ -3370,12 +3592,21 @@ function JsonTree({ value }: { value: unknown }) {
   );
 }
 
+// A present-but-empty expected/observed value ("") is flagged as the explicit
+// word "empty" (Pete's own word, ISSUE-10) rather than rendering as blank; an
+// absent value (null/undefined) stays "n/a". Keeps the comparison segment
+// whenever EITHER side is present so an all-empty pair no longer drops the
+// whole clause and leaves a dangling "observed " before the suggested action.
+function issueDisplayValue(value: string | null | undefined): string {
+  return value === "" ? "empty" : (value ?? "n/a");
+}
+
 function toIssueRow(issue: ValidationIssueRecord): IssueRow {
   const details = [
     issue.description,
     issue.status_detail ? `Status: ${issue.status_detail}` : null,
-    issue.expected_value || issue.observed_value
-      ? `Expected ${issue.expected_value ?? "n/a"}, observed ${issue.observed_value ?? "n/a"}`
+    issue.expected_value != null || issue.observed_value != null
+      ? `Expected ${issueDisplayValue(issue.expected_value)}, observed ${issueDisplayValue(issue.observed_value)}`
       : null,
     issue.suggested_action,
   ]

@@ -268,6 +268,87 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.getByText(/affected rows are still accepted/i)).toBeInTheDocument();
   });
 
+  const latestImportSummary = {
+    import_id: "import-ip-9",
+    import_type: "ip_register",
+    file_name: "ip_register.csv",
+    file_type: "csv",
+    project_id: "demo-project",
+    site_id: "demo-site",
+    total_rows: 12,
+    accepted_rows: 12,
+    rejected_rows: 0,
+    status: "accepted",
+    missing_columns: [],
+    stored_file_name: "import-ip-9.csv",
+    created_at: "2026-07-16T09:00:00Z",
+  };
+
+  function stubLatestImportFetch(latest: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/imports/latest")) return jsonResponse(latest);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("shows a server-truth 'already imported' note when no file is staged (ISSUE-5)", async () => {
+    stubLatestImportFetch(latestImportSummary);
+
+    renderModule("ip-scanner");
+
+    // The empty file input no longer implies nothing was uploaded: the note names
+    // the stored register and states it is persisted and used by runs here.
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    expect(screen.getByText(/12 of 12 rows accepted/i)).toBeInTheDocument();
+    expect(screen.getByText(/stored[\s\S]*used by runs on this page/i)).toBeInTheDocument();
+  });
+
+  it("hides the 'already imported' note while a new file is staged (ISSUE-5)", async () => {
+    stubLatestImportFetch(latestImportSummary);
+
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Register already imported")).toBeInTheDocument();
+    // Staging a file replaces the server-truth note with the in-session
+    // "Selected: ..." line, so the two never both claim the current state.
+    fireEvent.change(await screen.findByLabelText(/CSV or XLSX file/i), {
+      target: { files: [new File(["reg"], "new_ip_register.csv")] },
+    });
+    expect(screen.queryByText("Register already imported")).not.toBeInTheDocument();
+    expect(screen.getByText(/Selected: new_ip_register\.csv/i)).toBeInTheDocument();
+  });
+
+  it("renders nothing extra when the server reports no prior import (ISSUE-5)", async () => {
+    // getLatestImport maps a 404 to null; the note must not render on an empty
+    // result — an empty file input is the honest state when nothing is on file.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/imports/latest")) {
+          return { ok: false, status: 404, statusText: "Not Found", json: async () => ({ detail: "none" }) } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    // The profiles load resolves the card; the note is absent.
+    expect(await screen.findByRole("button", { name: "Upload and validate" })).toBeInTheDocument();
+    expect(screen.queryByText("Register already imported")).not.toBeInTheDocument();
+  });
+
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(
@@ -455,6 +536,50 @@ describe("ModulePage discovery wiring", () => {
     expect(parameters.capture_seconds).toBe(0);
   });
 
+  it("omits topic_filter from the MQTT run when the filter is left blank so the saved Root Topic is inherited (ISSUE-3)", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    // Do NOT touch the topic filter: it now defaults to blank, so the backend
+    // inherits the saved Root Topic instead of a literal "#" silently overriding
+    // it. A blank filter must be omitted from the run parameters entirely.
+    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters).not.toHaveProperty("topic_filter");
+  });
+
+  it("sends an explicit MQTT topic filter verbatim when the operator types one (ISSUE-3)", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    // An operator who wants a full-wildcard or scoped capture types it explicitly;
+    // it flows through unchanged as the run's topic_filter override.
+    fireEvent.change(await screen.findByLabelText(/Topic filter/i), {
+      target: { value: "site/asset-1/#" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.topic_filter).toBe("site/asset-1/#");
+  });
+
   it("selects an MQTT topic row to inspect its real payload with honest metadata and no fabricated issues", async () => {
     const mqttResultsPayload = {
       run_id: "run-mqtt-1",
@@ -564,6 +689,163 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.getByText("Delivery QoS")).toBeInTheDocument();
     expect(screen.getByText("Received at")).toBeInTheDocument();
     expect(screen.queryByText("Published")).not.toBeInTheDocument();
+  });
+
+  it("filters the results table by text, preserves selection, and never shows the scan empty state for a filter miss (ISSUE-4)", async () => {
+    const mqttResultsPayload = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 2, messages_captured: 5 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "udmi/AHU-1/state",
+          message_count: 3,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: "AHU-1", position: 0 },
+        },
+        {
+          topic: "sensors/raw/blob",
+          message_count: 1,
+          last_payload: { _raw_present: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: null, position: 1 },
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(mqttResultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    // Both topic rows land and the count line reports the full set.
+    expect(await screen.findByText("sensors/raw/blob")).toBeInTheDocument();
+    expect(screen.getByText(/Showing 2 of 2 rows/)).toBeInTheDocument();
+
+    // Filter to the blob topic: the AHU row leaves the table, the count updates,
+    // and selection follows to the only visible row (its inspector heading).
+    fireEvent.change(screen.getByLabelText(/Filter results/i), { target: { value: "sensors" } });
+    expect(screen.getByText(/Showing 1 of 2 rows/)).toBeInTheDocument();
+    // Selection follows to the only visible row before asserting the AHU row is
+    // fully gone (table cell AND its inspector echo).
+    expect(await screen.findByText(/Last payload on sensors\/raw\/blob/)).toBeInTheDocument();
+    expect(screen.queryByText("udmi/AHU-1/state")).not.toBeInTheDocument();
+
+    // A filter that matches nothing shows the filter-specific note — NEVER the
+    // scan empty state, whose copy would assert something about the network.
+    fireEvent.change(screen.getByLabelText(/Filter results/i), { target: { value: "zzz-none" } });
+    expect(screen.getByText("No rows match the current filters")).toBeInTheDocument();
+    expect(screen.queryByText(/Capture complete/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
+    expect(screen.getByText(/Showing 0 of 2 rows/)).toBeInTheDocument();
+    // The Inspector must not keep the previously-selected (now hidden) topic's
+    // payload on screen while the table reports zero matches: with nothing
+    // visible the selection is null and the aside falls back to its own empty
+    // state (ISSUE-4).
+    expect(screen.queryByText(/Last payload on sensors\/raw\/blob/)).not.toBeInTheDocument();
+    expect(screen.getByText("No topic selected")).toBeInTheDocument();
+
+    // Clearing restores every row.
+    fireEvent.click(screen.getByRole("button", { name: /Clear filters/i }));
+    expect(screen.getByText(/Showing 2 of 2 rows/)).toBeInTheDocument();
+    expect(screen.getByText("udmi/AHU-1/state")).toBeInTheDocument();
+  });
+
+  it("filters the results table by verdict tone on the MQTT route (ISSUE-4)", async () => {
+    const mqttResultsPayload = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 2, messages_captured: 5 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "site/asset-1/state",
+          message_count: 3,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: "AHU-1", position: 0, register_match: "matched" },
+        },
+        {
+          topic: "rogue/asset-9/state",
+          message_count: 1,
+          last_payload: { online: true },
+          created_at: "2026-07-15T09:05:00Z",
+          attributes: { device_ref: null, position: 1, register_match: "unmatched" },
+        },
+      ],
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(mqttResultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    expect(await screen.findByText("rogue/asset-9/state")).toBeInTheDocument();
+
+    // "Not in register" keeps only the unmatched (fail-tone) row.
+    fireEvent.change(screen.getByLabelText(/Verdict/i), { target: { value: "fail" } });
+    expect(screen.getByText(/Showing 1 of 2 rows/)).toBeInTheDocument();
+    expect(screen.queryByText("site/asset-1/state")).not.toBeInTheDocument();
+    // Present in the table cell (and, since selection follows, the inspector).
+    expect(screen.getAllByText("rogue/asset-9/state").length).toBeGreaterThan(0);
   });
 
   it("shows 'Not recorded' MQTT metadata for a run that predates metadata capture", async () => {
@@ -1500,9 +1782,23 @@ describe("ModulePage UDMI workbench live results", () => {
               expected: {
                 timestamp: "<RFC 3339 timestamp>",
                 version: "1.5.2",
-                points: { energy_sensor: { present_value: "<device-reported value>" } },
+                points: {
+                  energy_sensor: { present_value: "<device-reported value>" },
+                  // Expected-only point: the device published a near-identical
+                  // (typo'd) name, so this spelling has no observed counterpart —
+                  // highlighted amber on the expected side (ISSUE-8).
+                  supply_temp_sensor: { present_value: "<device-reported value>" },
+                },
               },
-              observed: { version: "1.4.0", points: { energy_sensor: { present_value: 12.5 } } },
+              observed: {
+                version: "1.4.0",
+                points: {
+                  energy_sensor: { present_value: 12.5 },
+                  // Observed-only point (the typo) — highlighted red on the
+                  // observed side. Values (present_value/version) are never marked.
+                  suply_temp_sensor: { present_value: 21.4 },
+                },
+              },
               observed_present: true,
             },
             {
@@ -1603,6 +1899,22 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0]);
     expect(screen.getByText("Expected UDMI template")).toBeInTheDocument();
     expect(screen.getByText(/schema-valid sentinel values identify device-supplied fields/i)).toBeInTheDocument();
+
+    // Presence diff (ISSUE-8): the expected-only point spelling shades amber on
+    // the expected side, the observed-only (typo'd) spelling shades red on the
+    // observed side. jsdom cannot see theme CSS, so assert on the mark classes.
+    // The expected-only line names the correct spelling; the observed-only line
+    // names the typo — proving each is marked on its own side.
+    const expectedOnly = Array.from(document.querySelectorAll(".payload-diff-line.only-expected"));
+    const observedOnly = Array.from(document.querySelectorAll(".payload-diff-line.only-observed"));
+    expect(expectedOnly.some((el) => el.textContent?.includes("supply_temp_sensor"))).toBe(true);
+    expect(observedOnly.some((el) => el.textContent?.includes("suply_temp_sensor"))).toBe(true);
+    // A value difference (version 1.5.2 vs 1.4.0) is NEVER highlighted — expected
+    // values are template sentinels; the engine's issue cards own value checks.
+    expect(expectedOnly.some((el) => el.textContent?.includes("1.5.2"))).toBe(false);
+    expect(observedOnly.some((el) => el.textContent?.includes("1.4.0"))).toBe(false);
+    // The legend explaining the highlight is present.
+    expect(screen.getByText(/Values are not compared here/i)).toBeInTheDocument();
   });
 
   // Shared stub for the verdict-focused tests below — the same endpoints as the
@@ -1757,6 +2069,41 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(pass.closest(".payload-type-group")).toHaveClass("section-pass");
   });
 
+  it("flags a present-but-empty observed value as 'empty' in the issue detail (ISSUE-10)", async () => {
+    const emptyValueIssue = {
+      run_id: "run-udmi-1",
+      issues: [
+        {
+          issue_id: "UDMI-PS-009",
+          asset_id: "EM-1",
+          issue_type: "pointset_validation",
+          severity: "critical",
+          description: "Pointset payload version is blank.",
+          point_name: null,
+          expected_value: "1.5.2",
+          // Present but EMPTY (not null): previously rendered as a bare blank
+          // ("observed " with nothing after it); now it must read "empty".
+          observed_value: "",
+          suggested_action: "Populate the version field.",
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+      ],
+    };
+    stubUdmiRunFetch(emptyValueIssue);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
+
+    fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
+    // The empty observed value is named "empty" rather than dropped or blank.
+    expect((await screen.findAllByText(/Expected 1\.5\.2, observed empty/i)).length).toBeGreaterThan(0);
+  });
+
   it("shades silent devices red (offline) on a succeeded run (RAG)", async () => {
     // EM-1 publishes with one major issue → amber. EM-2 was CAPTURED (a real
     // attempt) but stayed silent: pointset + state observed_present false, an
@@ -1889,7 +2236,9 @@ describe("ModulePage UDMI workbench live results", () => {
     // ...and no pass/fail/warn shading or PASS text anywhere: a summary-derived
     // offline signal must not paint amber/red before the issues query settles.
     expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
-    expect(screen.queryByText("Pass")).not.toBeInTheDocument();
+    // The verdict "Pass" never appears in a results-table row cell (the ISSUE-4
+    // filter bar carries a "Pass" tone option, which is a control, not a verdict).
+    expect(document.querySelector(".data-table")?.textContent).not.toContain("Pass");
     expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
   });
 
@@ -1917,7 +2266,9 @@ describe("ModulePage UDMI workbench live results", () => {
     ).toBeInTheDocument();
     expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
     expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
-    expect(screen.queryByText("Pass")).not.toBeInTheDocument();
+    // The verdict "Pass" never appears in a results-table row cell (the ISSUE-4
+    // filter bar carries a "Pass" tone option, which is a control, not a verdict).
+    expect(document.querySelector(".data-table")?.textContent).not.toContain("Pass");
     expect(screen.queryByText("PASS — UDMI Compliant")).not.toBeInTheDocument();
   });
 

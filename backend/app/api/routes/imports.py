@@ -133,6 +133,24 @@ async def create_import(
     return summary
 
 
+# Declared BEFORE GET /{import_id} on purpose: a literal path must be registered
+# ahead of the parameterised one, or "latest" is swallowed as an import_id and
+# always 404s. Query params mirror createImport's project/site defaults so the
+# lookup targets the same rows the upload wrote.
+@router.get("/latest", response_model=ImportBatchSummary, dependencies=[Depends(require_viewer)])
+def get_latest_import(
+    import_type: ImportType,
+    project_id: str | None = None,
+    site_id: str | None = None,
+) -> ImportBatchSummary:
+    summary = service.get_latest_import(
+        import_type=import_type, project_id=project_id, site_id=site_id
+    )
+    if summary is None:
+        raise HTTPException(status_code=404, detail="No import is on file for the given filters.")
+    return summary
+
+
 @router.get("/{import_id}", response_model=ImportBatchSummary, dependencies=[Depends(require_viewer)])
 def get_import(import_id: str) -> ImportBatchSummary:
     try:

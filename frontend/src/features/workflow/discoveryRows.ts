@@ -326,6 +326,53 @@ export function matchesTopicFilter(topic: string, filter: string): boolean {
   return filterParts.length === topicParts.length;
 }
 
+// Client-side results-table filter (ISSUE-4). `tone` filters on the hidden
+// __tone verdict key; `text` is either an MQTT wildcard (when it carries a +/#
+// AND a Topic column exists) matched with broker semantics against the Topic
+// cell, or a case-insensitive substring across every VISIBLE cell. Hidden keys
+// (prefixed "__", e.g. __tone/__qos/__receivedAt) never participate in text
+// matching, so a filter can never key off data the operator cannot see.
+export type ResultsFilter = {
+  text: string;
+  // "all" | "pass" | "fail" | "warn" | "none" ("none" = rows with no verdict).
+  tone: string;
+};
+
+export function resultRowMatchesFilter(
+  row: Record<string, string>,
+  filter: ResultsFilter,
+  topicColumn?: string,
+): boolean {
+  if (filter.tone !== "all") {
+    const rowTone = row.__tone ?? "";
+    if (filter.tone === "none" ? rowTone !== "" : rowTone !== filter.tone) {
+      return false;
+    }
+  }
+  const text = filter.text.trim();
+  if (text === "") {
+    return true;
+  }
+  // A plain query (no wildcard) always uses substring matching, even on the MQTT
+  // route: matchesTopicFilter's exact-level semantics would make an asset-name
+  // query match nothing. Only a +/# query engages topic matching.
+  if (/[+#]/.test(text) && topicColumn && row[topicColumn] !== undefined) {
+    return matchesTopicFilter(row[topicColumn], text);
+  }
+  const lowerText = text.toLowerCase();
+  return Object.entries(row).some(
+    ([key, value]) => !key.startsWith("__") && value.toLowerCase().includes(lowerText),
+  );
+}
+
+export function filterResultRows(
+  rows: Record<string, string>[],
+  filter: ResultsFilter,
+  topicColumn?: string,
+): Record<string, string>[] {
+  return rows.filter((row) => resultRowMatchesFilter(row, filter, topicColumn));
+}
+
 export type DiscoveryView = {
   columns: string[];
   rows: Record<string, string>[];
