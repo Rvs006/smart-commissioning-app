@@ -15,10 +15,7 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   pointing at the Configuration page.** Previously an unconfigured install
   reported the same `broker_unreachable` label as a genuine network failure, so
   an operator with an unsaved configuration debugged the network instead of the
-  config. Fresh installs now seed an empty MQTT broker host, so running
-  discovery unconfigured fails as a config gap rather than dialing a fictional
-  placeholder FQDN; existing installs are unaffected (defaults only fill missing
-  keys).
+  config.
 
 ## [0.1.15] - 2026-07-17
 
