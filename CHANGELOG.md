@@ -16,7 +16,9 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   traded one error for another. The guard runs for IP, MQTT, and BACnet run
   creation alike, so the advice is now engine-neutral: re-select a current
   adapter; Auto also works for IP and MQTT runs, while a BACnet scan requires
-  a specific adapter.
+  a specific adapter. The Configuration page's missing-adapter hint ("set
+  Source Interface back to Auto") carried the same dead end and now uses the
+  same caveat.
 
 ## [0.1.14] - 2026-07-16
 
