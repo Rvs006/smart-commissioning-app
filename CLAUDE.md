@@ -70,19 +70,28 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-17 — **v0.1.11 through v0.1.15
-  are all released** (`main`, CI green, workflow-built boot-smoked portable
-  bundles attached; exe SHA-256 lives in each Release's notes, deliberately
-  not in repo files). v0.1.15 is a single pre-lab fix: the Source-Interface
-  guard messages and the Configuration page's missing-adapter hint no longer
-  dead-end BACnet operators on Auto. The two handoff docs
-  (`docs/handoff-2026-07-15-pete-walkthrough.md`,
-  `docs/handoff-v0.1.13-remaining-punchlist.md`) carry SPENT/SHIPPED banners
-  and are historical; the punchlist's §4 deferred items and §5 open Pete
-  decisions are the live backlog, alongside GitHub issue #4 (production
-  gates). Next hard date: the **2026-07-20** live lab session —
-  `docs/lab-day-2026-07-20-runbook.md`. Update or supersede this block when
-  the state changes.
+- **Current handoff**: status as of 2026-07-17 (evening) — **v0.1.11 through
+  v0.1.16 are released** (`main`, CI green, workflow-built boot-smoked
+  portable bundles attached; exe SHA-256 lives in each Release's notes,
+  deliberately not in repo files; v0.1.16 is cut from this commit and
+  publishes immediately after it). v0.1.16 is the post-field-session fix
+  bundle: a 2026-07-17 live session on a real flat (no-BBMD) BACnet network
+  showed every real discovery run returning HTTP 500 and freezing at
+  "running" while the scan completed on the wire — raw bacpypes3 values
+  hitting JSON persistence plus a double-fault in the run wrapper — and the
+  log bundle came back empty because 500 tracebacks never reached `app.log`.
+  Fixed: JSON-safe value normalization at the read boundary,
+  terminal-status-on-every-path in `engines/base.py`, uvicorn-to-`app.log`
+  routing + run-lifecycle breadcrumbs, and a startup sweep for runs orphaned
+  at "running" (worker-queued runs excluded). **A BBMD is optional per site**
+  — recorded as a hard requirement in `docs/protocol-conformance.md` §3;
+  "local broadcast only" is the healthy flat-network state. Open questions:
+  whether the 2026-07-20 lab network has a BBMD (the runbook rewrite hinges
+  on it), and the BACnet pre-flight card planned for v0.1.17 after the lab.
+  The punchlist's §4 deferred items and §5 open Pete decisions remain the
+  live backlog, alongside GitHub issue #4 (production gates). Next hard date:
+  the **2026-07-20** live lab session — `docs/lab-day-2026-07-20-runbook.md`.
+  Update or supersede this block when the state changes.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational
