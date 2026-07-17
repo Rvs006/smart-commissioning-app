@@ -22,6 +22,7 @@ transports remain on-site-validation surface (see each engine's docstring).
 """
 
 import ipaddress
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -34,6 +35,8 @@ from smart_commissioning_core.engines.base import (  # noqa: F401
     ThrottleConfig,
     make_cancel_checker,
 )
+
+logger = logging.getLogger(__name__)
 
 # Hard floor for the active-scan rate limiter. A request may lower the rate but
 # can never disable it (set it to None / unlimited): the limiter always stays a
@@ -201,8 +204,25 @@ def make_device_point_persister(
         for record in records:
             target = points if _is_point_record(record) else devices
             target.append(dict(record))
-        repository.replace_devices(run_id, devices)
-        repository.replace_points(run_id, points)
+        try:
+            repository.replace_devices(run_id, devices)
+            repository.replace_points(run_id, points)
+        except Exception:
+            # SESSION HYGIENE: each replace_* runs in its OWN
+            # ``sessionmaker.begin()`` transaction, which rolls back on a mid-flush
+            # raise and returns the pooled connection clean — so the engine
+            # framework's subsequent terminal-"failed" status write (a fresh
+            # session on the same engine) still succeeds and the run is never
+            # fossilized at "running". Log a breadcrumb naming the run, then
+            # re-raise the ORIGINAL error so that failure path runs.
+            logger.warning(
+                "Persisting BACnet discovery records failed for run %s "
+                "(%d device(s), %d point(s) not saved).",
+                run_id,
+                len(devices),
+                len(points),
+            )
+            raise
 
     return persist
 

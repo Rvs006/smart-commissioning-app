@@ -5,6 +5,43 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Live BACnet discovery runs no longer fail with a server error and stick on
+  "running" forever.** A real scan reads each point's present-value and a
+  device's vendor id as bacpypes3 objects (an enumerated value such as
+  "active", not a plain number), and writing those raw into the run's saved
+  results raised an error during the save — after the scan had already
+  finished on the network — so the request failed and the run was frozen at
+  "running" with nothing recorded. The engine now converts every observed
+  value to a save-safe form at the point it is read (an enumerated reading is
+  stored as its honest text, e.g. "active"; no numbers are invented), and the
+  run framework now always reaches a final status: a save that fails still
+  ends the run "failed" with a clear reason ("Discovery finished but its
+  results could not be saved. See server logs for details."), and a cancelled
+  or interrupted run can no longer be left stuck at "running".
+- **Server errors now leave a traceback in the log bundle, and runs leave a
+  trail.** A field session's "Download log bundle" zip came back with no
+  `app.log` at all: unhandled-500 tracebacks only ever went to uvicorn's
+  console, and the backend logged nothing during a healthy session. Now
+  uvicorn's error log is routed into `app.log` on both the portable app and
+  the dev server, an app-level handler records every unhandled traceback
+  before the 500 response goes out, run creation and every status change
+  leave an INFO breadcrumb, and API rejections (4xx) are logged with their
+  reason — so a log bundle finally tells the session's story.
+- **Runs orphaned at "running" are reclaimed, and a failing run store can no
+  longer take the response down with it.** Any run left "running" by an
+  application restart is marked failed on the next start ("This run was
+  interrupted by an application restart before it could finish, so no results
+  were saved. Please run it again."); runs queued to the background worker
+  are deliberately left alone, and the worker-dispatch markers are now
+  recorded before the job is enqueued so the sweep can never mistake a live
+  worker run for an orphan. The inline dispatch path also tolerates a run
+  store whose terminal write fails, reporting the run's real state instead of
+  crashing with a 500.
+
 ## [0.1.15] - 2026-07-17
 
 ### Fixed

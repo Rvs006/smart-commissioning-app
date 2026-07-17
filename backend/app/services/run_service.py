@@ -1,3 +1,5 @@
+import logging
+
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.models import Run
 from sqlalchemy import select, text, update
@@ -18,6 +20,8 @@ from app.schemas.jobs import (
     ValidationIssueRecord,
 )
 
+logger = logging.getLogger(__name__)
+
 DISCOVERY_JOB_TYPES: set[JobType] = {"ip_discovery", "bacnet_discovery", "mqtt_discovery"}
 VALIDATION_JOB_TYPES: set[JobType] = {
     "udmi_validation",
@@ -32,6 +36,31 @@ REPORT_FORMAT_EXTENSIONS = {
     "xlsx": "xlsx",
     "zip": "zip",
 }
+
+# Operator-facing message stamped on a run the startup sweep found fossilized at
+# "running" (see RunService.sweep_interrupted_runs). Credential-free and generic
+# by design (this text can reach the UI).
+INTERRUPTED_RUN_MESSAGE = (
+    "This run was interrupted by an application restart before it could finish, "
+    "so no results were saved. Please run it again."
+)
+
+
+def _was_queued_to_worker(result_summary: dict[str, object]) -> bool:
+    """Return True if the run was handed to the background (Dramatiq) worker queue.
+
+    The queue-dispatch path (app.services.run_dispatch.dispatch_run) is the ONLY
+    writer of ``queue_name`` / ``actor_name`` into a run's result_summary, so
+    their presence is the precise "went to the worker" marker. dispatch_run writes
+    them BEFORE handing the run to the queue (and clears them back to None if it
+    falls back to inline), so a worker that has already flipped the run to
+    'running' always carries the markers — closing the window in which the sweep
+    would otherwise false-fail a live worker run whose markers had not been
+    written yet. The ``queued`` / ``worker_required`` flags are deliberately NOT
+    used here: the run store stamps them on EVERY freshly created run (inline runs
+    included), so they cannot tell an inline run apart from a queued one.
+    """
+    return bool(result_summary.get("queue_name") or result_summary.get("actor_name"))
 
 
 class RunService:
@@ -190,7 +219,45 @@ class RunService:
             progress_percent=progress_percent,
             error_message=error_message,
         )
+        # Run-lifecycle breadcrumb: every status transition written through the
+        # service (running -> succeeded/failed/cancelled, and the startup sweep)
+        # so a log bundle tells the session story.
+        logger.info("run status run_id=%s status=%s stage=%s", run_id, status, stage)
         return RunRecord.model_validate(record)
+
+    def sweep_interrupted_runs(self) -> list[str]:
+        """Mark runs fossilized at status "running" by a restart as failed.
+
+        A run stuck at "running" after an application restart (or a crash/500
+        mid-persist) will never reach a terminal status on its own — the process
+        that owned it is gone. Flip such runs to "failed" with
+        :data:`INTERRUPTED_RUN_MESSAGE` so the operator sees an actionable result
+        instead of a run that spins forever.
+
+        CRITICAL GATE: only runs NOT dispatched to the worker queue are swept. A
+        queued/worker run may still be executing on a worker in the hosted
+        deployment, so touching it here would race a live run; see
+        :func:`_was_queued_to_worker` for the discriminator. Inline runs (the
+        portable exe path) have no worker to finish them, so they are the ones
+        this reclaims. Returns the ids swept (may be empty).
+        """
+        statement = select(Run.id, Run.result_summary).where(Run.status == "running")
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).all()
+        swept: list[str] = []
+        for run_id, result_summary in rows:
+            summary = result_summary if isinstance(result_summary, dict) else {}
+            if _was_queued_to_worker(summary):
+                continue
+            self.update_run_status(
+                run_id,
+                status="failed",
+                stage="interrupted_by_restart",
+                progress_percent=100,
+                error_message=INTERRUPTED_RUN_MESSAGE,
+            )
+            swept.append(run_id)
+        return swept
 
     def update_result_summary(
         self,
@@ -257,6 +324,8 @@ class RunService:
         # record (like cancel_requested), so the API response shape is unchanged;
         # the hub reads it via SyncRepository when a bundle is built/ingested.
         self._stamp_local_edge_id(str(record["run_id"]))
+        # Run-lifecycle breadcrumb (run created) — see update_run_status.
+        logger.info("run created run_id=%s job_type=%s", record["run_id"], job_type)
         return RunRecord.model_validate(record)
 
     def _stamp_local_edge_id(self, run_id: str) -> None:
