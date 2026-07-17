@@ -119,6 +119,19 @@ abstraction with two implementations:
 | Authorization gate before a real scan | Tested | A real (non-dry-run) scan requires the authorization contract. |
 | Directed (unicast) Who-Is | Not wired in real path | The documented signature did not accept it; flagged UNVERIFIED. |
 
+**Transport modes — a BBMD is OPTIONAL; local broadcast is the default (hard
+requirement, field-confirmed 2026-07-17).** Not every job site has a BBMD:
+single-subnet ("flat") networks are a normal case, and the app must scan them
+with Foreign Device left Disabled — the scan then uses **local broadcast
+only**, which on a flat network is the healthy state, not a degraded fallback.
+Foreign-device registration through a BBMD engages ONLY when the saved
+configuration has Foreign Device = Enabled (with a real BBMD Address), and
+exists solely to reach devices behind routers on other subnets. Operator docs
+and messages must never present "local broadcast only" as an error, and must
+never instruct enabling the BBMD fields except for sites that actually have
+one — a 2026-07-17 field session was misdirected by exactly that (see the
+correction note in `docs/pete-message-v0.1.15.md`).
+
 Install the real path with the optional extra:
 `pip install 'smart-commissioning-core[bacnet]'` (not installed by default; see
 `docs/SBOM.md`).

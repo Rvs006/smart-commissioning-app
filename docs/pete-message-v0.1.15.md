@@ -4,6 +4,17 @@
 published with the portable zip attached and marked latest — check the link
 resolves first.
 
+> **CORRECTION (2026-07-17, after the live session):** steps 2 and 5 of the
+> message below assume the target network sits behind a BBMD (the 2026-07-20
+> lab premise). Pete's own test network is a flat single subnet with **no
+> BBMD** — on such networks Foreign Device stays **Disabled**, the BBMD fields
+> are left alone, and a dry-run plan saying "local broadcast only" is the
+> CORRECT, healthy state — not a failed save. Following step 2 as written
+> misdirected the 2026-07-17 session (Foreign Device enabled against a
+> non-existent BBMD fails loudly, as designed). A BBMD is optional per site;
+> the requirement is recorded in `docs/protocol-conformance.md` §3. The
+> message text below is preserved exactly as sent.
+
 Context for the next session: v0.1.15 is a single fix ahead of Monday's lab
 session (2026-07-20). The "Source Interface not present / is down" errors at
 run creation, and the Configuration page's missing-adapter hint, all advised
