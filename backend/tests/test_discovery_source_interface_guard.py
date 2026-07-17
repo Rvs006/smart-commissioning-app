@@ -40,7 +40,9 @@ _SOURCE_INTERFACE = "192.168.77.5/24"
 # The exact operator-facing message contract (mirrors interface_service).
 _NOT_PRESENT_DETAIL = (
     "Source Interface 192.168.77.5 is not present on this host. Reconnect the adapter, "
-    "or set Source Interface to 'Auto (OS default route)' on the Configuration page."
+    "or open the Configuration page and re-select a current network adapter as "
+    "Source Interface (for IP and MQTT runs, 'Auto (OS default route)' also "
+    "works; a BACnet scan requires a specific adapter)."
 )
 
 _GUARD_TARGET = "app.services.interface_service.ensure_source_ip_available"

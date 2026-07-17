@@ -907,7 +907,9 @@ describe("ConfigurationPage", () => {
   it("flags a stored source interface that is not in the list without promising a scan failure", async () => {
     // Virtual adapters are enumerated too now, so "not listed" means the
     // adapter is genuinely absent (unplugged/disabled/IP changed). The copy
-    // names the likely causes without promising a specific outcome.
+    // names the likely causes without promising a specific outcome, and its
+    // Auto suggestion must carry the BACnet caveat (a live BACnet scan
+    // refuses to run on Auto), matching the backend guard messages.
     interfacesPayload = [interfaceFixture()];
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
@@ -921,6 +923,10 @@ describe("ConfigurationPage", () => {
     expect(
       await screen.findByText(/not in the list of adapters on this machine/i),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/a BACnet scan\s+requires a specific adapter/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/set Source Interface back to Auto/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Scans will fail/i)).not.toBeInTheDocument();
   });
 

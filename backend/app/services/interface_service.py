@@ -132,13 +132,20 @@ _VIRTUAL_DESC_RE = re.compile(
 
 # Dispatch-time guard messages (exact API contract text — the frontend surfaces
 # these verbatim via the generic HTTP 400 detail path).
+# The advice must stay valid for EVERY engine dispatching through this guard:
+# Auto is suggested only with the BACnet caveat, because a live BACnet scan
+# refuses to run on Auto (core bacnet_discovery._NO_SOURCE_INTERFACE_MESSAGE).
 _SOURCE_IP_NOT_PRESENT_MSG = (
     "Source Interface {ip} is not present on this host. Reconnect the adapter, "
-    "or set Source Interface to 'Auto (OS default route)' on the Configuration page."
+    "or open the Configuration page and re-select a current network adapter as "
+    "Source Interface (for IP and MQTT runs, 'Auto (OS default route)' also "
+    "works; a BACnet scan requires a specific adapter)."
 )
 _SOURCE_IP_DOWN_MSG = (
     "Source Interface {ip} ({name}) is down. Bring the adapter up, "
-    "or set Source Interface to 'Auto (OS default route)' on the Configuration page."
+    "or open the Configuration page and re-select a current network adapter as "
+    "Source Interface (for IP and MQTT runs, 'Auto (OS default route)' also "
+    "works; a BACnet scan requires a specific adapter)."
 )
 
 

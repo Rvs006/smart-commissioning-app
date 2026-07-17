@@ -74,7 +74,8 @@ export function SourceInterfaceDetails({
           <small>
             This interface is not in the list of adapters on this machine — it may be unplugged
             or disabled, or its IP address may have changed since it was saved. Pick a listed
-            adapter, or set Source Interface back to Auto (OS default route).
+            adapter — for IP and MQTT runs, Auto (OS default route) also works; a BACnet scan
+            requires a specific adapter.
           </small>
         )}
       </div>

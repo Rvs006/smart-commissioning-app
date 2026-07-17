@@ -228,7 +228,8 @@ class EnsureSourceIpAvailableTests(unittest.TestCase):
         message = str(context.exception)
         self.assertIn("10.9.9.9", message)
         self.assertIn("not present on this host", message)
-        self.assertIn("Auto (OS default route)", message)
+        self.assertIn("re-select a current network adapter", message)
+        self.assertIn("a BACnet scan requires a specific adapter", message)
 
     def test_assigned_but_down_raises_is_down_with_adapter_name(self) -> None:
         with self._patched_psutil():
@@ -237,7 +238,8 @@ class EnsureSourceIpAvailableTests(unittest.TestCase):
         message = str(context.exception)
         self.assertIn("is down", message)
         self.assertIn("Ethernet 2", message)
-        self.assertIn("Auto (OS default route)", message)
+        self.assertIn("re-select a current network adapter", message)
+        self.assertIn("a BACnet scan requires a specific adapter", message)
 
     def test_without_psutil_failed_bind_probe_raises_not_present(self) -> None:
         fake_socket_module = MagicMock()
