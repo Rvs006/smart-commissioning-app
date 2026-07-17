@@ -1593,8 +1593,12 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getByText("120 s (bounded)")).toBeInTheDocument();
     expect(screen.getAllByText("EM-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
+    // Wait for the issues query to merge in (the live banner can render from
+    // payload views alone, a beat before the verdict lands on the row).
     // Row cells also render in the selected-result detail aside, so match >=1.
-    expect(screen.getAllByText("Non-compliant — 1 issue (1 critical)").length).toBeGreaterThan(0);
+    expect(
+      (await screen.findAllByText("Non-compliant — 1 issue (1 critical)")).length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
     // The old illustrative sample asset never appears as a live result.
     expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
