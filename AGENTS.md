@@ -94,7 +94,14 @@ collection order is alphabetical — keep it so.
   publish a release without the user's authorization.
 - **Portable releases**: give `packaging/windows_portable/build.ps1` an explicit
   `-Version vX.Y.Z` when producing a release. It writes that version into both
-  `README_FIRST.txt` and the Windows EXE Properties → Details metadata.
+  `README_FIRST.txt` and the Windows EXE Properties → Details metadata. Publish
+  with `scripts/release-portable.ps1` (Windows PowerShell 5.1-safe): it ships
+  the CI artifact archive as the release zip, proves the version from inside
+  the bundle, fills `{{EXE_SHA256}}` / `{{ZIP_SHA256}}` / `{{COMMIT}}` tokens
+  in the notes file, and cross-checks GitHub's recorded asset digest after
+  upload. `-VerifyExisting` re-verifies a published release read-only. Its
+  header documents the PS 5.1 traps it exists to avoid — do not hand-roll the
+  download/zip steps again.
 - **Style**: smallest correct change, reuse before adding, stdlib before deps.
   Deliberate shortcuts carry a `ponytail:` comment naming the ceiling.
 - **Honesty**: engines never fake success — unreachable broker / unauthorized
