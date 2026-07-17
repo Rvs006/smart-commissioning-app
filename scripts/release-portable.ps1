@@ -13,9 +13,10 @@
     bytes field engineers download are the exact bytes CI built and booted, with
     the exe SHA-256 recorded in the release notes.
 
-    Engineered around four real Windows PowerShell 5.1 failures hit publishing
-    v0.1.15 by hand. Each is a silent-corruption or silent-wrong-asset trap, so
-    each has a guard here rather than a comment saying "be careful":
+    Engineered around five real Windows PowerShell 5.1 failures hit publishing
+    v0.1.15 by hand and v0.1.16 with this script. Each is a silent-corruption,
+    silent-wrong-asset, or hard-stop trap, so each has a guard here rather than
+    a comment saying "be careful":
 
     1. `gh api .../zip > file.zip` CORRUPTS the download. In PS 5.1 the `>`
        operator re-encodes native-command stdout as text (UTF-16 + CRLF
@@ -44,6 +45,15 @@
        the version from inside the artifact: README_FIRST.txt carries
        "Version: <v>", written by build.ps1 from the same -Version that stamps the
        exe. Mismatch => wrong run => fail before touching Releases.
+
+    5. `Invoke-WebRequest -MaximumRedirection 0` is NOT a reliable way to catch
+       the 302: on some .NET Framework patch levels it throws a bare
+       InvalidOperationException ("Operation is not valid due to the current
+       state of the object") with Exception.Response = $null, so the Location
+       header is unreachable (hit publishing v0.1.16 — deterministic on that
+       machine). The redirect probe therefore uses raw HttpWebRequest with
+       AllowAutoRedirect = $false, where a 3xx is a NORMAL response and the
+       Location header is read without exception games.
 
 .PARAMETER Version
     Release tag, e.g. v0.1.16. Validated against ^v\d+\.\d+\.\d+$.
@@ -214,39 +224,45 @@ function Get-ArtifactArchive {
     if ($LASTEXITCODE -ne 0) { throw "gh auth token failed (exit $LASTEXITCODE) - is gh logged in?" }
     $token = "$token".Trim()
 
-    $authHeaders = @{
-        Authorization = "Bearer $token"
-        Accept        = 'application/vnd.github+json'
-        'User-Agent'  = 'smart-commissioning-release-portable'
-    }
-
+    # Failure #5 (found publishing v0.1.16): Invoke-WebRequest -MaximumRedirection 0
+    # on some .NET Framework patch levels throws a bare InvalidOperationException
+    # ("Operation is not valid due to the current state of the object") with
+    # $_.Exception.Response = $null, so the 302's Location header is unreachable
+    # from the catch block. Probe the redirect with raw HttpWebRequest instead:
+    # with AllowAutoRedirect = $false a 3xx comes back as a NORMAL response (only
+    # >= 400 throws), so the Location header is read without exception games.
     $location = $null
+    $req = [System.Net.WebRequest]::CreateHttp($ArchiveUrl)
+    $req.Method = 'GET'
+    $req.AllowAutoRedirect = $false
+    $req.Accept = 'application/vnd.github+json'
+    $req.UserAgent = 'smart-commissioning-release-portable'
+    $req.Headers.Add('Authorization', "Bearer $token")
+    $resp = $req.GetResponse()
     try {
-        # -MaximumRedirection 0 makes PS 5.1 THROW on the 302 rather than follow
-        # it with the Authorization header still attached (which Azure rejects).
-        # -OutFile is harmless here: on the expected 302 nothing is written; only
-        # a direct 200 (which GitHub does not currently send) would write bytes.
-        Invoke-WebRequest -Uri $ArchiveUrl -Headers $authHeaders `
-            -MaximumRedirection 0 -UseBasicParsing -OutFile $OutFile -ErrorAction Stop
-        Write-Host "    endpoint answered 200 directly (no redirect) - archive written"
-    }
-    catch {
-        $resp = $_.Exception.Response
-        if ($null -eq $resp) {
-            throw "Artifact download failed with no HTTP response: $($_.Exception.Message)"
-        }
         $status = [int]$resp.StatusCode
         if ($status -ge 300 -and $status -lt 400) {
-            # The signed, pre-authenticated blob URL. Read it straight off the
-            # exception response's headers - PS 5.1 exposes it here.
+            # The signed, pre-authenticated blob URL.
             $location = $resp.Headers['Location']
             if ([string]::IsNullOrWhiteSpace($location)) {
                 throw "Artifact endpoint returned redirect $status but no Location header."
             }
         }
+        elseif ($status -eq 200) {
+            # GitHub does not currently answer 200 directly, but if it ever does,
+            # stream the body to disk byte-exact (never `>`, failure #1).
+            Write-Host "    endpoint answered 200 directly (no redirect) - writing archive"
+            $inStream = $resp.GetResponseStream()
+            $outStream = [System.IO.File]::Create($OutFile)
+            try { $inStream.CopyTo($outStream) }
+            finally { $outStream.Dispose(); $inStream.Dispose() }
+        }
         else {
             throw "Artifact endpoint returned HTTP $status (expected a 302 redirect to blob storage)."
         }
+    }
+    finally {
+        $resp.Close()
     }
 
     if ($location) {
