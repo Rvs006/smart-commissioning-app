@@ -21,23 +21,40 @@ Pete's environment (2026-07-16): personal laptop and the MSI server, no
 ThreatLocker/allowlisting — SmartScreen note applies to him, not the IT
 hash-approval drill.
 
-## The message (simplified for a non-technical read)
+## The message (simplified for a non-technical read, BACnet steps included)
 
 ```text
 Hi Pete,
 
-Small update before Monday - v0.1.15. Use this one:
+New build before Monday - v0.1.15:
 https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.15
-Download: Smart_Commissioning_App_Windows_Portable.zip (about 32MB)
+Grab Smart_Commissioning_App_Windows_Portable.zip, same as last time.
 
-One fix in it: if the app tells you your network adapter has gone
-missing or is down, the error now gives advice that actually works for
-BACnet. The old wording suggested switching to "Auto" - fine for IP and
-MQTT scans, but a BACnet scan always needs a real adapter picked on the
-Configuration page. The messages now say exactly that, so nobody gets
-sent in a circle on Monday.
+One fix in it. When the app can't find your network adapter it used to
+tell you to switch to "Auto", which quietly breaks BACnet scans - they
+need a real adapter picked. The error now tells you the right thing to
+do instead, so nobody chases their tail on Monday.
 
-Everything else is unchanged from v0.1.14.
+For the BACnet discovery itself:
+
+1. Configuration page first. Under Network Basics, set Source Interface
+   to your wired adapter from the list (not Auto, not blank).
+2. Same page, BACnet section: switch Foreign Device to Enabled, put in
+   the BBMD's real IP (just the IP, no port), leave the port at 47808
+   and TTL at 300. Ignore the separate "BBMD" toggle, it doesn't do
+   anything anymore.
+3. Hit Validate Snapshot, then Save Configuration. Nothing counts until
+   you press Save.
+4. Close Yabe or any other BACnet tool if one's open - they hog the port.
+5. Tick "Dry run" on the BACnet Discovery step and run it once. If the
+   plan says "using foreign-device registration via BBMD ..." you're
+   set. If it says "local broadcast only", the save didn't take - back
+   to step 1.
+6. Untick Dry run, tick the authorisation box, and run it for real.
+   Start with a couple of known devices before the full sweep.
+
+The first real scan may pop a Windows firewall prompt - accept it, and
+do that first run before the session starts, not during it.
 
 Cheers,
 Raj
