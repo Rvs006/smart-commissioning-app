@@ -5,6 +5,21 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **MQTT/UDMI failure classification now distinguishes a missing/invalid broker
+  configuration (`broker_not_configured`) and a DNS resolution failure
+  (`dns_resolution_failed`) from `broker_unreachable`, with operator guidance
+  pointing at the Configuration page.** Previously an unconfigured install
+  reported the same `broker_unreachable` label as a genuine network failure, so
+  an operator with an unsaved configuration debugged the network instead of the
+  config. Fresh installs now seed an empty MQTT broker host, so running
+  discovery unconfigured fails as a config gap rather than dialing a fictional
+  placeholder FQDN; existing installs are unaffected (defaults only fill missing
+  keys).
+
 ## [0.1.15] - 2026-07-17
 
 ### Fixed

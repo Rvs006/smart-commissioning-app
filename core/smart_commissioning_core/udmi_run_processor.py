@@ -27,8 +27,9 @@ _SANITIZED_FAILURE_MESSAGE = "UDMI validation failed; see server logs."
 # completed window is a RESULT (not_publishing / payload_error issues, red
 # rows on the Results step) — never a run failure (field ask 2026-07-15: "it
 # can't fail the whole validation just because one device isn't responding").
-# Everything else — broker_unreachable / tls_error / authentication_error /
-# broker_timeout / live_capture_unavailable / missing_capture_topics / blank —
+# Everything else — broker_not_configured / broker_unreachable /
+# dns_resolution_failed / tls_error / authentication_error / broker_timeout /
+# live_capture_unavailable / missing_capture_topics / blank —
 # stays `failed`: if we never reached the broker we cannot claim we validated
 # anything (honesty rule), and an UNKNOWN future status defaults to failed for
 # the same reason.

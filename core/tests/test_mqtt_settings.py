@@ -1,8 +1,11 @@
 """Tests for MQTT connection-settings resolution (secure/non-secure TLS)."""
 
+import socket
 import unittest
 
 from smart_commissioning_core.mqtt_settings import (
+    MqttSettingsError,
+    _broker_error_status,
     build_mqtt_connection_settings,
     parse_capture_seconds,
     set_configuration_values_provider,
@@ -57,6 +60,46 @@ class ResolveUseTlsTests(unittest.TestCase):
         self.assertTrue(build_mqtt_connection_settings({}).use_tls)
         self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "1883"})
         self.assertFalse(build_mqtt_connection_settings({}).use_tls)
+
+
+class BuildMqttConnectionSettingsTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_configuration_values_provider(None)
+
+    def test_missing_broker_host_raises_settings_error(self) -> None:
+        # No host in parameters and no configuration provider => a configuration
+        # gap, surfaced as MqttSettingsError (not a network failure). The
+        # explicit reset guards against a provider leaked by another test.
+        set_configuration_values_provider(None)
+        with self.assertRaises(MqttSettingsError):
+            build_mqtt_connection_settings({})
+
+
+class BrokerErrorStatusTests(unittest.TestCase):
+    """Coarse, credential-free labels — config gap and DNS are distinct from
+    an unreachable broker so the operator is pointed at the right fix."""
+
+    def test_settings_error_is_configuration_gap(self) -> None:
+        self.assertEqual(_broker_error_status(MqttSettingsError("x")), "broker_not_configured")
+
+    def test_gaierror_is_dns_failure(self) -> None:
+        self.assertEqual(
+            _broker_error_status(socket.gaierror(11001, "getaddrinfo failed")),
+            "dns_resolution_failed",
+        )
+
+    def test_name_resolution_text_is_dns_failure(self) -> None:
+        # A gaierror message forwarded inside a plain OSError still classifies.
+        self.assertEqual(
+            _broker_error_status(OSError("Temporary failure in name resolution")),
+            "dns_resolution_failed",
+        )
+
+    def test_connection_refused_is_unreachable(self) -> None:
+        self.assertEqual(_broker_error_status(OSError("connection refused")), "broker_unreachable")
+
+    def test_timeout_still_classifies(self) -> None:
+        self.assertEqual(_broker_error_status(TimeoutError("timed out")), "broker_timeout")
 
 
 class ParseCaptureSecondsTests(unittest.TestCase):

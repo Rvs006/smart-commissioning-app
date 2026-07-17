@@ -1,4 +1,5 @@
 import math
+import socket
 from collections.abc import Callable
 
 from smart_commissioning_core.mqtt_transport import (
@@ -12,6 +13,7 @@ _configuration_values_provider: ConfigurationValuesProvider | None = None
 
 __all__ = [
     "ConfigurationValuesProvider",
+    "MqttSettingsError",
     "build_mqtt_connection_settings",
     "parse_bool",
     "parse_capture_seconds",
@@ -20,6 +22,16 @@ __all__ = [
     "set_configuration_values_provider",
     "set_secret_resolver",
 ]
+
+
+class MqttSettingsError(ValueError):
+    """Connection settings could not be built from job parameters + configuration.
+
+    A distinct type so the error classifier can report a configuration gap
+    (``broker_not_configured``) instead of implying a network failure.
+    Subclasses ValueError so existing ``except ValueError`` call sites keep
+    working.
+    """
 
 
 def set_configuration_values_provider(provider: ConfigurationValuesProvider | None) -> None:
@@ -43,7 +55,7 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
     mqtt_values, certificate_values = _configuration_values()
     host = _string(parameters.get("broker_host")) or _string(mqtt_values.get("MQTT Broker FQDN or IP Address"))
     if not host:
-        raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")
+        raise MqttSettingsError("Live broker mode requires an MQTT broker FQDN or IP address.")
 
     port = parse_int(parameters.get("broker_port") or mqtt_values.get("Port"), default=8883)
     use_tls = _resolve_use_tls(parameters, mqtt_values, port)
@@ -88,14 +100,14 @@ def _resolve_use_tls(parameters: dict[str, object], mqtt_values: dict[str, objec
             return True
         if explicit_text in {"0", "false", "no", "disabled", "off"}:
             return False
-        raise ValueError("use_tls must be a boolean value.")
+        raise MqttSettingsError("use_tls must be a boolean value.")
     configured = _string(mqtt_values.get("Use TLS"))
     if configured:
         if configured.casefold() == "enabled":
             return True
         if configured.casefold() == "disabled":
             return False
-        raise ValueError("Use TLS must be Enabled or Disabled.")
+        raise MqttSettingsError("Use TLS must be Enabled or Disabled.")
     return port == 8883
 
 
@@ -103,9 +115,25 @@ def _string(value: object) -> str:
     return str(value or "").strip()
 
 
+# DNS-resolution failure markers. ``socket.gaierror`` is the primary signal;
+# these catch a gaierror message forwarded inside another exception's text.
+_DNS_FAILURE_MARKERS = (
+    "getaddrinfo",
+    "name or service not known",
+    "name resolution",
+    "nodename nor servname",
+)
+
+
 def _broker_error_status(error: Exception) -> str:
     """Coarse status label for an MQTT error — never the raw text (may carry creds)."""
+    if isinstance(error, MqttSettingsError):
+        # Settings could not even be built: a configuration gap, not a network
+        # failure — do not send the operator network-debugging.
+        return "broker_not_configured"
     text = str(error).casefold()
+    if isinstance(error, socket.gaierror) or any(marker in text for marker in _DNS_FAILURE_MARKERS):
+        return "dns_resolution_failed"
     if "tls" in text or "certificate" in text or "ssl" in text:
         return "tls_error"
     if "username" in text or "password" in text or "authorised" in text or "authorized" in text:
