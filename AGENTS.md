@@ -70,11 +70,13 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-16 — the 2026-07-15 walkthrough
-  punch list is spent: **v0.1.11 through v0.1.14 are all released** (`main`,
-  CI green, workflow-built boot-smoked portable bundles attached; exe SHA-256
-  lives in each Release's notes, deliberately not in repo files). The two
-  handoff docs (`docs/handoff-2026-07-15-pete-walkthrough.md`,
+- **Current handoff**: status as of 2026-07-17 — **v0.1.11 through v0.1.15
+  are all released** (`main`, CI green, workflow-built boot-smoked portable
+  bundles attached; exe SHA-256 lives in each Release's notes, deliberately
+  not in repo files). v0.1.15 is a single pre-lab fix: the Source-Interface
+  guard messages and the Configuration page's missing-adapter hint no longer
+  dead-end BACnet operators on Auto. The two handoff docs
+  (`docs/handoff-2026-07-15-pete-walkthrough.md`,
   `docs/handoff-v0.1.13-remaining-punchlist.md`) carry SPENT/SHIPPED banners
   and are historical; the punchlist's §4 deferred items and §5 open Pete
   decisions are the live backlog, alongside GitHub issue #4 (production
