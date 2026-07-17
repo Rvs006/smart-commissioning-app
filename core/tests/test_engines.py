@@ -12,6 +12,8 @@ import unittest
 from typing import Any
 
 from smart_commissioning_core.engines.base import (
+    _PERSIST_FAILURE_MESSAGE,
+    _SANITIZED_FAILURE_MESSAGE,
     EngineContext,
     EngineResult,
     Throttle,
@@ -396,6 +398,142 @@ class RunEngineTests(unittest.TestCase):
 
         ctx = _ctx(store, is_cancelled=boom)
         self.assertFalse(ctx.is_cancelled(), "a broken checker must read as not-cancelled")
+
+
+class _TerminalFailedWriteStore(FakeRunStore):
+    """A run store that raises on the terminal 'failed' write only.
+
+    Models a poisoned / pending-rollback SQLAlchemy session after a failed flush:
+    the initial 'running' write still succeeds, but the terminal 'failed' write
+    the wrapper attempts next raises. The wrapper must swallow that so nothing
+    escapes run_engine and the run is never fossilized at 'running'.
+    """
+
+    def update_run_status(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        stage: str | None = None,
+        progress_percent: int | None = None,
+        error_message: str | None = None,
+    ) -> dict[str, Any]:
+        if status == "failed":
+            raise RuntimeError("session is in a pending-rollback state")
+        return super().update_run_status(
+            run_id,
+            status=status,
+            stage=stage,
+            progress_percent=progress_percent,
+            error_message=error_message,
+        )
+
+
+class RunEnginePersistenceSafetyTests(unittest.TestCase):
+    """A run must reach a TERMINAL status on every path — never stuck 'running'.
+
+    These pin the base-framework half of the live-BACnet fix: a persist failure
+    (the raw bacpypes3 value that would not serialize into a JSON column) and the
+    BaseException classes that bypass a plain ``except Exception`` both used to
+    leave the run fossilized at 'running' with the POST 500ing. No network,
+    BACnet, or database here — a scripted engine + in-memory run store only.
+    """
+
+    _BASE_LOGGER = "smart_commissioning_core.engines.base"
+
+    def test_persist_failure_yields_failed_with_distinct_message(self) -> None:
+        store = FakeRunStore()
+
+        def persist(run_id: str, records: list[dict[str, Any]]) -> None:
+            # A poisoned repository write — e.g. a value that will not serialize.
+            raise RuntimeError("could not serialize present_value for user=admin")
+
+        def engine(ctx: EngineContext) -> EngineResult:
+            return EngineResult(
+                discovered_assets=[{"asset_id": "a"}],
+                structured_records=[{"point_id": "p1"}],
+                result_summary_extra={"device_count": 1},
+            )
+
+        with self.assertLogs(self._BASE_LOGGER, level="ERROR") as logs:
+            result = run_engine(_ctx(store), engine, persist_records=persist)
+
+        # Terminal 'failed', never left 'running'.
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.last_status, "failed")
+        self.assertEqual(store.last_progress, 100)
+        # DISTINCT, saving-focused message — not the generic engine-crash text.
+        self.assertEqual(store.last_error, _PERSIST_FAILURE_MESSAGE)
+        self.assertNotEqual(store.last_error, _SANITIZED_FAILURE_MESSAGE)
+        # The result_summary is written BEFORE the records, so it is not lost.
+        self.assertEqual(store.summary_calls[-1]["device_count"], 1)
+        # Raw exception text (which could echo credentials) never reaches the run.
+        self.assertNotIn("admin", store.last_error or "")
+        # The traceback was logged where the message says it will be.
+        self.assertTrue(
+            any("persist" in line.lower() for line in logs.output),
+            "the persist failure traceback must be logged",
+        )
+
+    def test_terminal_write_failure_after_persist_failure_does_not_escape(self) -> None:
+        store = _TerminalFailedWriteStore()
+
+        def persist(run_id: str, records: list[dict[str, Any]]) -> None:
+            raise RuntimeError("persist blew up")
+
+        def engine(ctx: EngineContext) -> EngineResult:
+            return EngineResult(structured_records=[{"point_id": "p1"}])
+
+        # Must NOT raise even though BOTH the persist AND the terminal write fail.
+        with self.assertLogs(self._BASE_LOGGER, level="ERROR") as logs:
+            result = run_engine(_ctx(store), engine, persist_records=persist)
+
+        self.assertIsNone(result, "a failed terminal write returns None, not an exception")
+        # The 'running' write still landed; the failing 'failed' write was swallowed.
+        self.assertEqual(store.status_calls[0]["status"], "running")
+        self.assertNotIn("failed", [call["status"] for call in store.status_calls])
+        joined = "\n".join(logs.output).lower()
+        self.assertIn("persist", joined, "the persist failure must be logged")
+        self.assertIn("terminal", joined, "the swallowed terminal-write failure must be logged")
+
+    def test_cancelled_error_without_cancel_request_sets_failed(self) -> None:
+        store = FakeRunStore()
+
+        def engine(ctx: EngineContext) -> EngineResult:
+            raise asyncio.CancelledError()
+
+        with self.assertLogs(self._BASE_LOGGER, level="WARNING"):
+            result = run_engine(_ctx(store), engine)
+
+        # No cancel was requested, so a CancelledError is an honest 'failed'.
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.last_status, "failed")
+        self.assertNotIn("running", [call["status"] for call in store.status_calls[1:]])
+
+    def test_cancelled_error_with_cancel_request_sets_cancelled(self) -> None:
+        store = FakeRunStore()
+
+        def engine(ctx: EngineContext) -> EngineResult:
+            raise asyncio.CancelledError()
+
+        result = run_engine(_ctx(store, is_cancelled=lambda: True), engine)
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(store.last_status, "cancelled")
+        self.assertIsNone(store.last_error, "a cancelled run carries no error message")
+
+    def test_keyboard_interrupt_records_failed_then_reraises(self) -> None:
+        store = FakeRunStore()
+
+        def engine(ctx: EngineContext) -> EngineResult:
+            raise KeyboardInterrupt()
+
+        # Best-effort terminal write, then the interrupt must propagate.
+        with self.assertRaises(KeyboardInterrupt):
+            run_engine(_ctx(store), engine)
+
+        self.assertEqual(store.last_status, "failed")
+        self.assertEqual(store.last_progress, 100)
 
 
 if __name__ == "__main__":

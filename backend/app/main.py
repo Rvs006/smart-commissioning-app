@@ -6,10 +6,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from smart_commissioning_core.db.migrate import upgrade_to_head
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.router import api_router
 from app.core.config import get_settings
@@ -18,6 +20,7 @@ from app.core.logging import (
     configure_file_logging,
     configure_logging,
     new_request_id,
+    propagate_uvicorn_loggers,
     reset_request_id,
     set_request_id,
 )
@@ -53,6 +56,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # file logging exists even if the configured settings below cannot be read
     # (fresh or unmigrated DB). apply_logging_settings re-points it on success.
     configure_file_logging(LOG_DIR, startup_level)
+    # Re-point uvicorn's loggers to propagate to root, so unhandled-500
+    # tracebacks (logged by uvicorn.error, whose handler does NOT reach root by
+    # default) land in app.log on both the portable exe and the dev uvicorn path.
+    # Runs here deliberately: uvicorn has already configured these loggers before
+    # the app lifespan starts.
+    propagate_uvicorn_loggers()
     if startup_settings.auth_mode == "api_key" and not (startup_settings.api_key or "").strip():
         logger.warning(
             "AUTH_MODE is 'api_key' but API_KEY is not set; "
@@ -75,6 +84,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         purge_old_logs(LOG_DIR, retention_days(logging_values))
     except Exception:  # noqa: BLE001 (configured logging is best-effort; never block startup)
         logger.debug("Could not apply configured logging settings.", exc_info=True)
+    # Orphan-run sweep: a run left at status "running" by an application restart
+    # (or a crash mid-persist) never reaches a terminal status on its own, so the
+    # UI shows a run that spins forever. Mark such interrupted runs failed with an
+    # actionable message. Only inline runs are swept — a run handed to the worker
+    # queue may still be executing on a worker in the hosted deployment. Guarded
+    # like every startup side-effect above: it must never block boot.
+    try:
+        from app.services.run_service import RunService
+
+        swept = RunService().sweep_interrupted_runs()
+        if swept:
+            logger.warning(
+                "Startup swept %d interrupted run(s) to failed: %s",
+                len(swept),
+                ", ".join(swept),
+            )
+    except Exception:  # noqa: BLE001 (orphan sweep is best-effort; never block startup)
+        logger.debug("Orphan-run sweep failed.", exc_info=True)
     yield
 
 
@@ -84,6 +111,46 @@ app = FastAPI(
     summary="Production scaffold for commissioning configuration, discovery, validation, and reporting.",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(Exception)
+async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    """Log the full traceback for any unhandled error, then return the standard 500.
+
+    Belt-and-braces alongside the uvicorn.error re-pointing: this logs through an
+    app logger (which reaches the rotating file handler) BEFORE the response goes
+    out, so a 500 traceback lands in app.log even if uvicorn's own error logging
+    is ever reconfigured. The response body is byte-for-byte FastAPI's default
+    500, so clients see no change. Starlette still re-raises after this returns,
+    so nothing else in the error path changes.
+    """
+    logger.error(
+        "Unhandled exception handling %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def log_http_exception(request: Request, exc: StarletteHTTPException) -> Response:
+    """Log 4xx/5xx HTTPException rejections, then defer to FastAPI's default handler.
+
+    Adds a WARNING breadcrumb (method, path, status, detail) for client-error
+    rejections — an RBAC 403, a missing-target 400, a 404 — so a log bundle tells
+    the session story; 5xx HTTPExceptions (e.g. a 503 when the queue is down) log
+    at ERROR. The response is unchanged: the FastAPI default handler builds it.
+    """
+    if 400 <= exc.status_code < 500:
+        logger.warning(
+            "HTTP %s on %s %s: %s", exc.status_code, request.method, request.url.path, exc.detail
+        )
+    elif exc.status_code >= 500:
+        logger.error(
+            "HTTP %s on %s %s: %s", exc.status_code, request.method, request.url.path, exc.detail
+        )
+    return await http_exception_handler(request, exc)
 
 # Interactive docs and the OpenAPI schema disclose the full API surface, so
 # they are only served in local (loopback-only) mode; hosted api_key

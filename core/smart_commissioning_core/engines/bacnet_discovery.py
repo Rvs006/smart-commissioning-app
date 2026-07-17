@@ -242,6 +242,27 @@ _NO_SOURCE_INTERFACE_MESSAGE = (
 )
 
 
+def _json_safe_value(value: Any) -> Any:
+    """Coerce a backend-supplied value into a JSON-serializable primitive.
+
+    The live bacpypes3 backend returns LIBRARY objects, not plain primitives: a
+    binary-input present-value is an enumerated object, a vendor id is an
+    ``Unsigned``. Left raw, they reach a JSON repository column / result_summary
+    and raise on serialization AFTER the scan already completed on the wire —
+    the 100%-reproducible field crash this guard removes (simulated/dry-run data
+    is plain primitives, which is why only real runs died).
+
+    Primitives (``None`` / ``bool`` / ``int`` / ``float`` / ``str``) pass
+    through UNCHANGED; anything else is coerced with ``str()``. For a bacpypes3
+    enumerated value that yields the honest observed token (e.g. ``"active"``).
+    No numeric re-encoding is ever invented — an unrecognised value is reported
+    as the string the library itself renders, never a fabricated number.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
 @runtime_checkable
 class BacnetDiscoveryBackend(Protocol):
     """Async transport abstraction for BACnet discovery.
@@ -1117,7 +1138,13 @@ class Bacpypes3Backend:
                     # iAmDeviceIdentifier/pduSource, not the exact vendor attribute
                     # name. getattr(..., None) degrades to None rather than raising
                     # if the casing differs on real hardware.
-                    "vendor_id": getattr(i_am, "vendorID", None),
+                    #
+                    # Normalized at this boundary: vendorID is a bacpypes3
+                    # ``Unsigned`` on real hardware, not a plain int, and it flows
+                    # straight into the discovered_assets summary and the device
+                    # repository row. Coercing it here keeps every downstream
+                    # consumer holding a JSON-safe value (see _json_safe_value).
+                    "vendor_id": _json_safe_value(getattr(i_am, "vendorID", None)),
                 }
             )
         return devices
@@ -1619,6 +1646,11 @@ def _point_record(
     ``observed_value`` is a JSON object (the repository column is JSON), so the
     raw present-value is wrapped under a ``"value"`` key; ``read_error`` records
     a per-point read failure without aborting the device.
+
+    The present-value is normalized (see :func:`_json_safe_value`) because the
+    live backend hands back a raw bacpypes3 object here — an enumerated
+    present-value serializes to nothing JSON knows, so wrapping it raw is what
+    poisoned the repository write on every real run.
     """
     attributes: dict[str, Any] = {
         "object_type": obj.get("object_type"),
@@ -1630,7 +1662,7 @@ def _point_record(
         "device_ref": device_ref,
         "point_id": obj.get("object_identifier"),
         "point_name": obj.get("object_name") or obj.get("object_identifier"),
-        "observed_value": {} if read_error is not None else {"value": present_value},
+        "observed_value": {} if read_error is not None else {"value": _json_safe_value(present_value)},
         "units": obj.get("units"),
         "attributes": attributes,
     }

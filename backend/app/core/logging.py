@@ -236,6 +236,38 @@ def configure_file_logging(
     root.addHandler(handler)
 
 
+# Uvicorn installs its own StreamHandlers on these loggers and sets
+# propagate=False, so their records never reach the root logger's rotating file
+# handler. Notably ``uvicorn.error`` is where an unhandled 500 traceback is
+# logged — with propagation off it was written only to the console and lost from
+# app.log (a field "Download log bundle" then held no server traceback at all).
+_UVICORN_LOGGER_NAMES = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+
+def propagate_uvicorn_loggers() -> None:
+    """Re-point uvicorn's loggers to propagate to the root logger's handlers.
+
+    Clears each uvicorn logger's own handlers and turns propagation on, so every
+    uvicorn record (startup lines, access logs, and — the reason this exists —
+    ``uvicorn.error`` unhandled-500 tracebacks) flows to the root console + file
+    handlers and lands in app.log.
+
+    MUST be called from lifespan startup, which runs AFTER uvicorn has configured
+    these loggers (both ``uvicorn.run(...)`` in the portable exe and
+    ``python -m uvicorn app.main:app`` load the logging config before entering the
+    app lifespan) — so clearing the handlers here reliably removes uvicorn's, not
+    a not-yet-installed set. Idempotent: re-running simply re-clears and re-sets.
+
+    The handlers are removed (not closed): they are StreamHandlers wrapping
+    stdout/stderr, which must stay open for the rest of the process.
+    """
+    for name in _UVICORN_LOGGER_NAMES:
+        uvicorn_logger = logging.getLogger(name)
+        for handler in list(uvicorn_logger.handlers):
+            uvicorn_logger.removeHandler(handler)
+        uvicorn_logger.propagate = True
+
+
 def purge_old_logs(log_dir: Path, retention_days: int) -> None:
     """Best-effort delete of rotated/crash log files older than ``retention_days``.
 

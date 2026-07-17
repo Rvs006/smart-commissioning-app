@@ -332,6 +332,17 @@ _SANITIZED_FAILURE_MESSAGE = (
     "(error detail withheld to avoid leaking credentials)."
 )
 
+# DISTINCT from the engine-failure text above: the engine ran to completion and
+# its results are real, but writing them to the store failed (a value that will
+# not serialize into a JSON column, a poisoned session). The operator must not
+# re-run a scan that already worked, so the message points at saving — not the
+# scan — as the thing to look at. Credential-free by construction (no raw
+# exception text): the traceback goes to the server logs via logger.exception.
+_PERSIST_FAILURE_MESSAGE = (
+    "Discovery finished but its results could not be saved. "
+    "See server logs for details."
+)
+
 # Stage labels mirror the existing processors' "<thing>_complete/_failed" style.
 _STAGE_RUNNING = "engine_running"
 _STAGE_SUCCEEDED = "engine_complete"
@@ -389,14 +400,68 @@ def _apply_success(
     )
 
 
-def _apply_failure(ctx: EngineContext) -> Any:
-    """Set the run failed with a sanitized message (no raw exception text)."""
-    return ctx.run_store.update_run_status(
-        ctx.run_id,
-        status="failed",
-        stage=_STAGE_FAILED,
-        progress_percent=100,
-        error_message=_SANITIZED_FAILURE_MESSAGE,
+def _safe_update_run_status(
+    ctx: EngineContext,
+    *,
+    status: str,
+    stage: str,
+    error_message: str | None,
+) -> Any:
+    """Write a terminal status, swallowing and logging any run-store error.
+
+    THE LAST LINE OF DEFENCE against a fossilized ``running`` run. The terminal
+    write can itself raise — a poisoned / pending-rollback SQLAlchemy session
+    after a failed flush is the field case this exists for — and if that
+    exception escaped :func:`run_engine_async` the POST would 500 and the run
+    would stay ``running`` forever, which is exactly the bug this guard removes.
+    On failure it logs the traceback and returns ``None``; it never raises.
+    """
+    try:
+        return ctx.run_store.update_run_status(
+            ctx.run_id,
+            status=status,
+            stage=stage,
+            progress_percent=100,
+            error_message=error_message,
+        )
+    except Exception:
+        logger.exception(
+            "terminal '%s' status write raised for run %s; swallowing so the run "
+            "is not left 'running'",
+            status,
+            ctx.run_id,
+        )
+        return None
+
+
+def _apply_failure(ctx: EngineContext, *, error_message: str = _SANITIZED_FAILURE_MESSAGE) -> Any:
+    """Set the run failed with a safe message; the write can never escape.
+
+    ``error_message`` defaults to the sanitized generic text (a raw exception may
+    echo credentials); the persistence path passes the distinct
+    :data:`_PERSIST_FAILURE_MESSAGE` so "the scan worked but saving it did not"
+    is never misreported as an engine crash. Routes the write through
+    :func:`_safe_update_run_status`, so even a failing terminal write is logged
+    rather than raised.
+    """
+    return _safe_update_run_status(
+        ctx, status="failed", stage=_STAGE_FAILED, error_message=error_message
+    )
+
+
+def _apply_cancelled(ctx: EngineContext) -> Any:
+    """Terminal write when an :class:`asyncio.CancelledError` unwound the run.
+
+    ``cancelled`` only when a cancel was actually requested (the operator asked
+    for it); otherwise the CancelledError came from elsewhere and ``failed`` is
+    the honest terminal state. Never leaves the run ``running``, never raises.
+    """
+    if ctx.is_cancelled():
+        return _safe_update_run_status(
+            ctx, status="cancelled", stage=_STAGE_CANCELLED, error_message=None
+        )
+    return _safe_update_run_status(
+        ctx, status="failed", stage=_STAGE_FAILED, error_message=_SANITIZED_FAILURE_MESSAGE
     )
 
 
@@ -413,9 +478,21 @@ async def run_engine_async(
     ``run_store.update_run_status`` returns for the terminal flip (the updated
     run record), matching the existing processors.
 
-    On ANY exception from the engine, the run is set ``failed`` with a sanitized
-    message and the exception is swallowed (the run record carries the failure),
-    mirroring ``process_udmi_validation_run`` / ``process_mqtt_config_publish_run``.
+    A terminal status is written on EVERY path, so a run can never fossilize at
+    ``running`` — the field failure this wrapper exists to make impossible:
+
+        * Engine raises ``Exception``          -> ``failed``, sanitized message.
+        * Engine raises ``CancelledError``     -> ``cancelled`` if a cancel was
+          requested, else ``failed``; swallowed (the run record carries it).
+        * Engine raises ``KeyboardInterrupt`` /
+          ``SystemExit``                       -> best-effort ``failed``, then
+          RE-RAISED (interpreter shutdown must win). ``GeneratorExit`` is not
+          caught at all.
+        * Engine succeeds but PERSISTING its results fails                  ->
+          ``failed`` with the distinct :data:`_PERSIST_FAILURE_MESSAGE`, so a
+          scan that really worked is not misreported as an engine crash.
+        * Even the terminal status write failing is caught and logged, never
+          raised (see :func:`_safe_update_run_status`).
     """
     ctx.run_store.update_run_status(
         ctx.run_id,
@@ -434,7 +511,23 @@ async def run_engine_async(
                 "engine callable must return an EngineResult, "
                 f"got {type(result).__name__}"
             )
-        return _apply_success(ctx, result, persist_records)
+    except asyncio.CancelledError:
+        # CancelledError is a BaseException, so the `except Exception` below would
+        # MISS it and the run would fossilize at 'running' — the secondary
+        # mechanism this wrapper must defend against. Swallow it like a failure
+        # (the run record carries the terminal state) and never re-raise.
+        logger.warning("engine cancelled for run %s", ctx.run_id)
+        return _apply_cancelled(ctx)
+    except (KeyboardInterrupt, SystemExit):
+        # Process-level interruption (Ctrl-C, sys.exit): record a best-effort
+        # terminal 'failed' so the run is not left 'running', then RE-RAISE —
+        # swallowing these would defeat interpreter shutdown. GeneratorExit is
+        # deliberately NOT caught: it must propagate to close the frame.
+        logger.warning(
+            "engine interrupted for run %s; recording 'failed' and re-raising", ctx.run_id
+        )
+        _apply_failure(ctx)
+        raise
     except Exception:
         # The operator-facing message says "See server logs for details". Until
         # now nothing in this module logged anything, so that sentence was a
@@ -447,6 +540,29 @@ async def run_engine_async(
         # error_message=...), which the operator actually sees.
         logger.exception("engine execution failed for run %s", ctx.run_id)
         return _apply_failure(ctx)
+
+    # The engine SUCCEEDED and its results are real. Persisting them is a SEPARATE
+    # failure domain: a save that fails (a non-JSON-serializable value reaching a
+    # JSON column — the live-scan crash this release fixes — or a poisoned
+    # session) must still land a terminal 'failed' run, with a message that says
+    # the scan itself worked, never a run stuck 'running'. _apply_success writes
+    # result_summary + issues BEFORE the structured records, so a persist failure
+    # does not silently discard the summary the operator can still use.
+    try:
+        return _apply_success(ctx, result, persist_records)
+    except asyncio.CancelledError:
+        logger.warning("result persistence cancelled for run %s", ctx.run_id)
+        return _apply_cancelled(ctx)
+    except (KeyboardInterrupt, SystemExit):
+        logger.warning(
+            "result persistence interrupted for run %s; recording 'failed' and re-raising",
+            ctx.run_id,
+        )
+        _apply_failure(ctx, error_message=_PERSIST_FAILURE_MESSAGE)
+        raise
+    except Exception:
+        logger.exception("failed to persist engine results for run %s", ctx.run_id)
+        return _apply_failure(ctx, error_message=_PERSIST_FAILURE_MESSAGE)
 
 
 def run_engine(
