@@ -10,11 +10,13 @@ listed in the task's ``live_untested`` output and requires on-site validation.
 """
 
 import json
+import socket
 import unittest
 from datetime import UTC, datetime
 from typing import Any
 
 from smart_commissioning_core.engines import mqtt_discovery
+from smart_commissioning_core.mqtt_settings import MqttSettingsError
 from smart_commissioning_core.mqtt_transport import (
     MqttConnectionSettings,
     MqttMessage,
@@ -598,7 +600,7 @@ class ErrorSanitizationTests(unittest.TestCase):
         store = FakeRunStore()
 
         def failing_build(_p: dict[str, Any]) -> MqttConnectionSettings:
-            raise ValueError("Live broker mode requires an MQTT broker FQDN or IP address.")
+            raise MqttSettingsError("Live broker mode requires an MQTT broker FQDN or IP address.")
 
         result = mqtt_discovery.process_mqtt_discovery_run(
             "run_nohost", {**_AUTH},
@@ -606,8 +608,25 @@ class ErrorSanitizationTests(unittest.TestCase):
             live_capture=FakeCapture([]), build_settings=failing_build,
         )
         self.assertEqual(result["status"], "failed")
-        self.assertEqual(store.summary_calls[-1]["broker_status_detail"], "broker_unreachable")
-        self.assertIn("broker_unreachable", result["error_message"])
+        self.assertEqual(store.summary_calls[-1]["broker_status_detail"], "broker_not_configured")
+        self.assertIn("broker_not_configured", result["error_message"])
+        # A config gap points the operator at the Configuration page, not the network.
+        self.assertIn("Configuration page", result["error_message"])
+
+    def test_dns_resolution_failure_maps_to_status(self) -> None:
+        store = FakeRunStore()
+
+        def failing_capture(*_a: Any, **_k: Any) -> list[MqttMessage]:
+            raise socket.gaierror(11001, "getaddrinfo failed")
+
+        result = mqtt_discovery.process_mqtt_discovery_run(
+            "run_dns", {**_AUTH},
+            run_store=store, execution_mode="x",
+            live_capture=failing_capture, build_settings=_stub_build,
+        )
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.summary_calls[-1]["broker_status_detail"], "dns_resolution_failed")
+        self.assertIn("dns_resolution_failed", result["error_message"])
 
 
 if __name__ == "__main__":

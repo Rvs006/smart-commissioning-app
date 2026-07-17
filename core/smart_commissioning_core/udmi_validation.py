@@ -1089,6 +1089,18 @@ def _missing_topics_issue(*, asset_id: str, missing: list[list[str]], got_any: b
     )
 
 
+# Remedies for statuses whose fix is on the Configuration page, not the network.
+# Anything else keeps the general default action.
+_CAPTURE_ERROR_ACTIONS = {
+    "broker_not_configured": "Enter the MQTT broker FQDN or IP address on the Configuration page and save it.",
+    "dns_resolution_failed": (
+        "Check the broker FQDN or IP address on the Configuration page — the "
+        "configured hostname did not resolve in DNS."
+    ),
+}
+_DEFAULT_CAPTURE_ERROR_ACTION = "Check broker reachability, credentials, TLS configuration, and topic filters."
+
+
 def _capture_error_issue(*, asset_id: str, status_detail: str) -> ValidationIssueRecord:
     return _issue(
         [],
@@ -1096,7 +1108,7 @@ def _capture_error_issue(*, asset_id: str, status_detail: str) -> ValidationIssu
         issue_type="payload_error",
         severity="critical",
         description=f"Live MQTT capture failed ({status_detail}).",
-        suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
+        suggested_action=_CAPTURE_ERROR_ACTIONS.get(status_detail, _DEFAULT_CAPTURE_ERROR_ACTION),
     )
 
 

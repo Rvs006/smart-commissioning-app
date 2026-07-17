@@ -324,9 +324,10 @@ def _run_mqtt_discovery(
     try:
         settings = build_settings(ctx.parameters)
     except (ValueError, MqttTransportError) as error:
-        # build error (e.g. missing host). Surface a coarse, credential-free
-        # label and fail the run so the operator cannot mistake it for an empty
-        # successful discovery.
+        # Settings-build error (e.g. missing host) classifies as
+        # broker_not_configured, pointing the operator at the Configuration page
+        # rather than the network. Fail the run either way so it cannot be
+        # mistaken for an empty successful discovery.
         broker_status_detail = _broker_error_status(error)
         return EngineResult(
             result_summary_extra={
@@ -556,9 +557,24 @@ def _aggregate_capture(
     )
 
 
+# Operator guidance for statuses whose remedy is the Configuration page, not
+# the network. Appended to the label so the frontend can keep echoing ONE
+# engine-authored string. Credential-free: never names the configured host.
+_FAILURE_HINTS = {
+    "broker_not_configured": (
+        " No MQTT broker is configured — enter the broker FQDN or IP address"
+        " on the Configuration page and save it."
+    ),
+    "dns_resolution_failed": (
+        " The configured broker hostname did not resolve in DNS — check the"
+        " broker FQDN or IP address on the Configuration page."
+    ),
+}
+
+
 def _mqtt_failure_message(status_detail: str) -> str:
     """Credential-free operator reason for a self-diagnosed failed run."""
-    return f"MQTT discovery failed ({status_detail})."
+    return f"MQTT discovery failed ({status_detail}).{_FAILURE_HINTS.get(status_detail, '')}"
 
 
 def _safe_str(value: Any) -> str | None:

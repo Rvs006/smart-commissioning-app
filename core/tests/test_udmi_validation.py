@@ -7,6 +7,7 @@ skipped structural check is never presented as a pass.
 """
 
 import json
+import socket
 import unittest
 from pathlib import Path
 
@@ -1581,6 +1582,38 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         self.assertEqual(record["status"], "failed")
         self.assertIn("broker_unreachable", record["error_message"])
         self.assertEqual(store.summaries[-1]["broker_status_detail"], "broker_unreachable")
+
+    def test_live_broker_dns_failure_marks_the_run_failed(self) -> None:
+        store = _FakeRunStore()
+
+        def dns_failure(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise socket.gaierror(11001, "getaddrinfo failed")
+
+        record = process_udmi_validation_run(
+            "run-broker-dns",
+            {**_PROCESSOR_PARAMS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=dns_failure,
+        )
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("dns_resolution_failed", record["error_message"])
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "dns_resolution_failed")
+
+    def test_missing_broker_configuration_marks_the_run_failed(self) -> None:
+        # No broker_host and no configuration provider => the settings build
+        # fails as a config gap, distinct from an unreachable broker.
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-broker-unconfigured",
+            {"use_live_broker": True, **_TOPICS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=RecordingCapture(),
+        )
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("broker_not_configured", record["error_message"])
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "broker_not_configured")
 
     def test_unexpected_failure_does_not_expose_exception_text(self) -> None:
         store = _FakeRunStore()
