@@ -790,6 +790,7 @@ export function ConfigurationPage() {
                         secretContent={secretDrafts[field] ?? ""}
                         secretFileName={secretFiles[field] ?? null}
                         secretPending={secretMutation.isPending}
+                        serverValue={configurationQuery.data?.[section]?.values?.[field] ?? ""}
                         value={displayValue}
                       />
                       );
@@ -1028,6 +1029,10 @@ type FieldControlProps = {
   secretContent: string;
   secretFileName: string | null;
   secretPending: boolean;
+  // The last SERVER-PERSISTED value of this field, so a password field can tell
+  // the write-only sentinel the API echoed apart from asterisks the operator is
+  // typing right now (ISSUE-1). Empty string when the field has no stored value.
+  serverValue: string;
   value: string;
 };
 
@@ -1047,6 +1052,7 @@ function FieldControl({
   secretContent,
   secretFileName,
   secretPending,
+  serverValue,
   value,
 }: FieldControlProps) {
   const [maskedSentinel, setMaskedSentinel] = useState<string | null>(null);
@@ -1145,6 +1151,29 @@ function FieldControl({
   }
 
   const isPassword = kind === "password";
+  // A stored password is carried in the form as the all-asterisk sentinel the
+  // write-only API echoes for an untouched password field — it is NEVER the real
+  // secret. It counts as "on file" only when the field value STILL equals that
+  // server echo: gating on `value === serverValue` stops operator-typed
+  // asterisks (a blank field into which someone types '*', or a password that is
+  // itself all asterisks) from being misread as a saved secret (ISSUE-1), which
+  // would falsely claim "Saved — hidden" and strip the Show toggle mid-edit.
+  const showsServerSecret = isPassword && isSecretSentinel(value) && value === serverValue;
+  // Clicking Show on the server sentinel would only reveal eight literal
+  // asterisks, which an operator reads as "Show is broken / the password was
+  // lost" (ISSUE-1). In that state we replace the Show/Hide toggle with a
+  // non-revealing "Saved — hidden" indicator. The second clause keeps this true
+  // while the focused field is transiently blanked by the onFocus swap below
+  // (maskedSentinel set, value momentarily "") so the operator never sees a bare
+  // empty field and concludes the password is gone.
+  const hasStoredSecret =
+    isPassword && (showsServerSecret || (maskedSentinel !== null && value === ""));
+  // Never render the SERVER sentinel as revealed text: even if `revealed` was
+  // left on from a previously typed value, force the input back to a password
+  // field whenever it holds the server echo so those asterisks can never
+  // masquerade as the actual secret. Operator-typed asterisks are their own
+  // input and stay revealable.
+  const effectiveRevealed = revealed && !showsServerSecret;
   const inputElement = (
     <input
       // Password inputs sit beside the Show/Hide toggle inside the <label>, so
@@ -1159,13 +1188,15 @@ function FieldControl({
       }}
       onChange={(event) => onValueChange(event.target.value)}
       onFocus={() => {
-        if (isPassword && isSecretSentinel(value)) {
+        // Blank ONLY the server-echoed sentinel so the operator can type a fresh
+        // value; asterisks they typed themselves are left untouched (ISSUE-1).
+        if (isPassword && showsServerSecret) {
           setMaskedSentinel(value);
           onValueChange("");
         }
       }}
       readOnly={disabled || kind === "readonly"}
-      type={isPassword ? (revealed ? "text" : "password") : "text"}
+      type={isPassword ? (effectiveRevealed ? "text" : "password") : "text"}
       value={value}
     />
   );
@@ -1175,18 +1206,29 @@ function FieldControl({
       {isPassword ? (
         <span className="password-field">
           {inputElement}
-          <button
-            aria-label={revealed ? `Hide ${field}` : `Show ${field}`}
-            aria-pressed={revealed}
-            className="secondary-button compact"
-            onClick={() => setRevealed((shown) => !shown)}
-            type="button"
-          >
-            {revealed ? "Hide" : "Show"}
-          </button>
+          {hasStoredSecret ? (
+            // Non-toggling: a stored secret can never be revealed (write-only
+            // API by design), so there is no Show action to offer here.
+            <span className="secret-stored-note">Saved — hidden</span>
+          ) : (
+            <button
+              aria-label={revealed ? `Hide ${field}` : `Show ${field}`}
+              aria-pressed={revealed}
+              className="secondary-button compact"
+              onClick={() => setRevealed((shown) => !shown)}
+              type="button"
+            >
+              {revealed ? "Hide" : "Show"}
+            </button>
+          )}
         </span>
       ) : (
         inputElement
+      )}
+      {isPassword && hasStoredSecret && (
+        <small>
+          A saved password is never displayed. Type a new value and Save Configuration to replace it.
+        </small>
       )}
       {hint && <small>{hint}</small>}
     </label>

@@ -208,7 +208,18 @@ export function udmiPayloadVerdict(input: {
     };
   }
   if (totalIssues > 0) {
-    return { label: "Pass with notes", verdict: "pass-notes" };
+    // "Pass with notes" is an honest claim ONLY when a payload was actually
+    // observed. A payload type that was never received but still carries
+    // minor-only notes must not read as a PASS (ISSUE-10) — it stays neutral
+    // "Not received", with the note count kept visible in the label. Hard fails
+    // (critical/major) above are unaffected: those issues are real regardless of
+    // whether a payload was observed.
+    return observedPresent
+      ? { label: "Pass with notes", verdict: "pass-notes" }
+      : {
+          label: `Not received — ${totalIssues} note${totalIssues === 1 ? "" : "s"}`,
+          verdict: "none",
+        };
   }
   return observedPresent
     ? { label: "Pass", verdict: "pass" }

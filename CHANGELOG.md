@@ -5,6 +5,55 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The saved Root Topic now actually filters MQTT discovery.** The run form
+  silently sent `#` as the topic filter on every run, which the API correctly
+  treated as an operator override — so the saved Root Topic never applied and
+  every capture behaved as subscribe-to-everything. The filter field now
+  defaults to blank, meaning "inherit the saved Root Topic from
+  Configuration"; typing `#` explicitly still captures every topic.
+- **A saved password no longer looks lost after a restart.** Saved secrets are
+  write-only by design (the API never returns them), but the password field's
+  "Show" button just revealed the masked placeholder — eight literal
+  asterisks — and clicking into the field blanked it, so operators concluded
+  the password hadn't saved. The field now shows an honest "Saved — hidden"
+  indicator with a hint that typing a new value and saving replaces it;
+  Show/Hide returns (and toggles repeatedly) while a replacement is being
+  typed, and operator-typed asterisks are never misread as a saved secret.
+- **A misnamed point is one fault, not two.** A typo'd pointset name raised
+  both "expected point not received" and "received point not in the expected
+  schedule". Near-identically named missing/unexpected pairs now merge into a
+  single issue naming both spellings as a probable misname — while
+  digit-indexed siblings (phase1 vs phase2, zone1 vs zone2) deliberately stay
+  two independent faults, and the metadata schema-vs-register checks remain
+  separate as designed.
+- **Empty values say "empty".** Issue details and the homepage blocking
+  finding now render a present-but-empty value as "empty" instead of a blank
+  gap, and a payload with minor-only notes that was never observed reads
+  "Not received — N notes" instead of "Pass with notes". (For observed
+  payloads, "pass with notes" behaves exactly as before.)
+
+### Added
+
+- **Result tables scroll inside their own window and can be filtered.**
+  Discovery/validation and MQTT capture tables sit in a bounded, sticky-header
+  scroll box instead of taking over the page, with free-text (topic path,
+  asset, MQTT wildcard) and verdict filters plus an honest "Showing N of M
+  rows" count; when a filter hides the selected row the Inspector falls back
+  to its empty state rather than showing a hidden row's detail.
+- **The Register Import card shows what is already on file.** When no new file
+  is staged, a server-truth note ("Register already imported" with file name,
+  accepted rows, and when) makes clear there is no need to re-upload — backed
+  by a new `GET /api/v1/imports/latest` endpoint.
+- **Expected and observed UDMI payloads sit side by side** (stacking only on
+  narrow screens), with keys present on only one side highlighted — amber for
+  expected-only, red for observed-only. Values are never colour-diffed: the
+  expected panel is a template with sentinel values, not an observation, and
+  highlighting them as mismatches would fabricate findings.
+
 ## [0.1.16] - 2026-07-17
 
 ### Fixed

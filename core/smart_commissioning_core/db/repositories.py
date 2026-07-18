@@ -412,6 +412,38 @@ class ImportRepository:
             records = session.scalars(statement).all()
             return [_import_to_dict(record) for record in records]
 
+    def latest_summary(
+        self,
+        *,
+        import_type: str,
+        project_id: str | None = None,
+        site_id: str | None = None,
+        require_accepted: bool = True,
+    ) -> dict[str, object] | None:
+        """Newest stored ImportBatchSummary for these filters, or None.
+
+        Backs the Setup card's "already imported" note (the newest register of a
+        type on file for a project/site). With ``require_accepted`` (the default)
+        a fully-rejected import — zero accepted rows, nothing a run could use — is
+        skipped so the note only ever claims a register that actually has usable
+        rows. Ordering matches :meth:`list` (newest ``created_at`` first).
+        """
+        statement = (
+            select(ImportRecord)
+            .where(ImportRecord.import_type == import_type)
+            .order_by(ImportRecord.created_at.desc(), ImportRecord.import_id.desc())
+        )
+        if project_id is not None:
+            statement = statement.where(ImportRecord.project_id == project_id)
+        if site_id is not None:
+            statement = statement.where(ImportRecord.site_id == site_id)
+        with self._session_factory() as session:
+            for record in session.scalars(statement):
+                summary = dict(record.summary or {})
+                if not require_accepted or int(summary.get("accepted_rows", 0) or 0) > 0:
+                    return summary
+        return None
+
     def _load(self, session: Session, import_id: str) -> ImportRecord:
         record = session.get(ImportRecord, import_id)
         if record is None:

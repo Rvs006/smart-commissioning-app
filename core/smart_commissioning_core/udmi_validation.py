@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -519,6 +520,63 @@ def _misplaced_value_detail(
     )
 
 
+# difflib ratio above which a missing-expected point and an unexpected-received
+# point are treated as one misnamed point rather than two independent faults. A
+# single-letter slip in a typical snake_case point name scores ~0.98
+# (phase2_line_current_sensor vs phas2_line_current_sensor = 50/51 ~ 0.980);
+# genuinely different names (supply_air_temperature vs return_air_temperature ~
+# 0.77) stay below it and remain two issues.
+_MISNAME_RATIO_THRESHOLD = 0.8
+
+_DIGIT_RUN = re.compile(r"\d+")
+
+
+def _differ_only_by_index(expected: str, received: str) -> bool:
+    """True when two names are identical apart from their numeric indices.
+
+    ``phase1_line_current_sensor`` and ``phase2_line_current_sensor`` (or
+    ``zone1_temp`` / ``zone2_temp``) score ~0.96 on SequenceMatcher, but they are
+    DISTINCT indexed points — different physical measurements — not one
+    misspelling. Merging them would drop two real faults to one and steer the
+    operator to rename phase-2 data onto a phase-1 register row. A genuine typo
+    perturbs letters and leaves the digits alone, so its digit-stripped skeleton
+    differs and this guard does not fire.
+    """
+    return expected != received and _DIGIT_RUN.sub("", expected) == _DIGIT_RUN.sub("", received)
+
+
+def _probable_misname_pairs(missing: list[str], unexpected: list[str]) -> list[tuple[str, str]]:
+    """One-to-one (expected, received) pairs whose names are near-identical.
+
+    Greedy highest-ratio pairing, ties broken alphabetically, each name
+    consumed at most once; anything under the threshold stays two issues.
+    Indexed siblings (see :func:`_differ_only_by_index`) are excluded even when
+    they clear the ratio, so distinct numbered points remain two faults.
+    """
+    scored = sorted(
+        (
+            (SequenceMatcher(None, expected, received).ratio(), expected, received)
+            for expected in missing
+            for received in unexpected
+        ),
+        key=lambda item: (-item[0], item[1], item[2]),
+    )
+    pairs: list[tuple[str, str]] = []
+    used_expected: set[str] = set()
+    used_received: set[str] = set()
+    for ratio, expected, received in scored:
+        if ratio < _MISNAME_RATIO_THRESHOLD:
+            break
+        if expected in used_expected or received in used_received:
+            continue
+        if _differ_only_by_index(expected, received):
+            continue
+        pairs.append((expected, received))
+        used_expected.add(expected)
+        used_received.add(received)
+    return pairs
+
+
 def _review_all_payload_issues(
     parameters: dict[str, object],
     existing_issues: list[ValidationIssueRecord],
@@ -853,7 +911,42 @@ def _review_payload_issues(
         else set()
     )
     observed_points = set(str(point) for point in pointset_points)
-    for point_name in sorted(expected_points - observed_points):
+    # A single misnamed point lands one spelling in ``missing`` and its near-twin
+    # in ``unexpected``; pair those into one issue naming both spellings so a
+    # typo is not double-counted as an absent point AND an unexpected point. Only
+    # leftovers after that pairing stay as the two independent messages below.
+    # When no pointset payload was captured ``unexpected_points`` is empty, so
+    # the pairing is a no-op and an offline device never reads as a rename.
+    missing_points = sorted(expected_points - observed_points)
+    unexpected_points = sorted(observed_points - expected_points)
+    misname_pairs = _probable_misname_pairs(missing_points, unexpected_points)
+    paired_expected = {expected_name for expected_name, _ in misname_pairs}
+    paired_received = {received_name for _, received_name in misname_pairs}
+    for expected_name, received_name in misname_pairs:
+        issues.append(
+            _issue(
+                issues,
+                asset_id=asset_id,
+                issue_type="pointset_validation",
+                severity="high",
+                description=(
+                    f"Expected point {expected_name} was not received; the pointset instead "
+                    f"carries the similarly named {received_name} — probably a single misnamed "
+                    "point. One issue is reported for both spellings."
+                ),
+                point_name=expected_name,
+                expected_value=expected_name,
+                observed_value=received_name,
+                suggested_action=(
+                    "Align the point name between the register and the publisher "
+                    "(correct whichever spelling is wrong), then re-run."
+                ),
+                raw_evidence_uri=raw_evidence_uri,
+            )
+        )
+    for point_name in missing_points:
+        if point_name in paired_expected:
+            continue
         issues.append(
             _issue(
                 issues,
@@ -868,7 +961,9 @@ def _review_payload_issues(
                 raw_evidence_uri=raw_evidence_uri,
             )
         )
-    for point_name in sorted(observed_points - expected_points):
+    for point_name in unexpected_points:
+        if point_name in paired_received:
+            continue
         issues.append(
             _issue(
                 issues,

@@ -141,6 +141,30 @@ describe("udmiPayloadVerdict / udmiVerdictTone — RAG scheme (mqf-udmi-rag)", (
     expect(udmiVerdictTone("pass-notes")).toBe("warn");
   });
 
+  it("neutral 'Not received — N notes' for minor-only notes with no observed payload (ISSUE-10)", () => {
+    // A payload type that was never received but still carries minor-only notes
+    // must NOT read as a PASS ("Pass with notes"). It stays neutral, and the
+    // note count remains visible in the label so nothing is hidden.
+    const verdict = udmiVerdictForIssues([sev("minor"), sev("minor")], false);
+    expect(verdict.verdict).toBe("none");
+    expect(verdict.label).toBe("Not received — 2 notes");
+    expect(udmiVerdictTone(verdict.verdict)).toBeNull();
+  });
+
+  it("singularises the note count in the unobserved-notes label (ISSUE-10)", () => {
+    const verdict = udmiVerdictForIssues([sev("minor")], false);
+    expect(verdict.verdict).toBe("none");
+    expect(verdict.label).toBe("Not received — 1 note");
+  });
+
+  it("still reports hard fails as non-compliant when unobserved and not offline (ISSUE-10)", () => {
+    // The observation gate only affects the minor-only branch; a critical/major
+    // issue is a real finding regardless of whether a payload was observed.
+    const verdict = udmiVerdictForIssues([sev("critical")], false, false);
+    expect(verdict.verdict).toBe("fail");
+    expect(verdict.label).toBe("Non-compliant — 1 issue (1 critical)");
+  });
+
   it("green for a clean observed payload", () => {
     const verdict = udmiVerdictForIssues([], true);
     expect(verdict.verdict).toBe("pass");

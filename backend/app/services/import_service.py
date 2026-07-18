@@ -866,6 +866,26 @@ class ImportService:
     def get_import(self, import_id: str) -> ImportBatchSummary:
         return ImportBatchSummary.model_validate(self._repository.get_summary(import_id))
 
+    def get_latest_import(
+        self,
+        *,
+        import_type: ImportType,
+        project_id: str | None,
+        site_id: str | None,
+    ) -> ImportBatchSummary | None:
+        """Newest usable (non-empty) import of a type for a project/site, or None.
+
+        Backs GET /imports/latest so the Setup card can tell the operator a
+        register is already on file (surviving a restart) instead of the native
+        file input's permanent "No file chosen".
+        """
+        summary = self._repository.latest_summary(
+            import_type=import_type, project_id=project_id, site_id=site_id
+        )
+        if summary is None:
+            return None
+        return ImportBatchSummary.model_validate(summary)
+
     def get_import_errors(self, import_id: str) -> ImportErrorReport:
         return ImportErrorReport.model_validate(self._repository.get_errors(import_id))
 
