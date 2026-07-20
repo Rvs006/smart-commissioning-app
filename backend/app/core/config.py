@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     max_xlsx_decompressed_bytes: int = 200 * 1024 * 1024
     job_execution_mode: Literal["auto", "queue", "inline"] = "auto"
     allow_inline_worker_fallback: bool = True
+    # Run inline (portable-exe) executions on a background thread so the POST
+    # returns immediately and the run monitor / Stop-run control render while the
+    # run is live (ITEM-4). On by default so the portable build gets it out of the
+    # box; the API test suite forces it off (INLINE_RUN_ASYNC=0) because those
+    # tests POST a run then assert its terminal status synchronously.
+    inline_run_async: bool = True
     # Edge->hub synchronization role (smart_commissioning_core.sync). Determines
     # which sync features are active for this instance:
     #   - "standalone" (default): today's single-instance behavior. No sync; the

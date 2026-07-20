@@ -5,6 +5,8 @@ from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
 from app.schemas.configuration import (
+    ConfigurationExportEnvelope,
+    ConfigurationImportRequest,
     ConfigurationSnapshot,
     ConfigurationValidationResult,
     SecretMaterialRequest,
@@ -61,6 +63,54 @@ def update_configuration(
 )
 def validate_configuration(configuration: ConfigurationSnapshot) -> ConfigurationValidationResult:
     return service.validate(configuration)
+
+
+@router.get(
+    "/export-with-secrets",
+    response_model=ConfigurationExportEnvelope,
+    dependencies=[Depends(require_engineer)],
+)
+def export_configuration_with_secrets(
+    project_id: str = Query(default=DEFAULT_PROJECT_ID),
+    site_id: str = Query(default=DEFAULT_SITE_ID),
+) -> ConfigurationExportEnvelope:
+    """Export the configuration INCLUDING plain-text secrets (engineer only).
+
+    Distinct from GET /configuration (which always masks). The returned envelope
+    carries the MQTT password/tokens and the certificate/key PEM material so it
+    can be imported on another machine — engineer-gated and warned about in the UI.
+    """
+    return service.export_with_secrets(project_id, site_id)
+
+
+@router.post(
+    "/import",
+    response_model=ConfigurationSnapshot,
+    dependencies=[Depends(require_engineer)],
+)
+def import_configuration(
+    request: ConfigurationImportRequest,
+    project_id: str = Query(default=DEFAULT_PROJECT_ID),
+    site_id: str = Query(default=DEFAULT_SITE_ID),
+) -> ConfigurationSnapshot:
+    """Import a configuration, restoring any exported secret material.
+
+    Validation mirrors PUT (invalid snapshot -> 400 with the error list); a bad
+    secret field/reference -> 400. Returns the masked snapshot, like PUT, and
+    applies logging settings best-effort so a Log Level change takes effect now.
+    """
+    result = service.validate(request.configuration)
+    if not result.valid:
+        raise HTTPException(status_code=400, detail=result.errors)
+    try:
+        saved = service.import_with_secrets(request, project_id=project_id, site_id=site_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    try:
+        apply_logging_settings(saved.logging.values)
+    except Exception:  # noqa: BLE001 (applying logging settings is best-effort)
+        logger.debug("Could not apply logging settings after import.", exc_info=True)
+    return saved
 
 
 @router.post("/secrets", response_model=SecretMaterialResponse, dependencies=[Depends(require_engineer)])

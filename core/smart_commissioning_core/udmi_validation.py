@@ -10,6 +10,7 @@ from typing import Any
 
 from smart_commissioning_core.engines.comparison_common import make_issue, normalise_unit
 from smart_commissioning_core.mqtt_settings import (
+    INDEFINITE_BACKSTOP_SECONDS,
     _broker_error_status,
     _string,
     build_mqtt_connection_settings,
@@ -1276,7 +1277,10 @@ def _capture_live_payloads(
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
             topics=topics,
-            timeout_seconds=timeout_seconds,
+            # timeout_seconds stays None in the summary (capture_mode "indefinite");
+            # the transport gets the 48h backstop so an indefinite capture still
+            # ends with its data rather than hanging on a never-publishing device.
+            timeout_seconds=timeout_seconds if timeout_seconds is not None else INDEFINITE_BACKSTOP_SECONDS,
             max_messages=parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES),
             qos=parse_int(parameters.get("qos"), default=0),
             cancel_check=cancel_check,
@@ -1431,7 +1435,10 @@ def _capture_live_payloads_per_asset(
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
             topics=topics,
-            timeout_seconds=timeout_seconds,
+            # timeout_seconds stays None in the summary (capture_mode "indefinite");
+            # the transport gets the 48h backstop so an indefinite capture still
+            # ends with its data rather than hanging on a never-publishing device.
+            timeout_seconds=timeout_seconds if timeout_seconds is not None else INDEFINITE_BACKSTOP_SECONDS,
             max_messages=parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES),
             qos=parse_int(parameters.get("qos"), default=0),
             cancel_check=cancel_check,

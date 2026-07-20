@@ -373,6 +373,53 @@ export function filterResultRows(
   return rows.filter((row) => resultRowMatchesFilter(row, filter, topicColumn));
 }
 
+// One asset's group of UDMI results rows (ITEM-7): the visible per-payload-type
+// rows for that asset, folded into a single expandable summary row. This is a
+// RENDER-ONLY layer over the unchanged flat resultRows — each child keeps its
+// ORIGINAL index, so positional selection and the Asset+Payload detail joins
+// (the ISSUE-4 invariant) are untouched.
+export type UdmiRowGroup = {
+  asset: string;
+  rows: Array<{ row: Record<string, string>; index: number }>;
+  // Aggregate RAG shade over VISIBLE children only — so the collapsed row's tone
+  // honestly reflects what is shown (it can change as the filters change).
+  worstTone: "pass" | "warn" | "fail" | "";
+  issueTotal: number;
+  observedCount: number;
+};
+
+const TONE_RANK: Record<string, number> = { fail: 3, warn: 2, pass: 1, "": 0 };
+
+// Folds already-filtered visible rows (each {row, original index}) into per-asset
+// groups. udmiLiveResults emits rows grouped by asset in order, so consecutive
+// same-Asset rows form one group.
+export function groupUdmiRowsByAsset(
+  visible: Array<{ row: Record<string, string>; index: number }>,
+): UdmiRowGroup[] {
+  const groups: UdmiRowGroup[] = [];
+  let current: UdmiRowGroup | null = null;
+  for (const entry of visible) {
+    const asset = entry.row.Asset ?? "";
+    if (!current || current.asset !== asset) {
+      current = { asset, issueTotal: 0, observedCount: 0, rows: [], worstTone: "" };
+      groups.push(current);
+    }
+    current.rows.push(entry);
+    const tone = entry.row.__tone ?? "";
+    if ((TONE_RANK[tone] ?? 0) > (TONE_RANK[current.worstTone] ?? 0)) {
+      current.worstTone = tone as UdmiRowGroup["worstTone"];
+    }
+    const issues = Number(entry.row.Issues ?? "0");
+    if (Number.isFinite(issues)) {
+      current.issueTotal += issues;
+    }
+    if (entry.row.Observed === "Yes") {
+      current.observedCount += 1;
+    }
+  }
+  return groups;
+}
+
 export type DiscoveryView = {
   columns: string[];
   rows: Record<string, string>[];

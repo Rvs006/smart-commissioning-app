@@ -19,6 +19,8 @@ It returns a :class:`JobAcceptedResponse`. Inline runs report their real
 terminal status; queued runs report ``queued`` with a worker-required summary.
 """
 
+import logging
+import threading
 from collections.abc import Callable
 
 from app.core.config import get_settings
@@ -26,7 +28,46 @@ from app.schemas.jobs import JobAcceptedResponse, RunRecord
 from app.services.job_queue import JobQueueUnavailable, RunEnqueuer
 from app.services.run_service import RunService
 
+logger = logging.getLogger(__name__)
+
 InlineFn = Callable[[], RunRecord]
+
+# Sanitized, credential-free message for a background inline run that raised
+# BEFORE the engine wrapper could write its own terminal status (e.g. a failure
+# building the persister). The startup orphan sweep only reclaims runs stuck at
+# 'running'; a crash here can strand a run at 'queued', which the sweep does NOT
+# touch, so the crash guard must land a terminal 'failed' itself.
+_INLINE_RUN_CRASH_MESSAGE = (
+    "This run stopped unexpectedly before it could finish, so no results were "
+    "saved. Please run it again."
+)
+
+
+def _run_inline_guarded(service: RunService, run_id: str, run_inline: InlineFn) -> None:
+    """Execute ``run_inline`` on a background thread, never letting it strand the run.
+
+    The engine wrapper (engines.base.run_engine) already writes a terminal status
+    on every path it reaches, so the only gap this closes is an exception raised
+    BEFORE the wrapper's own try/except runs. In that case nothing wrote a
+    terminal status, so mark the run failed with a sanitized message. ``Exception``
+    only: KeyboardInterrupt / SystemExit propagate to end the thread (the wrapper
+    already recorded 'failed' for those), and the terminal write is itself guarded
+    so a store hiccup cannot raise out of the thread.
+    """
+    try:
+        run_inline()
+    except Exception:
+        logger.exception("background inline run %s crashed before it could finish", run_id)
+        try:
+            service.update_run_status(
+                run_id,
+                status="failed",
+                stage="inline_run_crashed",
+                progress_percent=100,
+                error_message=_INLINE_RUN_CRASH_MESSAGE,
+            )
+        except Exception:
+            logger.exception("failed to mark crashed inline run %s as failed", run_id)
 
 
 def _inline_response(
@@ -39,17 +80,39 @@ def _inline_response(
     """Run the engine in-process and report the outcome without 500-ing on the
     store-failure path.
 
-    ``run_inline`` normally returns the terminal RunRecord, but the engine
-    framework's last line of defence (engines.base._safe_update_run_status)
-    returns ``None`` when even the terminal status write fails — a poisoned
-    session, or a disk-full / locked SQLite database. Dereferencing that None as
-    ``processed.run_id`` used to raise AttributeError into a 500 while the run was
-    left fossilized at 'running'. On None we re-read the run's current stored
-    state (the terminal write never landed, so it reads 'running'; the startup
-    orphan sweep reclaims it) and, if that read fails too, fall back to the run as
-    created — so this path returns a clean accepted response carrying the run id
-    instead of a 500.
+    When ``inline_run_async`` is set (the portable-exe default, ITEM-4) the run is
+    started on a daemon background thread and this returns immediately with the
+    run's current (non-terminal) status, so the caller learns the run_id at once
+    and the run monitor + Stop-run control can render while the run is live. The
+    background run does not survive closing the app: a run killed by process exit
+    has no worker markers and is reclaimed as failed/interrupted at next startup.
+
+    In synchronous mode (the tests' INLINE_RUN_ASYNC=0 path, byte-for-byte the
+    historical behaviour): ``run_inline`` normally returns the terminal RunRecord,
+    but the engine framework's last line of defence
+    (engines.base._safe_update_run_status) returns ``None`` when even the terminal
+    status write fails — a poisoned session, or a disk-full / locked SQLite
+    database. Dereferencing that None as ``processed.run_id`` used to raise
+    AttributeError into a 500 while the run was left fossilized at 'running'. On
+    None we re-read the run's current stored state (the terminal write never
+    landed, so it reads 'running'; the startup orphan sweep reclaims it) and, if
+    that read fails too, fall back to the run as created — so this path returns a
+    clean accepted response carrying the run id instead of a 500.
     """
+    if get_settings().inline_run_async:
+        threading.Thread(
+            target=_run_inline_guarded,
+            args=(service, run.run_id, run_inline),
+            name=f"inline-run-{run.run_id}",
+            daemon=True,
+        ).start()
+        return JobAcceptedResponse(
+            run_id=run.run_id,
+            job_type=run.job_type,
+            status=run.status,
+            message=message,
+        )
+
     processed = run_inline()
     if processed is None:
         try:

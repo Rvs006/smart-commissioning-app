@@ -10,7 +10,18 @@ ConfigurationValuesProvider = Callable[[], tuple[dict[str, object], dict[str, ob
 
 _configuration_values_provider: ConfigurationValuesProvider | None = None
 
+# Hard safety backstop for an "indefinite" (blank Run time) capture: 48 hours. A
+# blank capture runs until the operator presses Stop run, every expected topic is
+# seen (UDMI), or the distinct-topic cap — but never past this ceiling, so the
+# broker socket and its thread cannot be held forever. Both capture engines pass
+# this as the transport timeout when the resolved window is None, while keeping
+# ``capture_mode`` reported as "indefinite" in the summary. The API route caps
+# (discovery.MQTT_MAX_CAPTURE_SECONDS / validation.MAX_UDMI_CAPTURE_SECONDS) equal
+# this value, and the worker actor time limits sit one hour above it.
+INDEFINITE_BACKSTOP_SECONDS = 172_800.0
+
 __all__ = [
+    "INDEFINITE_BACKSTOP_SECONDS",
     "ConfigurationValuesProvider",
     "build_mqtt_connection_settings",
     "parse_bool",

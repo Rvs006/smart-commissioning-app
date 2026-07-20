@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.schemas.configuration import SecretMaterialRequest
+from app.schemas.configuration import (
+    ConfigurationImportRequest,
+    ConfigurationSecretMaterial,
+    SecretMaterialRequest,
+)
 from app.services import _configuration_values
 from app.services import configuration_service as configuration_service_module
 from app.services.configuration_service import (
@@ -359,6 +363,139 @@ class DerivedCertificatesStatusTests(SecretStorageTestCase):
 
         self.assertEqual(returned.certificates.status, "Private key stored")
         self.assertEqual(self.stored_payload()["certificates"]["status"], "Private key stored")
+
+
+class ConfigurationTransferTests(SecretStorageTestCase):
+    """Export-with-secrets + import round-trip (ITEM-1).
+
+    The default export stays masked; this separate engineer action carries the
+    MQTT password and the certificate/key PEM material in plain text so a config
+    can be imported and actually connect on another machine.
+    """
+
+    def test_export_carries_plaintext_password_and_cert_material(self) -> None:
+        cert = _self_signed_cert(_dt(2030, 1, 2))
+        self.service.store_secret(
+            SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=cert)
+        )
+        configuration = self.service.load(mask_secrets=False)
+        configuration.mqtt.values["MQTT Password"] = "broker-secret-A"
+        self.service.save(configuration)
+
+        envelope = self.service.export_with_secrets()
+
+        self.assertEqual(envelope.version, 2)
+        self.assertTrue(envelope.secrets_included)
+        # Plain-text password rides along (not the '********' mask).
+        self.assertEqual(envelope.configuration.mqtt.values["MQTT Password"], "broker-secret-A")
+        # The CA PEM content is attached, keyed by field name.
+        self.assertIn("CA Certificate", envelope.secret_material)
+        self.assertEqual(envelope.secret_material["CA Certificate"].content, cert)
+
+    def test_export_skips_a_cert_whose_backing_file_vanished(self) -> None:
+        stored = self.service.store_secret(
+            SecretMaterialRequest(field="Client Certificate", file_name="c.pem", content=PEM_CONTENT)
+        )
+        (self.secrets_root / f"{stored.secret_ref.removeprefix('secret://')}.pem").unlink()
+
+        envelope = self.service.export_with_secrets()
+
+        # A dangling ref never rides along as broken material.
+        self.assertNotIn("Client Certificate", envelope.secret_material)
+
+    def test_round_trip_restores_everything_on_a_fresh_machine(self) -> None:
+        cert = _self_signed_cert(_dt(2030, 1, 2))
+        self.service.store_secret(
+            SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=cert)
+        )
+        configuration = self.service.load(mask_secrets=False)
+        configuration.mqtt.values["MQTT Password"] = "broker-secret-A"
+        self.service.save(configuration)
+        envelope = self.service.export_with_secrets()
+
+        # A second machine: its own secret store (own Fernet key) and database.
+        machine_b_dir = self.secrets_root.parent / "machine-b"
+        machine_b_dir.mkdir()
+        machine_b_secrets = machine_b_dir / "secrets"
+        machine_b_engine = create_engine_from_url(default_sqlite_url(machine_b_dir))
+        Base.metadata.create_all(machine_b_engine)
+        self.addCleanup(machine_b_engine.dispose)
+
+        with mock.patch.object(configuration_service_module, "SECRETS_ROOT", machine_b_secrets):
+            service_b = ConfigurationService(engine=machine_b_engine)
+            service_b.import_with_secrets(
+                ConfigurationImportRequest(
+                    configuration=envelope.configuration,
+                    secret_material=envelope.secret_material,
+                )
+            )
+
+            loaded_b = service_b.load(mask_secrets=False)
+            self.assertEqual(loaded_b.mqtt.values["MQTT Password"], "broker-secret-A")
+            ca_ref = loaded_b.certificates.values["CA Certificate"]
+            self.assertTrue(ca_ref.startswith("secret://"))
+            # Material was re-encrypted with machine B's own key yet reads back.
+            self.assertEqual(service_b.read_secret(ca_ref), cert)
+            self.assertEqual(loaded_b.certificates.values["Certificate Expiry"], "2030-01-02")
+
+    def test_import_rejects_a_traversal_secret_ref(self) -> None:
+        configuration = self.service.load(mask_secrets=False)
+        request = ConfigurationImportRequest(
+            configuration=configuration,
+            secret_material={
+                "CA Certificate": ConfigurationSecretMaterial(secret_ref="secret://../evil", content="x")
+            },
+        )
+        with self.assertRaises(ValueError):
+            self.service.import_with_secrets(request)
+
+    def test_import_rejects_a_non_certificate_secret_field(self) -> None:
+        configuration = self.service.load(mask_secrets=False)
+        request = ConfigurationImportRequest(
+            configuration=configuration,
+            secret_material={
+                "MQTT Password": ConfigurationSecretMaterial(secret_ref="secret://whatever", content="x")
+            },
+        )
+        with self.assertRaises(ValueError):
+            self.service.import_with_secrets(request)
+
+
+class RootTopicRemovalTests(SecretStorageTestCase):
+    """The Root Topic field is gone (ITEM-2): no topic scope is inherited, and a
+    stored Root Topic in a legacy/imported snapshot is tolerated and dropped."""
+
+    def _store_legacy_payload_with_root_topic(self) -> None:
+        # Write a payload carrying Root Topic straight through the repository,
+        # bypassing save()'s migration, to simulate an existing field install / an
+        # old exported config file.
+        payload = DEFAULT_CONFIGURATION.model_copy(deep=True).model_dump(mode="json")
+        payload["mqtt"]["values"]["Root Topic"] = "legacy/root/topic"
+        ConfigurationRepository(self.engine).save(DEFAULT_PROJECT_ID, DEFAULT_SITE_ID, payload)
+
+    def test_subscribe_defaults_returns_only_qos(self) -> None:
+        self._store_legacy_payload_with_root_topic()
+        defaults = self.service.mqtt_subscribe_defaults()
+        self.assertEqual(defaults, {"qos": 1})  # "1 - At least once"
+        self.assertNotIn("topic_filter", defaults)
+
+    def test_stored_root_topic_is_dropped_on_load_and_next_save(self) -> None:
+        self._store_legacy_payload_with_root_topic()
+        loaded = self.service.load(mask_secrets=False)
+        self.assertNotIn("Root Topic", loaded.mqtt.values)
+        self.service.save(loaded)
+        self.assertNotIn("Root Topic", self.stored_payload()["mqtt"]["values"])
+
+    def test_default_snapshot_has_no_root_topic_and_validates(self) -> None:
+        snapshot = self.service.load(mask_secrets=False)
+        self.assertNotIn("Root Topic", snapshot.mqtt.values)
+        self.assertTrue(self.service.validate(snapshot).valid)
+
+
+def _dt(year: int, month: int, day: int):
+    from datetime import UTC, datetime
+
+    return datetime(year, month, day, tzinfo=UTC)
 
 
 if __name__ == "__main__":

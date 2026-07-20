@@ -24,6 +24,9 @@ from sqlalchemy.engine import Engine
 from app.core.db import get_engine
 from app.core.runtime import SECRETS_ROOT, ensure_runtime_directories
 from app.schemas.configuration import (
+    ConfigurationExportEnvelope,
+    ConfigurationImportRequest,
+    ConfigurationSecretMaterial,
     ConfigurationSection,
     ConfigurationSnapshot,
     ConfigurationValidationResult,
@@ -87,7 +90,6 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             "Port": "8883",
             "Use TLS": "Enabled",
             "Client ID": "sct-gateway-01",
-            "Root Topic": "electracom/sct/1532",
             "QoS": "1 - At least once",
             "Keep Alive Interval": "60",
             "MQTT Username": "",
@@ -294,23 +296,88 @@ class ConfigurationService:
         """Resolve a secret:// reference to its decrypted contents."""
         return read_secret_material(secret_ref)
 
+    def export_with_secrets(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        site_id: str = DEFAULT_SITE_ID,
+    ) -> ConfigurationExportEnvelope:
+        """A shareable export that INCLUDES secrets, for cross-machine import.
+
+        Field decision 2026-07-20: plain text is fine for the moment, encryption
+        at a later date. Unlike the default masked export, this loads
+        the snapshot UNMASKED (so the MQTT password / tokens / key password ride
+        along as plain text) and attaches the CA/client-certificate/private-key
+        PEM material so another engineer can import a working configuration on
+        their own machine. A cert field whose secret:// reference does not resolve
+        to a file on disk is skipped (the import-side dangling-drop keeps the
+        result honest), so the envelope never carries a broken reference.
+        """
+        snapshot = self.load(project_id, site_id, mask_secrets=False)
+        secret_material: dict[str, ConfigurationSecretMaterial] = {}
+        cert_values = snapshot.certificates.values
+        for field in ("CA Certificate", "Client Certificate", "Private Key"):
+            value = str(cert_values.get(field, "")).strip()
+            if not value.startswith("secret://"):
+                continue
+            try:
+                if not _secret_path(value).exists():
+                    continue
+                content = read_secret_material(value)
+            except (ValueError, FileNotFoundError, OSError):
+                continue
+            secret_material[field] = ConfigurationSecretMaterial(secret_ref=value, content=content)
+        return ConfigurationExportEnvelope(
+            exported_at=datetime.now(UTC).isoformat(),
+            project_id=project_id,
+            site_id=site_id,
+            configuration=snapshot,
+            secret_material=secret_material,
+        )
+
+    def import_with_secrets(
+        self,
+        request: ConfigurationImportRequest,
+        *,
+        project_id: str = DEFAULT_PROJECT_ID,
+        site_id: str = DEFAULT_SITE_ID,
+    ) -> ConfigurationSnapshot:
+        """Restore a shared configuration + its secret material, then persist it.
+
+        Secret material is written to THIS machine's secret store BEFORE the
+        snapshot is persisted, reusing the envelope's secret:// reference names —
+        so ``_persist``'s dangling-ref drop finds the material resolvable and the
+        certificate status/expiry re-derive honestly from disk. Material is
+        re-encrypted with the receiving machine's own key (cross-machine works
+        because the envelope carries the PEM content, not ciphertext). Password-
+        kind values in ``request.configuration`` are plain text, not sentinels, so
+        ``save`` persists them verbatim and masks them on the returned snapshot.
+
+        Callers validate ``request.configuration`` (mirroring PUT) before invoking
+        this; a bad secret field or reference raises ValueError for a 400.
+        """
+        for field, material in (request.secret_material or {}).items():
+            if field not in {"CA Certificate", "Client Certificate", "Private Key"}:
+                raise ValueError(f"{field} cannot be imported as secret material.")
+            # Validates the reference shape (rejects path traversal) before writing.
+            _secret_path(material.secret_ref)
+            write_secret_material(material.secret_ref, material.content)
+        return self.save(request.configuration, project_id=project_id, site_id=site_id)
+
     def mqtt_subscribe_defaults(self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID) -> dict:
-        """Subscribe defaults from saved config so a run inherits them when the
-        operator left them blank: the configured Root Topic becomes the default
-        ``topic_filter`` (normalised to a ``prefix/#`` wildcard) and the QoS field
-        becomes the subscribe ``qos`` (0-2). Addresses "I set the root topic / QoS
-        and the scan ignored it".
+        """QoS-only subscribe default from saved config, so a run inherits the
+        configured QoS (0-2) when the operator left it blank.
+
+        Topic scope is NOT inherited: the saved Root Topic field was removed
+        (ITEM-2). MQTT discovery chooses its topic filter per run on its own page
+        (a blank filter means the engine's own capture-all ``#``), and UDMI
+        Workbench takes its topics from the imported register.
         """
         values = self.load(project_id, site_id).mqtt.values
         try:
             qos = max(0, min(2, int(str(values.get("QoS")).strip().split()[0])))
         except (ValueError, IndexError):
             qos = 0
-        defaults: dict = {"qos": qos}
-        root = str(values.get("Root Topic") or "").strip()
-        if root:
-            defaults["topic_filter"] = root if ("#" in root or "+" in root) else root.rstrip("/") + "/#"
-        return defaults
+        return {"qos": qos}
 
     def bacnet_transport_defaults(
         self, project_id: str = DEFAULT_PROJECT_ID, site_id: str = DEFAULT_SITE_ID
@@ -561,7 +628,8 @@ class ConfigurationService:
             configuration.mqtt.values.get("MQTT Broker FQDN or IP Address", ""),
         )
         self._validate_non_empty(errors, "MQTT Client ID", configuration.mqtt.values.get("Client ID", ""))
-        self._validate_non_empty(errors, "MQTT Root Topic", configuration.mqtt.values.get("Root Topic", ""))
+        # Root Topic was removed (ITEM-2): no non-empty check — a blank per-run
+        # topic filter now means capture-all, and topic scope is never stored.
         self._validate_positive_int(errors, "MQTT Keep Alive Interval", configuration.mqtt.values.get("Keep Alive Interval", ""))
         self._validate_positive_int(errors, "NTP Update Interval", configuration.time.values.get("NTP Update Interval", ""))
         self._validate_certificate(errors, "CA Certificate", configuration.certificates.values.get("CA Certificate", ""))
@@ -659,6 +727,14 @@ class ConfigurationService:
             mqtt_values["MQTT Broker FQDN or IP Address"] = mqtt_values.pop("MQTT Broker")
         if "Keep Alive" in mqtt_values and "Keep Alive Interval" not in mqtt_values:
             mqtt_values["Keep Alive Interval"] = mqtt_values.pop("Keep Alive")
+        # The Root Topic field was removed (ITEM-2). Dropping the key here (like
+        # _REMOVED_LOGGING_FIELDS) is LOAD-BEARING: _merge_with_defaults unions
+        # {**default, **loaded}, so a stored snapshot on a field machine — or an
+        # old exported config file being imported — would otherwise keep the stale
+        # key alive and the UI would keep rendering a live-looking dead field. The
+        # value has no remaining consumer, so its loss on next save belongs in the
+        # CHANGELOG (the Remote Syslog precedent).
+        mqtt_values.pop("Root Topic", None)
         # A config saved before the "Use TLS" control existed carries no such key.
         # Derive it from the stored port here — BEFORE _merge_with_defaults unions
         # the new static "Use TLS": "Enabled" default in — so a legacy plaintext

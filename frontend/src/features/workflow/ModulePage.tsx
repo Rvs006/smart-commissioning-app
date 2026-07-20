@@ -1,4 +1,4 @@
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   cancelRun,
@@ -37,6 +37,8 @@ import {
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import {
+  assetMatchesFacetFilter,
+  buildAssetFacts,
   groupIssuesByAsset,
   mergeAssetGroups,
   moduleWorkspaces,
@@ -54,6 +56,7 @@ import {
   expectedByRegisterSilent,
   expectedPortsOk,
   forbiddenOpenPorts,
+  groupUdmiRowsByAsset,
   matchesTopicFilter,
   missingExpectedPorts,
   mqttRegisterCompareNote,
@@ -62,7 +65,7 @@ import {
   validationMetrics,
 } from "./discoveryRows";
 import { formatAbsoluteTime, formatRelativeTime, isTerminalStatus, toHealthState } from "./runFormat";
-import { diffPayloadLines, isPlainObject, type DiffLine } from "./payloadDiff";
+import { alignPayloadDiff, isPlainObject, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 
@@ -281,6 +284,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // filtered view preserves original indices (see visibleResultRows).
   const [resultsTextFilter, setResultsTextFilter] = useState("");
   const [resultsToneFilter, setResultsToneFilter] = useState("all");
+  // Inspector facet filters (ITEM-10), udmi-validation only: by asset type, by
+  // seen/not-seen, and by ONLINE/OFFLINE. Composed on top of the text + verdict
+  // filter above and applied to BOTH the results table and the drill-down list.
+  const [resultsAssetTypeFilter, setResultsAssetTypeFilter] = useState("all");
+  const [resultsSeenFilter, setResultsSeenFilter] = useState("all");
+  const [resultsStateFilter, setResultsStateFilter] = useState("all");
   // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
   // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
@@ -288,6 +297,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // and the nested expected-vs-observed payload expand keyed `${asset}:${type}`.
   const [expandedAsset, setExpandedAsset] = useState<string | null>(null);
   const [expandedPayloadKey, setExpandedPayloadKey] = useState<string | null>(null);
+  // Which asset summary rows are expanded in the grouped UDMI results table
+  // (ITEM-7). Collapsed by default; the selected asset auto-expands (below) so
+  // the inspector never shows a row the table hides (ISSUE-4).
+  const [expandedResultAssets, setExpandedResultAssets] = useState<Set<string>>(new Set());
   // Reports page: which queued reports are ticked for "Export selected" and a
   // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
@@ -297,9 +310,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [reportExportFormat, setReportExportFormat] = useState<ReportFormat>("pdf");
   // MQTT Explorer-like capture inputs (mq9nhbzu). The live broker capture itself
   // is on-site-untested; this drives the existing mqtt discovery run + topics.
-  // Default BLANK, not "#": a blank filter is omitted from the run parameters so
-  // the backend inherits the saved Root Topic (discovery route), instead of a
-  // literal "#" silently overriding it and capturing every topic (ISSUE-3).
+  // Default BLANK: a blank filter is OMITTED from the run parameters, so the
+  // engine falls back to its own "#" default and captures every topic. The Root
+  // Topic field was removed from Configuration (2026-07-20 walkthrough ITEM-2),
+  // so blank no longer inherits a saved value — it means capture-all. Keep the
+  // omit-when-blank wire shape (do NOT send a literal "#"): an absent parameter
+  // keeps override semantics clean and the engine default covers capture-all.
   const [captureTopicFilter, setCaptureTopicFilter] = useState("");
   const [captureSeconds, setCaptureSeconds] = useState("10");
   // Field ask 2026-07-14: day-scale windows are real (metadata often every 24h),
@@ -312,7 +328,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
-  const allTemplatesDownload = useFileDownload();
   const schemaTemplateDownload = useFileDownload();
 
   const profilesQuery = useQuery({
@@ -366,6 +381,42 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     (sseDriving ? sseEvent?.progress_percent : undefined) ?? activeRunRecord?.progress_percent ?? 0;
   const activeRunError = (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
   const activeRunTerminal = isTerminalStatus(activeRunStatus);
+
+  // Elapsed timer + progress presentation for the active run (ITEM-6). The run
+  // monitor renders live now that a run is started in the background (ITEM-4), so
+  // a stuck-at-15% bar would otherwise be the face of every run. While running,
+  // the timer ticks from the run's created_at; once terminal it freezes to
+  // updated_at - created_at. A bounded capture fills over its own window (never
+  // claiming 100% before the terminal flip); an indefinite/unknown run shows an
+  // active sweep. Clock source is the polled run record, not the SSE frame (the
+  // frame carries no created_at).
+  const runIsActive = Boolean(activeRun) && !activeRunTerminal;
+  const activeRunElapsedSeconds = useElapsedSeconds(
+    activeRunRecord?.created_at,
+    runIsActive,
+    activeRunRecord?.updated_at,
+  );
+  const captureSecondsParam =
+    typeof activeRunRecord?.parameters?.capture_seconds === "number"
+      ? (activeRunRecord.parameters.capture_seconds as number)
+      : undefined;
+  const boundedCapture = runIsActive && captureSecondsParam !== undefined && captureSecondsParam > 0;
+  // Fill over the capture window while running, but never past 99% until the run
+  // actually reports terminal — the real progress_percent still wins if higher.
+  const progressWidth = boundedCapture
+    ? Math.max(activeRunProgress, Math.min(99, (activeRunElapsedSeconds / captureSecondsParam) * 100))
+    : activeRunProgress;
+  const progressIndeterminate = runIsActive && !boundedCapture;
+
+  // Only a run the operator STARTED here this session hard-blocks a second start
+  // (ITEM-4: prevent an accidental parallel capture). A REHYDRATED run (restored
+  // from a prior visit) still shows its live monitor + Stop control, but must NOT
+  // gate Execute: a run fossilized at running/queued — a hosted worker that died
+  // with its dispatch markers, so the startup sweep leaves it alone — would
+  // otherwise disable Execute forever with no UI escape (the cancel flag it sets
+  // is never observed). Gating only freshly-started runs keeps ITEM-4's guard
+  // where it belongs and can never fossilize into a permanent lock.
+  const startedRunActive = runIsActive && !activeRun?.restored;
 
   // Validation issues — fetched only once the validation run is terminal.
   const validationIssuesQuery = useQuery({
@@ -443,9 +494,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   // Run retention: the page state is wiped on every navigation, so arriving at a
-  // head used to look like nothing had ever run there. Ask the run store for the
-  // most recent succeeded run of this head's own job types and re-attach it, so
-  // the monitor and results survive navigating away and back.
+  // head used to look like nothing had ever run there. Ask the run store for
+  // this head's own runs and re-attach one, so the monitor and results survive
+  // navigating away and back.
+  //
+  // Now that runs execute in the background (ITEM-4), a run can still be
+  // RUNNING/QUEUED when the operator refreshes or navigates away. Prefer the
+  // newest non-terminal run so its LIVE monitor and Stop control re-attach; fall
+  // back to the newest succeeded run otherwise. The seed effect below marks the
+  // re-attached run restored:true, so rehydration never hijacks the step — and
+  // polling resumes automatically because the run monitor queries key off
+  // activeRun.
   //
   // Report actions carry no run lifecycle, so they are excluded — which also
   // naturally exempts the reports route (report-only actions => no query).
@@ -455,19 +514,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const lastRunQuery = useQuery({
     enabled: rehydratableActions.length > 0,
     // Keyed by route so one head's cached run can never be handed to another.
-    queryKey: ["last-succeeded-run", module.route],
+    queryKey: ["last-attachable-run", module.route],
     queryFn: async () => {
+      // Two requests per job type: the newest run of ANY status (catches a live
+      // running/queued run) and the newest succeeded run (the terminal fallback).
       const responses = await Promise.all(
-        rehydratableActions.map((action) =>
+        rehydratableActions.flatMap((action) => [
+          listRuns({ jobType: action.jobType, limit: 1 }),
           listRuns({ jobType: action.jobType, limit: 1, status: "succeeded" }),
-        ),
+        ]),
       );
-      // One request per job type (data-validation has three); pick the newest
-      // across them. created_at is ISO-8601 UTC, so it sorts lexicographically.
-      const newest = responses
-        .flatMap((response) => response.runs)
-        .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))[0];
-      return newest ?? null;
+      // created_at is ISO-8601 UTC, so it sorts lexicographically.
+      const byNewest = (a: { created_at: string }, b: { created_at: string }) =>
+        a.created_at < b.created_at ? 1 : -1;
+      const all = responses.flatMap((response) => response.runs);
+      const live = all.filter((run) => !isTerminalStatus(run.status)).sort(byNewest)[0];
+      const succeeded = all.filter((run) => run.status === "succeeded").sort(byNewest)[0];
+      return live ?? succeeded ?? null;
     },
   });
 
@@ -490,7 +553,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
-  const resetAllTemplatesDownload = allTemplatesDownload.reset;
 
   useEffect(() => {
     setSelectedImportType(module.importTypes[0] ?? "");
@@ -503,6 +565,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setSelectedResultIndex(0);
     setResultsTextFilter("");
     setResultsToneFilter("all");
+    setResultsAssetTypeFilter("all");
+    setResultsSeenFilter("all");
+    setResultsStateFilter("all");
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
     setReportToast(null);
@@ -521,14 +586,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetTemplateDownload();
     resetReportDownload();
     resetExportDownload();
-    resetAllTemplatesDownload();
   }, [
     module.route,
     module.importTypes,
     resetTemplateDownload,
     resetReportDownload,
     resetExportDownload,
-    resetAllTemplatesDownload,
   ]);
 
   // Re-attach this head's most recent succeeded run (see lastRunQuery above).
@@ -988,9 +1051,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setSelectedResultIndex(0);
       setDetailRow(null);
       // A fresh result set starts unfiltered so a stale filter never hides new
-      // rows behind a "no rows match" note (ISSUE-4).
+      // rows behind a "no rows match" note (ISSUE-4). The facet filters (ITEM-10)
+      // join the same reset choreography for the same reason.
       setResultsTextFilter("");
       setResultsToneFilter("all");
+      setResultsAssetTypeFilter("all");
+      setResultsSeenFilter("all");
+      setResultsStateFilter("all");
+      setExpandedResultAssets(new Set());
     }
   }, [hasUdmiLiveResults]);
 
@@ -1049,16 +1117,90 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // any plain query) uses substring matching. Rows keep their ORIGINAL index so
   // selection, the Inspector, and the View modal never point at the wrong row.
   const resultsTopicColumn = tableColumns.includes("Topic") ? "Topic" : undefined;
-  const isResultsFilterActive = resultsTextFilter.trim() !== "" || resultsToneFilter !== "all";
+  // Per-asset facts for the inspector facet filters (ITEM-10), derived from the
+  // same merged groups + offline set the verdicts use — so the filters can never
+  // claim more than the app observed. Non-udmi routes get an empty map (unused).
+  const isUdmiValidation = module.route === "udmi-validation";
+  const assetFacts = useMemo(
+    () => buildAssetFacts(mergedAssetGroups ?? [], offlineAssets),
+    [mergedAssetGroups, offlineAssets],
+  );
+  const assetTypeOptions = useMemo(() => {
+    const types = new Set<string>();
+    for (const facts of assetFacts.values()) {
+      types.add(facts.type);
+    }
+    return Array.from(types).sort();
+  }, [assetFacts]);
+  const facetFilterActive =
+    isUdmiValidation &&
+    (resultsAssetTypeFilter !== "all" ||
+      resultsSeenFilter !== "all" ||
+      resultsStateFilter !== "all");
+  const isResultsFilterActive =
+    resultsTextFilter.trim() !== "" || resultsToneFilter !== "all" || facetFilterActive;
   const visibleResultRows = useMemo(
     () =>
       resultRows
         .map((row, index) => ({ index, row }))
-        .filter(({ row }) =>
-          resultRowMatchesFilter(row, { text: resultsTextFilter, tone: resultsToneFilter }, resultsTopicColumn),
-        ),
-    [resultRows, resultsTextFilter, resultsToneFilter, resultsTopicColumn],
+        .filter(({ row }) => {
+          if (
+            !resultRowMatchesFilter(
+              row,
+              { text: resultsTextFilter, tone: resultsToneFilter },
+              resultsTopicColumn,
+            )
+          ) {
+            return false;
+          }
+          // Facet filters are a claim about the ASSET, so they apply on the
+          // udmi-validation route only (other routes have no asset facts).
+          return isUdmiValidation
+            ? assetMatchesFacetFilter(assetFacts.get(row.Asset), {
+                type: resultsAssetTypeFilter,
+                seen: resultsSeenFilter,
+                state: resultsStateFilter,
+              })
+            : true;
+        }),
+    [
+      resultRows,
+      resultsTextFilter,
+      resultsToneFilter,
+      resultsTopicColumn,
+      isUdmiValidation,
+      assetFacts,
+      resultsAssetTypeFilter,
+      resultsSeenFilter,
+      resultsStateFilter,
+    ],
   );
+  // The drill-down list mirrors the same facet filter so "show me all EMs that
+  // are offline" filters the inspector groups too — table and inspector can
+  // never disagree (ITEM-10). Text/tone are cell-level, so they are NOT applied
+  // here (they filter payload-type rows, not whole assets).
+  const visibleAssetGroups = useMemo(() => {
+    if (!mergedAssetGroups) {
+      return null;
+    }
+    if (!isUdmiValidation) {
+      return mergedAssetGroups;
+    }
+    return mergedAssetGroups.filter((group) =>
+      assetMatchesFacetFilter(assetFacts.get(group.assetId), {
+        type: resultsAssetTypeFilter,
+        seen: resultsSeenFilter,
+        state: resultsStateFilter,
+      }),
+    );
+  }, [
+    mergedAssetGroups,
+    isUdmiValidation,
+    assetFacts,
+    resultsAssetTypeFilter,
+    resultsSeenFilter,
+    resultsStateFilter,
+  ]);
   // The selected row, resolved WITHIN the filtered view so the Inspector can
   // never show a row the table is hiding (ISSUE-4): when the active selection is
   // filtered out we fall back to the first visible row, and when NOTHING matches
@@ -1071,6 +1213,37 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const resultDetails = selectedResult
     ? buildResultDetailItems(module.route, selectedResult, usingLiveResults, mergedAssetGroups)
     : [];
+  // Group the visible UDMI rows by asset for the collapsible summary rows
+  // (ITEM-7). Render-only over visibleResultRows, so child rows keep their
+  // original index and the ISSUE-4 selection/detail joins are untouched.
+  const udmiRowGroups = useMemo(
+    () => (hasUdmiLiveResults ? groupUdmiRowsByAsset(visibleResultRows) : []),
+    [hasUdmiLiveResults, visibleResultRows],
+  );
+  const toggleResultAsset = useCallback((asset: string) => {
+    setExpandedResultAssets((current) => {
+      const next = new Set(current);
+      if (next.has(asset)) {
+        next.delete(asset);
+      } else {
+        next.add(asset);
+      }
+      return next;
+    });
+  }, []);
+  // Keep the selected row's asset expanded so the inspector never shows a row the
+  // grouped table has collapsed (preserves the ISSUE-4 selection contract). Since
+  // a row is always selected when rows exist, this expands the first asset by
+  // default, which is the intended "the asset you're looking at is open" state.
+  const selectedResultAsset = selectedResult?.Asset;
+  useEffect(() => {
+    if (!hasUdmiLiveResults || !selectedResultAsset) {
+      return;
+    }
+    setExpandedResultAssets((current) =>
+      current.has(selectedResultAsset) ? current : new Set(current).add(selectedResultAsset),
+    );
+  }, [hasUdmiLiveResults, selectedResultAsset]);
   // Verdict-tone filter options, worded per route: MQTT discovery's pass/fail is
   // register membership, other routes are the RAG pass/fail/warn verdicts.
   const resultsToneOptions =
@@ -1362,6 +1535,36 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
   const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
   const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
+
+  // One results-table data row. Shared by the flat (discovery) render and the
+  // grouped-by-asset render (ITEM-7) so the two can never drift. rowIndex is the
+  // ORIGINAL index in resultRows, so selection and detail joins stay correct
+  // while the list is filtered (ISSUE-4).
+  const renderResultRow = ({ row, index: rowIndex }: { row: Record<string, string>; index: number }) => (
+    <tr
+      className={`${row.__tone ? `row-${row.__tone}` : ""}${
+        selectedResultIndex === rowIndex ? " row-selected" : ""
+      }`.trim() || undefined}
+      key={rowIndex}
+      onClick={() => setSelectedResultIndex(rowIndex)}
+    >
+      {tableColumns.map((column) => (
+        <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
+      ))}
+      <td>
+        <button
+          className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
+          onClick={() => {
+            setSelectedResultIndex(rowIndex);
+            setDetailRow(row);
+          }}
+          type="button"
+        >
+          View
+        </button>
+      </td>
+    </tr>
+  );
 
   return (
     <div className="app-page">
@@ -1664,7 +1867,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 const overCapBlocked =
                   (udmiCaptureOverCap && action.kind === "validation" && action.runKind === "udmi") ||
                   mqttOverCapBlocked;
-                const blocked = scanBlocked || !canEngineer || overCapBlocked;
+                // A run started here now executes in the background, so block a
+                // second start while one is live (Stop run is the escape) —
+                // prevents accidental parallel captures now that POSTs return
+                // instantly (ITEM-4). Only a run started THIS session blocks; a
+                // rehydrated run never fossilizes into a permanent lock (see
+                // startedRunActive).
+                const blocked = scanBlocked || !canEngineer || overCapBlocked || startedRunActive;
                 // Role gate takes priority in the tooltip; otherwise the existing
                 // scan-authorization hint is shown for a blocked real scan.
                 const blockedTooltip = !canEngineer
@@ -1672,10 +1881,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   : scanBlocked
                     ? "Confirm scan authorization (or enable dry run) before starting a real scan."
                     : mqttOverCapBlocked
-                      ? "Capture duration exceeds the 48-hour capture limit."
+                      ? "Run time exceeds the 48-hour capture limit."
                       : overCapBlocked
                         ? "Run time exceeds the 48-hour capture limit."
-                        : undefined;
+                        : startedRunActive
+                          ? "A run is already in progress — stop it before starting another."
+                          : undefined;
                 return (
                   <div className="run-card" key={action.label}>
                     <div>
@@ -1779,14 +1990,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </span>
               </div>
 
-              <div className="progress-track">
-                <div style={{ width: `${activeRunProgress}%` }} />
+              <div className={`progress-track${progressIndeterminate ? " indeterminate" : ""}`}>
+                <div style={progressIndeterminate ? undefined : { width: `${progressWidth}%` }} />
               </div>
 
               <dl className="summary-grid">
                 <div>
                   <dt>Stage</dt>
                   <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
+                </div>
+                <div>
+                  <dt>Elapsed</dt>
+                  <dd>{formatElapsed(activeRunElapsedSeconds)}</dd>
                 </div>
                 <div>
                   <dt>Expected</dt>
@@ -1822,7 +2037,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     onClick={() => cancelMutation.mutate(activeRun.runId)}
                     type="button"
                   >
-                    {cancelMutation.isPending ? "Cancelling..." : "Cancel run"}
+                    {cancelMutation.isPending ? "Stopping..." : "Stop run"}
                   </button>
                 )}
                 {canEngineer &&
@@ -1847,6 +2062,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   />
                 )}
               </div>
+
+              {canCancel && (
+                <span className="run-monitor-note">
+                  Stop run keeps the data collected so far — the stopped run can still generate a
+                  report.
+                </span>
+              )}
 
               {reportToast && (
                 <span className="run-monitor-note">{reportToast}</span>
@@ -1885,71 +2107,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
         </article>
       </section>
-
-      {module.importTypes.length > 0 && (
-        <section className="surface" data-stepgroup="setup">
-          <div className="surface-heading">
-            <div>
-              <span className="eyebrow">Templates</span>
-              <h3>Import Templates for This Page</h3>
-            </div>
-          </div>
-          <p className="section-copy">
-            Every register and validation template this page accepts, downloadable as XLSX or CSV.
-            Each template includes the required columns and one realistic example row.
-          </p>
-          <div className="template-grid">
-            {module.importTypes.map((importType) => (
-              <article className="schema-card template-card" key={importType}>
-                <div>
-                  <strong>{formatImportTypeLabel(importType)}</strong>
-                  <p>{importType}.xlsx / {importType}.csv</p>
-                </div>
-                <div className="inline-actions">
-                  <button
-                    className="secondary-button compact"
-                    disabled={allTemplatesDownload.pendingKey !== null}
-                    onClick={() =>
-                      void allTemplatesDownload.download(
-                        `all-${importType}-xlsx`,
-                        getImportTemplatePath(importType, "xlsx"),
-                        `${importType}_template.xlsx`,
-                      )
-                    }
-                    type="button"
-                  >
-                    {allTemplatesDownload.pendingKey === `all-${importType}-xlsx`
-                      ? "Downloading..."
-                      : "XLSX"}
-                  </button>
-                  <button
-                    className="secondary-button compact"
-                    disabled={allTemplatesDownload.pendingKey !== null}
-                    onClick={() =>
-                      void allTemplatesDownload.download(
-                        `all-${importType}-csv`,
-                        getImportTemplatePath(importType, "csv"),
-                        `${importType}_template.csv`,
-                      )
-                    }
-                    type="button"
-                  >
-                    {allTemplatesDownload.pendingKey === `all-${importType}-csv`
-                      ? "Downloading..."
-                      : "CSV"}
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-          {allTemplatesDownload.error && (
-            <div className="state-panel error">
-              <strong>Template download failed</strong>
-              <span>{allTemplatesDownload.error}</span>
-            </div>
-          )}
-        </section>
-      )}
 
       {module.route === "data-validation" && (
         <section className="surface" data-stepgroup="setup">
@@ -2081,25 +2238,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               Topic filter (MQTT wildcards: + and #)
               <input
                 onChange={(event) => setCaptureTopicFilter(event.target.value)}
-                placeholder="Blank = saved Root Topic from Configuration"
+                placeholder="Blank = capture every topic (#)"
                 value={captureTopicFilter}
               />
               <small>
-                Leave blank to inherit the saved Root Topic (e.g. site/asset-1/#). Type # to
-                capture every topic regardless of the Root Topic.
+                Leave blank to capture every topic (#). Enter a filter with MQTT wildcards
+                (+ and #) to narrow the capture, e.g. site/asset-1/#.
               </small>
             </label>
             <label>
-              Capture duration (0 or blank = run until stopped)
+              Run time (blank = run until all assets/topics seen or until the user stops the run)
               <input
                 inputMode="numeric"
                 onChange={(event) => setCaptureSeconds(event.target.value)}
-                placeholder="0 = until stopped"
+                placeholder="blank = run until you stop the run"
                 value={captureSeconds}
               />
             </label>
             <label>
-              Capture duration unit
+              Run time unit
               <select
                 onChange={(event) =>
                   setCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
@@ -2114,27 +2271,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </div>
           {mqttCaptureOverCap && (
             <span className="error-text">
-              Capture duration exceeds the 48-hour capture limit — shorten the window.
+              Run time exceeds the 48-hour capture limit — shorten the window.
             </span>
           )}
           <p className="section-copy">
             Subscribes through an MQTT discovery run and shows the latest payload seen per topic. The live
             broker capture is on-site-untested here; with no broker reachable the run records
             broker_unreachable and this panel stays empty rather than showing fabricated payloads. The
-            filter and duration are sent to the run; set the duration to{" "}
-            <strong>{Number(captureSecondsEffective) > 0 ? `${captureSecondsEffective}s` : "0 (run until stopped)"}</strong> —
-            an indefinite capture runs until you press Cancel above or the topic cap is reached. Captures are
-            capped at 48 hours; on the portable exe (inline runs) an indefinite capture is bounded to the
-            5-second default window, and an hour-to-day-scale window needs the hosted worker profile — a long
-            capture there runs inside a single HTTP request and does not survive closing the app. Captured
-            topics appear here when the run completes.
+            filter and run time are sent to the run; the run time is{" "}
+            <strong>{Number(captureSecondsEffective) > 0 ? `${captureSecondsEffective}s` : "blank (run until you press Stop run)"}</strong>.
+            Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety limit.
+            Closing the app ends the run, which is then marked interrupted at next start. Captured topics
+            appear here when the run completes.
           </p>
           {activeRunTerminal &&
             discoveryRunQuery.data?.result_summary?.indefinite_bounded_inline === true && (
               <span className="error-text">
-                This run requested an indefinite capture but executed inline, so it was bounded to{" "}
-                {String(discoveryRunQuery.data?.result_summary?.capture_seconds)}s — run indefinite or
-                long captures on the hosted worker profile.
+                This run requested an indefinite capture but was bounded to{" "}
+                {String(discoveryRunQuery.data?.result_summary?.capture_seconds)}s because no stop
+                control was available for it.
               </span>
             )}
           <div className="data-table-wrap results-scroll">
@@ -2438,11 +2593,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   </>
                 )}
                 <label>
-                  Run time (blank = all required topics or Cancel)
+                  Run time (blank = run until all assets/topics seen or until the user stops the run)
                   <input
                     inputMode="numeric"
                     onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
-                    placeholder="blank = all required topics or Cancel"
+                    placeholder="blank = run until all assets/topics seen or you stop the run"
                     value={udmiCaptureSeconds}
                   />
                 </label>
@@ -2466,10 +2621,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </span>
               )}
               <p className="section-copy">
-                Blank runs until all required topics report or you press Cancel run. Worker captures are capped at 48
-                hours (real-world reporting intervals: metadata is often daily); inline/portable captures are bounded
-                at 240 seconds when blank — hour-scale windows need the hosted worker profile. The completion-driven
-                safety limit is 500 distinct concrete topics.
+                Blank runs until every expected asset/topic has reported or you press Stop run — on the portable
+                exe as well as the hosted worker. Every capture still ends at the 48-hour safety limit (real-world
+                reporting intervals: metadata is often daily), and the completion-driven safety limit is 500 distinct
+                concrete topics. Closing the app ends the run, which is then marked interrupted at next start.
               </p>
             </>
           )}
@@ -2477,14 +2632,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="inline-actions execute-row">
             <button
               className="primary-button compact"
-              disabled={runMutation.isPending || !canEngineer || udmiCaptureOverCap}
+              disabled={runMutation.isPending || !canEngineer || udmiCaptureOverCap || startedRunActive}
               onClick={() => runMutation.mutate(udmiRunActionIndex)}
               title={
                 !canEngineer
                   ? ENGINEER_REQUIRED_TOOLTIP
                   : udmiCaptureOverCap
                     ? "Run time exceeds the 48-hour capture limit."
-                    : undefined
+                    : startedRunActive
+                      ? "A run is already in progress — stop it before starting another."
+                      : undefined
               }
               type="button"
             >
@@ -2864,9 +3021,55 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ))}
                 </select>
               </label>
+              {/* Facet filters (ITEM-10): asset-type, seen, and online/offline
+                  are asset-level claims, so they show on the udmi-validation
+                  route only, where each row maps to a real asset with facts. */}
+              {isUdmiValidation && (
+                <>
+                  <label className="results-filter-facet">
+                    Asset type
+                    <select
+                      onChange={(event) => setResultsAssetTypeFilter(event.target.value)}
+                      value={resultsAssetTypeFilter}
+                    >
+                      <option value="all">All types</option>
+                      {assetTypeOptions.map((type) => (
+                        <option key={type} value={type}>
+                          {type}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="results-filter-facet">
+                    Seen
+                    <select
+                      onChange={(event) => setResultsSeenFilter(event.target.value)}
+                      value={resultsSeenFilter}
+                    >
+                      <option value="all">Seen or not</option>
+                      <option value="seen">Payload observed</option>
+                      <option value="not-seen">Not observed</option>
+                    </select>
+                  </label>
+                  <label className="results-filter-facet">
+                    State
+                    <select
+                      onChange={(event) => setResultsStateFilter(event.target.value)}
+                      value={resultsStateFilter}
+                    >
+                      <option value="all">Any state</option>
+                      <option value="online">Online (published this run)</option>
+                      <option value="offline">Offline (did not publish)</option>
+                    </select>
+                  </label>
+                </>
+              )}
               <span className="results-filter-count">
                 Showing {visibleResultRows.length} of {resultRows.length}{" "}
                 {resultRows.length === 1 ? "row" : "rows"}
+                {hasUdmiLiveResults
+                  ? ` across ${udmiRowGroups.length} ${udmiRowGroups.length === 1 ? "asset" : "assets"}`
+                  : ""}
               </span>
               {isResultsFilterActive && (
                 <button
@@ -2874,6 +3077,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   onClick={() => {
                     setResultsTextFilter("");
                     setResultsToneFilter("all");
+                    setResultsAssetTypeFilter("all");
+                    setResultsSeenFilter("all");
+                    setResultsStateFilter("all");
                   }}
                   type="button"
                 >
@@ -2922,48 +3128,48 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <th>Details</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {visibleResultRows.map(({ row, index: rowIndex }) => (
-                    // Row shading: live UDMI verdicts (pass green / fail red),
-                    // IP discovery register verdicts (pass/fail plus warn amber
-                    // for expected-but-silent and other inconclusive findings)
-                    // via ipRowVerdict, and MQTT discovery register-comparison
-                    // verdicts (pass = topic in the register, fail = observed but
-                    // not in the register) all set __tone. "Not received" and
-                    // neutral sample/discovery rows (including MQTT rows with no
-                    // register imported) carry no tone. The expression stays
-                    // generic so any row map with a __tone key gets shaded.
-                    // Rows are clickable to drive the Inspector without opening
-                    // the modal (Pete: "select a scan result"). row-selected marks
-                    // the active row; the nested "Copy payload" click bubbles here
-                    // and also selects — benign and desirable, no stopPropagation.
-                    // rowIndex is the row's ORIGINAL index in resultRows, so
-                    // selection stays correct while the list is filtered (ISSUE-4).
-                    <tr
-                      className={`${row.__tone ? `row-${row.__tone}` : ""}${
-                        selectedResultIndex === rowIndex ? " row-selected" : ""
-                      }`.trim() || undefined}
-                      key={rowIndex}
-                      onClick={() => setSelectedResultIndex(rowIndex)}
-                    >
-                      {tableColumns.map((column) => (
-                        <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
-                      ))}
-                      <td>
-                        <button
-                          className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
-                          onClick={() => {
-                            setSelectedResultIndex(rowIndex);
-                            setDetailRow(row);
-                          }}
-                          type="button"
-                        >
-                          View
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
+                {/* UDMI results group by asset (ITEM-7): one collapsible summary
+                    row per asset that expands to its per-payload-type rows,
+                    instead of 3-4 flat lines per asset. Row shading (row-tone)
+                    is the live UDMI/discovery verdict set on __tone; the summary
+                    row carries the asset's worst visible tone. Discovery routes
+                    keep the flat render. Child rows are the shared renderResultRow
+                    (selection + View unchanged, ISSUE-4). */}
+                {hasUdmiLiveResults ? (
+                  <tbody>
+                    {udmiRowGroups.map((group) => {
+                      const isOpen = expandedResultAssets.has(group.asset);
+                      return (
+                        <Fragment key={`group-${group.asset}`}>
+                          <tr
+                            className={`asset-summary-row${group.worstTone ? ` row-${group.worstTone}` : ""}`}
+                          >
+                            <td colSpan={tableColumns.length + 1}>
+                              <button
+                                aria-expanded={isOpen}
+                                className="asset-summary-toggle"
+                                onClick={() => toggleResultAsset(group.asset)}
+                                type="button"
+                              >
+                                <span aria-hidden="true" className="asset-summary-caret">
+                                  {isOpen ? "▾" : "▸"}
+                                </span>
+                                <strong>{group.asset}</strong>
+                                <span>
+                                  {group.rows.length} payload type{group.rows.length === 1 ? "" : "s"} ·{" "}
+                                  {group.issueTotal} issue{group.issueTotal === 1 ? "" : "s"}
+                                </span>
+                              </button>
+                            </td>
+                          </tr>
+                          {isOpen && group.rows.map(renderResultRow)}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                ) : (
+                  <tbody>{visibleResultRows.map(renderResultRow)}</tbody>
+                )}
               </table>
             )}
           </div>
@@ -3032,7 +3238,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           : "No payload content for this run (fixture summary only); expand an asset for issue detail per payload type."}
                     </p>
                   )}
-                  {mergedAssetGroups.map((group) => {
+                  {(visibleAssetGroups ?? []).length === 0 && facetFilterActive && (
+                    // A claim about the FILTER, never the scan (ISSUE-4 pattern).
+                    <div className="empty-workspace">
+                      <strong>No assets match the current filters</strong>
+                      <span>Adjust or clear the filters to see the captured assets.</span>
+                    </div>
+                  )}
+                  {(visibleAssetGroups ?? []).map((group) => {
                     const isOpen = expandedAsset === group.assetId;
                     const typeSummary = group.payloadTypes
                       .map((entry) => {
@@ -3093,13 +3306,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                     </p>
                                   )}
                                   {entry.issues.map((issue) => (
-                                    <div className={`issue-card ${issue.severity}`} key={issue.id}>
-                                      <div className="issue-card-body">
-                                        <span>{issue.id}</span>
-                                        <strong>{issue.message}</strong>
-                                        <small>{issue.area}</small>
-                                      </div>
-                                    </div>
+                                    <IssueCard key={issue.id} context={issue.area} issue={issue} />
                                   ))}
                                   {entry.hasPayloadView && (
                                     <div className="payload-evidence">
@@ -3116,6 +3323,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                       {payloadOpen && (
                                         <PayloadComparePanels
                                           expected={entry.expected}
+                                          issues={entry.issues}
                                           observed={entry.observed}
                                           observedPresent={entry.observedPresent}
                                         />
@@ -3154,13 +3362,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <div className="issue-list compact-list">
                 {visibleIssues.length > 0 ? (
                   visibleIssues.map((issue) => (
-                    <div className={`issue-card ${issue.severity}`} key={issue.id}>
-                      <div className="issue-card-body">
-                        <span>{issue.id}</span>
-                        <strong>{issue.message}</strong>
-                        <small>{issue.assetId}</small>
-                      </div>
-                    </div>
+                    <IssueCard key={issue.id} context={issue.assetId} issue={issue} />
                   ))
                 ) : (
                   <div className="empty-workspace">
@@ -3467,6 +3669,27 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
   throw new Error(`${label} must be a JSON object.`);
 }
 
+// Structured issue card (ITEM-9): the description reads as the headline, then the
+// expected/observed comparison, any status detail, and the suggested action sit
+// on their own readable lines — instead of one run-on <strong> string. `context`
+// is the eyebrow's secondary label (the payload area, or the asset id). Pete's
+// own word "empty" for a present-but-blank value survives inside expectedObserved
+// (built in toIssueRow) byte-identical.
+function IssueCard({ issue, context }: { issue: IssueRow; context: string }) {
+  const headline = (issue.description ?? "").trim() || issue.message;
+  return (
+    <div className={`issue-card ${issue.severity}`}>
+      <div className="issue-card-body">
+        <span>{context ? `${issue.id} · ${context}` : issue.id}</span>
+        <strong>{headline}</strong>
+        {issue.expectedObserved && <small>{issue.expectedObserved}</small>}
+        {issue.statusDetail && <small>Status: {issue.statusDetail}</small>}
+        {issue.suggestedAction && <small className="issue-suggestion">{issue.suggestedAction}</small>}
+      </div>
+    </div>
+  );
+}
+
 // The MQTT discovery inspector's payload panel: the real last_payload OBJECT for
 // the selected topic (never a re-parse of the stringified "Raw Payload" cell).
 // Mirrors the UDMI observed-payload block (pre + Explore JSON tree). Honesty:
@@ -3500,72 +3723,104 @@ function MqttPayloadPanel({ topic }: { topic: DiscoveryRowRecord }) {
   );
 }
 
-// Renders a payload as per-line spans carrying the presence-diff highlight
-// class. Text is byte-identical to JSON.stringify(value, null, 2) (see
-// payloadDiff); only the class differs, so the panel content is unchanged.
-function renderPayloadDiffLines(lines: DiffLine[]) {
-  return lines.map((line, index) => (
-    <span className={`payload-diff-line${line.mark ? ` ${line.mark}` : ""}`} key={index}>
-      {line.text}
-    </span>
-  ));
+// One aligned compare cell: a single JSON line coloured into syntax spans, with
+// the presence-diff mark class (only-expected amber / only-observed red) and, on
+// an engine-flagged point row, the red flagged tint. A null line is a filler that
+// keeps the two panels row-aligned. textContent stays the full line text, so the
+// mark-class assertions in the tests still read the key names off each cell.
+function AlignedDiffCell({ line, flagged }: { line: AlignedRow["expected"]; flagged: boolean }) {
+  const markClass = line?.mark ? ` ${line.mark}` : "";
+  return (
+    <div className={`payload-diff-line${markClass}${flagged ? " flagged" : ""}`}>
+      {line
+        ? tokenizeJsonLine(line.text).map((token, index) => (
+            <span className={`json-${token.kind}`} key={index}>
+              {token.text}
+            </span>
+          ))
+        : ""}
+    </div>
+  );
 }
 
-// Expected-vs-observed UDMI payload panels (ISSUE-8): side by side via the
-// .payload-compare grid, with a per-line PRESENCE diff. A key present on only
-// one side is highlighted on that side (amber = expected only, red = observed
-// only). VALUES are never diffed — the expected side is a template of sentinel
-// values, so value marks would fabricate findings on every healthy payload; the
-// engine's issue cards above remain the authority on values. When nothing was
-// observed there is no diff at all (an observation-shaped claim would be
-// dishonest), so the panels fall back to today's plain rendering.
+// Expected-vs-observed UDMI payload panels (ITEM-8). When a payload was observed,
+// the two sides are aligned LINE-FOR-LINE inside ONE scroll container (so they
+// scroll together), JSON-syntax-coloured, with the presence diff (amber =
+// expected-only key, red = observed-only key) and an honest red highlight on rows
+// whose point name the engine actually flagged in its validation issues. VALUES
+// are never diffed — the expected side is a template of sentinels — so a healthy
+// payload is never painted red. When nothing was observed there is no comparison
+// to make (an observation-shaped claim would be dishonest), so it falls back to a
+// plain expected panel.
 function PayloadComparePanels({
   expected,
   observed,
   observedPresent,
+  issues,
 }: {
   expected: unknown;
   observed: unknown;
   observedPresent: boolean;
+  issues: IssueRow[];
 }) {
-  const diff =
+  // Red rows come ONLY from the engine's flagged point names (name-based,
+  // best-effort): an issue with no point_name highlights no row, and topic /
+  // cadence / schema-level issues stay the authority of the issue cards above.
+  const flaggedPoints = new Set<string>();
+  for (const issue of issues) {
+    if (issue.pointName) {
+      flaggedPoints.add(issue.pointName);
+    }
+  }
+  const aligned =
     observedPresent && isPlainObject(expected) && isPlainObject(observed)
-      ? diffPayloadLines(expected, observed)
+      ? alignPayloadDiff(expected, observed, flaggedPoints)
       : null;
-  return (
-    <>
+
+  if (!aligned) {
+    return (
       <div className="payload-compare">
         <div>
           <h6>Expected UDMI template</h6>
           <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
-          <pre className="payload-cell">
-            {diff ? renderPayloadDiffLines(diff.expected) : expected ? JSON.stringify(expected, null, 2) : "—"}
-          </pre>
+          <pre className="payload-cell">{expected ? JSON.stringify(expected, null, 2) : "—"}</pre>
         </div>
         <div>
           <h6>Observed</h6>
-          <pre className="payload-cell">
-            {diff
-              ? renderPayloadDiffLines(diff.observed)
-              : observedPresent
-                ? JSON.stringify(observed, null, 2)
-                : "not captured"}
-          </pre>
-          {observedPresent && observed !== null && observed !== undefined && (
-            <details className="json-inspector">
-              <summary>Explore JSON tree</summary>
-              <JsonTree value={observed} />
-            </details>
-          )}
+          <pre className="payload-cell">not captured</pre>
         </div>
       </div>
-      {diff && (
-        <p className="section-copy payload-diff-legend">
-          Highlights mark keys present on only one side (amber = expected only, red = observed
-          only). Values are not compared here — expected values are template sentinels; see the
-          issues above for value checks.
-        </p>
+    );
+  }
+
+  const hasFlagged = aligned.some((row) => row.flagged);
+  return (
+    <>
+      <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
+      <div className="payload-compare-aligned">
+        <div className="payload-compare-grid">
+          <div className="payload-compare-head">Expected UDMI template</div>
+          <div className="payload-compare-head">Observed</div>
+          {aligned.map((row, index) => (
+            <Fragment key={index}>
+              <AlignedDiffCell flagged={row.flagged} line={row.expected} />
+              <AlignedDiffCell flagged={row.flagged} line={row.observed} />
+            </Fragment>
+          ))}
+        </div>
+      </div>
+      {observed !== null && observed !== undefined && (
+        <details className="json-inspector">
+          <summary>Explore observed JSON tree</summary>
+          <JsonTree value={observed} />
+        </details>
       )}
+      <p className="section-copy payload-diff-legend">
+        Highlights mark keys present on only one side (amber = expected only, red = observed only).
+        {hasFlagged ? " Rows in red are points flagged by the validation issues above." : ""} Values are
+        not compared here — expected values are template sentinels; see the issues above for value
+        checks.
+      </p>
     </>
   );
 }
@@ -3602,12 +3857,17 @@ function issueDisplayValue(value: string | null | undefined): string {
 }
 
 function toIssueRow(issue: ValidationIssueRecord): IssueRow {
+  const expectedObserved =
+    issue.expected_value != null || issue.observed_value != null
+      ? `Expected ${issueDisplayValue(issue.expected_value)}, observed ${issueDisplayValue(issue.observed_value)}`
+      : undefined;
+  // The joined one-liner is still built (the row View modal reads issue.message);
+  // the same fragments are also carried structured so the issue CARDS can render
+  // them as separate lines instead of one run-on string (ITEM-9).
   const details = [
     issue.description,
     issue.status_detail ? `Status: ${issue.status_detail}` : null,
-    issue.expected_value != null || issue.observed_value != null
-      ? `Expected ${issueDisplayValue(issue.expected_value)}, observed ${issueDisplayValue(issue.observed_value)}`
-      : null,
+    expectedObserved ?? null,
     issue.suggested_action,
   ]
     .filter(Boolean)
@@ -3618,6 +3878,11 @@ function toIssueRow(issue: ValidationIssueRecord): IssueRow {
     id: issue.issue_id,
     message: details,
     severity: toIssueSeverity(issue.severity),
+    description: issue.description,
+    statusDetail: issue.status_detail ?? null,
+    expectedObserved,
+    suggestedAction: issue.suggested_action ?? null,
+    pointName: issue.point_name ?? null,
   };
 }
 
@@ -3636,6 +3901,45 @@ function formatSummaryValue(value: unknown): string {
     return String(value);
   }
   return "Pending";
+}
+
+// Seconds elapsed since `startIso` (the run's created_at). While `running`, a 1s
+// interval re-renders so the value ticks; once stopped it freezes to
+// frozenEndIso - startIso (updated_at - created_at) with no interval. Clamped at
+// 0 so client/server clock skew can never show a negative timer. On the portable
+// exe both clocks are the same host, so skew is not a practical concern (ITEM-6).
+function useElapsedSeconds(
+  startIso: string | undefined,
+  running: boolean,
+  frozenEndIso: string | undefined,
+): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) {
+      return;
+    }
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+  if (!startIso) {
+    return 0;
+  }
+  const start = Date.parse(startIso);
+  if (Number.isNaN(start)) {
+    return 0;
+  }
+  const frozenEnd = frozenEndIso ? Date.parse(frozenEndIso) : Number.NaN;
+  const end = running || Number.isNaN(frozenEnd) ? now : frozenEnd;
+  return Math.max(0, Math.floor((end - start) / 1000));
+}
+
+// h:mm:ss for the run monitor's Elapsed entry.
+function formatElapsed(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const minutes = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+  const seconds = String(s % 60).padStart(2, "0");
+  return `${Math.floor(s / 3600)}:${minutes}:${seconds}`;
 }
 
 // The capture window a UDMI run actually used, from result_summary
@@ -3757,14 +4061,6 @@ function buildMultiPointPayload(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-// Human-readable label for an import type, e.g. "bacnet_points" -> "Bacnet Points".
-function formatImportTypeLabel(importType: ImportType): string {
-  return importType
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 // One latest-payload-per-topic row for the MQTT Explorer-like capture panel.

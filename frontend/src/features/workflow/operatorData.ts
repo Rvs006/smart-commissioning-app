@@ -20,7 +20,18 @@ export type IssueRow = {
   assetId: string;
   severity: "critical" | "major" | "minor";
   area: string;
+  // The full joined description used by the row "View" modal and anything else
+  // that wants one string. The issue CARDS render the structured fragments below
+  // as separate readable lines instead (ITEM-9).
   message: string;
+  description?: string;
+  statusDetail?: string | null;
+  // "Expected X, observed Y", already formatted (empty -> "empty") — ITEM-9.
+  expectedObserved?: string;
+  suggestedAction?: string | null;
+  // The engine's point_name, when the issue is point-scoped. Drives the honest
+  // red-row highlight in the expected/observed payload compare (ITEM-8).
+  pointName?: string | null;
 };
 
 // Groups validation issues by asset, then by derived payload type (mq9m4bnv).
@@ -264,6 +275,81 @@ export function udmiVerdictForIssues(
     observedPresent,
     totalIssues: issues.length,
   });
+}
+
+// Inspector facet filters (ITEM-10): asset type, seen/not-seen, and
+// ONLINE/OFFLINE, composed on top of the existing text + verdict-tone results
+// filter. Every fact is derived HONESTLY from the same data the verdicts use, so
+// a filter can never claim more than the app actually observed.
+export type AssetFacts = {
+  // Heuristic type from the asset-id prefix (the register carries no type field).
+  type: string;
+  // A payload was observed for this asset during the run.
+  seen: boolean;
+  // A capture attempt found this asset silent AND nothing was observed — mirrors
+  // udmiPayloadVerdict's offline gate exactly, so OFFLINE never paints a
+  // pasted-run asset red (honesty rule).
+  offline: boolean;
+};
+
+// Leading-alpha prefix, uppercased (AHU-1000001 -> AHU, EM-... -> EM); "Other"
+// when the id has no alpha prefix. Heuristic: the register schema carries no
+// asset-type field, so the prefix is the only derivable type signal. If real
+// types are ever needed, the register import needs a type column — do not infer
+// more than the prefix here.
+export function assetTypePrefix(assetId: string): string {
+  const match = /^[A-Za-z]+/.exec(assetId.trim());
+  return match ? match[0].toUpperCase() : "Other";
+}
+
+export function buildAssetFacts(
+  groups: MergedAssetGroup[],
+  offlineAssets: ReadonlySet<string>,
+): Map<string, AssetFacts> {
+  const facts = new Map<string, AssetFacts>();
+  for (const group of groups) {
+    const seen = group.payloadTypes.some((entry) => entry.observedPresent);
+    facts.set(group.assetId, {
+      type: assetTypePrefix(group.assetId),
+      seen,
+      offline: offlineAssets.has(group.assetId) && !seen,
+    });
+  }
+  return facts;
+}
+
+export type AssetFacetFilter = {
+  type: string; // "all" or a type prefix
+  seen: string; // "all" | "seen" | "not-seen"
+  state: string; // "all" | "online" | "offline"
+};
+
+// Online = published during this run (seen); Offline = the offline-gated fact.
+// Assets that are NEITHER (pasted runs, no capture attempted) match only "all",
+// so the UI never makes an online/offline claim the engine never made.
+export function assetMatchesFacetFilter(
+  facts: AssetFacts | undefined,
+  filter: AssetFacetFilter,
+): boolean {
+  if (!facts) {
+    return filter.type === "all" && filter.seen === "all" && filter.state === "all";
+  }
+  if (filter.type !== "all" && facts.type !== filter.type) {
+    return false;
+  }
+  if (filter.seen === "seen" && !facts.seen) {
+    return false;
+  }
+  if (filter.seen === "not-seen" && facts.seen) {
+    return false;
+  }
+  if (filter.state === "online" && !facts.seen) {
+    return false;
+  }
+  if (filter.state === "offline" && !facts.offline) {
+    return false;
+  }
+  return true;
 }
 
 export type ModuleWorkspace = {

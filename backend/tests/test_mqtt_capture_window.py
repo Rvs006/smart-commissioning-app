@@ -65,7 +65,7 @@ class MqttCaptureWindowCapTests(ApiTestCase):
 
     def test_indefinite_capture_is_accepted(self) -> None:
         # capture_seconds 0 is the indefinite sentinel (run until stopped) and
-        # stays legal — it is bounded by Cancel and, worst case, the 49h actor.
+        # stays legal — it runs until Stop run, the topic cap, or the 48h backstop.
         response = self._post_run({"dry_run": True, "capture_seconds": 0})
         self.assertEqual(response.status_code, 200, response.text)
 
@@ -73,11 +73,14 @@ class MqttCaptureWindowCapTests(ApiTestCase):
         from app.api.routes.discovery import MQTT_MAX_CAPTURE_SECONDS
 
         # The MQTT cap and the UDMI cap must be identical so the two capture
-        # routes can never silently diverge.
+        # routes can never silently diverge — both source the one shared core
+        # constant (the blank-capture backstop).
         from app.api.routes.validation import MAX_UDMI_CAPTURE_SECONDS
+        from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS
 
         self.assertEqual(MQTT_MAX_CAPTURE_SECONDS, 172_800)
         self.assertEqual(MQTT_MAX_CAPTURE_SECONDS, MAX_UDMI_CAPTURE_SECONDS)
+        self.assertEqual(MQTT_MAX_CAPTURE_SECONDS, INDEFINITE_BACKSTOP_SECONDS)
 
         source = _WORKER_TASKS.read_text(encoding="utf-8")
         match = re.search(

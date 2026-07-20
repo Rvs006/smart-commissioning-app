@@ -984,6 +984,32 @@ label {
   background: var(--accent);
 }
 
+/* Indeterminate run progress (ITEM-6): an indefinite/unknown-window run shows a
+   quiet fixed-width bar sweeping the full track with stable rounded caps. The
+   track's overflow:hidden clips it cleanly. prefers-reduced-motion drops the
+   sweep for a static partial fill so the bar is never blank and never stutters. */
+.progress-track.indeterminate div {
+  width: 35%;
+  animation: progress-sweep 1.4s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate div {
+    width: 15%;
+    animation: none;
+    transform: none;
+  }
+}
+
 .status-token {
   padding: 4px 8px;
   text-transform: uppercase;
@@ -1190,6 +1216,21 @@ label {
 
 .compact-list .issue-card {
   padding: 10px;
+}
+
+/* Bounded scroll for the inspector issues list (ITEM-9): a long findings list
+   scrolls inside its own box instead of running the inspector off-screen. Same
+   recipe as .results-scroll. Scoped to the .compact-list modifier so the
+   DashboardPage .issue-list (a single blocking finding) is never capped. */
+.issue-list.compact-list {
+  max-height: min(45vh, 420px);
+  overflow-y: auto;
+}
+
+/* The suggested-action line of a structured issue card (ITEM-9): a quiet accent
+   tint so it reads as the "do this" line, distinct from the problem detail. */
+.issue-suggestion {
+  color: var(--accent);
 }
 
 /* Blocking finding: two readable lines instead of one run-on string.
@@ -1770,21 +1811,7 @@ input.field-expired {
   font-weight: 800;
 }
 
-/* --- Module review additions (templates, capture, multi-point, groups) --- */
-
-/* All-templates panel: one downloadable card per import type for the page. */
-.template-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.template-grid .template-card {
-  display: grid;
-  gap: 10px;
-  align-content: start;
-}
+/* --- Module review additions (capture, multi-point, groups) --- */
 
 /* Multi-point MQTT config publish editor. */
 .multi-point-editor {
@@ -1841,6 +1868,12 @@ input.field-expired {
   display: grid;
   gap: 8px;
   margin-bottom: 12px;
+  /* Bounded scroll (ITEM-9): a long per-asset drill-down scrolls inside its own
+     box instead of running the inspector off-screen. Same recipe as
+     .results-scroll. The nested payload-compare container keeps its own smaller
+     inner scroll, so payloads scroll inside the drill-down that scrolls here. */
+  max-height: min(55vh, 520px);
+  overflow-y: auto;
 }
 
 .asset-group {
@@ -1929,6 +1962,40 @@ input.field-expired {
   box-shadow: inset 0 0 0 1px var(--accent, #4f7cff);
 }
 
+/* Per-asset summary row for the grouped UDMI results table (ITEM-7): a full-width
+   clickable header that expands to the asset's per-payload-type rows. Reuses the
+   --green-bg/--amber-bg/--red-bg row tints via .row-pass/.row-warn/.row-fail. */
+.asset-summary-row td {
+  padding: 0;
+}
+
+.asset-summary-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.asset-summary-caret {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.asset-summary-toggle strong {
+  font-size: 12px;
+}
+
+.asset-summary-toggle span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* Matching tone for the per-asset payload sections (state/metadata/pointset),
    so scrolling the groups draws the eye to the RAG verdict without re-reading
    the table: green = compliant, amber (warn) = publishing-but-non-compliant,
@@ -2015,6 +2082,79 @@ input.field-expired {
 
 .payload-diff-legend {
   margin-top: 4px;
+}
+
+/* Aligned expected/observed compare (ITEM-8): ONE scroll container holds a
+   two-column grid so both panels scroll together (synchronised) on BOTH axes,
+   and a massive payload scrolls inside the box instead of taking over the
+   inspector. Nests inside the .asset-group-list outer scroll (ITEM-9). */
+.payload-compare-aligned {
+  max-height: min(60vh, 560px);
+  overflow: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.payload-compare-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, max-content));
+  font-family: "SF Mono", SFMono-Regular, Consolas, "Courier New", monospace;
+  font-size: 11px;
+}
+
+/* Sticky column headers so the panel labels stay visible while the body scrolls
+   (same sticky-th pattern as the results table). */
+.payload-compare-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* Each cell is one JSON line; white-space:pre keeps indentation, and long lines
+   pan together on the shared horizontal scroll rather than wrapping. */
+.payload-compare-grid .payload-diff-line {
+  padding: 0 10px;
+  white-space: pre;
+}
+
+/* Engine-flagged point row: red across BOTH cells with a red edge bar, so the
+   mismatching point reads at a glance. Distinct from the per-cell presence tints
+   (only-expected amber / only-observed red) above. */
+.payload-diff-line.flagged {
+  background: var(--red-bg);
+  box-shadow: inset 2px 0 0 var(--red);
+}
+
+/* Notepad++-adjacent JSON syntax colouring (ITEM-8), mapped onto the existing
+   warm palette tokens so light and dark both follow automatically. */
+.json-key {
+  color: var(--accent);
+}
+
+.json-string {
+  color: var(--green);
+}
+
+.json-number {
+  color: var(--amber);
+}
+
+.json-literal {
+  color: var(--purple);
+}
+
+.json-punct {
+  color: var(--muted);
 }
 
 /* Inline report-linking confirmation in the run monitor. */

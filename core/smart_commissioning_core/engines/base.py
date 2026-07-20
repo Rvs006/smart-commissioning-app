@@ -149,6 +149,19 @@ class EngineContext:
         except Exception:
             return False
 
+    @property
+    def has_cancel_path(self) -> bool:
+        """True when a real cooperative-cancel checker is wired for this run.
+
+        ``make_cancel_checker`` returns the ``_never_cancelled`` sentinel when the
+        run store advertises no ``is_cancel_requested``, so identity against that
+        sentinel is the precise test for "the operator can stop this run". A
+        capture engine uses it to decide whether an indefinite (blank) window is
+        safe to honour: with a cancel path the run can always be stopped; without
+        one it must bound itself so a never-publishing broker cannot hang forever.
+        """
+        return self._is_cancelled is not _never_cancelled
+
 
 @dataclass(slots=True)
 class EngineResult:

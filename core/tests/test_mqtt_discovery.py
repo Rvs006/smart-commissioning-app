@@ -413,9 +413,9 @@ class BoundTests(unittest.TestCase):
         self.assertEqual(call["topics"], ["#"])
 
     def test_explicit_zero_is_indefinite_on_worker(self) -> None:
-        # mq9nhbzu: capture_seconds=0 => indefinite (timeout None) + a cancel
-        # check is wired so the run can be stopped; summary labels it indefinite.
-        # Indefinite is honored on the background worker (dramatiq_worker).
+        # mq9nhbzu: capture_seconds=0 => indefinite + a cancel check is wired so
+        # the run can be stopped; summary labels it indefinite. The transport gets
+        # the 48h backstop (not None) so it ends with its data, never hanging.
         store = FakeRunStore()
         capture = FakeCapture([_json_msg("t/1", {"i": 1})])
         mqtt_discovery.process_mqtt_discovery_run(
@@ -424,21 +424,57 @@ class BoundTests(unittest.TestCase):
             live_capture=capture, build_settings=_stub_build,
         )
         call = capture.calls[-1]
-        self.assertIsNone(call["timeout_seconds"])
+        self.assertEqual(call["timeout_seconds"], mqtt_discovery.INDEFINITE_BACKSTOP_SECONDS)
         self.assertTrue(callable(call["cancel_check"]))
         self.assertEqual(store.summary_calls[-1]["capture_mode"], "indefinite")
         self.assertFalse(store.summary_calls[-1]["indefinite_bounded_inline"])
 
-    def test_indefinite_bounded_on_inline_path(self) -> None:
-        # Inline-hang guard: an indefinite request on a non-worker (inline) path
-        # is bounded to the default window so it can't tie up the request worker,
-        # and the downgrade is flagged. The capture gets a finite timeout.
+    def test_indefinite_honoured_when_store_has_cancel_path(self) -> None:
+        # The store advertises is_cancel_requested (every real RunService does), so
+        # a blank request is honoured as a true indefinite capture on the inline
+        # path too — the run is backgrounded and Stop run can end it. The transport
+        # gets the 48h backstop; the summary stays "indefinite", not downgraded.
         store = FakeRunStore()
         capture = FakeCapture([_json_msg("t/1", {"i": 1})])
         mqtt_discovery.process_mqtt_discovery_run(
             "run_inline_indef", {**_AUTH, "capture_seconds": 0},
             run_store=store, execution_mode="inline_local_fallback",
             live_capture=capture, build_settings=_stub_build,
+        )
+        call = capture.calls[-1]
+        self.assertEqual(call["timeout_seconds"], mqtt_discovery.INDEFINITE_BACKSTOP_SECONDS)
+        self.assertEqual(store.summary_calls[-1]["capture_mode"], "indefinite")
+        self.assertFalse(store.summary_calls[-1]["indefinite_bounded_inline"])
+
+    def test_indefinite_bounded_when_no_cancel_path(self) -> None:
+        # A store with NO cancel path could not be stopped if a broker never
+        # publishes, so a blank request is bounded to the default window and the
+        # downgrade is flagged honestly.
+        store = FakeRunStore()
+        store.is_cancel_requested = None  # simulate a store with no cancel path
+        capture = FakeCapture([_json_msg("t/1", {"i": 1})])
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_no_cancel", {**_AUTH, "capture_seconds": 0},
+            run_store=store, execution_mode="inline_local_fallback",
+            live_capture=capture, build_settings=_stub_build,
+        )
+        call = capture.calls[-1]
+        self.assertEqual(call["timeout_seconds"], mqtt_discovery.DEFAULT_CAPTURE_SECONDS)
+        self.assertEqual(store.summary_calls[-1]["capture_mode"], "bounded")
+        self.assertTrue(store.summary_calls[-1]["indefinite_bounded_inline"])
+
+    def test_sync_inline_bounds_indefinite_even_with_cancel_path(self) -> None:
+        # A cancel path exists, but the run is NOT backgrounded: a synchronous
+        # inline run blocks the request until it finishes, so the client never
+        # receives a run_id and cannot reach Stop run. A blank window is bounded to
+        # the default and the downgrade is flagged honestly.
+        store = FakeRunStore()
+        capture = FakeCapture([_json_msg("t/1", {"i": 1})])
+        mqtt_discovery.process_mqtt_discovery_run(
+            "run_sync_inline", {**_AUTH, "capture_seconds": 0},
+            run_store=store, execution_mode="inline_local_fallback",
+            live_capture=capture, build_settings=_stub_build,
+            run_is_backgrounded=False,
         )
         call = capture.calls[-1]
         self.assertEqual(call["timeout_seconds"], mqtt_discovery.DEFAULT_CAPTURE_SECONDS)

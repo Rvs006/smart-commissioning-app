@@ -25,7 +25,7 @@ from smart_commissioning_core.mqtt_config_publish_processor import (
     process_mqtt_config_publish_run,
     process_mqtt_config_rollback_run,
 )
-from smart_commissioning_core.mqtt_settings import parse_capture_seconds
+from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 from smart_commissioning_core.udmi_validation import DEFAULT_CAPTURE_SECONDS
@@ -71,12 +71,13 @@ settings = get_settings()
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
 
-# Hard ceiling on an explicit UDMI capture window: 48 hours. Tied to the worker
-# actor's time limit (worker/app/tasks.py validate_udmi_payloads runs at 49h =
-# this cap + 1h margin, and MUST stay above it) and to the frontend's
-# udmiCaptureOverCap guard (frontend/src/features/workflow/ModulePage.tsx) —
-# the three must move together or an accepted capture gets killed at the wire.
-MAX_UDMI_CAPTURE_SECONDS = 172_800
+# Hard ceiling on an explicit UDMI capture window: 48 hours. Sourced from the
+# single shared core constant (also the backstop for a blank/indefinite capture)
+# so this cap and discovery.MQTT_MAX_CAPTURE_SECONDS can never drift. Tied to the
+# worker actor's time limit (worker/app/tasks.py validate_udmi_payloads runs at
+# 49h = this cap + 1h margin, and MUST stay above it) and to the frontend's
+# udmiCaptureOverCap guard (frontend/src/features/workflow/ModulePage.tsx).
+MAX_UDMI_CAPTURE_SECONDS = int(INDEFINITE_BACKSTOP_SECONDS)
 
 
 def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRecord:
@@ -101,12 +102,9 @@ def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAccepted
             service=service,
             enqueue=enqueue,
             run_inline=run_inline,
-            inline_message=f"{label} processed with labelled local inline fallback.",
+            inline_message=f"{label} run started (local inline execution). Follow progress in the run monitor.",
             queued_message=f"{label} job queued for worker execution.",
-            fallback_message=(
-                f"{label} processed with labelled local inline fallback "
-                "because Redis/Dramatiq was unavailable."
-            ),
+            fallback_message=f"{label} run started inline because Redis/Dramatiq was unavailable.",
         )
     except JobQueueUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
@@ -345,6 +343,10 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
             run_store=service,
             execution_mode="inline_local_fallback",
             fallback_reason="JOB_EXECUTION_MODE is set to inline for local development.",
+            # Synchronous inline (INLINE_RUN_ASYNC=0) blocks this request until the
+            # run finishes, so the client never gets a run_id to reach Stop run — a
+            # blank window must bound itself. Async inline is backgrounded (ITEM-4).
+            run_is_backgrounded=get_settings().inline_run_async,
         )
 
     return _dispatch(

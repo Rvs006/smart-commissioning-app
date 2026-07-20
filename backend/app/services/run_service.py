@@ -226,22 +226,30 @@ class RunService:
         return RunRecord.model_validate(record)
 
     def sweep_interrupted_runs(self) -> list[str]:
-        """Mark runs fossilized at status "running" by a restart as failed.
+        """Mark runs fossilized at "running"/"queued" by a restart as failed.
 
-        A run stuck at "running" after an application restart (or a crash/500
-        mid-persist) will never reach a terminal status on its own — the process
-        that owned it is gone. Flip such runs to "failed" with
-        :data:`INTERRUPTED_RUN_MESSAGE` so the operator sees an actionable result
-        instead of a run that spins forever.
+        A run stuck at "running" — or at the default "queued" status — after an
+        application restart (or a crash/500 mid-persist) will never reach a
+        terminal status on its own: the process that owned it is gone. Flip such
+        runs to "failed" with :data:`INTERRUPTED_RUN_MESSAGE` so the operator sees
+        an actionable result instead of a run that spins forever.
+
+        "queued" is swept too because a backgrounded inline run (ITEM-4) is
+        committed at "queued" and only flips to "running" once its daemon thread
+        starts; a portable-exe process exit in that window strands it at "queued",
+        which the crash guard in :mod:`app.services.run_dispatch` cannot catch
+        (process death, not an exception). Without this the module head's Execute
+        stayed disabled across restarts (the run rehydrates as a live monitor that
+        can never terminate).
 
         CRITICAL GATE: only runs NOT dispatched to the worker queue are swept. A
-        queued/worker run may still be executing on a worker in the hosted
-        deployment, so touching it here would race a live run; see
-        :func:`_was_queued_to_worker` for the discriminator. Inline runs (the
-        portable exe path) have no worker to finish them, so they are the ones
-        this reclaims. Returns the ids swept (may be empty).
+        queued/worker run may still be waiting in — or executing off — the worker
+        queue in the hosted deployment, so touching it here would race a live run;
+        see :func:`_was_queued_to_worker` for the discriminator. Inline runs (the
+        portable exe path) carry no worker markers, so they are the ones this
+        reclaims. Returns the ids swept (may be empty).
         """
-        statement = select(Run.id, Run.result_summary).where(Run.status == "running")
+        statement = select(Run.id, Run.result_summary).where(Run.status.in_(("running", "queued")))
         with self._engine.connect() as connection:
             rows = connection.execute(statement).all()
         swept: list[str] = []
