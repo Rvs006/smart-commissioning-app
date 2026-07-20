@@ -882,6 +882,13 @@ export function getReportDownloadPath(reportId: string): string {
   return `/reports/${encodeURIComponent(reportId)}/download`;
 }
 
+// Bundle multiple reports into one zip. One gesture, one fetch, one download —
+// so the browser's per-gesture download throttle never drops files (mqatcqb3).
+export function getReportsExportPath(reportIds: string[]): string {
+  const query = reportIds.map((id) => `report_id=${encodeURIComponent(id)}`).join("&");
+  return `/reports/export?${query}`;
+}
+
 export function startDiscoveryRun(input: {
   runKind: DiscoveryRunKind;
   jobType: JobType;

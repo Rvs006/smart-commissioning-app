@@ -1599,6 +1599,73 @@ describe("ModulePage reports wiring", () => {
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
 
+  // Records every reports fetch so the export tests can assert exactly which
+  // endpoint (bundle zip vs per-report download) each gesture hit.
+  function stubReportsExport(hits: { download: string[]; export: string[] }) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [] });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.includes("/api/v1/reports/export?")) {
+          hits.export.push(url);
+          return blobResponse("reports_export.zip");
+        }
+        if (/\/api\/v1\/reports\/[^/]+\/download$/.test(url)) {
+          hits.download.push(url);
+          return blobResponse("issue_report.xlsx");
+        }
+        if (url.endsWith("/api/v1/reports")) {
+          return jsonResponse(reportsPayload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  // Field bug (2026-07-20 item 13): a per-file download loop tripped the
+  // browser's per-gesture throttle and kept only the last file. Several ticked
+  // rows must now be ONE bundle request, not one download each.
+  it("bundles multiple selected reports into a single export zip request", async () => {
+    const hits = { download: [] as string[], export: [] as string[] };
+    stubReportsExport(hits);
+    renderModule("reports");
+
+    fireEvent.click(await screen.findByLabelText(/Select report issue_report\.xlsx/i));
+    fireEvent.click(screen.getByLabelText(/Select report handover_pack\.zip/i));
+    fireEvent.click(screen.getByRole("button", { name: "Export selected" }));
+
+    await waitFor(() => expect(hits.export).toHaveLength(1));
+    // One request carrying every selected id, and zero per-report downloads.
+    expect(hits.export[0]).toMatch(/report_id=rep-1/);
+    expect(hits.export[0]).toMatch(/report_id=rep-3/);
+    expect(hits.download).toHaveLength(0);
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  // Exactly one ticked report keeps the direct per-report download — a zip of
+  // one is needless (their words: "a zip for multiples, direct for one is fine").
+  it("downloads a single selected report directly, not through the export zip", async () => {
+    const hits = { download: [] as string[], export: [] as string[] };
+    stubReportsExport(hits);
+    renderModule("reports");
+
+    fireEvent.click(await screen.findByLabelText(/Select report handover_pack\.zip/i));
+    fireEvent.click(screen.getByRole("button", { name: "Export selected" }));
+
+    await waitFor(() => expect(hits.download).toHaveLength(1));
+    expect(hits.download[0]).toMatch(/\/api\/v1\/reports\/rep-3\/download$/);
+    expect(hits.export).toHaveLength(0);
+  });
+
   // Only a succeeded report has real bytes behind it; offering a download for a
   // queued one would hand the operator an error, not a file.
   it("disables the row Download for a report that has not completed", async () => {

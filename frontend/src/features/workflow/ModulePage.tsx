@@ -16,6 +16,7 @@ import {
   getValidationRun,
   getImportTemplatePath,
   getReportDownloadPath,
+  getReportsExportPath,
   getUdmiSchemaTemplatePath,
   ImportBatchSummary,
   ImportType,
@@ -1451,20 +1452,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     });
   };
 
-  // Export selected reports (mqatcqb3): download each ticked report through the
-  // authenticated downloadFile path, sequentially so the browser keeps them.
+  // Export selected reports (mqatcqb3). One ticked report downloads directly;
+  // multiple bundle into a single zip via one fetch — a per-file download loop
+  // tripped the browser's per-gesture throttle and kept only one file.
   const handleExportSelected = async () => {
     const chosen = downloadableReports.filter((report) => selectedReportIds.has(report.report_id));
     if (chosen.length === 0) {
       return;
     }
-    for (const report of chosen) {
+    if (chosen.length === 1) {
+      const [report] = chosen;
       await exportDownload.download(
         `selected-${report.report_id}`,
         getReportDownloadPath(report.report_id),
         report.file_name || `${report.report_id}.${report.output_format}`,
       );
+      return;
     }
+    await exportDownload.download(
+      "selected-zip",
+      getReportsExportPath(chosen.map((report) => report.report_id)),
+      "reports_export.zip",
+    );
   };
 
   // "Generate report from this run" affordance shown on a terminal validation/
