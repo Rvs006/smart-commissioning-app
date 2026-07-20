@@ -606,7 +606,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // invocation and the reset/seed two-pass flush both settle on the same run.
   useEffect(() => {
     const run = lastRunQuery.data;
-    if (!run || activeRun) {
+    if (!run) {
+      return;
+    }
+    // A LIVE (non-terminal) run always outranks a restored terminal seed. The
+    // query cache can hand this effect a stale succeeded run first (mount
+    // serves cached data, the refetch lands later with the background run that
+    // is actually executing); without this upgrade the activeRun guard below
+    // would pin the stale run and the live run's monitor + Stop control would
+    // never attach (Codex P1 on PR #88). A session-started run (restored not
+    // set) is never replaced.
+    const upgradeToLive =
+      activeRun?.restored === true &&
+      activeRun.runId !== run.run_id &&
+      !isTerminalStatus(run.status);
+    if (activeRun && !upgradeToLive) {
       return;
     }
     // Belt-and-braces on top of the route-keyed query: only ever seed a run
