@@ -388,9 +388,11 @@ class ConfigurationTransferTests(SecretStorageTestCase):
         self.assertTrue(envelope.secrets_included)
         # Plain-text password rides along (not the '********' mask).
         self.assertEqual(envelope.configuration.mqtt.values["MQTT Password"], "broker-secret-A")
-        # The CA PEM content is attached, keyed by field name.
+        # The CA PEM content is attached, keyed by field name. The store keeps
+        # the upload-normalized form (store_secret strips surrounding
+        # whitespace), so the export carries exactly what the store holds.
         self.assertIn("CA Certificate", envelope.secret_material)
-        self.assertEqual(envelope.secret_material["CA Certificate"].content, cert)
+        self.assertEqual(envelope.secret_material["CA Certificate"].content, cert.strip())
 
     def test_export_skips_a_cert_whose_backing_file_vanished(self) -> None:
         stored = self.service.store_secret(
@@ -434,8 +436,9 @@ class ConfigurationTransferTests(SecretStorageTestCase):
             self.assertEqual(loaded_b.mqtt.values["MQTT Password"], "broker-secret-A")
             ca_ref = loaded_b.certificates.values["CA Certificate"]
             self.assertTrue(ca_ref.startswith("secret://"))
-            # Material was re-encrypted with machine B's own key yet reads back.
-            self.assertEqual(service_b.read_secret(ca_ref), cert)
+            # Material was re-encrypted with machine B's own key yet reads back
+            # in the store's upload-normalized (stripped) form.
+            self.assertEqual(service_b.read_secret(ca_ref), cert.strip())
             self.assertEqual(loaded_b.certificates.values["Certificate Expiry"], "2030-01-02")
 
     def test_import_rejects_a_traversal_secret_ref(self) -> None:
