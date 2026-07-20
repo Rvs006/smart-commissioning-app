@@ -42,6 +42,13 @@ class ApiTestCase(unittest.TestCase):
     Alembic migrations. tearDownClass restores everything.
     """
 
+    # Applied to every ApiTestCase, overridable per subclass via ``env``. Inline
+    # runs execute on a background thread in production (ITEM-4) so the run
+    # monitor renders while a run is live, but the API tests below POST a run then
+    # assert its terminal status/results synchronously — so the suite forces the
+    # synchronous path. A subclass that needs the async behaviour sets
+    # env = {"INLINE_RUN_ASYNC": "1", ...} and the merge below lets it win.
+    _BASE_ENV: dict[str, str | None] = {"INLINE_RUN_ASYNC": "0"}
     # Subclasses override; a None value means "ensure the variable is unset".
     env: dict[str, str | None] = {}
     # Default headers for every request (e.g. {"X-API-Key": ...}); None = none.
@@ -53,6 +60,7 @@ class ApiTestCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         overrides: dict[str, str | None] = {
             "DATABASE_URL": shared_test_database_url(),
+            **cls._BASE_ENV,
             **cls.env,
         }
         cls._previous_env = {}

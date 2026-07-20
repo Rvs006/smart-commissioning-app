@@ -140,6 +140,49 @@ class OrphanRunSweepTests(ApiTestCase):
         self.assertNotIn(run_id, swept)
         self.assertEqual(run_service.get_run(run_id).status, "running")
 
+    def test_stuck_queued_inline_run_is_swept_to_failed(self) -> None:
+        from app.services.run_service import INTERRUPTED_RUN_MESSAGE, RunService
+
+        run_service, run_id = self._new_run()
+        # A backgrounded inline run (ITEM-4) is committed at the default "queued"
+        # status and only flips to "running" once its daemon thread starts. A
+        # portable-exe process exit in that window strands the run at "queued"
+        # with no worker markers; the sweep must reclaim it exactly like a stuck
+        # "running" run, or the module head's Execute stays disabled across
+        # restarts.
+        self.assertEqual(run_service.get_run(run_id).status, "queued")
+
+        swept = RunService().sweep_interrupted_runs()
+
+        self.assertIn(run_id, swept)
+        record = run_service.get_run(run_id)
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(record.stage, "interrupted_by_restart")
+        self.assertEqual(record.error_message, INTERRUPTED_RUN_MESSAGE)
+
+    def test_queued_worker_run_at_queued_status_is_left_alone(self) -> None:
+        from app.services.run_service import RunService
+
+        run_service, run_id = self._new_run()
+        # A run enqueued to the worker is left at "queued" until a worker picks it
+        # up. It carries the dispatch markers, so the sweep must not touch it even
+        # at "queued" — a worker across the fleet may still run it.
+        run_service.update_result_summary(
+            run_id, {"queue_name": "discovery", "actor_name": "discover_bacnet"}
+        )
+        self.addCleanup(
+            run_service.update_run_status,
+            run_id,
+            status="cancelled",
+            stage="test_cleanup",
+            progress_percent=100,
+        )
+
+        swept = RunService().sweep_interrupted_runs()
+
+        self.assertNotIn(run_id, swept)
+        self.assertEqual(run_service.get_run(run_id).status, "queued")
+
 
 class PersisterSessionHygieneTests(ApiTestCase):
     env = _ENV

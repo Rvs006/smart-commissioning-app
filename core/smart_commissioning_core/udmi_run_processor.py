@@ -10,16 +10,6 @@ from smart_commissioning_core.udmi_validation import (
     validate_udmi_full_report,
 )
 
-# ponytail: inline safety ceiling for an indefinite capture. On the queued
-# worker, "blank = run until every expected topic reports or Cancel" is
-# honoured as a true indefinite capture. On the inline path the run executes
-# INSIDE the API request thread and the frontend only learns the run_id when
-# that request returns — so the Cancel button never renders while an inline
-# run is in flight. An indefinite request there is therefore bounded to this
-# ceiling (generous vs the 20s register reporting interval; the all-topics-seen
-# stop condition usually ends the run far earlier) and the downgrade is
-# recorded as indefinite_bounded_inline in the result summary.
-INLINE_INDEFINITE_CEILING_SECONDS = 240.0
 _SANITIZED_FAILURE_MESSAGE = "UDMI validation failed; see server logs."
 
 # Capture outcomes where the transport did its WHOLE job: connect, subscribe,
@@ -44,6 +34,7 @@ def process_udmi_validation_run(
     execution_mode: str,
     fallback_reason: str | None = None,
     live_capture: LiveCapture | None = subscribe_and_capture,
+    run_is_backgrounded: bool = True,
 ) -> Any:
     run_store.update_run_status(
         run_id,
@@ -53,23 +44,34 @@ def process_udmi_validation_run(
     )
 
     parameters = dict(parameters)
-    indefinite_requested = (
-        parse_capture_seconds(parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS) is None
-    )
-    indefinite_bounded_inline = indefinite_requested and execution_mode != "dramatiq_worker"
-    if indefinite_bounded_inline:
-        parameters["capture_seconds"] = INLINE_INDEFINITE_CEILING_SECONDS
 
-    # Cooperative stop: Cancel run button -> POST /runs/{id}/cancel -> DB flag,
+    # Cooperative stop: Stop run button -> POST /runs/{id}/cancel -> DB flag,
     # observed by the capture loop via this checker. Only claim a cancel path
     # when the store actually advertises one — the engine bounds an indefinite
-    # capture itself when cancel_check is None, so a run can never wait forever
-    # with no way to stop it.
+    # capture itself (udmi_validation._capture_window) when cancel_check is None,
+    # so a run can never wait forever with no way to stop it.
     cancel_check = (
         make_cancel_checker(run_store, run_id)
         if callable(getattr(run_store, "is_cancel_requested", None))
         else None
     )
+    # A blank/0 Run time is honoured as a true indefinite capture only when the
+    # operator can actually reach Stop run: a cancel path is wired AND the run is
+    # BACKGROUNDED (worker, or async inline). It is bounded to the default window
+    # when either fails. The no-cancel-path case is bounded by
+    # udmi_validation._capture_window itself (which also labels capture_mode). The
+    # NEW case is a run WITH a cancel path that is NOT backgrounded — a synchronous
+    # inline run blocks the HTTP request until it finishes, so the client never
+    # receives a run_id and cannot stop it; _capture_window would otherwise honour
+    # it as indefinite, so coerce the window here. Bounding capture_seconds (not
+    # just the summary flag) is what keeps a silent broker from holding the request
+    # thread + broker socket up to the 48h backstop.
+    indefinite_requested = (
+        parse_capture_seconds(parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS) is None
+    )
+    if indefinite_requested and cancel_check is not None and not run_is_backgrounded:
+        parameters["capture_seconds"] = DEFAULT_CAPTURE_SECONDS
+    indefinite_bounded_inline = indefinite_requested and (cancel_check is None or not run_is_backgrounded)
 
     try:
         validation_result = validate_udmi_full_report(parameters, live_capture=live_capture, cancel_check=cancel_check)

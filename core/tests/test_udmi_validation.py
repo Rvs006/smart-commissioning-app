@@ -11,12 +11,10 @@ import unittest
 from pathlib import Path
 
 from smart_commissioning_core import mqtt_transport, udmi_schema
+from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS
 from smart_commissioning_core.mqtt_transport import MqttMessage
 from smart_commissioning_core.records import ValidationIssueRecord
-from smart_commissioning_core.udmi_run_processor import (
-    INLINE_INDEFINITE_CEILING_SECONDS,
-    process_udmi_validation_run,
-)
+from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 from smart_commissioning_core.udmi_schema import (
     declared_version,
     is_nonpub_version,
@@ -1372,10 +1370,13 @@ class CaptureRunTimeTests(unittest.TestCase):
             cancel_check=lambda: False,
         )
         call = capture.calls[-1]
-        self.assertIsNone(call["timeout_seconds"])
+        # The summary stays "indefinite" but the transport is handed the 48h
+        # backstop so a never-publishing device can't hang the capture forever.
+        self.assertEqual(call["timeout_seconds"], INDEFINITE_BACKSTOP_SECONDS)
         self.assertTrue(callable(call["cancel_check"]))
         self.assertEqual(call["max_messages"], DEFAULT_MAX_MESSAGES)
         self.assertEqual(result.result_summary["capture_mode"], "indefinite")
+        self.assertIsNone(result.result_summary["capture_window_seconds"])
         self.assertEqual(result.result_summary["broker_status_detail"], "live_payloads_captured")
 
     def test_stop_when_needs_distinct_topics_not_message_count(self) -> None:
@@ -1528,7 +1529,7 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
             cancel_check=lambda: False,
         )
         call = capture.calls[-1]
-        self.assertIsNone(call["timeout_seconds"])
+        self.assertEqual(call["timeout_seconds"], INDEFINITE_BACKSTOP_SECONDS)
         stop_when = call["stop_when"]
         # A chatty first asset does not end the capture while the second is quiet.
         self.assertFalse(stop_when([_msg("site/a1/state")] * 5))
@@ -1640,21 +1641,56 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             execution_mode="dramatiq_worker", live_capture=capture,
         )
         call = capture.calls[-1]
-        self.assertIsNone(call["timeout_seconds"])
+        # Indefinite honoured (summary stays "indefinite"); the transport gets the
+        # 48h backstop so a silent device cannot hang the capture forever.
+        self.assertEqual(call["timeout_seconds"], INDEFINITE_BACKSTOP_SECONDS)
         self.assertTrue(callable(call["cancel_check"]))
         self.assertEqual(record["status"], "succeeded")
         self.assertFalse(store.summaries[-1]["indefinite_bounded_inline"])
 
-    def test_inline_mode_bounds_indefinite_to_the_ceiling(self) -> None:
-        # Inline runs execute inside the API request with no Cancel button
-        # available, so an indefinite request is bounded and flagged honestly.
+    def test_inline_mode_honours_indefinite_when_cancel_path_exists(self) -> None:
+        # The store advertises is_cancel_requested (every real RunService does),
+        # so a blank request is honoured as indefinite on the inline path too — the
+        # run is backgrounded and Stop run can end it. No downgrade is flagged.
         store = _FakeRunStore()
         capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
         record = process_udmi_validation_run(
             "run-2", dict(_PROCESSOR_PARAMS), run_store=store,
             execution_mode="inline_local_fallback", live_capture=capture,
         )
-        self.assertEqual(capture.calls[-1]["timeout_seconds"], INLINE_INDEFINITE_CEILING_SECONDS)
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], INDEFINITE_BACKSTOP_SECONDS)
+        self.assertEqual(record["status"], "succeeded")
+        self.assertFalse(store.summaries[-1]["indefinite_bounded_inline"])
+
+    def test_inline_mode_bounds_indefinite_when_no_cancel_path(self) -> None:
+        # A store with NO cancel path cannot be stopped, so a blank request is
+        # bounded to the default window (by udmi_validation._capture_window) and
+        # the downgrade is flagged honestly in the summary.
+        store = _FakeRunStore()
+        store.is_cancel_requested = None  # simulate a store with no cancel path
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        record = process_udmi_validation_run(
+            "run-2b", dict(_PROCESSOR_PARAMS), run_store=store,
+            execution_mode="inline_local_fallback", live_capture=capture,
+        )
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], DEFAULT_CAPTURE_SECONDS)
+        self.assertEqual(record["status"], "succeeded")
+        self.assertTrue(store.summaries[-1]["indefinite_bounded_inline"])
+
+    def test_sync_inline_bounds_indefinite_even_with_cancel_path(self) -> None:
+        # A cancel path exists, but the run is NOT backgrounded: a synchronous
+        # inline run blocks the HTTP request until it finishes, so the client never
+        # receives a run_id and cannot reach Stop run. A blank window is bounded to
+        # the default and the downgrade is flagged — a silent broker cannot hold the
+        # request thread up to the 48h backstop.
+        store = _FakeRunStore()
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        record = process_udmi_validation_run(
+            "run-2c", dict(_PROCESSOR_PARAMS), run_store=store,
+            execution_mode="inline_local_fallback", live_capture=capture,
+            run_is_backgrounded=False,
+        )
+        self.assertEqual(capture.calls[-1]["timeout_seconds"], DEFAULT_CAPTURE_SECONDS)
         self.assertEqual(record["status"], "succeeded")
         self.assertTrue(store.summaries[-1]["indefinite_bounded_inline"])
 

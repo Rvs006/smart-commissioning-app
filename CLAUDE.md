@@ -84,19 +84,30 @@ collection order is alphabetical — keep it so.
   scroll + filters, `GET /imports/latest`-backed already-imported note,
   side-by-side expected/observed payload panels with presence-only diff,
   near-match misname merge (digit-indexed siblings stay separate), and
-  empty-value wording. Four walkthrough items are deliberately parked for
-  discussion: config export including keys, template consolidation, run-time
-  field wording, fetching unpinned UDMI schema versions.
-  **A BBMD is optional per site** (`docs/protocol-conformance.md` §3), and
-  `docs/lab-day-2026-07-20-runbook.md` is rewritten two-path: Path A flat
-  no-BBMD (field-proven 2026-07-17, now primary) and Path B behind-a-BBMD
-  (still first-contact); its §9 records exactly what is proven vs not.
-  Open: whether Monday's lab network has a BBMD (Pete asked); the BACnet
-  pre-flight card is planned for **v0.1.18 after the lab** (full design in
-  session memory, not repo docs). The punchlist's §4 deferred items and §5
-  open Pete decisions remain the live backlog, alongside GitHub issue #4
-  (production gates). Next hard date: the **2026-07-20** live lab session.
-  Update or supersede this block when the state changes.
+  empty-value wording. The 2026-07-20 live field review of v0.1.17 (results
+  scroll/filters and already-imported note verified GREEN; password
+  affordance accepted as-is) produced the follow-up branch
+  `feat/v17-comments-2026-07-20` (target **v0.1.18**): inline runs
+  backgrounded on the portable exe (INLINE_RUN_ASYNC, sweep now reclaims
+  "queued" strays too), Stop run on every tool (keeps partial data, still
+  reports), blank Run time = run until all assets/topics seen or stopped
+  (240s inline ceiling gone; 48h backstop stays), engineer-gated export/
+  import WITH secrets (plain text — explicit field decision, encryption
+  later), Root Topic field REMOVED (blank filter = `#`; supersedes
+  v0.1.17's blank-inherits behaviour), duplicate templates card removed,
+  asset-grouped results, synchronized/aligned payload compare with JSON
+  colouring and honest engine-flagged highlighting, bounded scroll
+  containers, inspector filters (type / seen / online-offline). Only one
+  walkthrough item stays parked: fetching unpinned UDMI schema versions
+  (pinned 1.5.2 by field decision).
+  **A BBMD is optional per site** (`docs/protocol-conformance.md` §3);
+  `docs/lab-day-2026-07-20-runbook.md` is two-path (flat no-BBMD primary,
+  field-proven; BBMD still first-contact — the BBMD-in-the-lab question is
+  STILL unanswered; the 2026-07-20 session exercised MQTT/UDMI only). The
+  BACnet pre-flight card (full design in session memory, not repo docs)
+  waits on the BACnet lab learnings. The punchlist's §4 deferred items and
+  §5 open Pete decisions remain the live backlog, alongside GitHub issue #4
+  (production gates). Update or supersede this block when the state changes.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational

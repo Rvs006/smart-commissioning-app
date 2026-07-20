@@ -71,6 +71,7 @@ from smart_commissioning_core.engines.safety import (
     require_scan_authorization,
 )
 from smart_commissioning_core.mqtt_settings import (
+    INDEFINITE_BACKSTOP_SECONDS,
     _broker_error_status,
     build_mqtt_connection_settings,
     parse_capture_seconds,
@@ -176,6 +177,7 @@ def process_mqtt_discovery_run(
     persist_records: Callable[[str, Sequence[dict[str, Any]]], None] | None = None,
     live_capture: LiveCapture | None = subscribe_and_capture,
     build_settings: Callable[[dict[str, Any]], MqttConnectionSettings] = build_mqtt_connection_settings,
+    run_is_backgrounded: bool = True,
 ) -> Any:
     """Run an MQTT discovery capture through the shared engine lifecycle.
 
@@ -195,6 +197,12 @@ def process_mqtt_discovery_run(
         build_settings: injectable settings builder (default: the real provider-
             aware ``build_mqtt_connection_settings``). Tests can inject a stub so
             no configuration provider is required.
+        run_is_backgrounded: whether the run executes off the HTTP request thread
+            (a worker, or an async inline run) so Stop run is reachable while it
+            runs. Default True. The inline route passes ``inline_run_async``; when
+            False a blank (indefinite) window is bounded to the default just like a
+            store with no cancel path — a synchronous inline run blocks the request
+            until it finishes, so the client cannot reach Stop run.
 
     Returns whatever ``run_store.update_run_status`` returns for the terminal flip.
     """
@@ -218,6 +226,7 @@ def process_mqtt_discovery_run(
             engine_ctx,
             live_capture=live_capture,
             build_settings=build_settings,
+            run_is_backgrounded=run_is_backgrounded,
         )
 
     # persist_records None -> run_engine's own _noop_persister default.
@@ -231,6 +240,7 @@ def _run_mqtt_discovery(
     *,
     live_capture: LiveCapture | None,
     build_settings: Callable[[dict[str, Any]], MqttConnectionSettings],
+    run_is_backgrounded: bool = True,
 ) -> EngineResult:
     """The engine body: plan (dry run) or capture + aggregate (real run).
 
@@ -243,13 +253,16 @@ def _run_mqtt_discovery(
     capture_seconds = _capture_seconds(ctx.parameters)
     max_messages = _max_messages(ctx.parameters)
 
-    # Inline-hang guard (mq9nhbzu): an indefinite capture (capture_seconds <= 0
-    # => None) blocks until the message cap or cancellation. That is safe on the
-    # background worker, but on the inline / in-request execution path it would
-    # tie up the request worker for the whole capture, so bound it to the default
-    # window there and flag why so the UI/operator can see the downgrade. Run
-    # indefinite captures on the worker (DEPLOYMENT/JOB_EXECUTION via Dramatiq).
-    indefinite_bounded_inline = capture_seconds is None and ctx.execution_mode != "dramatiq_worker"
+    # No-cancel guard (mq9nhbzu): an indefinite capture (capture_seconds <= 0
+    # => None) runs until the distinct-topic cap, cancellation, or the 48h
+    # backstop. Honouring it needs a way for the operator to actually STOP it, so
+    # bound blank to the default window unless BOTH hold: a cancel path is wired
+    # AND the run is backgrounded so Stop run is reachable. The worker and the
+    # async inline path (ITEM-4) are backgrounded; a SYNCHRONOUS inline run blocks
+    # the HTTP request until it finishes (run_is_backgrounded False), so the client
+    # never receives a run_id and cannot stop it — bound it, exactly like a store
+    # with no cancel path, and flag the downgrade honestly.
+    indefinite_bounded_inline = capture_seconds is None and (not ctx.has_cancel_path or not run_is_backgrounded)
     if indefinite_bounded_inline:
         capture_seconds = DEFAULT_CAPTURE_SECONDS
 
@@ -363,7 +376,10 @@ def _run_mqtt_discovery(
         messages = live_capture(
             settings,
             topics=topic_filters,
-            timeout_seconds=capture_seconds,
+            # capture_seconds stays None in the summary (capture_mode
+            # "indefinite"); the transport gets the 48h backstop so an
+            # indefinite capture still ends with its data instead of hanging.
+            timeout_seconds=capture_seconds if capture_seconds is not None else INDEFINITE_BACKSTOP_SECONDS,
             max_messages=max_messages,
             cancel_check=ctx.is_cancelled,
             qos=subscribe_qos,

@@ -36,7 +36,7 @@ from smart_commissioning_core.engines.mqtt_discovery import (
     process_mqtt_discovery_run,
 )
 from smart_commissioning_core.engines.safety import is_authorized
-from smart_commissioning_core.mqtt_settings import parse_capture_seconds
+from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import AuthPrincipal, get_principal, require_role
@@ -81,13 +81,14 @@ config_service = ConfigurationService()
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
 
-# Hard ceiling on an explicit MQTT capture window: 48 hours. MUST equal
-# validation.py MAX_UDMI_CAPTURE_SECONDS and stay strictly BELOW the
-# discover_mqtt actor's time_limit (worker/app/tasks.py runs at cap + 1h) — else
-# a maximum-length accepted capture would be killed at the wire by its own
-# executor. All three move together; the contract is asserted in
+# Hard ceiling on an explicit MQTT capture window: 48 hours. Sourced from the
+# single shared core constant (also the backstop for a blank/indefinite capture)
+# so this route cap, validation.py MAX_UDMI_CAPTURE_SECONDS, and the engines can
+# never drift. MUST stay strictly BELOW the discover_mqtt actor's time_limit
+# (worker/app/tasks.py runs at cap + 1h) — else a maximum-length accepted capture
+# would be killed at the wire by its own executor. The contract is asserted in
 # backend/tests/test_mqtt_capture_window.py.
-MQTT_MAX_CAPTURE_SECONDS = 172_800
+MQTT_MAX_CAPTURE_SECONDS = int(INDEFINITE_BACKSTOP_SECONDS)
 
 
 # Actionable message returned when a real scan lacks authorization. Mirrors the
@@ -490,8 +491,8 @@ def create_mqtt_discovery_run(
     _stamp_authorizer(parameters, principal)
     # Reject an over-cap capture window BEFORE creating the run (UDMI precedent
     # routes/validation.py) so a rejected request never leaves an orphaned run.
-    # None (0/blank = indefinite) passes: it is bounded by Cancel and, worst
-    # case, the 49h actor kill.
+    # None (0/blank = indefinite) passes: it runs until Stop run, the distinct-
+    # topic cap, or the 48-hour backstop the engine applies to the transport.
     capture_seconds = parse_capture_seconds(
         parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS
     )
@@ -503,12 +504,11 @@ def create_mqtt_discovery_run(
                 "(48 hours); the worker would kill a longer capture at its time limit."
             ),
         )
-    # Inherit Root Topic (-> default subscribe filter) and QoS from saved config
-    # when the operator didn't override them on the run.
-    defaults = config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)
-    parameters.setdefault("qos", defaults["qos"])
-    if defaults.get("topic_filter") and not any(parameters.get(k) for k in ("topic_filter", "topic_prefix", "topics")):
-        parameters["topic_filter"] = defaults["topic_filter"]
+    # Inherit only QoS from saved config; the run's topic scope is chosen per run
+    # on the MQTT Discovery page (a blank filter means the engine's own "#"
+    # capture-all default). The saved Root Topic field was removed (ITEM-2), so
+    # nothing is injected here for topics.
+    parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     _resolve_source_interface(request.project_id, request.site_id, parameters)
     run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_discovery")
 
@@ -526,6 +526,10 @@ def create_mqtt_discovery_run(
             throttle=_settings_throttle(parameters),
             dry_run=is_dry_run(parameters),
             persist_records=persist,
+            # Synchronous inline (INLINE_RUN_ASYNC=0) blocks this request until the
+            # run finishes, so the client never gets a run_id to reach Stop run — a
+            # blank window must bound itself. Async inline is backgrounded (ITEM-4).
+            run_is_backgrounded=get_settings().inline_run_async,
         )
 
     return _dispatch(
@@ -543,12 +547,9 @@ def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAccepted
             service=service,
             enqueue=enqueue,
             run_inline=run_inline,
-            inline_message=f"{label} processed with labelled local inline fallback.",
+            inline_message=f"{label} run started (local inline execution). Follow progress in the run monitor.",
             queued_message=f"{label} job queued for worker execution.",
-            fallback_message=(
-                f"{label} processed with labelled local inline fallback "
-                "because Redis/Dramatiq was unavailable."
-            ),
+            fallback_message=f"{label} run started inline because Redis/Dramatiq was unavailable.",
         )
     except JobQueueUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error

@@ -1139,6 +1139,83 @@ describe("ConfigurationPage", () => {
     expect(await screen.findByText(/MQTT Port must be between/i)).toBeInTheDocument();
   });
 
+  it("exports the configuration WITH secrets via the engineer-gated endpoint (ITEM-1)", async () => {
+    let calledSecretsExport = false;
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration/export-with-secrets")) {
+        calledSecretsExport = true;
+        return jsonResponse({
+          kind: "smart-commissioning-configuration",
+          version: 2,
+          exported_at: "2026-07-20T10:00:00.000Z",
+          project_id: null,
+          site_id: null,
+          secrets_included: true,
+          configuration: configurationPayload(),
+          secret_material: {
+            "CA Certificate": { secret_ref: "secret://ca", content: "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----" },
+          },
+        });
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: /Export with secrets/i }));
+    // The success banner warns the file carries secrets in plain text, and the
+    // separate with-secrets endpoint was called (not the masked default export).
+    expect(await screen.findByText(/PLAIN TEXT/i)).toBeInTheDocument();
+    expect(calledSecretsExport).toBe(true);
+    expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it("imports a v2 with-secrets envelope via POST /configuration/import (ITEM-1)", async () => {
+    let postBody: string | null = null;
+    stubFetch((url, init) => {
+      if (url.endsWith("/api/v1/configuration/import") && init?.method === "POST") {
+        postBody = String(init?.body);
+        return jsonResponse(configurationPayload());
+      }
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    await screen.findByRole("button", { name: /Import JSON/i });
+    const fileInput = screen.getByLabelText(/Import configuration JSON file/i);
+    const envelope = {
+      kind: "smart-commissioning-configuration",
+      version: 2,
+      secrets_included: true,
+      configuration: configurationPayload(),
+      secret_material: {
+        "CA Certificate": { secret_ref: "secret://ca", content: "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----" },
+      },
+    };
+    const file = new File([JSON.stringify(envelope)], "config-with-secrets.json", {
+      type: "application/json",
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    // The secret path routes to POST /configuration/import and sends BOTH the
+    // configuration and the secret_material; the success note says secrets were
+    // restored on this machine.
+    expect(
+      await screen.findByText(/restored into this machine's secret store/i),
+    ).toBeInTheDocument();
+    expect(postBody).not.toBeNull();
+    const parsed = JSON.parse(postBody as unknown as string) as Record<string, unknown>;
+    expect(parsed).toHaveProperty("configuration");
+    expect(parsed).toHaveProperty("secret_material");
+  });
+
   // v0.1.13 — logging destinations. The Logging & Diagnostics section is
   // collapsed by default, so each test expands it via its toggle first.
   it("renders the logging section with a Log Level select and a masked upload token, and no syslog fields", async () => {

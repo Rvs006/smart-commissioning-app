@@ -469,10 +469,10 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("mqtt-discovery");
 
-    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "2" },
     });
-    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
       target: { value: "hours" },
     });
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
@@ -494,10 +494,10 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("mqtt-discovery");
 
-    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "49" },
     });
-    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
       target: { value: "hours" },
     });
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
@@ -519,10 +519,10 @@ describe("ModulePage discovery wiring", () => {
 
     // Clear the default "10" so the duration is blank, then pick an hours unit:
     // the unit multiplier must not turn a blank (indefinite) into a bounded 0.
-    fireEvent.change(await screen.findByLabelText(/Capture duration \(0/i), {
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "" },
     });
-    fireEvent.change(await screen.findByLabelText(/Capture duration unit/i), {
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
       target: { value: "hours" },
     });
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
@@ -536,7 +536,7 @@ describe("ModulePage discovery wiring", () => {
     expect(parameters.capture_seconds).toBe(0);
   });
 
-  it("omits topic_filter from the MQTT run when the filter is left blank so the saved Root Topic is inherited (ISSUE-3)", async () => {
+  it("omits topic_filter from the MQTT run when the filter is left blank so the engine captures every topic (#) (2026-07-20 walkthrough ITEM-2)", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     stubMqttRunFetch((body) => {
       postedBody = body;
@@ -544,9 +544,10 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("mqtt-discovery");
 
-    // Do NOT touch the topic filter: it now defaults to blank, so the backend
-    // inherits the saved Root Topic instead of a literal "#" silently overriding
-    // it. A blank filter must be omitted from the run parameters entirely.
+    // Do NOT touch the topic filter: it defaults to blank. Root Topic was removed
+    // from Configuration, so a blank filter is omitted from the run parameters
+    // entirely and the engine falls back to its own "#" default (capture-all) —
+    // never a literal "#" on the wire.
     fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
     await waitFor(() => expect(runButton).toBeEnabled());
@@ -1701,19 +1702,17 @@ describe("ModulePage labels and templates", () => {
     expect(screen.getByText("Generate Word Report")).toBeInTheDocument();
   });
 
-  it("exposes XLSX and CSV template downloads for every import type on a page", async () => {
+  it("drops the duplicate all-templates section but keeps template downloads in Register Import (2026-07-20 walkthrough ITEM-3)", async () => {
     stubBasic();
     renderModule("data-validation");
-    // The all-templates panel lists each import type the validation page accepts.
-    expect(await screen.findByText("Import Templates for This Page")).toBeInTheDocument();
-    expect(screen.getByText("Asset Validation")).toBeInTheDocument();
-    expect(screen.getByText("Bacnet Points")).toBeInTheDocument();
-    expect(screen.getByText("Mqtt Points")).toBeInTheDocument();
-    expect(screen.getByText("Mapping")).toBeInTheDocument();
-    expect(screen.getByText("Tolerances")).toBeInTheDocument();
-    // Each card offers both XLSX and CSV (5 import types -> 5 of each).
-    expect(screen.getAllByRole("button", { name: "XLSX" })).toHaveLength(5);
-    expect(screen.getAllByRole("button", { name: "CSV" })).toHaveLength(5);
+    // The duplicate "Import Templates for This Page" section is removed.
+    expect(await screen.findByText("Register Import")).toBeInTheDocument();
+    expect(screen.queryByText("Import Templates for This Page")).not.toBeInTheDocument();
+    // Templates remain downloadable from the Default import template card inside
+    // Register Import — pick the import profile, then XLSX or CSV.
+    expect(screen.getByText("Default import template")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download XLSX" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download CSV" })).toBeInTheDocument();
   });
 
   // The module hero renders `workspace?.title ?? module.title`, so the
@@ -1887,15 +1886,21 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
     // The run monitor shows the capture window the run ACTUALLY used.
     expect(screen.getByText("120 s (bounded)")).toBeInTheDocument();
+    // Wait for the issues query to merge so the verdict lands on the row (it can
+    // render a beat after the banner, which comes from payload views alone).
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
     expect(screen.getAllByText("EM-1").length).toBeGreaterThan(0);
+    // The single asset's summary row auto-expands (it is the selected asset), so
+    // its per-payload-type rows are visible (ITEM-7 grouping).
     expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
-    // Row cells also render in the selected-result detail aside, so match >=1.
-    expect(screen.getAllByText("Non-compliant — 1 issue (1 critical)").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
     // The old illustrative sample asset never appears as a live result.
     expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
+    // Expand the asset in the INSPECTOR drill-down (a separate toggle from the
+    // results-table summary row, so scope the query to the inspector aside).
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    fireEvent.click(within(inspector).getByRole("button", { name: /EM-1.*issue/i }));
     fireEvent.click(screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0]);
     expect(screen.getByText("Expected UDMI template")).toBeInTheDocument();
     expect(screen.getByText(/schema-valid sentinel values identify device-supplied fields/i)).toBeInTheDocument();
@@ -2059,7 +2064,8 @@ describe("ModulePage UDMI workbench live results", () => {
     // Ensure the issues query has merged before expanding the asset group.
     await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
-    fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
+    const inspectorStamp = document.querySelector(".inspector") as HTMLElement;
+    fireEvent.click(within(inspectorStamp).getByRole("button", { name: /EM-1.*issue/i }));
     // Publishing device with a critical issue → amber "NON-COMPLIANT" section.
     const nonCompliant = await screen.findByText("NON-COMPLIANT — please see details below");
     expect(nonCompliant).toHaveClass("payload-verdict", "warn");
@@ -2099,9 +2105,14 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
     await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
-    fireEvent.click(screen.getByRole("button", { name: /EM-1.*issue/i }));
-    // The empty observed value is named "empty" rather than dropped or blank.
-    expect((await screen.findAllByText(/Expected 1\.5\.2, observed empty/i)).length).toBeGreaterThan(0);
+    const inspectorEmpty = document.querySelector(".inspector") as HTMLElement;
+    fireEvent.click(within(inspectorEmpty).getByRole("button", { name: /EM-1.*issue/i }));
+    // Structured issue card (ITEM-9): the expected/observed comparison and the
+    // suggested action render as their OWN lines, not one run-on string. The
+    // empty observed value is named "empty" rather than dropped or blank.
+    expect((await screen.findAllByText("Expected 1.5.2, observed empty")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Populate the version field.")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Pointset payload version is blank.")).length).toBeGreaterThan(0);
   });
 
   it("shades silent devices red (offline) on a succeeded run (RAG)", async () => {
@@ -2192,31 +2203,212 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(runButton);
     expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
 
-    // Wait for the offline verdict to land (issues merged).
+    // EM-1 is the first (selected) asset, so it auto-expands; EM-2 is collapsed
+    // under ITEM-7 grouping. Expand EM-2's summary row (scope to the table so the
+    // query does not also match the inspector's EM-2 drill-down toggle).
+    const resultsTable = screen.getByRole("table");
+    fireEvent.click(within(resultsTable).getByRole("button", { name: /EM-2/ }));
+
+    // Wait for the offline verdict to land (issues merged) on the now-visible
+    // EM-2 rows.
     await screen.findAllByText("Offline — did not publish");
 
-    // Every EM-2 result row (pointset, state, and the derived not_publishing
-    // "other" row) is red offline; EM-1 is amber (publishing but non-compliant).
+    // Every EM-2 data row (the rows carrying the offline verdict) is red offline.
     const em2Rows = screen
-      .getAllByText("EM-2")
+      .getAllByText("Offline — did not publish")
       .map((cell) => cell.closest("tr"))
       .filter((row): row is HTMLTableRowElement => row !== null);
     expect(em2Rows.length).toBeGreaterThan(0);
     for (const row of em2Rows) {
       expect(row).toHaveClass("row-fail");
-      expect(within(row).getByText("Offline — did not publish")).toBeInTheDocument();
     }
-    const em1Row = screen
+    // EM-1 is amber (publishing but non-compliant): a summary/data row reads warn.
+    const em1Rows = screen
       .getAllByText("EM-1")
       .map((cell) => cell.closest("tr"))
-      .find((row) => row !== null);
-    expect(em1Row).toHaveClass("row-warn");
+      .filter((row): row is HTMLTableRowElement => row !== null);
+    expect(em1Rows.some((row) => row.classList.contains("row-warn"))).toBe(true);
 
-    // The EM-2 section line reads OFFLINE once its asset group is expanded.
-    fireEvent.click(screen.getByRole("button", { name: /EM-2.*issue/i }));
+    // The EM-2 section line reads OFFLINE once its INSPECTOR asset group expands.
+    const inspectorEm2 = document.querySelector(".inspector") as HTMLElement;
+    fireEvent.click(within(inspectorEm2).getByRole("button", { name: /EM-2.*issue/i }));
     expect(
       (await screen.findAllByText("OFFLINE — device did not publish during the capture window")).length,
     ).toBeGreaterThan(0);
+  });
+
+  // Shared two-asset stub for the grouping/facet tests: EM-1 published, AHU-9
+  // published, EM-2 (facet test) silent — overridable per test.
+  function stubTwoAssetUdmi(run: unknown, issues: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST")
+          return jsonResponse(udmiAccepted);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(issues);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(run);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("groups results by asset: collapsed summary rows expand to per-payload rows (ITEM-7)", async () => {
+    const cleanPayload = (asset: string, types: string[]) => ({
+      asset_id: asset,
+      payload_types: types.map((type) => ({
+        payload_type: type,
+        expected: { version: "1.5.2", points: {} },
+        observed: { version: "1.5.2", points: {} },
+        observed_present: true,
+      })),
+    });
+    const twoAssetRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        payload_views: [cleanPayload("EM-1", ["pointset", "state"]), cleanPayload("AHU-9", ["pointset"])],
+      },
+    };
+    stubTwoAssetUdmi(twoAssetRun, { run_id: "run-udmi-1", issues: [] });
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    const table = screen.getByRole("table");
+    // One collapsible summary row per asset.
+    expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: /AHU-9/ })).toBeInTheDocument();
+    expect(screen.getByText(/across 2 assets/i)).toBeInTheDocument();
+
+    // EM-1 is the first (selected) asset, so it auto-expands (2 child rows).
+    // AHU-9 is collapsed until clicked.
+    expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(2);
+    fireEvent.click(within(table).getByRole("button", { name: /AHU-9/ }));
+    expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(3);
+
+    // Clicking a child row's View selects it (opens the detail modal for AHU-9).
+    fireEvent.click(screen.getAllByRole("button", { name: "View" })[2]);
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("AHU-9")).toBeInTheDocument();
+  });
+
+  it("filters the results and inspector by ONLINE/OFFLINE state (ITEM-10)", async () => {
+    const run = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        expected_devices: 2,
+        publishing_seen: 1,
+        not_publishing_devices: ["EM-2"],
+        payload_views: [
+          {
+            asset_id: "EM-1",
+            payload_types: [
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: { version: "1.5.2", points: {} },
+                observed_present: true,
+              },
+            ],
+          },
+          {
+            asset_id: "EM-2",
+            payload_types: [
+              { payload_type: "pointset", expected: { version: "1.5.2", points: {} }, observed: null, observed_present: false },
+            ],
+          },
+        ],
+      },
+    };
+    stubTwoAssetUdmi(run, { run_id: "run-udmi-1", issues: [] });
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/across 2 assets/i)).toBeInTheDocument();
+
+    const table = screen.getByRole("table");
+    expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+
+    // State = Offline hides the observed EM-1 asset and keeps only the silent EM-2.
+    fireEvent.change(screen.getByLabelText("State"), { target: { value: "offline" } });
+    expect(within(table).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
+    expect(within(table).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    expect(screen.getByText(/across 1 asset\b/i)).toBeInTheDocument();
+  });
+
+  it("re-attaches a still-running run on arrival and offers Stop run, without locking Execute (ITEM-4)", async () => {
+    const runningRun = {
+      run_id: "run-udmi-1",
+      job_type: "udmi_validation",
+      status: "running",
+      stage: "capturing",
+      progress_percent: 15,
+      created_at: "2026-06-11T09:00:00Z",
+      updated_at: "2026-06-11T09:00:30Z",
+      project_id: "demo-project",
+      site_id: "demo-site",
+      parameters: { capture_seconds: 0 },
+      result_summary: {},
+      error_message: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        // The rehydration query finds a still-running run of this head's job type.
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: [
+              {
+                run_id: "run-udmi-1",
+                job_type: "udmi_validation",
+                status: "running",
+                stage: "capturing",
+                progress_percent: 15,
+                created_at: "2026-06-11T09:00:00Z",
+                updated_at: "2026-06-11T09:00:30Z",
+                edge_id: null,
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues"))
+          return jsonResponse({ run_id: "run-udmi-1", issues: [] });
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(runningRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    // The live run re-attaches its monitor with a Stop run control and the
+    // data-kept note. A REHYDRATED run must NOT lock Execute: a fossilized
+    // running/queued run (e.g. a hosted worker that died with its dispatch
+    // markers, which the startup sweep leaves alone) would otherwise disable
+    // Execute forever with no UI escape. Only a run started THIS session blocks.
+    expect(await screen.findByRole("button", { name: "Stop run" })).toBeInTheDocument();
+    expect(screen.getByText(/Stop run keeps the data collected so far/i)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Execute capture" })).toBeEnabled(),
+    );
+
+    // Progress + elapsed (ITEM-6): the monitor shows an Elapsed entry, and an
+    // indefinite-window run (capture_seconds 0) shows the indeterminate sweep.
+    expect(screen.getByText("Elapsed")).toBeInTheDocument();
+    expect(document.querySelector(".progress-track.indeterminate")).not.toBeNull();
   });
 
   it("keeps verdicts neutral (Verdict pending, no green Pass) while the issues query is loading", async () => {
@@ -2444,10 +2636,12 @@ describe("ModulePage UDMI workbench live results", () => {
 
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
 
-    expect(screen.getByText(/Blank runs until all required topics report or you press Cancel run/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Blank runs until every expected asset\/topic has reported or you press Stop run/i),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Worker captures are capped at 48\s*hours.*inline\/portable captures are bounded\s*at 240 seconds when blank.*500 distinct\s*concrete topics/i,
+        /48-hour safety limit.*500 distinct\s*concrete topics.*Closing the app ends the run/i,
       ),
     ).toBeInTheDocument();
   });

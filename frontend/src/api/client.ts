@@ -674,6 +674,69 @@ export function importConfiguration(
   );
 }
 
+// Importable secret material for one certificate field (CA Certificate / Client
+// Certificate / Private Key). `content` is the PEM text in plain text so another
+// engineer can import it on their OWN machine — the receiving machine re-encrypts
+// it into its own secret store. Field decision 2026-07-20: plain text is fine for
+// now, encryption at a later date.
+export type ConfigurationSecretMaterial = {
+  secret_ref: string;
+  content: string;
+  file_name?: string | null;
+};
+
+// v2 export envelope that INCLUDES secret material so a shared config file
+// actually works across machines (2026-07-20 walkthrough ITEM-1). The server
+// sets exported_at and reads the UNMASKED snapshot, so password-kind values
+// (MQTT Password, Key Password, Log Upload Token) ride in `configuration` in
+// plain text; certificate material rides in `secret_material`, keyed by field
+// name. Distinct from the default masked ConfigurationExport (version 1).
+export type ConfigurationExportEnvelope = {
+  kind: "smart-commissioning-configuration";
+  version: 2;
+  exported_at: string;
+  project_id: string | null;
+  site_id: string | null;
+  secrets_included: true;
+  configuration: ConfigurationSnapshot;
+  secret_material: Record<string, ConfigurationSecretMaterial>;
+};
+
+// Engineer-gated export that carries secrets in plain text (GET
+// /configuration/export-with-secrets). Separate from exportConfiguration, whose
+// default export stays masked. The server builds the whole envelope (including
+// exported_at); this just fetches it for the UI to serialise to a file.
+export function exportConfigurationWithSecrets(
+  projectId?: string,
+  siteId?: string,
+): Promise<ConfigurationExportEnvelope> {
+  return request<ConfigurationExportEnvelope>(
+    `/configuration/export-with-secrets${buildConfigurationQuery(projectId, siteId)}`,
+  );
+}
+
+// Imports a v2 envelope (configuration + secret_material) via POST
+// /configuration/import, which restores the certificate material into the
+// receiving machine's secret store, validates, and saves — returning the MASKED
+// snapshot. Throws ApiError on a 400 validation rejection.
+export function importConfigurationWithSecrets(
+  envelope: ConfigurationExportEnvelope,
+  projectId?: string,
+  siteId?: string,
+): Promise<ConfigurationSnapshot> {
+  return request<ConfigurationSnapshot>(
+    `/configuration/import${buildConfigurationQuery(projectId, siteId)}`,
+    {
+      body: JSON.stringify({
+        configuration: envelope.configuration,
+        secret_material: envelope.secret_material,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+  );
+}
+
 // Outcome of POST /logs/upload. `outcome` is the honest terminal result: the
 // server accepted the bundle ("uploaded"), rejected it ("rejected", with the
 // HTTP status), or did not respond at all ("no_response") — never a fabricated

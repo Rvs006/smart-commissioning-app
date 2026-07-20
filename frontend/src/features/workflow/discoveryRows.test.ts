@@ -7,6 +7,7 @@ import {
   expectedPortsOk,
   filterResultRows,
   forbiddenOpenPorts,
+  groupUdmiRowsByAsset,
   ipResultColumns,
   ipRowVerdict,
   ipRowsFromResults,
@@ -935,5 +936,37 @@ describe("filterResultRows (ISSUE-4)", () => {
     expect(filterResultRows(noTopic, { text: "ahu-2", tone: "all" }).map((r) => r.Asset)).toEqual([
       "AHU-2",
     ]);
+  });
+});
+
+describe("groupUdmiRowsByAsset (ITEM-7)", () => {
+  it("folds consecutive same-asset rows into groups with aggregate tone and counts", () => {
+    const visible = [
+      { index: 0, row: { Asset: "EM-1", Payload: "UDMI pointset", Issues: "1", Observed: "Yes", __tone: "warn" } },
+      { index: 1, row: { Asset: "EM-1", Payload: "UDMI metadata", Issues: "0", Observed: "Yes", __tone: "pass" } },
+      { index: 2, row: { Asset: "EM-2", Payload: "UDMI pointset", Issues: "2", Observed: "No", __tone: "fail" } },
+    ];
+    const groups = groupUdmiRowsByAsset(visible);
+    expect(groups.map((group) => group.asset)).toEqual(["EM-1", "EM-2"]);
+    // EM-1: worst of warn/pass = warn; 1 issue total; 2 observed.
+    expect(groups[0].rows).toHaveLength(2);
+    expect(groups[0].worstTone).toBe("warn");
+    expect(groups[0].issueTotal).toBe(1);
+    expect(groups[0].observedCount).toBe(2);
+    // EM-2: fail, 2 issues, 0 observed.
+    expect(groups[1].worstTone).toBe("fail");
+    expect(groups[1].issueTotal).toBe(2);
+    expect(groups[1].observedCount).toBe(0);
+    // Children keep their ORIGINAL index (ISSUE-4 selection invariant).
+    expect(groups[1].rows[0].index).toBe(2);
+  });
+
+  it("aggregate tone reflects only the VISIBLE children passed in", () => {
+    // A filter that hid the failing row leaves only the passing row visible, so
+    // the group's tone honestly reads pass — the aggregate can change as filters do.
+    const visible = [
+      { index: 1, row: { Asset: "EM-1", Payload: "UDMI metadata", Issues: "0", Observed: "Yes", __tone: "pass" } },
+    ];
+    expect(groupUdmiRowsByAsset(visible)[0].worstTone).toBe("pass");
   });
 });

@@ -2,13 +2,16 @@ import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ConfigurationExport,
+  ConfigurationExportEnvelope,
   ConfigurationSectionKey,
   ConfigurationSnapshot,
   downloadFile,
   exportConfiguration,
+  exportConfigurationWithSecrets,
   getConfiguration,
   getSystemInterfaces,
   importConfiguration,
+  importConfigurationWithSecrets,
   storeSecretMaterial,
   updateConfiguration,
   uploadLogs,
@@ -66,7 +69,7 @@ const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
     "Planned network identity of the gateway device being commissioned — reference values used by validation, not this laptop's settings. The adapter this laptop scans from is chosen under Source Interface.",
   logging:
     "Runtime logging to a local rotating file (logs/app.log under the app runtime directory), retention of rotated files, and optional upload of a masked log bundle to a URL.",
-  mqtt: "Broker, client identity, topic, QoS, keep-alive, and optional Mosquitto-style credentials.",
+  mqtt: "Broker, client identity, QoS, keep-alive, and optional Mosquitto-style credentials.",
   time: "Timezone and NTP settings used to timestamp evidence and validate stale data.",
 };
 
@@ -451,19 +454,49 @@ export function ConfigurationPage() {
     },
   });
 
-  // Import validates the parsed file client-side, then saves it via
-  // importConfiguration -> PUT /configuration, which validates again
-  // server-side before persisting (surfacing an ApiError on a 400).
+  // Export WITH secrets (2026-07-20 walkthrough ITEM-1): an explicit,
+  // engineer-gated action separate from the default masked export. The file
+  // carries the MQTT password, all stored passwords/tokens, and the CA/client
+  // certificate + private key material in plain text so another engineer can
+  // import a working config on their own machine (field decision: plain text now,
+  // encryption later).
+  const exportWithSecretsMutation = useMutation({
+    mutationFn: () => exportConfigurationWithSecrets(),
+    onSuccess: (envelope) => {
+      downloadConfigurationEnvelope(envelope, "-with-secrets");
+      setTransferError(null);
+      setTransferMessage(
+        "Exported the configuration WITH its secrets as JSON. This file contains the MQTT password, all stored passwords and tokens, and the CA/client-certificate/private-key material in PLAIN TEXT — handle it like a password and delete it once imported.",
+      );
+    },
+    onError: (error: Error) => {
+      setTransferMessage(null);
+      setTransferError(error.message);
+    },
+  });
+
+  // Import validates the parsed file client-side, then saves it server-side. A
+  // v2 envelope carrying secret_material goes to POST /configuration/import
+  // (restores the certificate material into THIS machine's secret store); a v1
+  // envelope or a bare snapshot keeps the existing PUT /configuration path. Both
+  // validate again server-side before persisting (surfacing an ApiError on 400).
   const importMutation = useMutation({
-    mutationFn: (payload: ConfigurationExport | ConfigurationSnapshot) => importConfiguration(payload),
-    onSuccess: (savedConfiguration) => {
+    mutationFn: (payload: ConfigurationExport | ConfigurationExportEnvelope | ConfigurationSnapshot) =>
+      hasSecretMaterial(payload)
+        ? importConfigurationWithSecrets(payload)
+        : importConfiguration(payload),
+    onSuccess: (savedConfiguration, payload) => {
       queryClient.setQueryData(["configuration"], savedConfiguration);
       // As saved by the API — an imported snapshot prepared off-site for the
       // lab keeps its Foreign Device setting instead of being reset on arrival.
       setDraft(savedConfiguration);
       setValidationErrors([]);
       setTransferError(null);
-      setTransferMessage("Imported configuration was validated by the API and saved as the new snapshot.");
+      setTransferMessage(
+        hasSecretMaterial(payload)
+          ? "Imported configuration and its secrets — validated by the API and saved; the certificate material and passwords were restored into this machine's secret store."
+          : "Imported configuration was validated by the API and saved as the new snapshot.",
+      );
     },
     onError: (error: Error) => {
       setTransferMessage(null);
@@ -630,6 +663,15 @@ export function ConfigurationPage() {
             </button>
             <button
               className="secondary-button compact"
+              disabled={exportWithSecretsMutation.isPending || !canEngineer}
+              onClick={() => exportWithSecretsMutation.mutate()}
+              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+              type="button"
+            >
+              {exportWithSecretsMutation.isPending ? "Exporting..." : "Export with secrets"}
+            </button>
+            <button
+              className="secondary-button compact"
               disabled={importMutation.isPending || !canEngineer}
               onClick={() => importInputRef.current?.click()}
               title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
@@ -647,8 +689,11 @@ export function ConfigurationPage() {
             />
           </div>
           <p className="action-note">
-            Export downloads the current configuration as JSON (secrets stay masked) so it can be
-            reused on another project; Import validates a JSON file and saves it as the new snapshot.
+            Export downloads the current configuration as JSON with secrets masked, so it can be reused
+            on another project. Export with secrets includes the MQTT password and the certificate and
+            key material in plain text for a full transfer to another machine — handle that file like a
+            password. Import validates a JSON file and saves it as the new snapshot, restoring any
+            secrets the file carries.
           </p>
         </aside>
       </section>
@@ -975,7 +1020,6 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "Use TLS":
     "Secure the broker connection with TLS. Enable for the secure port (8883); disable for a plaintext port (1883).",
   "Client ID": "Unique client identifier this gateway connects with.",
-  "Root Topic": "Base MQTT topic prefix for this site's messages.",
   QoS: "MQTT delivery guarantee — 0 at most once, 1 at least once, 2 exactly once.",
   "Keep Alive Interval": "Seconds between MQTT keep-alive pings.",
   "MQTT Username": "Broker username, if authentication is required.",
@@ -1257,17 +1301,33 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
-// Serialises an exported envelope to a downloadable JSON file. No secret values
-// are present in the envelope: password fields are masked and certificate
-// material is a secret:// reference.
-function downloadConfigurationEnvelope(envelope: ConfigurationExport): void {
+// Serialises an exported envelope to a downloadable JSON file. The default
+// masked export (v1) carries no secret values; the with-secrets export (v2)
+// does — the filenameSuffix distinguishes the two files on disk.
+function downloadConfigurationEnvelope(
+  envelope: ConfigurationExport | ConfigurationExportEnvelope,
+  filenameSuffix = "",
+): void {
   const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: "application/json" });
   const stamp = envelope.exported_at.replace(/[:.]/g, "-");
-  saveBlob(blob, `smart-commissioning-configuration-${stamp}.json`);
+  saveBlob(blob, `smart-commissioning-configuration${filenameSuffix}-${stamp}.json`);
+}
+
+// True when a parsed import payload is a v2 with-secrets envelope (carries a
+// secret_material object). Routes the import to POST /configuration/import so the
+// certificate material is restored; anything else keeps the PUT snapshot path.
+function hasSecretMaterial(
+  payload: ConfigurationExport | ConfigurationExportEnvelope | ConfigurationSnapshot,
+): payload is ConfigurationExportEnvelope {
+  return (
+    "secret_material" in payload &&
+    Boolean((payload as ConfigurationExportEnvelope).secret_material) &&
+    typeof (payload as ConfigurationExportEnvelope).secret_material === "object"
+  );
 }
 
 type ParsedConfiguration =
-  | { ok: true; payload: ConfigurationExport | ConfigurationSnapshot }
+  | { ok: true; payload: ConfigurationExport | ConfigurationExportEnvelope | ConfigurationSnapshot }
   | { ok: false; error: string };
 
 const configurationSectionKeys: ConfigurationSectionKey[] = [...sectionOrder];
@@ -1304,5 +1364,8 @@ function parseConfigurationFile(raw: string): ParsedConfiguration {
     }
   }
 
-  return { ok: true, payload: parsed as ConfigurationExport | ConfigurationSnapshot };
+  return {
+    ok: true,
+    payload: parsed as ConfigurationExport | ConfigurationExportEnvelope | ConfigurationSnapshot,
+  };
 }

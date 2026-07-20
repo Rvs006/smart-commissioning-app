@@ -174,6 +174,55 @@ class RbacEnforcementTests(ApiTestCase):
         )
         self.assertEqual(response.status_code, 403, response.text)
 
+    # -- configuration export-with-secrets / import (ITEM-1) ------------------
+
+    _TRANSFER_PARAMS = {"project_id": "rbac-transfer-project", "site_id": "rbac-transfer-site"}
+
+    def test_viewer_is_403_on_export_with_secrets(self) -> None:
+        response = self.client.get(
+            "/api/v1/configuration/export-with-secrets",
+            headers=self._headers("viewer"),
+            params=self._TRANSFER_PARAMS,
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+
+    def test_engineer_can_export_with_secrets_and_reimport(self) -> None:
+        exported = self.client.get(
+            "/api/v1/configuration/export-with-secrets",
+            headers=self._headers("engineer"),
+            params=self._TRANSFER_PARAMS,
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
+        envelope = exported.json()
+        self.assertEqual(envelope["version"], 2)
+        self.assertTrue(envelope["secrets_included"])
+
+        imported = self.client.post(
+            "/api/v1/configuration/import",
+            headers=self._headers("engineer"),
+            params=self._TRANSFER_PARAMS,
+            json={
+                "configuration": envelope["configuration"],
+                "secret_material": envelope["secret_material"],
+            },
+        )
+        self.assertEqual(imported.status_code, 200, imported.text)
+        self.assertIn("mqtt", imported.json())
+
+    def test_viewer_is_403_on_import(self) -> None:
+        envelope = self.client.get(
+            "/api/v1/configuration/export-with-secrets",
+            headers=self._headers("engineer"),
+            params=self._TRANSFER_PARAMS,
+        ).json()
+        response = self.client.post(
+            "/api/v1/configuration/import",
+            headers=self._headers("viewer"),
+            params=self._TRANSFER_PARAMS,
+            json={"configuration": envelope["configuration"]},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+
     # -- admin: retention apply + user management -----------------------------
 
     def test_admin_user_can_apply_retention(self) -> None:

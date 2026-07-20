@@ -5,6 +5,61 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A Stop run button on every tool** (renamed from Cancel run), with a note
+  that stopping keeps the data collected so far — a stopped run can still
+  generate a report. A still-running run re-attaches its live monitor and Stop
+  control after navigating away or refreshing, and Execute is disabled while a
+  run started in this session is in progress.
+- **Runs on the portable exe now execute in the background**: Execute returns
+  immediately and the run monitor shows a live Elapsed timer plus a progress
+  bar (window-filling for bounded captures, indeterminate for indefinite
+  ones). A run killed by closing the app is reclaimed as failed/interrupted at
+  the next start — the startup sweep now also reclaims runs stranded at
+  "queued".
+- **Leaving Run time blank now runs until all expected assets/topics are seen
+  or the operator stops the run** — on the portable exe as well as the hosted
+  worker. The old ~240-second inline ceiling is gone; every capture still ends
+  at the 48-hour safety backstop, and a synchronous-inline run (background
+  execution disabled) is still bounded to the default window and flagged
+  honestly.
+- **Configuration can be exported WITH its secrets** via a separate
+  engineer-gated "Export with secrets" action: the JSON carries the MQTT
+  password, stored tokens, and the CA/client-certificate/private-key material
+  in plain text (2026-07-20 field decision; encryption to follow) so another
+  engineer can import a working config on their own machine — Import restores
+  and re-encrypts everything into that machine's own secret store. The default
+  Export stays masked and byte-unchanged.
+- **UDMI results are grouped by asset**: one collapsible summary row per asset
+  (aggregate status + issue count) expanding to its per-payload rows, instead
+  of 3–4 flat lines per asset; the selected asset stays expanded.
+- **Inspector filters** on the UDMI Workbench: by asset type, seen/not-seen,
+  and ONLINE/OFFLINE state.
+
+### Changed
+
+- **The expected-vs-observed payload compare aligns line-for-line** inside one
+  synchronized-scroll container, colours the JSON (Notepad++-style), and
+  highlights in red only the rows for points the engine actually flagged —
+  values are never diffed, because the expected side is a sentinel template.
+- The per-asset drill-down and inspector issues list scroll inside bounded
+  containers, and issue cards render problem / comparison / suggested action
+  as separate readable lines.
+
+### Removed
+
+- **The saved Root Topic field on the Configuration page** (2026-07-20 field
+  decision): a blank per-run MQTT topic filter now captures every topic (`#`),
+  and UDMI Workbench continues to take its topics from the imported register.
+  A Root Topic value in an existing saved configuration is tolerated and
+  dropped on next save.
+- **The duplicate "Import Templates for This Page" section** on module pages —
+  templates remain downloadable from the Default import template card inside
+  Register Import.
+
 ## [0.1.17] - 2026-07-17
 
 ### Fixed
