@@ -70,44 +70,39 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-17 (night) — **v0.1.11 through
-  v0.1.17 are released** (`main`, CI green, workflow-built boot-smoked
-  portable bundles attached; exe SHA-256 lives in each Release's notes,
-  deliberately not in repo files; v0.1.17 is cut from this commit and
-  publishes immediately after it). v0.1.16 fixed the 2026-07-17 field
-  session's live-BACnet failures (raw bacpypes3 values in JSON persistence +
-  run-wrapper double-fault -> 500s and runs fossilized at "running"; empty
-  log bundles) and swept orphaned runs. v0.1.17 is the same day's MQTT/UDMI
-  walkthrough punch list (7 items — PR #87): Root Topic now inherited by
-  discovery (blank filter = saved Root Topic; the form no longer silently
-  sends `#`), honest "Saved — hidden" password affordance, result-table
-  scroll + filters, `GET /imports/latest`-backed already-imported note,
-  side-by-side expected/observed payload panels with presence-only diff,
-  near-match misname merge (digit-indexed siblings stay separate), and
-  empty-value wording. The 2026-07-20 live field review of v0.1.17 (results
-  scroll/filters and already-imported note verified GREEN; password
-  affordance accepted as-is) produced the follow-up branch
-  `feat/v17-comments-2026-07-20` (target **v0.1.18**): inline runs
-  backgrounded on the portable exe (INLINE_RUN_ASYNC, sweep now reclaims
-  "queued" strays too), Stop run on every tool (keeps partial data, still
-  reports), blank Run time = run until all assets/topics seen or stopped
-  (240s inline ceiling gone; 48h backstop stays), engineer-gated export/
-  import WITH secrets (plain text — explicit field decision, encryption
-  later), Root Topic field REMOVED (blank filter = `#`; supersedes
-  v0.1.17's blank-inherits behaviour), duplicate templates card removed,
-  asset-grouped results, synchronized/aligned payload compare with JSON
-  colouring and honest engine-flagged highlighting, bounded scroll
-  containers, inspector filters (type / seen / online-offline). Only one
-  walkthrough item stays parked: fetching unpinned UDMI schema versions
-  (pinned 1.5.2 by field decision).
+- **Current handoff**: status as of 2026-07-20 — **v0.1.11 through v0.1.18
+  are released** (`main`, CI green, workflow-built boot-smoked portable
+  bundles attached; exe SHA-256 lives in each Release's notes, deliberately
+  not in repo files; v0.1.18 is cut from this commit and publishes
+  immediately after it). v0.1.18 (PR #88) is the 2026-07-20 live field
+  review of v0.1.17: inline runs backgrounded on the portable exe
+  (INLINE_RUN_ASYNC; startup sweep reclaims "queued" strays too), Stop run
+  on every tool (keeps partial data, still reports; live runs re-attach
+  after refresh, Execute disabled while a session-started run is active),
+  blank Run time = run until all assets/topics seen or stopped (240s inline
+  ceiling gone; 49h actor / 48h backstop stand), engineer-gated
+  export/import WITH secrets (plain text — explicit field decision,
+  encryption later), Root Topic field REMOVED (blank filter = `#`),
+  duplicate templates card removed, asset-grouped results,
+  synchronized/aligned payload compare with JSON colouring and
+  engine-flagged highlighting, bounded scroll containers, inspector filters
+  (type / seen / online-offline). Codex reviewed the PR; both findings
+  (stale-cache rehydration pinning an old run; 1h-vs-49h doc claim) were
+  verified and fixed in-branch. Field verdicts on v0.1.17: results
+  scroll/filters + already-imported note GREEN, password affordance
+  accepted as-is. Parked: fetching unpinned UDMI schema versions (pinned
+  1.5.2 by field decision; a legacy-projects check may revive it) and
+  encryption for the secrets export.
   **A BBMD is optional per site** (`docs/protocol-conformance.md` §3);
   `docs/lab-day-2026-07-20-runbook.md` is two-path (flat no-BBMD primary,
   field-proven; BBMD still first-contact — the BBMD-in-the-lab question is
-  STILL unanswered; the 2026-07-20 session exercised MQTT/UDMI only). The
-  BACnet pre-flight card (full design in session memory, not repo docs)
-  waits on the BACnet lab learnings. The punchlist's §4 deferred items and
-  §5 open Pete decisions remain the live backlog, alongside GitHub issue #4
-  (production gates). Update or supersede this block when the state changes.
+  STILL unanswered; 2026-07-20 exercised MQTT/UDMI only). Open field loops:
+  a 10-minute broker capture (operator skepticism that "not published" rows
+  were wrong) and the BACnet pre-flight card (full design in session
+  memory, not repo docs) which waits on the BACnet lab learnings. The
+  punchlist's §4 deferred items and §5 open Pete decisions remain the live
+  backlog, alongside GitHub issue #4 (production gates). Update or
+  supersede this block when the state changes.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational
