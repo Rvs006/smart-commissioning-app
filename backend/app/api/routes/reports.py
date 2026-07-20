@@ -5,9 +5,10 @@ from io import BytesIO
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from pydantic import BaseModel, Field
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.rbac import Role
 
@@ -78,20 +79,28 @@ def list_reports() -> ReportListResponse:
     return ReportListResponse(reports=reports)
 
 
-# Declared BEFORE /{report_id}: FastAPI matches in declaration order, so a
-# route added after the path parameter would be swallowed as report_id="export"
-# and 404. Multiple ticked reports become ONE zip so the browser fires a single
-# download (its multiple-download throttle otherwise keeps only one file); a
-# single report keeps downloading directly via /{report_id}/download.
-@router.get("/export", dependencies=[Depends(require_viewer)])
-def export_reports(report_id: list[str] = Query(min_length=1)) -> Response:
+class ReportExportRequest(BaseModel):
+    # Non-empty so an empty selection 422s instead of yielding an empty zip. The
+    # ids ride in a JSON body, not repeated query params, so an unbounded
+    # selection never hits the request-line limits uvicorn/h11 and proxies cap.
+    report_ids: list[str] = Field(min_length=1)
+
+
+# Declared BEFORE /{report_id}: kept ahead of the path route so the literal
+# /export can never be swallowed as report_id="export" (defensive — a POST could
+# not match a GET /{report_id} anyway). Multiple ticked reports become ONE zip so
+# the browser fires a single download (its multiple-download throttle otherwise
+# keeps only one file); a single report keeps downloading directly via
+# /{report_id}/download.
+@router.post("/export", dependencies=[Depends(require_viewer)])
+def export_reports(request: ReportExportRequest) -> Response:
     # Resolve every id up front (order-preserving dedupe, a twice-ticked report
     # yields one member) so an unknown id 404s the WHOLE request rather than
     # returning a silently partial archive (honesty rule). Each member reuses the
     # exact per-report path so its bytes equal that report's own download.
     seen: set[str] = set()
     runs: list[object] = []
-    for candidate_id in report_id:
+    for candidate_id in request.report_ids:
         if candidate_id in seen:
             continue
         seen.add(candidate_id)

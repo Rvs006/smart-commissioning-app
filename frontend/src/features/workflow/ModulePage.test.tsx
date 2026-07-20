@@ -1604,7 +1604,7 @@ describe("ModulePage reports wiring", () => {
   function stubReportsExport(hits: { download: string[]; export: string[] }) {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/runs?")) {
           return jsonResponse({ runs: [] });
@@ -1615,8 +1615,10 @@ describe("ModulePage reports wiring", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.includes("/api/v1/reports/export?")) {
-          hits.export.push(url);
+        if (url.endsWith("/api/v1/reports/export")) {
+          // The selected ids POST in the JSON body now (not the query string),
+          // so record the body — that is what carries the selection.
+          hits.export.push(String(init?.body ?? ""));
           return blobResponse("reports_export.zip");
         }
         if (/\/api\/v1\/reports\/[^/]+\/download$/.test(url)) {
@@ -1644,9 +1646,12 @@ describe("ModulePage reports wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Export selected" }));
 
     await waitFor(() => expect(hits.export).toHaveLength(1));
-    // One request carrying every selected id, and zero per-report downloads.
-    expect(hits.export[0]).toMatch(/report_id=rep-1/);
-    expect(hits.export[0]).toMatch(/report_id=rep-3/);
+    // One request whose JSON body carries every selected id, and zero per-report
+    // downloads.
+    const body = JSON.parse(hits.export[0]) as { report_ids: string[] };
+    expect(body.report_ids).toHaveLength(2);
+    expect(body.report_ids).toContain("rep-1");
+    expect(body.report_ids).toContain("rep-3");
     expect(hits.download).toHaveLength(0);
     expect(URL.createObjectURL).toHaveBeenCalled();
   });

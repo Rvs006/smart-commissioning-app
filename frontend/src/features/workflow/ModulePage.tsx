@@ -16,7 +16,7 @@ import {
   getValidationRun,
   getImportTemplatePath,
   getReportDownloadPath,
-  getReportsExportPath,
+  REPORTS_EXPORT_PATH,
   getUdmiSchemaTemplatePath,
   ImportBatchSummary,
   ImportType,
@@ -1469,11 +1469,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       );
       return;
     }
-    await exportDownload.download(
-      "selected-zip",
-      getReportsExportPath(chosen.map((report) => report.report_id)),
-      "reports_export.zip",
-    );
+    await exportDownload.download("selected-zip", REPORTS_EXPORT_PATH, "reports_export.zip", {
+      body: JSON.stringify({ report_ids: chosen.map((report) => report.report_id) }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
   };
 
   // "Generate report from this run" affordance shown on a terminal validation/
@@ -4140,18 +4140,21 @@ function useFileDownload() {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const download = useCallback(async (key: string, path: string, fallbackFilename: string) => {
-    setPendingKey(key);
-    setError(null);
-    try {
-      const { blob, filename } = await downloadFile(path);
-      triggerBlobDownload(blob, filename ?? fallbackFilename);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Download failed.");
-    } finally {
-      setPendingKey(null);
-    }
-  }, []);
+  const download = useCallback(
+    async (key: string, path: string, fallbackFilename: string, init?: RequestInit) => {
+      setPendingKey(key);
+      setError(null);
+      try {
+        const { blob, filename } = await downloadFile(path, init);
+        triggerBlobDownload(blob, filename ?? fallbackFilename);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Download failed.");
+      } finally {
+        setPendingKey(null);
+      }
+    },
+    [],
+  );
 
   const reset = useCallback(() => {
     setPendingKey(null);

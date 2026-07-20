@@ -5,7 +5,7 @@ file; a browser's multiple-download throttle otherwise keeps only one file (the
 field-observed "whatever file you choose last" bug). A single ticked report
 keeps its direct /{id}/download. Covered here:
 
-  * GET /reports/export?report_id=A&report_id=B returns application/zip whose
+  * POST /reports/export {"report_ids": [A, B]} returns application/zip whose
     members are exactly the two reports' file_names, each byte-identical to that
     report's own /{id}/download;
   * a duplicate id yields one member (order-preserving dedupe);
@@ -13,7 +13,10 @@ keeps its direct /{id}/download. Covered here:
     archive), naming the missing id;
   * a real non-report run id (a validation run) 404s — the wrong-job-type
     guard, so a discovery/validation record is never bundled as a "report";
-  * no report_id yields 422 — proving /export is not shadowed by /{report_id}.
+  * an empty report_ids list yields 422 — the non-empty pydantic constraint.
+
+The ids ride in a JSON body (not repeated query params) so an unbounded
+selection never exceeds the request-line limits uvicorn/h11 and proxies cap.
 
 In-process against the shared temporary SQLite DB (no live infra). The evidence
 signing key is pointed at a temp secrets dir because export persists integrity.
@@ -115,9 +118,9 @@ class ReportsExportApiTests(ApiTestCase):
         report_a = self._create_report([run_id])
         report_b = self._create_report([run_id])
 
-        response = self.client.get(
+        response = self.client.post(
             "/api/v1/reports/export",
-            params={"report_id": [report_a["report_id"], report_b["report_id"]]},
+            json={"report_ids": [report_a["report_id"], report_b["report_id"]]},
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["content-type"], "application/zip")
@@ -136,9 +139,9 @@ class ReportsExportApiTests(ApiTestCase):
     def test_duplicate_report_id_yields_one_member(self) -> None:
         run_id = self._seed_validation_run()
         report = self._create_report([run_id])
-        response = self.client.get(
+        response = self.client.post(
             "/api/v1/reports/export",
-            params={"report_id": [report["report_id"], report["report_id"]]},
+            json={"report_ids": [report["report_id"], report["report_id"]]},
         )
         self.assertEqual(response.status_code, 200, response.text)
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
@@ -147,9 +150,9 @@ class ReportsExportApiTests(ApiTestCase):
     def test_unknown_id_among_valid_ones_404s_the_whole_request(self) -> None:
         run_id = self._seed_validation_run()
         report = self._create_report([run_id])
-        response = self.client.get(
+        response = self.client.post(
             "/api/v1/reports/export",
-            params={"report_id": [report["report_id"], "no-such-report"]},
+            json={"report_ids": [report["report_id"], "no-such-report"]},
         )
         self.assertEqual(response.status_code, 404, response.text)
         self.assertIn("no-such-report", response.json()["detail"])
@@ -159,15 +162,15 @@ class ReportsExportApiTests(ApiTestCase):
         # validation run) must 404 the export, never bundle a fabricated
         # "report" built from a validation/discovery record (honesty rule).
         run_id = self._seed_validation_run()
-        response = self.client.get(
+        response = self.client.post(
             "/api/v1/reports/export",
-            params={"report_id": [run_id]},
+            json={"report_ids": [run_id]},
         )
         self.assertEqual(response.status_code, 404, response.text)
         self.assertIn(run_id, response.json()["detail"])
 
-    def test_no_report_id_param_is_422_not_shadowed_by_path_route(self) -> None:
-        # A missing required list param is 422; a 404 would mean /export was
-        # matched as /{report_id}="export" (wrong declaration order).
-        response = self.client.get("/api/v1/reports/export")
+    def test_empty_report_ids_is_422(self) -> None:
+        # An empty selection must 422 on the non-empty constraint, never build an
+        # empty zip. A 404/405 here would mean the /export route did not resolve.
+        response = self.client.post("/api/v1/reports/export", json={"report_ids": []})
         self.assertEqual(response.status_code, 422, response.text)
