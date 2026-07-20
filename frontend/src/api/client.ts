@@ -416,10 +416,12 @@ export type DownloadedFile = {
 /**
  * Fetches a binary endpoint with the same auth handling as request().
  * Direct-navigation anchors cannot attach the X-API-Key header, so all
- * file downloads must go through this helper in hosted deployments.
+ * file downloads must go through this helper in hosted deployments. `init`
+ * lets a caller POST a JSON body (e.g. the multi-report export) instead of a
+ * bare GET; withApiKey merges the X-API-Key header in either way.
  */
-export async function downloadFile(path: string): Promise<DownloadedFile> {
-  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey());
+export async function downloadFile(path: string, init?: RequestInit): Promise<DownloadedFile> {
+  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
 
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
@@ -881,6 +883,12 @@ export function getUdmiSchemaTemplatePath(): string {
 export function getReportDownloadPath(reportId: string): string {
   return `/reports/${encodeURIComponent(reportId)}/download`;
 }
+
+// Bundle multiple reports into one zip. One gesture, one fetch, one download —
+// so the browser's per-gesture download throttle never drops files (mqatcqb3).
+// The ids POST in a JSON body (built at the call site) rather than a query
+// string so an unbounded selection never overruns request-line limits.
+export const REPORTS_EXPORT_PATH = "/reports/export";
 
 export function startDiscoveryRun(input: {
   runKind: DiscoveryRunKind;

@@ -5,6 +5,30 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Empty units and present_value are now flagged as validation issues**: a
+  UDMI point whose `units` (device metadata) or `present_value` (pointset) is
+  present but blank ("", null, or whitespace) now raises a high-severity
+  issue naming the point, instead of passing silently or surfacing as a
+  confusing "should be numeric" complaint. Absent fields keep their existing
+  "does not declare units" / missing-point reporting; 0, 0.0 and false are
+  real observations and never read as empty. Each field is only checked in
+  the payload where UDMI 1.5.2 allows it, so a blank field in the wrong
+  payload is left to the structural "property not allowed" check rather than
+  being double-reported. (2026-07-20 field review, item 9.)
+
+### Fixed
+
+- **"Export selected" on the Reports page now bundles every ticked report
+  into one `reports_export.zip`** (new `GET /api/v1/reports/export`)
+  instead of downloading only the report whose row was ticked last. A single
+  ticked report still downloads directly; an unknown or non-report id fails
+  the whole export rather than returning a partial archive. (2026-07-20
+  field review, item 13.)
+
 ## [0.1.18] - 2026-07-20
 
 ### Added

@@ -112,6 +112,15 @@ def _canonical_unit(value: object) -> str | None:
     return _UNIT_ALIASES.get(normalised, normalised)
 
 
+def _is_blank_value(value: object) -> bool:
+    """True when a present field is blank: None, or an empty/whitespace string.
+
+    0, 0.0 and False are real observations, never blank — so this deliberately
+    does NO falsiness check (a numeric zero or a boolean must not read as empty).
+    """
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 @dataclass(frozen=True)
 class UdmiValidationResult:
     result_summary: dict[str, object]
@@ -815,13 +824,23 @@ def _review_payload_issues(
     )
     expected_units = _dict_or_empty(expected.get("units"))
     for point_name, expected_unit in expected_units.items():
-        metadata_unit = _dict_or_empty(metadata_points.get(point_name)).get("units")
+        metadata_point_entry = _dict_or_empty(metadata_points.get(point_name))
+        metadata_unit = metadata_point_entry.get("units")
         # Workbench contract: the register's expected unit must MATCH the
         # metadata payload's unit (after alias/format normalisation), not merely
         # be a recognisable UDMI unit.
         expected_canonical = _canonical_unit(expected_unit)
         observed_canonical = _canonical_unit(metadata_unit)
-        if expected_canonical and metadata_payload and point_name in metadata_points and not observed_canonical:
+        # A blank-but-PRESENT units field ("", null, whitespace) routes to the
+        # empty-value pass below, not here — "does not declare units" is the
+        # truly-absent case only (units key missing from the point entry).
+        if (
+            expected_canonical
+            and metadata_payload
+            and point_name in metadata_points
+            and not observed_canonical
+            and "units" not in metadata_point_entry
+        ):
             issues.append(
                 _issue(
                     issues,
@@ -874,7 +893,14 @@ def _review_payload_issues(
             )
 
         present_value = _dict_or_empty(pointset_points.get(point_name)).get("present_value")
-        if observed_canonical in _NUMERIC_CANONICAL_UNITS and present_value is not None and not isinstance(present_value, int | float):
+        # A blank-but-present value routes to the empty-value pass below (the
+        # accurate "never linked" fact), not to this numeric-type complaint.
+        if (
+            observed_canonical in _NUMERIC_CANONICAL_UNITS
+            and present_value is not None
+            and not _is_blank_value(present_value)
+            and not isinstance(present_value, int | float)
+        ):
             issues.append(
                 _issue(
                     issues,
@@ -886,6 +912,64 @@ def _review_payload_issues(
                     expected_value=f"numeric {observed_canonical}",
                     observed_value=f"{type(present_value).__name__}: {present_value}",
                     suggested_action="Fix the publisher so present_value type matches the expected unit.",
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+
+    # Empty-value pass (field review 2026-07-20, doc item 9): a units or
+    # present_value field that is PRESENT but blank ("", null, or whitespace) is
+    # a real fault — a point never linked to its data source — distinct from an
+    # ABSENT field, which the missing-field checks above/below still handle
+    # unchanged. Each field is swept ONLY in the payload where canonical UDMI
+    # 1.5.2 permits it: units in metadata point models, present_value in pointset
+    # event points (model_pointset_point.json / events_pointset_point.json, both
+    # additionalProperties:false). A blank field in the OTHER payload is an
+    # illegal property the structural pass already flags with the correct
+    # "remove it" remediation — re-flagging it here would double the blocking
+    # count with contradictory register/publisher advice.
+    for payload_label, empty_issue_type, points_map, payload_present, field in (
+        ("Metadata", "metadata_validation", metadata_points, bool(metadata_payload), "units"),
+        ("Pointset", "pointset_validation", pointset_points, bool(pointset_payload), "present_value"),
+    ):
+        if not payload_present:
+            continue
+        for empty_point in sorted(points_map):
+            entry = points_map[empty_point]
+            if not isinstance(entry, dict):
+                continue  # non-dict point entries are already reported structurally
+            if field not in entry or not _is_blank_value(entry[field]):
+                continue
+            value = entry[field]
+            description = (
+                f"{payload_label} point {empty_point} carries an empty {field} value; "
+                "the field is present but blank."
+            )
+            expected_value = "a non-empty value"
+            if field == "units":
+                register_unit = expected_units.get(empty_point)
+                if register_unit and _canonical_unit(register_unit):
+                    description += f" The register expects {register_unit}."
+                    expected_value = str(register_unit)
+                suggested_action = (
+                    "Set the point's units in the device metadata, or remove the point "
+                    "if it is not configured."
+                )
+            else:
+                suggested_action = (
+                    "Link the point to its data source so the publisher reports a real "
+                    "value, then re-run."
+                )
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type=empty_issue_type,
+                    severity="high",
+                    description=description,
+                    point_name=str(empty_point),
+                    expected_value=expected_value,
+                    observed_value="null" if value is None else f'"{value}"',
+                    suggested_action=suggested_action,
                     raw_evidence_uri=raw_evidence_uri,
                 )
             )

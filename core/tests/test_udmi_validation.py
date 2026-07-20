@@ -723,6 +723,11 @@ class UnitMatchTests(unittest.TestCase):
         self.assertEqual(len(missing), 1)
         self.assertEqual(missing[0].expected_value, "amperes")
         self.assertEqual(missing[0].observed_value, "missing")
+        # An ABSENT units key is the "does not declare units" case only — the
+        # present-but-empty message must NOT also fire.
+        self.assertNotIn(
+            "carries an empty units value", " ".join(issue.description for issue in issues)
+        )
 
     def test_explicit_no_units_metadata_still_mismatches_a_numeric_register_unit(self) -> None:
         # "no_units" is a real observed declaration, not an absent unit: a
@@ -741,6 +746,191 @@ class UnitMatchTests(unittest.TestCase):
         descriptions = " ".join(issue.description for issue in issues)
         self.assertIn("does not match the expected register unit", descriptions)
         self.assertNotIn("should be numeric", descriptions)
+
+
+class EmptyValueTests(unittest.TestCase):
+    """Field review 2026-07-20 (item 9): units/present_value present-but-blank.
+
+    A field that EXISTS but is empty ("", null, or whitespace) is a real fault
+    (a point never linked to its data source), reported distinctly from the
+    absent-field checks, scoped to units + present_value across both payloads.
+    """
+
+    def _empty(self, issues: list, fragment: str) -> list:
+        return [issue for issue in issues if f"carries an empty {fragment} value" in issue.description]
+
+    def test_metadata_empty_units_string_is_flagged_with_register_expectation(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"phase_1_line_current_sensor": {"units": ""}}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "units")
+        self.assertEqual(len(empty), 1)
+        self.assertTrue(empty[0].issue_id.startswith("UDMI-MD"))
+        self.assertEqual(empty[0].severity, "high")
+        self.assertEqual(empty[0].point_name, "phase_1_line_current_sensor")
+        self.assertEqual(empty[0].observed_value, '""')
+        self.assertEqual(empty[0].expected_value, "amperes")
+        self.assertIn("The register expects amperes.", empty[0].description)
+        self.assertNotIn(
+            "does not declare units", " ".join(issue.description for issue in issues)
+        )
+
+    def test_metadata_null_units_is_flagged_and_observed_reads_null(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"phase_1_line_current_sensor": {"units": None}}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "units")
+        self.assertEqual(len(empty), 1)
+        self.assertEqual(empty[0].observed_value, "null")
+        self.assertNotIn(
+            "does not declare units", " ".join(issue.description for issue in issues)
+        )
+
+    def test_metadata_whitespace_units_is_flagged(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"phase_1_line_current_sensor": {"units": "   "}}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "units")
+        self.assertEqual(len(empty), 1)
+        self.assertEqual(empty[0].observed_value, '"   "')
+
+    def test_unlinked_sensor_empty_units_without_register_expectation_is_flagged(self) -> None:
+        # A point the register carries no expected unit for (a sensor never
+        # linked to the register) still trips the empty-value check.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(units={}),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"spare_sensor": {"units": ""}}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "units")
+        self.assertEqual(len(empty), 1)
+        self.assertEqual(empty[0].point_name, "spare_sensor")
+        self.assertEqual(empty[0].expected_value, "a non-empty value")
+        self.assertNotIn("The register expects", empty[0].description)
+
+    def test_pointset_null_present_value_is_flagged(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(),
+                "pointset_payload": _pointset(
+                    points={"phase_1_line_current_sensor": {"present_value": None}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "present_value")
+        self.assertEqual(len(empty), 1)
+        self.assertTrue(empty[0].issue_id.startswith("UDMI-PS"))
+        self.assertEqual(empty[0].severity, "high")
+        self.assertEqual(empty[0].observed_value, "null")
+
+    def test_pointset_empty_present_value_reroutes_away_from_numeric_complaint(self) -> None:
+        # "" against a numeric metadata unit must report as the precise
+        # empty-value fault, NOT the confusing critical "should be numeric".
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(),
+                "pointset_payload": _pointset(
+                    points={"phase_1_line_current_sensor": {"present_value": ""}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "present_value")
+        self.assertEqual(len(empty), 1)
+        self.assertEqual(empty[0].observed_value, '""')
+        self.assertNotIn(
+            "should be numeric", " ".join(issue.description for issue in issues)
+        )
+
+    def test_pointset_whitespace_present_value_is_flagged(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(),
+                "pointset_payload": _pointset(
+                    points={"phase_1_line_current_sensor": {"present_value": "   "}}
+                ),
+            }
+        )
+        empty = self._empty(issues, "present_value")
+        self.assertEqual(len(empty), 1)
+        self.assertEqual(empty[0].observed_value, '"   "')
+        self.assertNotIn(
+            "should be numeric", " ".join(issue.description for issue in issues)
+        )
+
+    def test_real_present_values_are_never_read_as_empty(self) -> None:
+        # 0, 0.0, False and a non-blank string are real observations, not empty.
+        for real_value in (0, 0.0, False, "ok"):
+            with self.subTest(value=real_value):
+                issues = _issues(
+                    {
+                        "expected_schedule": _schedule(),
+                        "metadata_payload": _metadata(),
+                        "pointset_payload": _pointset(
+                            points={"phase_1_line_current_sensor": {"present_value": real_value}}
+                        ),
+                    }
+                )
+                self.assertFalse(self._empty(issues, "present_value"))
+
+    def test_empty_value_checks_apply_to_multi_asset_entries(self) -> None:
+        issues = _issues(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": _schedule(),
+                        "metadata_payload": _metadata(),
+                        "pointset_payload": _pointset(
+                            points={"phase_1_line_current_sensor": {"present_value": None}}
+                        ),
+                    }
+                ]
+            }
+        )
+        self.assertEqual(len(self._empty(issues, "present_value")), 1)
+
+    def test_illegal_field_blank_is_not_double_flagged_by_the_empty_sweep(self) -> None:
+        # units in a POINTSET event point and present_value in a METADATA point
+        # are illegal per canonical UDMI 1.5.2 (additionalProperties:false); the
+        # structural pass already flags them. The empty-value sweep must NOT add
+        # a second issue with the opposite (register/publisher) remediation.
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"phase_1_line_current_sensor": {"units": "amperes", "present_value": ""}}}
+                ),
+                "pointset_payload": _pointset(
+                    points={"phase_1_line_current_sensor": {"present_value": 1.2, "units": ""}}
+                ),
+            }
+        )
+        # No empty-value issue on the illegal side of either payload.
+        self.assertFalse(self._empty(issues, "present_value"))  # illegal in metadata
+        self.assertFalse(self._empty(issues, "units"))  # illegal in pointset
+        # The structural pass still reports the stray fields as not allowed.
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertIn("is not allowed", descriptions)
 
 
 class MetadataPointCoverageTests(unittest.TestCase):

@@ -8,6 +8,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from pydantic import BaseModel, Field
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.rbac import Role
 
@@ -76,6 +77,61 @@ def list_reports() -> ReportListResponse:
     for run in service.list_runs(job_types=REPORT_JOB_TYPES):
         reports.append(_to_report_summary(run.run_id))
     return ReportListResponse(reports=reports)
+
+
+class ReportExportRequest(BaseModel):
+    # Non-empty so an empty selection 422s instead of yielding an empty zip. The
+    # ids ride in a JSON body, not repeated query params, so an unbounded
+    # selection never hits the request-line limits uvicorn/h11 and proxies cap.
+    report_ids: list[str] = Field(min_length=1)
+
+
+# Declared BEFORE /{report_id}: kept ahead of the path route so the literal
+# /export can never be swallowed as report_id="export" (defensive — a POST could
+# not match a GET /{report_id} anyway). Multiple ticked reports become ONE zip so
+# the browser fires a single download (its multiple-download throttle otherwise
+# keeps only one file); a single report keeps downloading directly via
+# /{report_id}/download.
+@router.post("/export", dependencies=[Depends(require_viewer)])
+def export_reports(request: ReportExportRequest) -> Response:
+    # Resolve every id up front (order-preserving dedupe, a twice-ticked report
+    # yields one member) so an unknown id 404s the WHOLE request rather than
+    # returning a silently partial archive (honesty rule). Each member reuses the
+    # exact per-report path so its bytes equal that report's own download.
+    seen: set[str] = set()
+    runs: list[object] = []
+    for candidate_id in request.report_ids:
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        try:
+            run = service.get_run(candidate_id)
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=404, detail=f"Report '{candidate_id}' was not found."
+            ) from error
+        if run.job_type != "report_generation":
+            raise HTTPException(status_code=404, detail=f"Report '{candidate_id}' was not found.")
+        runs.append(run)
+
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        for run in runs:
+            report = _to_report_summary(run.run_id)
+            content, _media_type = _build_report_artifact(run, report.output_format)
+            _persist_integrity(run, content)
+            # Pinned to the zip epoch (same as _normalize_zip_bytes) so the
+            # bundle is byte-reproducible; member name embeds the run id, so
+            # names are unique and never collide.
+            info = ZipInfo(filename=report.file_name, date_time=_ZIP_EPOCH)
+            info.compress_type = ZIP_DEFLATED
+            info.external_attr = 0o600 << 16
+            archive.writestr(info, content)
+    return Response(
+        content=buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="reports_export.zip"'},
+    )
 
 
 @router.get("/{report_id}", response_model=ReportSummary, dependencies=[Depends(require_viewer)])
