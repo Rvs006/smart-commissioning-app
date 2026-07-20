@@ -70,8 +70,15 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-20 — **v0.1.11 through v0.1.18
-  are released** (`main`, CI green, workflow-built boot-smoked portable
+- **Current handoff**: status as of 2026-07-20 (evening) — **v0.1.11 through
+  v0.1.19 are released**. v0.1.19 (PR #89) closes round 2 of the field
+  review: empty units/present_value flagged as real high-severity issues
+  (empty != absent; per-payload legality; 0/false never flag) and Reports
+  "Export selected" bundling multiple reports into one zip via
+  POST /reports/export (Codex P2: ids in a validated JSON body, never the
+  request line). Recorded, no change: the fast2/phase2-style typo pair sits
+  below the 0.8 misname threshold — field decision "leave it".
+  Earlier same day: **v0.1.18** (`main`, CI green, workflow-built boot-smoked portable
   bundles attached; exe SHA-256 lives in each Release's notes, deliberately
   not in repo files; v0.1.18 is cut from this commit and publishes
   immediately after it). v0.1.18 (PR #88) is the 2026-07-20 live field
