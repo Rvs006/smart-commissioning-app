@@ -133,6 +133,32 @@ class RunLifecycleTests(SqliteTestCase):
         for issue in fetched["issues"]:
             self.assertEqual(list(issue), ISSUE_KEYS)
 
+    def test_terminal_run_is_not_resurrected_by_a_late_progress_write(self) -> None:
+        # REGRESSION: a still-in-flight engine unit's best-effort progress write
+        # (status='running') could land AFTER the terminal write and flip a failed
+        # run back to running, erasing the vetted error_message and fossilizing the
+        # run. Once terminal, a non-terminal status write must be dropped.
+        run_id = self.store.create_run(
+            project_id="demo-project", site_id="demo-site", job_type="bacnet_discovery"
+        )["run_id"]
+        self.store.update_run_status(
+            run_id, status="failed", progress_percent=100, error_message="transport dead"
+        )
+
+        # A late 'running' progress write is a no-op: status, message, progress hold.
+        record = self.store.update_run_status(
+            run_id, status="running", stage="engine_running", progress_percent=60
+        )
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["error_message"], "transport dead")
+        self.assertEqual(record["progress_percent"], 100)
+        self.assertEqual(self.store.get_run(run_id)["status"], "failed")
+
+        # A terminal write still wins over a terminal run (last terminal writer),
+        # so the persist-failure / cancel paths are unaffected.
+        record = self.store.update_run_status(run_id, status="cancelled", error_message=None)
+        self.assertEqual(record["status"], "cancelled")
+
     def test_replace_issues_preserves_order_on_rewrite(self) -> None:
         run_id = self.store.create_run(
             project_id="demo-project", site_id="demo-site", job_type="mqtt_config_publish"

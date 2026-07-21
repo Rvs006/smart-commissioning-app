@@ -959,6 +959,13 @@ export function startMqttConfigPublishRun(input: {
     body: JSON.stringify({
       job_type: "mqtt_config_publish",
       parameters: {
+        // A live-broker publish is a real network write, so the backend gates it
+        // behind the authorization contract (403 without it). The operator's
+        // explicit "publish through the broker" choice plus the confirm checkbox
+        // IS that authorization; the backend still stamps the real principal.
+        // Boolean shorthand only — the frontend never fabricates a
+        // scan_authorization block. Validate-only (no broker) needs none.
+        authorized: Boolean(input.useLiveBroker),
         confirmed: input.confirmed,
         expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
         expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",

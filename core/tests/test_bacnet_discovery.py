@@ -425,10 +425,10 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
         self.assertEqual(summary["discovered_assets"][0]["device_instance"], 2050)
         self.assertEqual(backend.who_is_calls, [(2000, 3000, None)])
 
-    def test_cancellation_yields_partial_and_cancelled_status(self) -> None:
+    def test_cancellation_is_partial_retains_heard_devices_and_stops_reads(self) -> None:
         store = FakeRunStore()
-        # Cancel as soon as the first device unit runs, so subsequent device
-        # dispatches stop early (concurrency=1 makes dispatch serial).
+        # Cancel as soon as the first device's object-list read runs; concurrency=1
+        # makes dispatch serial so the remaining devices are never dispatched.
         cancel_state = {"cancel": False}
 
         class CancellingBackend(RecordingSimBackend):
@@ -447,10 +447,21 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
         self.assertEqual(result["status"], "cancelled")
         summary = store.summary_calls[-1]
         self.assertTrue(summary.get("partial"))
-        # who_is still ran (cancellation observed during per-device phase), but
-        # not all three devices were processed -> partial results.
         self.assertEqual(len(backend.who_is_calls), 1)
-        self.assertLess(summary["device_count"], 3)
+        # REGRESSION (Stop discarded heard devices): every device the broadcast
+        # HEARD is retained, so a Stop never throws away a confirmed Who-Is
+        # discovery and expected_responding_count cannot contradict device_count.
+        self.assertEqual(summary["device_count"], 3)
+        assets = summary["discovered_assets"]
+        # The devices whose read unit never ran are marked heard-but-not-enriched —
+        # kept honestly, never faked as fully scanned.
+        heard_only = [a for a in assets if a.get("heard_not_enriched")]
+        self.assertGreaterEqual(len(heard_only), 1)
+        self.assertTrue(all(a["point_count"] == 0 for a in heard_only))
+        # Stop bit INSIDE the first device's per-point loop, so it read fewer than
+        # its full 3 points (cancellation is no longer only observed between
+        # devices).
+        self.assertLess(summary["point_count"], 6)
 
     def test_per_point_read_error_does_not_abort_device(self) -> None:
         store = FakeRunStore()
@@ -475,6 +486,242 @@ class BacnetDiscoveryEngineTests(unittest.TestCase):
         failed = next(r for r in point_rows if r["point_id"] == "analog-input,2")
         self.assertEqual(failed["observed_value"], {})
         self.assertEqual(failed["attributes"]["read_error"], "present_value_read_failed")
+
+    def test_directed_lane_does_not_deadlock_with_many_silent_targets(self) -> None:
+        # REGRESSION (2026-07-21 field hang): probe units used to re-enter the
+        # throttle via _who_is, so once unique silent addresses reached
+        # max_concurrency the dispatch loop drained every permit and every probe
+        # blocked on a nested acquire -> permanent deadlock. Bounded by wait_for so
+        # a reintroduced deadlock FAILS CI (TimeoutError) instead of hanging it.
+        store = FakeRunStore()
+        targets = [
+            BacnetTarget(address=f"10.10.0.{i}", device_instance=9000 + i, asset_id=f"GHOST-{i}")
+            for i in range(1, 6)  # 5 unique silent addresses > max_concurrency=2
+        ]
+        # Empty fixture (nothing answers broadcast) and no directed answers, so all
+        # 5 register addresses are genuinely silent — the directed-lane deadlock case.
+        backend = DirectedSimBackend(devices=[], directed={})
+        params = {
+            **_AUTHORIZED,
+            PARAM_BACNET_TARGETS: [t.as_dict() for t in targets],
+            "device_instance_low": 9000,
+            "device_instance_high": 9999,
+        }
+        ctx = _ctx(
+            store,
+            parameters=params,
+            throttle=ThrottleConfig(max_concurrency=2, rate_limit_per_sec=None),
+        )
+        engine = make_bacnet_discovery_engine(backend)
+
+        async def main() -> Any:
+            return await asyncio.wait_for(run_engine_async(ctx, engine), timeout=10)
+
+        result = asyncio.run(main())
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        self.assertEqual(summary["lanes"][LANE_DIRECTED]["probe_count"], 5)
+        # All 5 were probed and honestly reported as sent-but-silent.
+        rows = summary["expected_not_responding"]
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(all(r["directed_probe_sent"] for r in rows))
+
+    def test_one_device_object_list_failure_does_not_fail_the_run(self) -> None:
+        # REGRESSION: one device's failed object-list read fell through gather as a
+        # Base-Exception and failed the ENTIRE run, discarding every other device.
+        store = FakeRunStore()
+
+        class _ApduAbort(BaseException):
+            """Stand-in for bacpypes3 ErrorRejectAbortNack (which subclasses BaseException)."""
+
+        class OneBadObjectList(RecordingSimBackend):
+            async def read_object_list(self, device: Any) -> list[dict[str, Any]]:
+                if device.get("device_instance") == 1002:
+                    raise _ApduAbort("object-list exceeds APDU size")
+                return await super().read_object_list(device)
+
+        backend = OneBadObjectList()
+        result, persisted = self._run(store, _ctx(store), backend)
+
+        self.assertEqual(result["status"], "succeeded")
+        summary = store.summary_calls[-1]
+        # Every heard device survives; the failed one is marked, not dropped, not faked.
+        instances = {a["device_instance"] for a in summary["discovered_assets"]}
+        self.assertEqual(instances, {1001, 1002, 2050})
+        bad = next(a for a in summary["discovered_assets"] if a["device_instance"] == 1002)
+        self.assertEqual(bad["point_count"], 0)
+        _, records = persisted[0]
+        bad_row = next(
+            r
+            for r in records
+            if r.get("device_type") == "bacnet_device" and r["attributes"]["device_instance"] == 1002
+        )
+        self.assertTrue(bad_row["attributes"]["object_list_read_failed"])
+        issues = [i for i in store.issues_calls[-1] if i.issue_type == "bacnet_object_list_unreadable"]
+        self.assertEqual(len(issues), 1)
+
+    def _many_object_device(self, count: int) -> list[dict[str, Any]]:
+        objects = [
+            {
+                "object_identifier": f"analog-input,{i}",
+                "object_name": f"AI{i}",
+                "object_type": "analog-input",
+                "units": None,
+                "present_value": float(i),
+            }
+            for i in range(1, count + 1)
+        ]
+        return [{"device_instance": 1001, "address": "10.10.0.11:47808", "name": "Big", "objects": objects}]
+
+    def test_consecutive_point_read_failures_abort_only_that_device(self) -> None:
+        store = FakeRunStore()
+
+        class AllReadsFail(SimulatedBacnetBackend):
+            async def read_present_value(self, device: Any, obj: Any) -> Any:
+                raise RuntimeError("device answers Who-Is but refuses reads")
+
+        backend = AllReadsFail(self._many_object_device(8))
+        params = dict(_AUTHORIZED)
+        params.update({"device_instance_low": 1001, "device_instance_high": 1001})
+        result, persisted = self._run(store, _ctx(store, parameters=params), backend)
+
+        self.assertEqual(result["status"], "succeeded")
+        _, records = persisted[0]
+        point_rows = [r for r in records if "point_id" in r]
+        # Bailed after exactly 5 consecutive failures: 5 read_error rows; the other
+        # 3 points are ABSENT (never attempted, never recorded as failures).
+        self.assertEqual(len(point_rows), 5)
+        self.assertTrue(
+            all(r["attributes"].get("read_error") == "present_value_read_failed" for r in point_rows)
+        )
+        device_row = next(r for r in records if r.get("device_type") == "bacnet_device")
+        aborted = device_row["attributes"]["point_reads_aborted"]
+        self.assertEqual(aborted["after_consecutive_failures"], 5)
+        self.assertEqual(aborted["points_not_attempted"], 3)
+        issues = [i for i in store.issues_calls[-1] if i.issue_type == "bacnet_point_reads_aborted"]
+        self.assertEqual(len(issues), 1)
+
+    def test_a_mid_stream_read_success_resets_the_failure_counter(self) -> None:
+        store = FakeRunStore()
+
+        class FlakyThenFine(SimulatedBacnetBackend):
+            async def read_present_value(self, device: Any, obj: Any) -> Any:
+                # Fail 1-4, succeed on 5 (resets the run of failures), fail 6-8: 7
+                # failures total but never 5 CONSECUTIVE, so the device is not aborted.
+                if obj.get("object_identifier") == "analog-input,5":
+                    return await super().read_present_value(device, obj)
+                raise RuntimeError("transient")
+
+        backend = FlakyThenFine(self._many_object_device(8))
+        params = dict(_AUTHORIZED)
+        params.update({"device_instance_low": 1001, "device_instance_high": 1001})
+        result, persisted = self._run(store, _ctx(store, parameters=params), backend)
+
+        self.assertEqual(result["status"], "succeeded")
+        _, records = persisted[0]
+        point_rows = [r for r in records if "point_id" in r]
+        self.assertEqual(len(point_rows), 8)
+        device_row = next(r for r in records if r.get("device_type") == "bacnet_device")
+        self.assertNotIn("point_reads_aborted", device_row["attributes"])
+
+    def test_stop_inside_point_loop_marks_the_truncated_device(self) -> None:
+        # A Stop that bites mid-point-loop keeps the points read so far, but the
+        # device row must record WHY it has fewer points than it has objects — else
+        # it is indistinguishable from a device that genuinely has that few readable
+        # points (unlike heard_only / object_list_error / reads_aborted, each of
+        # which marks itself).
+        store = FakeRunStore()
+        cancel_state = {"cancel": False}
+
+        class TruncatingBackend(SimulatedBacnetBackend):
+            def __init__(self, devices: Any) -> None:
+                super().__init__(devices)
+                self._reads = 0
+
+            async def read_present_value(self, device: Any, obj: Any) -> Any:
+                self._reads += 1
+                if self._reads >= 2:
+                    cancel_state["cancel"] = True
+                return await super().read_present_value(device, obj)
+
+        backend = TruncatingBackend(self._many_object_device(6))
+        params = dict(_AUTHORIZED)
+        params.update({"device_instance_low": 1001, "device_instance_high": 1001})
+        ctx = _ctx(store, parameters=params, is_cancelled=lambda: cancel_state["cancel"])
+        result, persisted = self._run(store, ctx, backend)
+
+        self.assertEqual(result["status"], "cancelled")
+        # Read 2 of the device's 6 points before Stop; the asset keeps the honest
+        # partial count and the row is marked truncated with the count not attempted.
+        asset = store.summary_calls[-1]["discovered_assets"][0]
+        self.assertEqual(asset["point_count"], 2)
+        _, records = persisted[0]
+        device_row = next(r for r in records if r.get("device_type") == "bacnet_device")
+        truncated = device_row["attributes"]["point_reads_truncated"]
+        self.assertEqual(truncated["points_not_attempted"], 4)
+
+    def test_worker_time_limit_interrupt_is_not_swallowed_as_a_read_error(self) -> None:
+        # A dramatiq Interrupt (e.g. TimeLimitExceeded) subclasses BaseException, so
+        # the per-point guard catches it — but it must be RE-RAISED, never recorded
+        # as a fake read_error, or the worker time limit is silently disarmed
+        # (dramatiq raises it exactly once) and the run stranded. core cannot import
+        # dramatiq, so the class is matched by its top-level module name.
+        store = FakeRunStore()
+
+        class _FakeTimeLimitExceeded(BaseException):
+            pass
+
+        _FakeTimeLimitExceeded.__module__ = "dramatiq.middleware.time_limit"
+
+        class TimeLimitBackend(SimulatedBacnetBackend):
+            async def read_present_value(self, device: Any, obj: Any) -> Any:
+                raise _FakeTimeLimitExceeded("time limit exceeded")
+
+        backend = TimeLimitBackend(self._many_object_device(6))
+        params = dict(_AUTHORIZED)
+        params.update({"device_instance_low": 1001, "device_instance_high": 1001})
+        engine = make_bacnet_discovery_engine(backend)
+        with self.assertRaises(_FakeTimeLimitExceeded):
+            asyncio.run(engine(_ctx(store, parameters=params)))
+
+    def test_scan_connect_timeout_reaches_the_bacpypes3_backend(self) -> None:
+        from smart_commissioning_core.engines.bacnet_discovery import _select_backend, _timeout_s
+
+        # The route accepts scan_connect_timeout_s; before the fallback the BACnet
+        # backend read only connect_timeout_s (which nothing sets), so the knob was dead.
+        self.assertEqual(_timeout_s({"scan_connect_timeout_s": 2}), 2.0)
+        # Legacy key still wins when both are present.
+        self.assertEqual(_timeout_s({"connect_timeout_s": 3, "scan_connect_timeout_s": 2}), 3.0)
+        # Default unchanged so a bare run is byte-identical.
+        self.assertEqual(_timeout_s({}), 5.0)
+        # Tolerant like the dispatch seam's _positive_float (which sanitizes this
+        # same key): a form-derived string or a non-positive value falls back to the
+        # default instead of raising and failing the whole run, or reaching who_is as
+        # a negative timeout. A valid narrower key still steps in past a bad wider one.
+        self.assertEqual(_timeout_s({"scan_connect_timeout_s": "5s"}), 5.0)
+        self.assertEqual(_timeout_s({"scan_connect_timeout_s": -3}), 5.0)
+        self.assertEqual(_timeout_s({"connect_timeout_s": 0, "scan_connect_timeout_s": 2}), 2.0)
+        self.assertEqual(_timeout_s({"connect_timeout_s": "abc", "scan_connect_timeout_s": 2}), 2.0)
+        backend = _select_backend(
+            {"bacnet_backend": "bacpypes3", "local_address": "192.0.2.10/24", "scan_connect_timeout_s": 2},
+            None,
+            dry_run=False,
+        )
+        self.assertEqual(backend._timeout_s, 2.0)
+
+    def test_phase_two_writes_intermediate_progress(self) -> None:
+        store = FakeRunStore()
+        backend = RecordingSimBackend()
+        self._run(store, _ctx(store), backend)
+        # A per-device progress write lands BEFORE the terminal flip, so the monitor
+        # can tell a working scan from a hung one (the bar previously sat at 15% for
+        # the whole scan).
+        progress_writes = [c for c in store.summary_calls if "progress" in c]
+        self.assertTrue(progress_writes)
+        last = progress_writes[-1]["progress"]
+        self.assertEqual(last["devices_total"], 3)
+        self.assertEqual(last["devices_done"], 3)
+        self.assertEqual(last["points_read"], 6)
 
     def test_non_dry_run_defaults_to_real_backend_and_never_returns_fixtures(self) -> None:
         # A direct non-dry processor call follows the same honesty rule as the

@@ -267,7 +267,13 @@ class MqttClient:
                 self._require_socket().settimeout(remaining)
                 packet_type, payload = self._read_packet()
             except TimeoutError:
-                return None
+                # A quiet slice at a packet BOUNDARY (no byte of a packet consumed).
+                # Keep waiting until the caller's deadline instead of abandoning the
+                # whole window on the first silence — a caller asking for a 30s
+                # pointset wait must not be cut to the ~5s connect-timeout slice.
+                # (A timeout MID-packet is a different, real fault: _read_packet
+                # raises MqttTransportError for that, which is NOT caught here.)
+                continue
             if packet_type & 0xF0 == 0x60:
                 message = self._complete_qos2(payload)
                 if message is not None:
@@ -475,11 +481,27 @@ class MqttClient:
 
     def _read_packet(self) -> tuple[int, bytes]:
         sock = self._require_socket()
-        packet_type = sock.recv(1)
+        packet_type = sock.recv(1)  # times out at a BOUNDARY -> caller may keep waiting
         if not packet_type:
             raise MqttTransportError("MQTT broker closed the connection.")
-        remaining_length = _read_remaining_length(sock)
-        payload = _recv_exact(sock, remaining_length)
+        # A packet has started. Its remaining bytes MUST be read to completion: if a
+        # short poll-slice timeout fired part-way through (a multi-KB retained UDMI
+        # payload split across TCP segments is the field case), returning to the poll
+        # loop would leave the stream mid-packet and the next read would parse
+        # payload bytes as a new fixed header — fabricating packets or aborting a
+        # healthy capture. Give the remainder a full read timeout; a timeout even
+        # then is a real stall, surfaced as a broker error (never silent desync).
+        previous_timeout = sock.gettimeout()
+        sock.settimeout(max(self.settings.timeout_seconds, previous_timeout or 0.0))
+        try:
+            remaining_length = _read_remaining_length(sock)
+            payload = _recv_exact(sock, remaining_length)
+        except TimeoutError as error:
+            raise MqttTransportError(
+                "MQTT broker sent a partial packet and then stopped responding."
+            ) from error
+        finally:
+            sock.settimeout(previous_timeout)
         return packet_type[0], payload
 
     def _require_socket(self) -> socket.socket:

@@ -88,5 +88,31 @@ class ParseCaptureSecondsTests(unittest.TestCase):
                 self.assertEqual(parse_capture_seconds(value, default=30.0), 30.0)
 
 
+class BrokerErrorStatusTests(unittest.TestCase):
+    """The coarse status label must not send an operator down the wrong path."""
+
+    def test_subscription_rejection_is_not_labelled_unreachable(self) -> None:
+        from smart_commissioning_core.mqtt_settings import _broker_error_status
+        from smart_commissioning_core.mqtt_transport import MqttTransportError
+
+        # SUBACK 0x80 (an ACL denying the topic filter): the broker was reached and
+        # authenticated, so "broker_unreachable" would send the operator to check
+        # firewalls/hosts/ports instead of the broker's topic ACL.
+        status = _broker_error_status(MqttTransportError("MQTT broker rejected the subscription."))
+        self.assertEqual(status, "subscription_rejected")
+
+    def test_labels_that_must_stay_stable(self) -> None:
+        from smart_commissioning_core.mqtt_settings import _broker_error_status
+
+        self.assertEqual(_broker_error_status(Exception("TLS handshake failed")), "tls_error")
+        self.assertEqual(_broker_error_status(Exception("bad username or password")), "authentication_error")
+        # A SUBACK acknowledgement timeout still reads as a timeout, not a rejection.
+        self.assertEqual(
+            _broker_error_status(Exception("MQTT broker timed out acknowledging the subscription.")),
+            "broker_timeout",
+        )
+        self.assertEqual(_broker_error_status(Exception("connection refused")), "broker_unreachable")
+
+
 if __name__ == "__main__":
     unittest.main()

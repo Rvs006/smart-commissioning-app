@@ -163,22 +163,29 @@ def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) 
 # (discover_mqtt, validate_udmi_payloads) additionally catch dramatiq's
 # Interrupt via _fail_interrupted_run so a time-limit kill leaves a real
 # 'failed' run, not a stranded 'running' row.
-# ponytail: discover_ip_range / discover_bacnet share the Interrupt hole but
-# their scans are bounded, so hitting the 1h ceiling there means something is
-# already very wrong; guard them too if long captures ever land there.
+# discover_ip_range / discover_bacnet catch dramatiq's Interrupt (a BaseException
+# that bypasses run_engine's `except Exception`) so a time-limit kill records a real
+# 'failed' run rather than a row stranded at 'running' that the marker-aware startup
+# sweep never reclaims. A BACnet scan against large object-lists with dead points is
+# not as bounded as once assumed, so it can reach the 1h ceiling.
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
 def discover_ip_range(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting IP discovery", extra={"actor": "discover_ip_range"})
-        process_ip_discovery_run(
-            run_id,
-            parameters,
-            run_store=run_store,
-            execution_mode="dramatiq_worker",
-            throttle=_build_throttle(parameters),
-            dry_run=_is_dry_run(parameters),
-            persist_records=_persist_devices,
-        )
+        try:
+            process_ip_discovery_run(
+                run_id,
+                parameters,
+                run_store=run_store,
+                execution_mode="dramatiq_worker",
+                throttle=_build_throttle(parameters),
+                dry_run=_is_dry_run(parameters),
+                persist_records=_persist_devices,
+            )
+        except Interrupt as interrupt:
+            # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
+            _fail_interrupted_run(run_id, interrupt, stage="engine_failed")
+            raise
         logger.info("Finished IP discovery", extra={"actor": "discover_ip_range"})
 
 
@@ -189,16 +196,21 @@ def discover_bacnet(run_id: str, parameters: dict) -> None:
         # Non-dry runs default to the UNVALIDATED real bacpypes3 path; simulation
         # is dry-run/test-only. The engine stamps result_summary['backend'] so a
         # preview can never be mistaken for a real scan.
-        process_bacnet_discovery_run(
-            run_id,
-            parameters,
-            run_store=run_store,
-            execution_mode="dramatiq_worker",
-            throttle=_build_throttle(parameters),
-            dry_run=_is_dry_run(parameters),
-            persist_records=_persist_devices_and_points,
-            is_cancelled=make_cancel_checker(run_store, run_id),
-        )
+        try:
+            process_bacnet_discovery_run(
+                run_id,
+                parameters,
+                run_store=run_store,
+                execution_mode="dramatiq_worker",
+                throttle=_build_throttle(parameters),
+                dry_run=_is_dry_run(parameters),
+                persist_records=_persist_devices_and_points,
+                is_cancelled=make_cancel_checker(run_store, run_id),
+            )
+        except Interrupt as interrupt:
+            # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
+            _fail_interrupted_run(run_id, interrupt, stage="engine_failed")
+            raise
         logger.info("Finished BACnet discovery", extra={"actor": "discover_bacnet"})
 
 

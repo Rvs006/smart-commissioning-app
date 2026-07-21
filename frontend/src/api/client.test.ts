@@ -18,6 +18,7 @@ import {
   roleAtLeast,
   rollbackMqttConfigPublish,
   setApiKey,
+  startMqttConfigPublishRun,
   streamRunEvents,
   validateConfiguration,
   type ConfigurationSnapshot,
@@ -375,6 +376,44 @@ describe("run and discovery API functions", () => {
     const fetchMock = stubFetch(jsonResponse({ reports: [] }));
     await listReports();
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/reports");
+  });
+
+  it("startMqttConfigPublishRun authorizes a live-broker publish so the backend gate passes", async () => {
+    // The backend's _require_publish_authorization returns 403 for a live-broker
+    // publish that carries no authorization, so the UI must send it — otherwise
+    // the live-publish feature can never succeed. The explicit live-broker choice
+    // (plus the confirm checkbox) IS the authorization.
+    const fetchMock = stubFetch(
+      jsonResponse({ run_id: "r1", job_type: "mqtt_config_publish", status: "queued", message: "ok" }),
+    );
+    await startMqttConfigPublishRun({
+      confirmed: true,
+      payload: "{}",
+      topic: "site/asset/config",
+      useLiveBroker: true,
+    });
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      parameters: Record<string, unknown>;
+    };
+    expect(body.parameters.authorized).toBe(true);
+    expect(body.parameters.use_live_broker).toBe(true);
+  });
+
+  it("startMqttConfigPublishRun leaves a validate-only publish unauthorized (no broker write)", async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({ run_id: "r1", job_type: "mqtt_config_publish", status: "queued", message: "ok" }),
+    );
+    await startMqttConfigPublishRun({
+      confirmed: true,
+      payload: "{}",
+      topic: "site/asset/config",
+      useLiveBroker: false,
+    });
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+      parameters: Record<string, unknown>;
+    };
+    expect(body.parameters.authorized).toBe(false);
+    expect(body.parameters.use_live_broker).toBe(false);
   });
 
   it("rollbackMqttConfigPublish POSTs to the rollback route", async () => {

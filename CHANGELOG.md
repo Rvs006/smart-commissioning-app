@@ -5,6 +5,64 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The BACnet field hang is gone.** A live scan against a register with 16 or
+  more silent addresses could freeze at "engine running" indefinitely with
+  Stop ineffective (the 2026-07-21 on-site freeze, root-caused from packet
+  captures). The directed-probe lane was re-entering the shared concurrency
+  limiter and deadlocking; probes now run directly, so a 41-row silent
+  register completes in seconds.
+- **A scan can no longer hang forever waiting on a device.** Every BACnet
+  network read now has an explicit timeout, so a device that aborts a
+  too-large reply or never answers becomes a recorded read error instead of an
+  eternal wait. A device is abandoned after 5 consecutive dead reads rather
+  than grinding through every object, and one device's failed object-list read
+  no longer fails the whole run.
+- **Stop actually stops, mid-device.** Cancellation is checked inside the
+  per-point read loop, so a device with many dead points no longer holds Stop
+  hostage; points already read are kept, unread points are simply absent.
+  Devices heard on Who-Is but not yet read are retained when you Stop.
+- **The run monitor shows real progress.** The BACnet engine advances the bar
+  past the initial 15% and reports devices-done / total and points read, so a
+  working scan is distinguishable from a stuck one; the monitor shows
+  "X of Y devices" when available.
+- **MQTT capture honors its full window.** A bounded wait is no longer
+  truncated to the ~5-second connect timeout at the first quiet moment, a
+  mid-packet socket stall no longer desyncs the stream (which could fabricate
+  messages or falsely report the broker unreachable), and a subscription
+  rejected by a broker ACL is now labelled `subscription_rejected` instead of
+  `broker_unreachable`.
+- **Fewer runs can strand at "queued" or "running".** Worker discovery actors
+  now catch the time-limit interrupt and record a real "failed"; a malformed
+  `REDIS_URL` surfaces as a queue-unavailable fallback; a 403-rejected live
+  MQTT config publish is checked before the run is created; and a late
+  non-terminal status write can no longer reopen a finished run.
+- **IP discovery Stop is honest.** Cutting a host's port batch short no longer
+  fabricates a "missing expected ports" verdict for ports that were never
+  probed.
+- **The run-progress event stream is more robust:** it reads the run off the
+  event loop and survives a transient store error, so a long inline-run write
+  can no longer stall other requests (including Stop) or abort the stream; and
+  the monitor no longer freezes on a stream that connects but never sends a
+  frame (it falls back to polling until frames arrive).
+- **UDMI results Verdict filter** now filters by the real verdict
+  (Pass / Pass with notes / Non-compliant / Offline / No verdict) instead of
+  the row's colour tone, which had hidden every Non-compliant row behind
+  "Fail". The payload compare shows the captured payload when one was observed
+  but the expected template is empty (instead of "not captured"), a
+  non-numeric capture Run time is rejected rather than silently made unbounded,
+  and the per-request BACnet timeout (`scan_connect_timeout_s`) now reaches the
+  engine.
+
+### Changed
+
+- **"Run history" is now the consistent name** across the app — the homepage
+  Recent runs card and the live run monitor both use it and link to
+  Operate → Run History (previously "Jobs / job history").
+
 ## [0.1.19] - 2026-07-20
 
 ### Added

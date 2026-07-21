@@ -1,5 +1,6 @@
 import { ChangeEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   cancelRun,
   createImport,
@@ -65,7 +66,14 @@ import {
   unexpectedOpenPorts,
   validationMetrics,
 } from "./discoveryRows";
-import { formatAbsoluteTime, formatRelativeTime, isTerminalStatus, toHealthState } from "./runFormat";
+import {
+  formatAbsoluteTime,
+  formatRelativeTime,
+  formatRunProgress,
+  isTerminalStatus,
+  runPollInterval,
+  toHealthState,
+} from "./runFormat";
 import { alignPayloadDiff, isPlainObject, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
@@ -350,12 +358,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled: Boolean(activeRun) && activeRun?.kind === "validation",
     queryFn: () => getValidationRun(activeRun?.runId ?? ""),
     queryKey: ["validation-run", activeRun?.runId],
-    refetchInterval: (query) => {
-      if (isTerminalStatus(query.state.data?.status) || runEvents.reachedTerminal) {
-        return false;
-      }
-      return runEvents.sseActive ? false : 1500;
-    },
+    refetchInterval: (query) =>
+      runPollInterval({
+        reachedTerminal: runEvents.reachedTerminal,
+        recordTerminal: isTerminalStatus(query.state.data?.status),
+        sseDriving,
+      }),
   });
 
   // Discovery run monitor — same polling contract, against the discovery
@@ -364,12 +372,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled: Boolean(activeRun) && activeRun?.kind === "discovery",
     queryFn: () => getDiscoveryRun(activeRun?.runId ?? ""),
     queryKey: ["discovery-run", activeRun?.runId],
-    refetchInterval: (query) => {
-      if (isTerminalStatus(query.state.data?.status) || runEvents.reachedTerminal) {
-        return false;
-      }
-      return runEvents.sseActive ? false : 1500;
-    },
+    refetchInterval: (query) =>
+      runPollInterval({
+        reachedTerminal: runEvents.reachedTerminal,
+        recordTerminal: isTerminalStatus(query.state.data?.status),
+        sseDriving,
+      }),
   });
 
   const activeRunRecord =
@@ -778,6 +786,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     onSuccess: (result, actionIndex) => {
       const action = module.runActions[actionIndex];
       if ("run_id" in result) {
+        // The new run has been ACCEPTED and is about to take over the single run
+        // monitor. Only now cancel a still-live REHYDRATED run being monitored,
+        // so the swap actually replaces it — never before the POST, where an
+        // invalid run-time typo or a rejected POST would strand a live capture
+        // with no reachable Stop and nothing started (the ITEM-4 orphan guard).
+        // Best-effort cooperative cancel: a fossilized run ignores it, a genuinely
+        // live one stops cleanly (keeps its partial data, still reports).
+        if (
+          (action?.kind === "discovery" || action?.kind === "validation") &&
+          activeRun?.restored &&
+          runIsActive
+        ) {
+          void cancelRun(activeRun.runId).catch(() => {});
+        }
         setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
         setLastReport(null);
         if (action?.kind === "discovery") {
@@ -1049,6 +1071,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           // Hidden row-shading tone (not in `columns`, so it never renders as a
           // cell): "pass" | "fail" | "" — sample/discovery rows never carry it.
           __tone: udmiVerdictTone(verdict) ?? "",
+          // Hidden verdict kind for the Verdict filter. On udmi the tone diverges
+          // from the verdict (Non-compliant is amber, Offline is red), so the
+          // filter must key off the real verdict, not the shading tone. "none"
+          // collapses to "" to match the filter's "no verdict" convention.
+          __verdict: verdict === "none" ? "" : verdict,
         };
       }),
     );
@@ -1225,8 +1252,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     visibleResultRows.length === 0
       ? null
       : (visibleResultRows.find(({ index }) => index === selectedResultIndex) ?? visibleResultRows[0]).row;
-  const resultDetails = selectedResult
-    ? buildResultDetailItems(module.route, selectedResult, usingLiveResults, mergedAssetGroups)
+  // In the grouped UDMI table a collapsed asset unmounts its child rows, so the
+  // inspector must not keep showing a hidden row's detail (ISSUE-4). Fall back to
+  // the empty state until the asset is re-expanded — selectedResult (and its
+  // index) is preserved, so re-expanding restores the detail, and the
+  // auto-expand-on-select effect still runs off selectedResult, not this.
+  const inspectorResult =
+    selectedResult && hasUdmiLiveResults && !expandedResultAssets.has(selectedResult.Asset)
+      ? null
+      : selectedResult;
+  const resultDetails = inspectorResult
+    ? buildResultDetailItems(module.route, inspectorResult, usingLiveResults, mergedAssetGroups)
     : [];
   // Group the visible UDMI rows by asset for the collapsible summary rows
   // (ITEM-7). Render-only over visibleResultRows, so child rows keep their
@@ -1259,8 +1295,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       current.has(selectedResultAsset) ? current : new Set(current).add(selectedResultAsset),
     );
   }, [hasUdmiLiveResults, selectedResultAsset]);
-  // Verdict-tone filter options, worded per route: MQTT discovery's pass/fail is
-  // register membership, other routes are the RAG pass/fail/warn verdicts.
+  // Verdict filter options, worded per route so the label matches what the filter
+  // actually does. MQTT discovery's pass/fail is register membership. udmi keys
+  // off the real verdict kind (__verdict), so each option maps to exactly one
+  // verdict the Result column shows — NOT the shading tone, which conflates
+  // Non-compliant (amber) with Pass-with-notes and paints Offline red. Discovery
+  // (ip/bacnet) keeps the RAG pass/fail/warn tones, where tone == verdict.
   const resultsToneOptions =
     module.route === "mqtt-discovery"
       ? [
@@ -1269,13 +1309,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           { label: "Not in register", value: "fail" },
           { label: "No verdict", value: "none" },
         ]
-      : [
-          { label: "All verdicts", value: "all" },
-          { label: "Pass", value: "pass" },
-          { label: "Fail", value: "fail" },
-          { label: "Warn", value: "warn" },
-          { label: "No verdict", value: "none" },
-        ];
+      : module.route === "udmi-validation"
+        ? [
+            { label: "All verdicts", value: "all" },
+            { label: "Pass", value: "pass" },
+            { label: "Pass with notes", value: "pass-notes" },
+            { label: "Non-compliant", value: "fail" },
+            { label: "Offline", value: "offline" },
+            { label: "No verdict", value: "none" },
+          ]
+        : [
+            { label: "All verdicts", value: "all" },
+            { label: "Pass", value: "pass" },
+            { label: "Fail", value: "fail" },
+            { label: "Warn", value: "warn" },
+            { label: "No verdict", value: "none" },
+          ];
 
   // Keep the selected row inside the FILTERED view: if the active selection is
   // filtered out, move it to the first visible row's ORIGINAL index so the
@@ -1351,6 +1400,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [liveMetrics, module.route, validationRunQuery.data, reportsQuery.isLoading, reportsQuery.data]);
 
   const activeStatusClass = activeRunStatus ? toHealthState(activeRunStatus) : "queued";
+  // Mid-run device progress for the monitor (BACnet enrichment writes it into
+  // result_summary.progress). Read from the polled run record — the SSE frame
+  // carries only status/stage/progress_percent — so it updates on the poll
+  // cadence; null when absent, so the row simply does not render.
+  const runProgressText = formatRunProgress(activeRunRecord?.result_summary);
   // Cancel is an engineer+ mutation; hide it entirely for lower roles so a
   // viewer/reviewer monitoring a run never sees a button that would 403.
   const canCancel =
@@ -2007,6 +2061,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div>
                   <strong>{activeRun.kind === "discovery" ? "Discovery" : "Validation"} run monitor</strong>
                   <span>{activeRun.runId}</span>
+                  <Link className="link-button" to="/run-history">
+                    Run history
+                  </Link>
                 </div>
                 <span className={`status-token ${activeStatusClass}`}>
                   {activeRunStatus ?? "queued"}
@@ -2026,6 +2083,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <dt>Elapsed</dt>
                   <dd>{formatElapsed(activeRunElapsedSeconds)}</dd>
                 </div>
+                {runProgressText !== null && (
+                  <div>
+                    <dt>Progress</dt>
+                    <dd>{runProgressText}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>Expected</dt>
                   <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.expected_devices)}</dd>
@@ -3617,12 +3680,20 @@ function buildDiscoveryParameters(
     if (filter) {
       parameters.topic_filter = filter;
     }
-    // Empty / 0 / non-numeric => 0, the backend's "indefinite" sentinel: run
-    // until stopped (Cancel) or the message cap. A positive value is a bounded
-    // capture window. >0 => bounded; otherwise indefinite (mq9nhbzu).
+    // Blank => 0, the backend's "indefinite" sentinel: run until stopped (Stop
+    // run) or the message cap. A positive value is a bounded capture window.
+    // Anything else ("45s", "abc", "-5") is REJECTED at submit, mirroring the
+    // UDMI run-time path — silently coercing it to 0 would turn an intended
+    // bounded window into an unbounded background capture with no warning
+    // (mq9nhbzu). The thrown Error surfaces through the runMutation error panel.
     const raw = (options.captureSeconds ?? "").trim();
     const seconds = Number(raw);
-    parameters.capture_seconds = raw !== "" && Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+    if (raw !== "" && !(Number.isFinite(seconds) && seconds > 0)) {
+      throw new Error(
+        "Run time must be a positive number, or blank to capture until you press Stop run.",
+      );
+    }
+    parameters.capture_seconds = raw === "" ? 0 : seconds;
   }
   return parameters;
 }
@@ -3810,7 +3881,16 @@ function PayloadComparePanels({
         </div>
         <div>
           <h6>Observed</h6>
-          <pre className="payload-cell">not captured</pre>
+          {/* Only claim "not captured" when nothing WAS observed. A payload can
+              be present while the aligned diff is unavailable (e.g. the expected
+              template facet is null / empty), and hiding real captured evidence
+              behind a false "not captured" would contradict the row's Observed:
+              Yes. Show the observed JSON in that case. */}
+          {observedPresent && observed !== null && observed !== undefined ? (
+            <pre className="payload-cell">{JSON.stringify(observed, null, 2)}</pre>
+          ) : (
+            <pre className="payload-cell">not captured</pre>
+          )}
         </div>
       </div>
     );

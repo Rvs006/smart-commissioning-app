@@ -914,6 +914,34 @@ describe("filterResultRows (ISSUE-4)", () => {
     ]);
   });
 
+  it("keys the verdict filter off __verdict when present (udmi), not the shading tone", () => {
+    // On udmi the verdict and its shading tone deliberately diverge: a
+    // Non-compliant row is verdict "fail" but amber tone "warn", and an Offline
+    // row is verdict "offline" but red tone "fail". The Verdict filter must key
+    // off the real verdict so "Non-compliant" (fail) shows the Non-compliant row
+    // and NOT the offline one — the bug was filtering by tone, which hid every
+    // Non-compliant row behind the "Fail" label.
+    const udmiRows: Record<string, string>[] = [
+      { Asset: "EM-1", Result: "Non-compliant — 1 issue", __tone: "warn", __verdict: "fail" },
+      { Asset: "EM-2", Result: "Offline — did not publish", __tone: "fail", __verdict: "offline" },
+      { Asset: "EM-3", Result: "Pass with notes", __tone: "warn", __verdict: "pass-notes" },
+      { Asset: "EM-4", Result: "Not received", __tone: "", __verdict: "" },
+    ];
+    expect(filterResultRows(udmiRows, { text: "", tone: "fail" }).map((r) => r.Asset)).toEqual([
+      "EM-1",
+    ]);
+    expect(filterResultRows(udmiRows, { text: "", tone: "offline" }).map((r) => r.Asset)).toEqual([
+      "EM-2",
+    ]);
+    expect(
+      filterResultRows(udmiRows, { text: "", tone: "pass-notes" }).map((r) => r.Asset),
+    ).toEqual(["EM-3"]);
+    // "No verdict" (none) collapses to the empty __verdict, never the tone.
+    expect(filterResultRows(udmiRows, { text: "", tone: "none" }).map((r) => r.Asset)).toEqual([
+      "EM-4",
+    ]);
+  });
+
   it("combines a text and a tone filter (AND)", () => {
     expect(
       filterResultRows(rows, { text: "site", tone: "pass" }, "Topic").map((r) => r.Asset),

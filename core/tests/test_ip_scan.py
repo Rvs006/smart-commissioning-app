@@ -481,6 +481,46 @@ class FakeConnectScanTests(unittest.TestCase):
         # 10.0.0.0/28 has 14 hosts; we must NOT have scanned all of them.
         self.assertLess(len(scanned_hosts), 14, "cancellation must stop the sweep early")
 
+    def test_mid_batch_cancel_does_not_fabricate_missing_expected(self) -> None:
+        # REGRESSION: a Stop that cut a responsive host's port batch short verdicted
+        # missing_expected against the PLANNED port list, so a never-probed expected
+        # port got a false "MISSING EXPECTED PORTS" red chip and scanned_ports
+        # over-claimed the sweep. Only ports actually probed may be verdicted.
+        store = FakeRunStore()
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def fake_connect(host: str, port: int, timeout: float) -> bool:
+            # 10.0.0.1:80 is open; probing it flips cancel so port 8080 (dispatched
+            # serially after it) is never probed on this host.
+            if host == "10.0.0.1" and port == 80:
+                store._cancel = True
+                return True
+            return False
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_midbatch_cancel",
+            {
+                **_AUTH,
+                "cidr": "10.0.0.0/30",
+                "ports": [80, 8080],
+                "expected_ports_by_address": {"10.0.0.1": "80/tcp,8080/tcp"},
+            },
+            run_store=store,
+            execution_mode="x",
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+            connect=fake_connect,
+            persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        host_row = next(a for a in store.summary_calls[-1]["discovered_assets"] if a["ip_address"] == "10.0.0.1")
+        # 8080 was never probed, so it must NOT be verdicted a missing expected port.
+        self.assertNotIn("MISSING EXPECTED PORTS", host_row["status_detail"])
+        _rid, records = persisted[0]
+        record = next(r for r in records if r["address"] == "10.0.0.1")
+        self.assertEqual(record["attributes"]["scanned_ports"], [80])
+        self.assertEqual(record["attributes"]["missing_expected_ports"], [])
+
 
 class AssetIdAndLastSeenTests(unittest.TestCase):
     """The live "Asset" and "Last Seen" columns: a responsive host resolves its

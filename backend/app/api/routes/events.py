@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 
@@ -42,6 +43,8 @@ from starlette.responses import StreamingResponse
 
 from app.schemas.jobs import JobStatus, RunRecord
 from app.services.run_service import RunService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 service = RunService()
@@ -95,12 +98,25 @@ async def _run_event_stream(run_id: str) -> AsyncIterator[str]:
     try:
         while True:
             try:
-                run = service.get_run(run_id)
+                # Off the event loop: get_run is a SYNC DB read, and on SQLite even
+                # a read takes the write lock (BEGIN IMMEDIATE), so calling it inline
+                # would stall the whole loop — including the operator's Stop request —
+                # for up to the busy-timeout while an inline run writes results.
+                run = await asyncio.to_thread(service.get_run, run_id)
             except FileNotFoundError:
                 # The run vanished mid-stream (e.g. retention purge). Tell the
                 # client and stop rather than spinning.
                 yield _format_sse({"run_id": run_id, "status": "gone"}, event="gone")
                 return
+            except Exception:  # noqa: BLE001 - a transient store error must not abort the stream
+                # e.g. a SQLite busy-timeout while a concurrent write holds the lock.
+                # Skip this poll; the next one (or the client's polling fallback)
+                # recovers. Bounded by the wall-clock cap so it cannot spin forever.
+                logger.warning("SSE run poll failed for %s; retrying", run_id, exc_info=True)
+                if time.monotonic() >= deadline:
+                    return
+                await asyncio.sleep(POLL_INTERVAL_SECONDS)
+                continue
 
             payload = _progress_payload(run)
             serialized = json.dumps(payload, sort_keys=True, default=str)
@@ -137,7 +153,11 @@ async def stream_run_events(run_id: str) -> StreamingResponse:
     parent protected router (app.api.router).
     """
     try:
-        service.get_run(run_id)
+        # Off the event loop, same as the poll loop: get_run is a SYNC DB read and
+        # on SQLite even a read takes the write lock (BEGIN IMMEDIATE), so calling
+        # it inline here would stall the whole loop — including the operator's Stop
+        # request — for up to the busy-timeout while an inline run writes results.
+        await asyncio.to_thread(service.get_run, run_id)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' was not found.") from error
 

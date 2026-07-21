@@ -312,9 +312,12 @@ export function DashboardPage() {
         <article className="surface">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Jobs</span>
-              <h3>Recent Runs</h3>
+              <span className="eyebrow">Runs</span>
+              <h3>Recent runs</h3>
             </div>
+            <Link className="link-button" to="/run-history">
+              View full run history
+            </Link>
           </div>
           <div className="run-list">
             {runsError ? (
@@ -325,7 +328,7 @@ export function DashboardPage() {
             ) : runsLoading ? (
               <div className="empty-workspace">
                 <strong>Loading runs...</strong>
-                <span>Fetching the latest job history.</span>
+                <span>Fetching run history.</span>
               </div>
             ) : recentRuns.length > 0 ? (
               recentRuns.map((run) => <RunSummaryCard key={run.run_id} run={run} />)

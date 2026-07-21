@@ -937,6 +937,7 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
         self.assertEqual(rollback.status_code, 400, rollback.text)
 
     def test_live_publish_without_authorization_rejected(self) -> None:
+        before = len(self.client.get("/api/v1/validation/runs").json()["runs"])
         response = self._post(
             "/api/v1/validation/mqtt-config/runs",
             {
@@ -949,6 +950,11 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
             "mqtt_config_publish",
         )
         self.assertEqual(response.status_code, 403, response.text)
+        # REGRESSION: the run was created BEFORE the auth check, so a 403 left an
+        # orphan stranded at 'queued' that the startup sweep never reclaims. The
+        # rejection must leave no run behind.
+        after = len(self.client.get("/api/v1/validation/runs").json()["runs"])
+        self.assertEqual(after, before, "a rejected live publish must leave no orphaned run")
 
 
 def _bacnet_request_with_points(count: int):

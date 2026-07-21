@@ -536,6 +536,32 @@ describe("ModulePage discovery wiring", () => {
     expect(parameters.capture_seconds).toBe(0);
   });
 
+  it("blocks a non-numeric MQTT run time with a validation error and posts nothing", async () => {
+    let posted = false;
+    stubMqttRunFetch(() => {
+      posted = true;
+    });
+
+    renderModule("mqtt-discovery");
+
+    // "45s" must NOT silently coerce to the 0 = indefinite sentinel: that would
+    // turn an intended bounded window into an unbounded background capture. It is
+    // rejected client-side with a visible error and no parameters are posted —
+    // mirroring the UDMI run-time path.
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
+      target: { value: "45s" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    expect(
+      await screen.findByText(/Run time must be a positive number/i),
+    ).toBeInTheDocument();
+    expect(posted).toBe(false);
+  });
+
   it("omits topic_filter from the MQTT run when the filter is left blank so the engine captures every topic (#) (2026-07-20 walkthrough ITEM-2)", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     stubMqttRunFetch((body) => {
@@ -2431,7 +2457,9 @@ describe("ModulePage UDMI workbench live results", () => {
       project_id: "demo-project",
       site_id: "demo-site",
       parameters: { capture_seconds: 0 },
-      result_summary: {},
+      // Mid-run device progress the engine writes as it enriches each device, so
+      // the monitor can show "X of Y devices" (hung vs working).
+      result_summary: { progress: { devices_done: 3, devices_total: 41, points_read: 128 } },
       error_message: null,
     };
     vi.stubGlobal(
@@ -2481,6 +2509,247 @@ describe("ModulePage UDMI workbench live results", () => {
     // indefinite-window run (capture_seconds 0) shows the indeterminate sweep.
     expect(screen.getByText("Elapsed")).toBeInTheDocument();
     expect(document.querySelector(".progress-track.indeterminate")).not.toBeNull();
+    // Mid-run device progress from result_summary.progress lights up the monitor.
+    expect(screen.getByText("3 of 41 devices · 128 points read")).toBeInTheDocument();
+    // The monitor links to the persistent run history (naming/reachability).
+    expect(screen.getByRole("link", { name: "Run history" })).toHaveAttribute("href", "/run-history");
+  });
+
+  it("cancels a still-live rehydrated run when a new run takes over the monitor (ITEM-4 orphan guard)", async () => {
+    // A rehydrated run genuinely still running (a backgrounded capture) owns the
+    // single monitor + its only Stop control. Starting a NEW run replaces the
+    // monitor, so the old run must be cancelled as part of the swap — otherwise
+    // it keeps running with no reachable Stop (an orphaned parallel capture).
+    const runningRun = {
+      run_id: "run-udmi-1",
+      job_type: "udmi_validation",
+      status: "running",
+      stage: "capturing",
+      progress_percent: 15,
+      created_at: "2026-06-11T09:00:00Z",
+      updated_at: "2026-06-11T09:00:30Z",
+      project_id: "demo-project",
+      site_id: "demo-site",
+      parameters: { capture_seconds: 0 },
+      result_summary: {},
+      error_message: null,
+    };
+    let cancelledRunId: string | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: [
+              {
+                run_id: "run-udmi-1",
+                job_type: "udmi_validation",
+                status: "running",
+                stage: "capturing",
+                progress_percent: 15,
+                created_at: "2026-06-11T09:00:00Z",
+                updated_at: "2026-06-11T09:00:30Z",
+                edge_id: null,
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        const cancelMatch = url.match(/\/api\/v1\/runs\/([^/]+)\/cancel$/);
+        if (cancelMatch && init?.method === "POST") {
+          cancelledRunId = cancelMatch[1];
+          return jsonResponse({ ...runningRun, status: "cancelled" });
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          return jsonResponse({ ...udmiAccepted, run_id: "run-udmi-2" });
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-2/issues"))
+          return jsonResponse({ run_id: "run-udmi-2", issues: [] });
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues"))
+          return jsonResponse({ run_id: "run-udmi-1", issues: [] });
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-2"))
+          return jsonResponse({ ...runningRun, run_id: "run-udmi-2" });
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(runningRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    // The rehydrated run re-attaches its monitor; Execute stays enabled (anti-
+    // fossilize), so starting a new run is possible.
+    await screen.findByRole("button", { name: "Stop run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+
+    fireEvent.click(runButton);
+    await waitFor(() => expect(cancelledRunId).toBe("run-udmi-1"));
+  });
+
+  it("does NOT cancel a live rehydrated run when the new run's submit is rejected (cancel-before-swap regression)", async () => {
+    // The orphan cancel must fire only AFTER the new run is accepted. Fired at the
+    // top of the submit (before the POST), a rejected POST — or an invalid run-time
+    // typo that throws before it — would strand the live capture: old run cancelled,
+    // nothing started, monitor still showing the now-dead run.
+    const runningRun = {
+      run_id: "run-udmi-1",
+      job_type: "udmi_validation",
+      status: "running",
+      stage: "capturing",
+      progress_percent: 15,
+      created_at: "2026-06-11T09:00:00Z",
+      updated_at: "2026-06-11T09:00:30Z",
+      project_id: "demo-project",
+      site_id: "demo-site",
+      parameters: { capture_seconds: 0 },
+      result_summary: {},
+      error_message: null,
+    };
+    let cancelledRunId: string | null = null;
+    let submitAttempted = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: [
+              {
+                run_id: "run-udmi-1",
+                job_type: "udmi_validation",
+                status: "running",
+                stage: "capturing",
+                progress_percent: 15,
+                created_at: "2026-06-11T09:00:00Z",
+                updated_at: "2026-06-11T09:00:30Z",
+                edge_id: null,
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        const cancelMatch = url.match(/\/api\/v1\/runs\/([^/]+)\/cancel$/);
+        if (cancelMatch && init?.method === "POST") {
+          cancelledRunId = cancelMatch[1];
+          return jsonResponse({ ...runningRun, status: "cancelled" });
+        }
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          // The new run's submit is REJECTED — onSuccess never runs.
+          submitAttempted = true;
+          return {
+            ok: false,
+            status: 400,
+            statusText: "Bad Request",
+            json: async () => ({ detail: "invalid parameters" }),
+          } as unknown as Response;
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues"))
+          return jsonResponse({ run_id: "run-udmi-1", issues: [] });
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(runningRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    await screen.findByRole("button", { name: "Stop run" });
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+
+    fireEvent.click(runButton);
+    // The submit was attempted and rejected; the cancel path (onSuccess only) is
+    // now unreachable, so the live run was never cancelled and keeps its Stop.
+    await waitFor(() => expect(submitAttempted).toBe(true));
+    expect(cancelledRunId).toBeNull();
+    expect(screen.getByRole("button", { name: "Stop run" })).toBeInTheDocument();
+  });
+
+  it("shows the observed payload in the compare fallback when the expected template facet is null", async () => {
+    // A payload can be observed while the expected side is null/empty (e.g. an
+    // empty Expected schedule), so the aligned diff can't be built. The observed
+    // side must still show the captured JSON — never the false claim "not
+    // captured", which would contradict the row's Observed: Yes.
+    const run = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        payload_views: [
+          {
+            asset_id: "EM-1",
+            payload_types: [
+              {
+                payload_type: "pointset",
+                expected: null,
+                observed: { version: "1.5.2", points: { widget_sensor: { present_value: 99.9 } } },
+                observed_present: true,
+              },
+            ],
+          },
+        ],
+      },
+    };
+    stubTwoAssetUdmi(run, { run_id: "run-udmi-1", issues: [] });
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    fireEvent.click(within(inspector).getByRole("button", { name: /EM-1.*issue/i }));
+    fireEvent.click(
+      within(inspector).getAllByRole("button", { name: /Show expected vs observed payload/i })[0],
+    );
+
+    // The observed JSON is shown (real captured evidence), not "not captured".
+    // Scoped to the inspector so the table's Raw Payload cell is not matched.
+    expect(within(inspector).getByText(/widget_sensor/)).toBeInTheDocument();
+    expect(within(inspector).queryByText("not captured")).not.toBeInTheDocument();
+  });
+
+  it("hides the inspector detail when the selected asset's group is collapsed (ISSUE-4)", async () => {
+    const cleanPayload = (asset: string, types: string[]) => ({
+      asset_id: asset,
+      payload_types: types.map((type) => ({
+        payload_type: type,
+        expected: { version: "1.5.2", points: {} },
+        observed: { version: "1.5.2", points: {} },
+        observed_present: true,
+      })),
+    });
+    const run = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        payload_views: [cleanPayload("EM-1", ["pointset"]), cleanPayload("EM-2", ["pointset"])],
+      },
+    };
+    stubTwoAssetUdmi(run, { run_id: "run-udmi-1", issues: [] });
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+
+    // EM-1 is the first (selected) asset, so it auto-expands and the inspector
+    // shows its selected-row detail ("Payload type" is unique to the inspector).
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(within(inspector).getByText("Payload type")).toBeInTheDocument();
+
+    // Collapse EM-1's group in the table: its child row unmounts, so the inspector
+    // must stop showing that row's detail rather than describe a hidden row.
+    const table = screen.getByRole("table");
+    fireEvent.click(within(table).getByRole("button", { name: /EM-1/ }));
+    await waitFor(() =>
+      expect(
+        within(document.querySelector(".inspector") as HTMLElement).queryByText("Payload type"),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("keeps verdicts neutral (Verdict pending, no green Pass) while the issues query is loading", async () => {

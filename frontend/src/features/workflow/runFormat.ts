@@ -10,6 +10,26 @@ export function isTerminalStatus(status: JobStatus | undefined): boolean {
   return Boolean(status) && terminalStatuses.includes(status as JobStatus);
 }
 
+// refetchInterval policy for the run-status poll shared by the discovery and
+// validation monitors. Stop once the run is terminal (by polled record OR by an
+// SSE terminal frame). While SSE is actively DRIVING the scalar status/stage/
+// progress live, still poll the record on a SLOW cadence: the SSE frame carries
+// none of result_summary, so the mid-run "X of Y devices" progress row
+// (formatRunProgress reads result_summary.progress) would otherwise freeze at the
+// mount-time snapshot for the whole run — the field visibility this poll exists to
+// give. When no frame has arrived (a buffering proxy, a half-open socket, or SSE
+// unsupported), poll at the full cadence so the monitor never freezes.
+export function runPollInterval(input: {
+  recordTerminal: boolean;
+  reachedTerminal: boolean;
+  sseDriving: boolean;
+}): number | false {
+  if (input.recordTerminal || input.reachedTerminal) {
+    return false;
+  }
+  return input.sseDriving ? 4000 : 1500;
+}
+
 // Maps a backend JobStatus onto the frontend HealthState used for status tokens.
 // succeeded -> ready, cancelled -> warning; queued/running/failed pass through.
 export function toHealthState(status: JobStatus): HealthState {
@@ -20,6 +40,28 @@ export function toHealthState(status: JobStatus): HealthState {
     return "warning";
   }
   return status;
+}
+
+// Mid-run enrichment progress from result_summary.progress
+// ({ devices_total, devices_done, points_read }, written per device by the
+// BACnet discovery engine). Returns "X of Y devices [· N points read]" so the
+// operator can tell a working grind from a hang, or null when the engine — or an
+// older run — wrote no such object, so the monitor degrades to rendering nothing
+// rather than a misleading "Pending".
+export function formatRunProgress(summary: Record<string, unknown> | undefined): string | null {
+  const progress = summary?.progress;
+  if (!progress || typeof progress !== "object") {
+    return null;
+  }
+  const fields = progress as Record<string, unknown>;
+  const done = fields.devices_done;
+  const total = fields.devices_total;
+  if (typeof done !== "number" || typeof total !== "number") {
+    return null;
+  }
+  const points =
+    typeof fields.points_read === "number" ? ` · ${fields.points_read} points read` : "";
+  return `${done} of ${total} devices${points}`;
 }
 
 const jobTypeLabels: Record<JobType, string> = {

@@ -123,6 +123,13 @@ def _broker_error_status(error: Exception) -> str:
         return "authentication_error"
     if "timed out" in text or "timeout" in text:
         return "broker_timeout"
+    # A SUBACK rejection (e.g. an ACL that denies the topic filter) means the broker
+    # was REACHED and authenticated but refused the subscribe — sending the operator
+    # down the firewall/host/port path (the "broker_unreachable" default) wastes a
+    # site visit. Checked after timeout so "timed out acknowledging the subscription"
+    # still reads as a timeout.
+    if "rejected the subscription" in text:
+        return "subscription_rejected"
     return "broker_unreachable"
 
 
