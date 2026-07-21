@@ -747,7 +747,13 @@ async def _run_ip_discovery(
         # expected port dropped by the per-host ceiling is covered by the cap
         # note instead (we never call a port we did not probe closed).
         open_set = set(open_ports)
-        probed_set = set(host_ports)
+        # Only ports ACTUALLY probed can be verdicted. On a mid-batch Stop,
+        # run_throttled returns fewer results than host_ports; verdicting against
+        # the planned list would fabricate "missing expected" for never-probed ports
+        # and over-claim scanned_ports. On a full batch this equals host_ports, so
+        # the happy path is byte-identical (results preserve dispatch order).
+        probed_ports = [port for port, _ok in results]
+        probed_set = set(probed_ports)
         missing_expected = (
             sorted(port for port in host_expected if port in probed_set and port not in open_set)
             if host_expected
@@ -807,8 +813,8 @@ async def _run_ip_discovery(
                 "name": hostname,
                 "attributes": {
                     "open_ports": open_ports,
-                    "scanned_ports": list(host_ports),
-                    "scanned_port_count": len(host_ports),
+                    "scanned_ports": probed_ports,
+                    "scanned_port_count": len(probed_ports),
                     # The register's declarations for THIS host, persisted next
                     # to the observation so the verdict is auditable. None =
                     # host has no registered expectation (honest blank);

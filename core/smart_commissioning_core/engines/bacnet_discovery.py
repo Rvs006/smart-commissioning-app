@@ -188,6 +188,53 @@ ISSUE_REGISTER_INSTANCE_MISMATCH = "bacnet_register_instance_mismatch"
 #: Two different addresses announced the SAME device instance (instances are
 #: spec-unique network-wide, so this is a real misconfiguration worth naming).
 ISSUE_INSTANCE_COLLISION = "bacnet_instance_collision"
+#: A device was heard (its I-Am is real) but its object-list read failed, so its
+#: points could not be enumerated. Reported discovered-but-unenumerated — never
+#: dropped, never faked as fully read.
+ISSUE_OBJECT_LIST_UNREADABLE = "bacnet_object_list_unreadable"
+#: A device's point reads failed back-to-back, so the scan stopped asking for its
+#: remaining points. The points not attempted are ABSENT (never recorded as
+#: failures — absent != failed).
+ISSUE_POINT_READS_ABORTED = "bacnet_point_reads_aborted"
+
+#: After this many CONSECUTIVE per-point read failures on one device, stop reading
+#: its remaining points. A device that answered Who-Is but refuses reads (wrong
+#: lane, ACL, went quiet) otherwise burns ~12s (bacpypes3 apduTimeout x retries)
+#: per dead point — a 500-object device would take ~100 min back-to-back. Reset to
+#: 0 on any successful read, so a device whose first few object types happen to be
+#: unreadable is not abandoned.
+#: ponytail: fixed threshold; make it a run parameter if a real device legitimately
+#: leads with >5 unreadable points.
+_MAX_CONSECUTIVE_POINT_READ_FAILURES = 5
+
+#: bacpypes3's ErrorRejectAbortNack (Error/Reject/Abort PDUs) subclasses
+#: BaseException, NOT Exception (verified against pinned bacpypes3==0.0.106,
+#: apdu.py: ``class ErrorRejectAbortNack(BaseException)``), so a bare
+#: ``except Exception`` around a ReadProperty MISSES a real APDU error and lets one
+#: unreadable object/device fail the entire run. The per-device read catches below
+#: therefore catch BaseException but ALWAYS re-raise true control-flow signals.
+_READ_PROPAGATE = (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit)
+#: The object-list read additionally treats RuntimeError as a vetted transport-dead
+#: failure that must fail the run (matching the engine's vetted/unvetted split).
+_OBJECT_LIST_PROPAGATE = (RuntimeError, *_READ_PROPAGATE)
+
+
+def _is_worker_interrupt(exc: BaseException) -> bool:
+    """True for a dramatiq worker Interrupt (TimeLimitExceeded / Shutdown).
+
+    core cannot import dramatiq, so match by top-level module. dramatiq's Interrupt
+    subclasses BaseException, and the TimeLimit middleware delivers TimeLimitExceeded
+    via PyThreadState_SetAsyncExc EXACTLY ONCE (it nulls the deadline first). If the
+    per-point / object-list ``except BaseException`` guards swallowed it, the worker
+    time limit would be silently disarmed and the run stranded — so it is re-raised
+    to reach worker.app.tasks' own ``except Interrupt`` handling.
+    """
+    return type(exc).__module__.split(".", 1)[0] == "dramatiq"
+
+#: Stage stamped on the mid-run progress writes below. Mirrors base._STAGE_RUNNING
+#: ("engine_running"), which the initial 15% write already set — kept in step so a
+#: progress write never changes the stage the monitor is showing.
+_STAGE_RUNNING_ENGINE = "engine_running"
 
 # -- bind pre-flight outcomes -----------------------------------------------
 
@@ -1493,8 +1540,55 @@ def _select_fd_backend(
 
 
 def _timeout_s(parameters: Mapping[str, Any]) -> float:
-    """Per-request Who-Is / ReadProperty timeout, in seconds."""
-    return float(parameters.get("connect_timeout_s") or 5.0)
+    """Per-request Who-Is timeout, in seconds.
+
+    Falls back through ``scan_connect_timeout_s`` — the key the API/route actually
+    accepts and clamps into ThrottleConfig.connect_timeout_s — because the BACnet
+    backend reads this directly (only ip_scan reads ctx.throttle.connect_timeout_s),
+    so before this fallback the operator's timeout knob never reached a BACnet scan.
+    The legacy ``connect_timeout_s`` keeps precedence; the default is unchanged at
+    5.0 so a bare run is byte-identical.
+
+    Tolerant like the dispatch seam's ``_positive_float`` (engine_dispatch.build_throttle
+    / worker._build_throttle sanitize this SAME key): a non-positive or unparseable
+    value in either key falls back to the default instead of raising — a form-derived
+    ``"5s"`` once failed the whole run — or reaching ``who_is`` as a negative timeout.
+    """
+    for key in ("connect_timeout_s", "scan_connect_timeout_s"):
+        try:
+            value = float(parameters.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 5.0
+
+
+def _safe_progress_write(
+    ctx: EngineContext,
+    *,
+    progress_percent: int,
+    summary: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort mid-run progress write. Never raises.
+
+    A live scan that is working on the wire must never be failed by a progress
+    write to a poisoned/contended store session (mirrors base._safe_update_run_status).
+    The bar moves via ``update_run_status(progress_percent=...)``; the X-of-Y detail
+    rides ``update_result_summary(merge=True)`` under a ``progress`` key, so it never
+    clobbers other summary keys and the terminal summary write overwrites cleanly.
+    """
+    try:
+        ctx.run_store.update_run_status(
+            ctx.run_id,
+            status="running",
+            stage=_STAGE_RUNNING_ENGINE,
+            progress_percent=progress_percent,
+        )
+        if summary is not None:
+            ctx.run_store.update_result_summary(ctx.run_id, summary)
+    except Exception:  # noqa: BLE001 - a progress write must never fail a live scan
+        logger.exception("progress write failed for run %s; scan continues", ctx.run_id)
 
 
 def _close_backend(backend: BacnetDiscoveryBackend) -> None:
@@ -2084,13 +2178,28 @@ async def _run_bacnet_discovery(
     directed_new = 0
     directed_i_ams = 0
     answered_addresses: set[str] = set()
+    # Addresses a directed probe was ACTUALLY sent to (dispatched and not skipped
+    # as unusable). Distinct from probe_addresses (the PLANNED list): a skipped or
+    # never-dispatched target must not later be reported as "a directed Who-Is was
+    # sent to it and went unanswered".
+    sent_addresses: set[str] = set()
     if probe_addresses:
         record["unicast_fallback_attempted"] = True
 
         def _make_probe(probe_address: str) -> Callable[[], Awaitable[dict[str, Any]]]:
             async def _unit() -> dict[str, Any]:
+                # Call the backend DIRECTLY, not through _who_is: this unit is
+                # already dispatched under throttle.run_throttled, which holds one
+                # semaphore permit AND applies the rate limiter for it. _who_is would
+                # acquire a SECOND permit from the same throttle, and because
+                # asyncio.Semaphore.acquire's fast path is synchronous, the dispatch
+                # loop drains every permit before any probe body runs — so with
+                # >= max_concurrency silent addresses every unit blocks on the nested
+                # acquire with the semaphore at 0 and nothing releasable: a
+                # deterministic deadlock (the 2026-07-21 field hang). Calling the
+                # backend directly de-nests it and also drops the double rate token.
                 try:
-                    found = await _who_is(backend, probe_address)
+                    found = await backend.who_is(low, high, probe_address)
                 except ValueError:
                     # ONE unusable register address (see _pdu_address) must not
                     # kill the lane for the other 59 targets. A RuntimeError from
@@ -2113,6 +2222,7 @@ async def _run_bacnet_discovery(
             found = probe["devices"]
             if not probe["skipped"]:
                 who_is_counters["unicast_sent"] += 1
+                sent_addresses.add(probe_address)
             if found:
                 answered_addresses.add(probe_address)
             directed_i_ams += len(found)
@@ -2164,15 +2274,50 @@ async def _run_bacnet_discovery(
         "i_am_count": directed_i_ams,
     }
 
+    # The Who-Is lanes are done; the long per-device read phase is next. Move the
+    # bar off the initial 15% so the monitor shows the scan is past discovery — the
+    # field run sat at 15% for 16+ minutes with no way to tell hung from working.
+    _safe_progress_write(ctx, progress_percent=25)
+
     targets_by_instance = {t.device_instance: t for t in in_scope}
 
     discovered_assets: list[dict[str, Any]] = []
     device_records: list[dict[str, Any]] = []
     point_records: list[dict[str, Any]] = []
 
+    total_devices = len(merged)
+    # Per-device progress, written from inside each completing unit (run_throttled
+    # gathers the batch, so there is no other seam). Best-effort + throttled to at
+    # most one store write per ~2s, but always one on the final device so a
+    # finished phase 2 lands an honest count. Single event loop, so the counter
+    # increments need no lock.
+    _progress = {"done": 0, "points": 0, "last": asyncio.get_running_loop().time()}
+
+    def _note_device_progress(points_added: int) -> None:
+        _progress["done"] += 1
+        _progress["points"] += points_added
+        done = _progress["done"]
+        now = asyncio.get_running_loop().time()
+        if done < total_devices and now - _progress["last"] < 2.0:
+            return
+        _progress["last"] = now
+        # Cap at 95: the monitor treats 100 as done-adjacent, and only the
+        # terminal write may reach it.
+        percent = min(95, 25 + int(70 * done / total_devices)) if total_devices else 25
+        _safe_progress_write(
+            ctx,
+            progress_percent=percent,
+            summary={
+                "progress": {
+                    "devices_total": total_devices,
+                    "devices_done": done,
+                    "points_read": _progress["points"],
+                }
+            },
+        )
+
     # Phase 2: per device, read the object list then each present-value. Each
-    # device is a throttled unit; run_throttled honours cancellation between
-    # dispatches and returns partial results if cancelled mid-scan.
+    # device is a throttled unit.
     #
     # Reads go back through the LANE THAT HEARD THE DEVICE. A device that only
     # the foreign-device lane could hear (a routed MS/TP device, say) is not
@@ -2184,25 +2329,83 @@ async def _run_bacnet_discovery(
         source: BacnetDiscoveryBackend,
     ) -> Callable[[], Awaitable[dict[str, Any]]]:
         async def _unit() -> dict[str, Any]:
-            objects = await source.read_object_list(device)
-            points: list[dict[str, Any]] = []
             asset_id = f"bacnet-device-{device.get('device_instance')}"
-            for obj in objects:
-                # Per-point read errors must not abort the whole device scan.
+            points: list[dict[str, Any]] = []
+            result: dict[str, Any] = {"device": device, "asset_id": asset_id, "points": points}
+            try:
+                # Stop must bite mid-device. With <= max_concurrency devices every
+                # unit dispatches immediately, so run_throttled's between-dispatch
+                # cancel check never fires again; without a check here a device with
+                # N dead points holds Stop hostage for up to N x ~12s. Return the
+                # points read so far HONESTLY — points not attempted are absent, not
+                # recorded as failures.
+                if ctx.is_cancelled():
+                    result["heard_only"] = True
+                    return result
+                # One device's failed object-list read must not vaporize the whole
+                # run (and discard every already-scanned device with it). RuntimeError
+                # stays the vetted transport-dead failure and still fails the run; any
+                # other failure means this device was heard but could not be
+                # enumerated — reported discovered-but-unenumerated, never dropped.
+                # BaseException, not Exception: bacpypes3's ErrorRejectAbortNack
+                # (the APDU-size abort this predicts on large devices) subclasses
+                # BaseException, so `except Exception` would MISS it and let one
+                # device fail the whole run — the critical field bug this guards.
                 try:
-                    value = await source.read_present_value(device, obj)
-                    points.append(_point_record(device, obj, value, device_ref=asset_id))
-                except Exception:  # noqa: BLE001 - record a read failure, keep scanning
-                    points.append(
-                        _point_record(
-                            device,
-                            obj,
-                            None,
-                            device_ref=asset_id,
-                            read_error="present_value_read_failed",
+                    objects = await source.read_object_list(device)
+                except _OBJECT_LIST_PROPAGATE:
+                    raise
+                except BaseException as exc:  # noqa: BLE001 - device heard, object-list unreadable
+                    if _is_worker_interrupt(exc):
+                        raise
+                    result["object_list_error"] = True
+                    return result
+                consecutive_failures = 0
+                for index, obj in enumerate(objects):
+                    if ctx.is_cancelled():
+                        # Stop bit mid-enumeration. Mark WHY this device has fewer
+                        # points than it has objects, so a Stop-truncated row is
+                        # never mistaken for a device that genuinely has this few
+                        # readable points — every other bail path (heard_only,
+                        # object_list_error, reads_aborted) marks itself; this one
+                        # must too. Points not attempted are ABSENT, never faked as
+                        # failures.
+                        result["reads_truncated"] = {
+                            "points_not_attempted": len(objects) - len(points)
+                        }
+                        break
+                    try:
+                        value = await source.read_present_value(device, obj)
+                        points.append(_point_record(device, obj, value, device_ref=asset_id))
+                        consecutive_failures = 0
+                    except _READ_PROPAGATE:
+                        raise
+                    except BaseException as exc:  # noqa: BLE001 - APDU errors subclass BaseException; record + keep scanning
+                        if _is_worker_interrupt(exc):
+                            raise
+                        points.append(
+                            _point_record(
+                                device,
+                                obj,
+                                None,
+                                device_ref=asset_id,
+                                read_error="present_value_read_failed",
+                            )
                         )
-                    )
-            return {"device": device, "asset_id": asset_id, "points": points}
+                        consecutive_failures += 1
+                        if consecutive_failures >= _MAX_CONSECUTIVE_POINT_READ_FAILURES:
+                            # Stop asking a device that answers Who-Is but refuses
+                            # reads. The remaining points are ABSENT, never labelled
+                            # as failures, and the device is marked so a truncated
+                            # scan never looks fully read.
+                            result["reads_aborted"] = {
+                                "after_consecutive_failures": consecutive_failures,
+                                "points_not_attempted": len(objects) - (index + 1),
+                            }
+                            break
+                return result
+            finally:
+                _note_device_progress(len(points))
 
         return _unit
 
@@ -2212,27 +2415,97 @@ async def _run_bacnet_discovery(
     per_device_results = await throttle.run_throttled(device_units, ctx)
 
     cancelled = ctx.is_cancelled()
+    # Index enriched results by instance so heard-but-unenriched devices — heard on
+    # a real Who-Is but whose read unit never ran because Stop halted dispatch — are
+    # NOT silently discarded. They answered; they must still appear, marked, never
+    # dropped (else expected_responding_count contradicts device_count on a Stop).
+    enriched: dict[int, dict[str, Any]] = {}
     for entry in per_device_results:
-        device = entry["device"]
-        asset_id = entry["asset_id"]
-        instance = device.get("device_instance")
-        provenance = merged.get(instance, {}) if isinstance(instance, int) else {}
-        target = targets_by_instance.get(instance) if isinstance(instance, int) else None
+        inst = entry["device"].get("device_instance")
+        if isinstance(inst, int) and not isinstance(inst, bool):
+            enriched[inst] = entry
+
+    for instance, provenance in merged.items():
+        device = provenance["device"]
+        asset_id = f"bacnet-device-{instance}"
+        target = targets_by_instance.get(instance)
         asset = _device_asset(
             device,
             backend_name,
             match_basis=provenance.get("match_basis", MATCH_BASIS_WHO_IS),
             lane=provenance.get("lane", LANE_BROADCAST),
         )
-        asset["point_count"] = len(entry["points"])
+        record_row = _device_record(device, asset_id, target=target)
+        entry = enriched.get(instance)
+        if entry is None:
+            # Heard, but its enrichment unit never ran (Stop halted dispatch first).
+            asset["point_count"] = 0
+            asset["heard_not_enriched"] = True
+            record_row["attributes"]["heard_not_enriched"] = True
+        else:
+            asset["point_count"] = len(entry["points"])
+            point_records.extend(entry["points"])
+            if entry.get("heard_only"):
+                asset["heard_not_enriched"] = True
+                record_row["attributes"]["heard_not_enriched"] = True
+            if entry.get("object_list_error"):
+                record_row["attributes"]["object_list_read_failed"] = True
+                issues.append(
+                    _bacnet_issue(
+                        issues,
+                        asset_id=asset_id,
+                        issue_type=ISSUE_OBJECT_LIST_UNREADABLE,
+                        severity="medium",
+                        description=(
+                            f"BACnet device instance {instance} ({device.get('address')}) "
+                            "answered Who-Is but its object-list could not be read, so its "
+                            "points were not enumerated. The device was discovered and is "
+                            "reported as discovered-but-unenumerated — not offline, and not "
+                            "fully scanned."
+                        ),
+                        suggested_action=(
+                            "The object-list read may exceed the device's APDU size, or the "
+                            "device may not support the request. Re-scan this device on its "
+                            "own or check its BACnet configuration."
+                        ),
+                    )
+                )
+            aborted = entry.get("reads_aborted")
+            if aborted:
+                record_row["attributes"]["point_reads_aborted"] = aborted
+                issues.append(
+                    _bacnet_issue(
+                        issues,
+                        asset_id=asset_id,
+                        issue_type=ISSUE_POINT_READS_ABORTED,
+                        severity="medium",
+                        description=(
+                            f"BACnet device instance {instance} ({device.get('address')}) "
+                            f"returned {aborted['after_consecutive_failures']} consecutive "
+                            "point-read failures, so the scan stopped reading its remaining "
+                            f"{aborted['points_not_attempted']} point(s). The points not "
+                            "attempted are absent from the results, never recorded as failures."
+                        ),
+                        suggested_action=(
+                            "Confirm the device is reachable for ReadProperty on the lane "
+                            "that heard it (check ACLs and routing), then re-scan it if needed."
+                        ),
+                    )
+                )
+            truncated = entry.get("reads_truncated")
+            if truncated:
+                # Operator-initiated Stop cut this device's point reads. Record it
+                # per-device (no issue: a Stop is not a device fault — the run-level
+                # 'cancelled'/'partial' already says the scan was stopped) so the
+                # row is reconstructible as "cut, not fully read" from the artifact.
+                record_row["attributes"]["point_reads_truncated"] = truncated
         if target is not None:
             # Register identity travels on the asset too, so the results table can
             # show the operator's own asset name next to what answered.
             asset["register_asset_id"] = target.asset_id
             asset["register_asset_name"] = target.asset_name
         discovered_assets.append(asset)
-        device_records.append(_device_record(device, asset_id, target=target))
-        point_records.extend(entry["points"])
+        device_records.append(record_row)
 
     structured_records = device_records + point_records
 
@@ -2246,12 +2519,12 @@ async def _run_bacnet_discovery(
             "asset_name": t.asset_name,
             "device_instance": t.device_instance,
             "address": t.address,
-            "directed_probe_sent": t.address in probe_addresses,
+            "directed_probe_sent": t.address in sent_addresses,
         }
         for t in not_responding
     ]
     for t in not_responding:
-        probed = t.address in probe_addresses
+        probed = t.address in sent_addresses
         answered = t.address in answered_addresses
         if answered:
             # Something DID answer at this address — just not this instance.
@@ -2316,7 +2589,9 @@ async def _run_bacnet_discovery(
             instance_high=high,
             timeout_s=_timeout_s(parameters),
             fd_bbmd_address=_fd_bbmd_address(fd_backend),
-            unanswered_directed=len(probe_addresses) - len(answered_addresses),
+            # Probes actually SENT that got no reply — not the planned count, which
+            # would over-count addresses skipped as unusable or never dispatched.
+            unanswered_directed=len(sent_addresses) - len(answered_addresses),
         )
 
     return EngineResult(

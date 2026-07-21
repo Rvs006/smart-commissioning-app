@@ -428,5 +428,26 @@ class QueueDispatchMarkerTimingTests(ApiTestCase):
         self.assertIn(run_id, swept)
 
 
+class JobQueueBrokerConstructionTests(unittest.TestCase):
+    """A RedisBroker construction failure (e.g. a malformed REDIS_URL that redis
+    parses eagerly) must surface as JobQueueUnavailable — the ONLY error dispatch_run
+    handles — so it clears markers / falls back instead of stranding a
+    marker-stamped run at 'queued' that the startup sweep never reclaims."""
+
+    def test_broker_construction_failure_becomes_job_queue_unavailable(self) -> None:
+        from unittest import mock
+
+        from app.services import job_queue as jq
+
+        service = jq.JobQueueService.__new__(jq.JobQueueService)
+        service.settings = mock.Mock(redis_url="redis://localhost:6379/0")
+        # RedisBroker(...) raising at construction used to escape as a raw error
+        # (and the finally's broker.close() would NameError). It must become
+        # JobQueueUnavailable, and the guarded close must not raise.
+        with mock.patch.object(jq, "RedisBroker", side_effect=ValueError("unparseable REDIS_URL")):
+            with self.assertRaises(jq.JobQueueUnavailable):
+                service._enqueue(actor_name="discover_bacnet", queue_name="discovery", args=())
+
+
 if __name__ == "__main__":
     unittest.main()

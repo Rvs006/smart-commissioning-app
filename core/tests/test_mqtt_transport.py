@@ -73,6 +73,56 @@ class PublishFilterTests(unittest.TestCase):
                 self.assertIsNotNone(message)
                 self.assertEqual(message.topic, topic)
 
+    def test_read_publish_any_keeps_waiting_through_quiet_boundary_slices(self) -> None:
+        # REGRESSION: a quiet recv slice raised TimeoutError and read_publish_any
+        # returned None, abandoning the whole window on the first silence — so a 30s
+        # pointset wait was cut to the ~5s connect-timeout slice and a healthy device
+        # was falsely called silent. It must keep waiting to the caller's deadline.
+        sock = RecordingSocket()
+        client = MqttClient(_settings(), socket_factory=lambda _addr, _t: sock)
+        client._socket = sock
+        topic = "site/asset/events/pointset"
+        payload = len(topic).to_bytes(2, "big") + topic.encode("utf-8") + b"{}"
+        with mock.patch.object(
+            client,
+            "_read_packet",
+            side_effect=[TimeoutError(), TimeoutError(), (0x30, payload)],
+        ):
+            message = client.read_publish_any(expected_topics={topic}, timeout_seconds=5)
+        self.assertIsNotNone(message)
+        self.assertEqual(message.topic, topic)
+
+    def test_mid_packet_timeout_raises_rather_than_desyncing_the_stream(self) -> None:
+        # REGRESSION: a timeout AFTER the fixed-header byte was consumed left the
+        # stream mid-packet; read_publish_any's `except TimeoutError: return None`
+        # then framed the next payload bytes as a new packet (fabricated messages or
+        # a false broker_unreachable). The remainder must be read to completion, and
+        # a genuine mid-packet stall surfaces as a broker error, never a silent None.
+        class _MidPacketSocket:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def gettimeout(self) -> float:
+                return 1.0
+
+            def settimeout(self, _t: float) -> None:
+                pass
+
+            def recv(self, _n: int) -> bytes:
+                self.calls += 1
+                if self.calls == 1:
+                    return b"\x30"  # fixed-header byte consumed; packet has started
+                raise TimeoutError()  # broker stalls part-way through the packet
+
+            def close(self) -> None:
+                pass
+
+        client = MqttClient(_settings())
+        client._socket = _MidPacketSocket()
+        with self.assertRaises(MqttTransportError) as cm:
+            client._read_packet()
+        self.assertIn("partial packet", str(cm.exception))
+
     def test_read_publish_preserves_the_mqtt_retain_flag(self) -> None:
         sock = RecordingSocket()
         client = MqttClient(_settings(), socket_factory=lambda _addr, _t: sock)

@@ -64,16 +64,22 @@ class JobQueueService:
         return RunEnqueuer(self, actor_name, queue_name)
 
     def _enqueue(self, *, actor_name: str, queue_name: str, args: tuple[object, ...]) -> JobDispatch:
-        broker = RedisBroker(url=self.settings.redis_url)
-        message = dramatiq.Message(
-            queue_name=queue_name,
-            actor_name=actor_name,
-            args=args,
-            kwargs={},
-            options={},
-        )
-
+        # RedisBroker construction must sit INSIDE the try: a malformed/unparseable
+        # REDIS_URL raises at construction (redis parses the URL eagerly), and if
+        # that raw error escaped as anything but JobQueueUnavailable, dispatch_run's
+        # handler would miss it and strand a marker-stamped run at 'queued' that the
+        # startup sweep never reclaims. broker stays None until built, so the
+        # finally can skip close() when construction itself failed.
+        broker: RedisBroker | None = None
         try:
+            broker = RedisBroker(url=self.settings.redis_url)
+            message = dramatiq.Message(
+                queue_name=queue_name,
+                actor_name=actor_name,
+                args=args,
+                kwargs={},
+                options={},
+            )
             broker.enqueue(message)
         except Exception as error:
             _logger.exception(
@@ -83,6 +89,7 @@ class JobQueueService:
             )
             raise JobQueueUnavailable(_QUEUE_UNAVAILABLE_MESSAGE) from error
         finally:
-            broker.close()
+            if broker is not None:
+                broker.close()
 
         return JobDispatch(actor_name=actor_name, queue_name=queue_name)

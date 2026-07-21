@@ -26,6 +26,11 @@ from smart_commissioning_core.records import ValidationIssueRecord
 
 _ISSUE_FIELDS = tuple(ValidationIssueRecord.model_fields)
 
+# A run in one of these states is DONE. Defined here (not imported from
+# db.repositories, which imports from this module) to avoid a circular import;
+# kept in lockstep with repositories.TERMINAL_RUN_STATUSES and base._terminal_status.
+_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -171,6 +176,14 @@ class DbRunStore:
     ) -> dict[str, object]:
         with self._session_factory.begin() as session:
             run = self._load(session, run_id, for_update=True)
+            # A terminal run is terminal. A late best-effort progress write from an
+            # engine unit still unwinding after the run already failed/cancelled (a
+            # BACnet device's finally-block progress write, or asyncio.run teardown
+            # of sibling tasks) must never resurrect it to 'running' and erase the
+            # vetted terminal error_message. Once terminal, only another terminal
+            # status may change it; a non-terminal write is dropped.
+            if run.status in _TERMINAL_STATUSES and status not in _TERMINAL_STATUSES:
+                return _run_to_dict(run)
             run.status = status
             if stage is not None:
                 run.stage = stage

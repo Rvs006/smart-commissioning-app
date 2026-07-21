@@ -334,7 +334,12 @@ export function matchesTopicFilter(topic: string, filter: string): boolean {
 // matching, so a filter can never key off data the operator cannot see.
 export type ResultsFilter = {
   text: string;
-  // "all" | "pass" | "fail" | "warn" | "none" ("none" = rows with no verdict).
+  // The verdict-filter value. On discovery routes tone == verdict, so this keys
+  // off __tone. On udmi-validation verdict and shading-tone deliberately diverge
+  // (Non-compliant is amber, Offline is red), so those rows carry a __verdict key
+  // holding the real verdict kind ("pass" | "pass-notes" | "fail" | "offline" |
+  // "" for none) which is preferred here — otherwise a "Fail" filter would key
+  // off the amber tone and hide the Non-compliant rows the label promises.
   tone: string;
 };
 
@@ -344,7 +349,9 @@ export function resultRowMatchesFilter(
   topicColumn?: string,
 ): boolean {
   if (filter.tone !== "all") {
-    const rowTone = row.__tone ?? "";
+    // Prefer the explicit verdict key when present (udmi), else the shading tone
+    // (discovery, where the two coincide). "" means "no verdict" for both.
+    const rowTone = row.__verdict ?? row.__tone ?? "";
     if (filter.tone === "none" ? rowTone !== "" : rowTone !== filter.tone) {
       return false;
     }

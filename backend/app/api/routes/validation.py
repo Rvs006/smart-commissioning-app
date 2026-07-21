@@ -363,18 +363,20 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     dependencies=[Depends(require_engineer)],
 )
 def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "mqtt_config_publish")
-
     # A live publish actively writes to a broker, so gate it on the same scan
-    # authorization contract used by the discovery engines. The local
-    # validate-only path (use_live_broker not set) is side-effect free and does
-    # not require authorization.
-    parameters = dict(run.parameters)
-    _require_publish_authorization(parameters)
+    # authorization contract used by the discovery engines. The local validate-only
+    # path (use_live_broker not set) is side-effect free and needs no authorization.
+    # Authorize BEFORE creating the run: the discovery routes validate first for
+    # exactly this reason — a 403-rejected request must never leave an orphaned run
+    # stranded at 'queued' (the startup sweep would never reclaim it, and it would
+    # count as an active run and pin the run monitor forever).
+    _require_publish_authorization(dict(request.parameters))
+
+    run = _create_run(request, "mqtt_config_publish")
 
     processed_run = process_mqtt_config_publish_run(
         run.run_id,
-        parameters,
+        dict(run.parameters),
         run_store=service,
         execution_mode="inline_local_fallback",
     )
