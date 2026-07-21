@@ -1342,7 +1342,18 @@ class Bacpypes3Backend:
         # (the shell form is object-list[0]) then each element by index
         # (object-list[i], instance=i). Wire that fallback up against real
         # hardware if the single read aborts.
-        raw_objects = await app.read_property(address, device_object, self._object_list_property)
+        #
+        # asyncio.wait_for is LOAD-BEARING, not belt-and-braces: bacpypes3's
+        # own apduTimeout only governs a request it actually tracks. A future
+        # that never settles — a device that Aborts mid-segmentation then goes
+        # silent, the 2026-07-21 field hang — leaves this await pending forever,
+        # which the per-read cancel check (it runs BETWEEN reads) cannot break.
+        # A hard deadline turns an unresponsive object-list read into a normal
+        # TimeoutError the caller's `except Exception` records as a read failure.
+        raw_objects = await asyncio.wait_for(
+            app.read_property(address, device_object, self._object_list_property),
+            timeout=self._timeout_s,
+        )
         objects: list[dict[str, Any]] = []
         for raw in raw_objects or []:
             # VERIFIED against bacpypes3 (context7 /joelbender/bacpypes3): each
@@ -1377,7 +1388,15 @@ class Bacpypes3Backend:
         # object with no present-value such as structured-view); the engine's
         # per-point `except Exception` records the read error and keeps scanning,
         # so one bad object does not abort the device.
-        return await app.read_property(address, object_identifier, "present-value")
+        #
+        # asyncio.wait_for bounds a read whose future never settles (a device
+        # that stops answering mid-transaction) so a single point cannot hang
+        # the whole scan — a TimeoutError is caught as an ordinary read failure.
+        # See read_object_list for the full rationale.
+        return await asyncio.wait_for(
+            app.read_property(address, object_identifier, "present-value"),
+            timeout=self._timeout_s,
+        )
 
     def close(self) -> None:
         """Tear down the Application and RELEASE THE UDP SOCKET. Not optional.
