@@ -1,7 +1,10 @@
 import logging
 from datetime import UTC, datetime, timedelta
 
-from smart_commissioning_core.db.db_run_store import DbRunStore
+from smart_commissioning_core.db.db_run_store import (
+    WORKER_STALE_OBSERVED_AT_KEY,
+    DbRunStore,
+)
 from smart_commissioning_core.db.models import Run
 from sqlalchemy import select, text, update
 from sqlalchemy.engine import Engine
@@ -57,6 +60,11 @@ WORKER_INTERRUPTED_RUN_MESSAGE = (
 # larger allowance because a healthy worker pool may legitimately be busy.
 _RUNNING_WORKER_STALE_AFTER = timedelta(minutes=2)
 _QUEUED_WORKER_STALE_AFTER = timedelta(hours=1)
+# An expired timestamp is only a suspicion after a database outage: the API and
+# a still-live worker can reconnect at the same instant, and the API may win the
+# first row lock before the worker writes its next beat. Require a full
+# two-minute confirmation window with no worker write before making it terminal.
+_WORKER_STALE_CONFIRM_AFTER = timedelta(minutes=2)
 
 
 def _was_queued_to_worker(result_summary: dict[str, object]) -> bool:
@@ -91,6 +99,20 @@ def _worker_run_is_stale(
         _QUEUED_WORKER_STALE_AFTER if status == "queued" else _RUNNING_WORKER_STALE_AFTER
     )
     return current - observed.astimezone(UTC) > threshold
+
+
+def _stale_observed_at(result_summary: dict[str, object]) -> datetime | None:
+    """Parse the internal first-stale observation, tolerating old/bad rows."""
+    value = result_summary.get(WORKER_STALE_OBSERVED_AT_KEY)
+    if not isinstance(value, str):
+        return None
+    try:
+        observed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=UTC)
+    return observed.astimezone(UTC)
 
 
 class RunService:
@@ -276,11 +298,12 @@ class RunService:
         stayed disabled across restarts (the run rehydrates as a live monitor that
         can never terminate).
 
-        Worker-bound rows are reclaimed only after their liveness window expires:
-        one hour while queued, or two minutes while a running actor should be
-        writing 30-second heartbeats. Fresh worker rows are left untouched. Inline
-        runs carry no worker markers and are reclaimed immediately at startup.
-        Returns the ids swept (may be empty).
+        Worker-bound rows enter a two-minute confirmation window after their
+        liveness timestamp expires: one hour while queued, or two minutes while a
+        running actor should be writing 30-second heartbeats. A live actor clears
+        the suspicion marker with its next write; only continued silence becomes
+        terminal. Inline runs carry no worker markers and are reclaimed immediately
+        at startup. Returns the ids swept (may be empty).
         """
         statement = select(Run.id, Run.result_summary).where(Run.status.in_(("running", "queued")))
         with self._engine.connect() as connection:
@@ -303,7 +326,13 @@ class RunService:
         return swept
 
     def _recover_stale_worker_run(self, run_id: str) -> bool:
-        """Atomically fail a worker-bound run whose heartbeat has expired."""
+        """Confirm, then atomically fail, a worker whose heartbeat stays stale.
+
+        The first stale observation is deliberately non-terminal. This closes
+        the race after a database outage where the API reconnects milliseconds
+        before the live worker's next heartbeat. DbRunStore clears the marker on
+        every accepted lifecycle, result-summary, or issue write.
+        """
         statement = (
             select(Run.status, Run.result_summary, Run.updated_at)
             .where(Run.id == run_id)
@@ -314,11 +343,56 @@ class RunService:
             if row is None:
                 return False
             summary = row.result_summary if isinstance(row.result_summary, dict) else {}
-            if not _was_queued_to_worker(summary) or not _worker_run_is_stale(
+            if not _was_queued_to_worker(summary) or row.status not in {"queued", "running"}:
+                return False
+            now = datetime.now(UTC)
+            first_observed_at = _stale_observed_at(summary)
+            heartbeat_at = (
+                row.updated_at
+                if row.updated_at.tzinfo is not None
+                else row.updated_at.replace(tzinfo=UTC)
+            ).astimezone(UTC)
+            if first_observed_at is not None and heartbeat_at > first_observed_at:
+                # A result/issue write can advance updated_at even if the
+                # dedicated heartbeat write failed. That is still proof the live
+                # actor reached the database after suspicion was recorded.
+                refreshed_summary = dict(summary)
+                refreshed_summary.pop(WORKER_STALE_OBSERVED_AT_KEY, None)
+                connection.execute(
+                    update(Run)
+                    .where(Run.id == run_id, Run.status == row.status)
+                    .values(result_summary=refreshed_summary)
+                )
+                return False
+            if not _worker_run_is_stale(
                 status=row.status,
                 updated_at=row.updated_at,
+                now=now,
             ):
                 return False
+            if first_observed_at is None:
+                # Do not update Run.updated_at here: that column remains the real
+                # worker heartbeat. The JSON marker starts a separate, bounded
+                # confirmation window and is removed by the next live beat.
+                connection.execute(
+                    update(Run)
+                    .where(Run.id == run_id, Run.status == row.status)
+                    .values(
+                        result_summary={
+                            **summary,
+                            WORKER_STALE_OBSERVED_AT_KEY: now.isoformat(),
+                        }
+                    )
+                )
+                logger.warning(
+                    "worker heartbeat stale; awaiting confirmation for run_id=%s",
+                    run_id,
+                )
+                return False
+            if now - first_observed_at <= _WORKER_STALE_CONFIRM_AFTER:
+                return False
+            terminal_summary = dict(summary)
+            terminal_summary.pop(WORKER_STALE_OBSERVED_AT_KEY, None)
             result = connection.execute(
                 update(Run)
                 .where(Run.id == run_id, Run.status == row.status)
@@ -328,7 +402,8 @@ class RunService:
                     progress_percent=100,
                     error_message=WORKER_INTERRUPTED_RUN_MESSAGE,
                     cancel_requested=True,
-                    updated_at=datetime.now(UTC),
+                    result_summary=terminal_summary,
+                    updated_at=now,
                 )
             )
         recovered = bool(result.rowcount)

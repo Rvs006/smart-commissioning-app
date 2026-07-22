@@ -31,6 +31,13 @@ _ISSUE_FIELDS = tuple(ValidationIssueRecord.model_fields)
 # kept in lockstep with repositories.TERMINAL_RUN_STATUSES and base._terminal_status.
 _TERMINAL_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
+# The backend's stale-worker recovery uses a two-phase decision: it first
+# records when an overdue heartbeat was observed, then waits for a fresh worker
+# write before declaring the actor dead. Any accepted status write proves that
+# the actor or recovery wrapper reached the database again, so the store clears
+# that observation atomically with the lifecycle update.
+WORKER_STALE_OBSERVED_AT_KEY = "_worker_stale_observed_at"
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -86,6 +93,16 @@ def _run_to_dict(run: Run) -> dict[str, object]:
         "issues": [_issue_to_dict(issue) for issue in issues],
         "error_message": run.error_message,
     }
+
+
+def _clear_worker_stale_observation(run: Run) -> None:
+    """Remove the backend's transient liveness marker from a live write."""
+    if not isinstance(run.result_summary, dict):
+        return
+    result_summary = dict(run.result_summary)
+    if WORKER_STALE_OBSERVED_AT_KEY in result_summary:
+        result_summary.pop(WORKER_STALE_OBSERVED_AT_KEY)
+        run.result_summary = result_summary
 
 
 class DbRunStore:
@@ -184,6 +201,7 @@ class DbRunStore:
             # status may change it; a non-terminal write is dropped.
             if run.status in _TERMINAL_STATUSES and status not in _TERMINAL_STATUSES:
                 return _run_to_dict(run)
+            _clear_worker_stale_observation(run)
             run.status = status
             if stage is not None:
                 run.stage = stage
@@ -209,9 +227,11 @@ class DbRunStore:
             run = self._load(session, run_id, for_update=True)
             if merge:
                 current = run.result_summary if isinstance(run.result_summary, dict) else {}
-                run.result_summary = {**current, **result_summary}
+                next_summary = {**current, **result_summary}
             else:
-                run.result_summary = dict(result_summary)
+                next_summary = dict(result_summary)
+            next_summary.pop(WORKER_STALE_OBSERVED_AT_KEY, None)
+            run.result_summary = next_summary
             run.updated_at = _utcnow()
             session.flush()
             return _run_to_dict(run)
@@ -224,6 +244,7 @@ class DbRunStore:
         records = [ValidationIssueRecord.model_validate(issue) for issue in issues]
         with self._session_factory.begin() as session:
             run = self._load(session, run_id, for_update=True)
+            _clear_worker_stale_observation(run)
             session.execute(delete(RunIssue).where(RunIssue.run_id == run_id))
             session.flush()
             for position, record in enumerate(records):
