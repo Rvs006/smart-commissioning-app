@@ -632,10 +632,10 @@
         <section class="surface stack" style="margin-top:14px">
           <div class="section-head"><div><span class="eyebrow">Config payloads</span><h2>Publish and Verify Next Pointset</h2><p>Simulates the V1 config payload workflow without connecting to a broker.</p></div></div>
           <div class="form-grid">
-            <label>Config topic<input id="publishTopic" value="334os/b1/ahu-1000001/config"></label>
+            <label>Config topic<input id="publishTopic" value="demo-site/b1/ahu-1000001/config"></label>
             <label>Expected point<input id="publishPoint" value="supply_air_temperature_setpoint"></label>
             <label>Expected value<input id="publishValue" value="22"></label>
-            <label>Next pointset topic<input id="pointsetTopic" value="334os/b1/ahu-1000001/events/pointset"></label>
+            <label>Next pointset topic<input id="pointsetTopic" value="demo-site/b1/ahu-1000001/events/pointset"></label>
           </div>
           <label>Config payload<textarea id="publishPayload">{"pointset":{"points":{"supply_air_temperature_setpoint":{"set_value":22}}}}</textarea></label>
           <label style="display:flex;gap:8px;align-items:center;font-weight:700"><input style="width:auto" type="checkbox" id="confirmPublish"> I confirm this payload is ready to publish</label>

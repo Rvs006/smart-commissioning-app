@@ -98,16 +98,16 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
     @staticmethod
     def _register_rows() -> list[dict]:
         return [
-            {"Asset ID": "AHU-1", "Expected topic": "334os/b1/ahu-1/#"},
-            {"Asset ID": "FCU-2", "Expected topic": "334os/b1/fcu-2/state", "Payload type": ""},
+            {"Asset ID": "AHU-1", "Expected topic": "demo-site/b1/ahu-1/#"},
+            {"Asset ID": "FCU-2", "Expected topic": "demo-site/b1/fcu-2/state", "Payload type": ""},
         ]
 
     @staticmethod
     def _observed_topics() -> list[dict]:
         return [
-            _topic("334os/b1/ahu-1/state"),
-            _topic("334os/b1/fcu-2/metadata"),
-            _topic("334os/rogue/x/state"),
+            _topic("demo-site/b1/ahu-1/state"),
+            _topic("demo-site/b1/fcu-2/metadata"),
+            _topic("demo-site/rogue/x/state"),
         ]
 
     # -- tests ---------------------------------------------------------------
@@ -125,26 +125,26 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         self.assertEqual(comparison["import_filename"], "register.csv")
 
         by_topic = self._by_topic(data["topics"])
-        ahu = by_topic["334os/b1/ahu-1/state"]["attributes"]
+        ahu = by_topic["demo-site/b1/ahu-1/state"]["attributes"]
         # The wildcard register row is cited via its wildcard (one # green-lights
         # every child), not as an individually listed topic.
         self.assertEqual(ahu["register_match"], "matched")
-        self.assertEqual(ahu["register_matched_filter"], "334os/b1/ahu-1/#")
+        self.assertEqual(ahu["register_matched_filter"], "demo-site/b1/ahu-1/#")
         self.assertEqual(ahu["register_asset_id"], "AHU-1")
 
-        fcu = by_topic["334os/b1/fcu-2/metadata"]["attributes"]
+        fcu = by_topic["demo-site/b1/fcu-2/metadata"]["attributes"]
         # Blank Payload type = whole asset: the metadata sibling is expected even
         # though the register row literally lists only .../state.
         self.assertEqual(fcu["register_match"], "matched")
-        self.assertEqual(fcu["register_matched_filter"], "334os/b1/fcu-2/metadata")
+        self.assertEqual(fcu["register_matched_filter"], "demo-site/b1/fcu-2/metadata")
         self.assertEqual(fcu["register_asset_id"], "FCU-2")
 
-        rogue = by_topic["334os/rogue/x/state"]["attributes"]
+        rogue = by_topic["demo-site/rogue/x/state"]["attributes"]
         self.assertEqual(rogue["register_match"], "unmatched")
 
         unobserved = {entry["filter"] for entry in comparison["unobserved_filters"]}
         # FCU-2's underived siblings (state / pointset variants) were never seen.
-        self.assertIn("334os/b1/fcu-2/state", unobserved)
+        self.assertIn("demo-site/b1/fcu-2/state", unobserved)
 
     def test_no_register_means_no_verdicts(self) -> None:
         project = "reg-compare-none"
@@ -165,7 +165,7 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         second = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertTrue(second["register_comparison"]["register_available"])
         by_topic = self._by_topic(second["topics"])
-        self.assertEqual(by_topic["334os/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
+        self.assertEqual(by_topic["demo-site/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
 
     def test_dry_run_carries_no_comparison(self) -> None:
         from app.api.routes import discovery as discovery_routes
@@ -189,8 +189,8 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         data = self.client.get(f"/api/v1/discovery/runs/{run_id}/topics").json()
         self.assertTrue(data["register_comparison"]["register_available"])
         by_topic = self._by_topic(data["topics"])
-        self.assertEqual(by_topic["334os/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
-        self.assertEqual(by_topic["334os/rogue/x/state"]["attributes"]["register_match"], "unmatched")
+        self.assertEqual(by_topic["demo-site/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
+        self.assertEqual(by_topic["demo-site/rogue/x/state"]["attributes"]["register_match"], "unmatched")
 
     def test_newest_import_with_accepted_rows_wins(self) -> None:
         project = "reg-compare-newest"
@@ -211,7 +211,7 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         data = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertEqual(data["register_comparison"]["import_filename"], "good-register.csv")
         by_topic = self._by_topic(data["topics"])
-        self.assertEqual(by_topic["334os/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
+        self.assertEqual(by_topic["demo-site/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
 
     def test_xlsx_export_carries_register_match_column(self) -> None:
         project = "reg-compare-xlsx"
@@ -222,5 +222,5 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         rows = list(load_workbook(BytesIO(resp.content)).active.iter_rows(values_only=True))
         self.assertEqual(rows[0][-1], "Register Match")
         by_topic = {row[0]: row for row in rows[1:]}
-        self.assertEqual(by_topic["334os/b1/ahu-1/state"][-1], "matched (334os/b1/ahu-1/#)")
-        self.assertEqual(by_topic["334os/rogue/x/state"][-1], "not in register")
+        self.assertEqual(by_topic["demo-site/b1/ahu-1/state"][-1], "matched (demo-site/b1/ahu-1/#)")
+        self.assertEqual(by_topic["demo-site/rogue/x/state"][-1], "not in register")

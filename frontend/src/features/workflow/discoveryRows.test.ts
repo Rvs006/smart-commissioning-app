@@ -763,8 +763,8 @@ describe("mqttRowsFromResults register comparison", () => {
   it("labels a concrete register match 'In register' with a pass tone", () => {
     const [row] = mqttRowsFromResults(
       mqttResults({
-        topic: "334os/b1/fcu-2/metadata",
-        attributes: { register_match: "matched", register_matched_filter: "334os/b1/fcu-2/metadata" },
+        topic: "demo-site/b1/fcu-2/metadata",
+        attributes: { register_match: "matched", register_matched_filter: "demo-site/b1/fcu-2/metadata" },
       }),
     );
     expect(row["Register Match"]).toBe("In register");
@@ -774,17 +774,17 @@ describe("mqttRowsFromResults register comparison", () => {
   it("shows the wildcard basis on a wildcard-covered match", () => {
     const [row] = mqttRowsFromResults(
       mqttResults({
-        topic: "334os/b1/ahu-1/state",
-        attributes: { register_match: "matched", register_matched_filter: "334os/b1/#" },
+        topic: "demo-site/b1/ahu-1/state",
+        attributes: { register_match: "matched", register_matched_filter: "demo-site/b1/#" },
       }),
     );
-    expect(row["Register Match"]).toBe("In register (wildcard 334os/b1/#)");
+    expect(row["Register Match"]).toBe("In register (wildcard demo-site/b1/#)");
     expect(row.__tone).toBe("pass");
   });
 
   it("labels an unmatched topic 'Not in register' with a fail tone", () => {
     const [row] = mqttRowsFromResults(
-      mqttResults({ topic: "334os/rogue/x/state", attributes: { register_match: "unmatched" } }),
+      mqttResults({ topic: "demo-site/rogue/x/state", attributes: { register_match: "unmatched" } }),
     );
     expect(row["Register Match"]).toBe("Not in register");
     expect(row.__tone).toBe("fail");

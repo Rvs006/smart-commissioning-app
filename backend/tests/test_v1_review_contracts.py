@@ -557,15 +557,15 @@ class UdmiReviewTests(unittest.TestCase):
         def fake_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
             return [
                 MqttMessage(
-                    topic="334os/b1/ahu-1000001/state",
+                    topic="demo-site/b1/ahu-1000001/state",
                     payload=b'{"timestamp":"2026-04-01T10:47:38.697+01:00","system":{"hardware":{"make":"ExpectedCo","model":"Model-A"}}}',
                 ),
                 MqttMessage(
-                    topic="334os/b1/ahu-1000001/metadata",
+                    topic="demo-site/b1/ahu-1000001/metadata",
                     payload=b'{"timestamp":"2026-04-01T10:48:00.000+01:00","system":{"physical_tag":{"asset":{"guid":"ifc://expected"}}},"pointset":{"points":{"co2_concentration_sensor":{"units":"parts_per_million"}}}}',
                 ),
                 MqttMessage(
-                    topic="334os/b1/ahu-1000001/events/pointset",
+                    topic="demo-site/b1/ahu-1000001/events/pointset",
                     payload=b'{"timestamp":"2026-04-01T10:48:56.312+01:00","pointset":{"points":{"co2_concentration_sensor":{"present_value":500}}}}',
                 ),
             ]
@@ -580,9 +580,9 @@ class UdmiReviewTests(unittest.TestCase):
                     "guid": "ifc://expected",
                     "units": {"co2_concentration_sensor": "parts_per_million"},
                 },
-                "metadata_topic": "334os/b1/ahu-1000001/metadata",
-                "pointset_topic": "334os/b1/ahu-1000001/events/pointset",
-                "state_topic": "334os/b1/ahu-1000001/state",
+                "metadata_topic": "demo-site/b1/ahu-1000001/metadata",
+                "pointset_topic": "demo-site/b1/ahu-1000001/events/pointset",
+                "state_topic": "demo-site/b1/ahu-1000001/state",
                 "use_live_broker": True,
             },
             live_capture=fake_capture,
@@ -635,11 +635,11 @@ class UdmiReviewTests(unittest.TestCase):
         def fake_capture(*_args: object, **_kwargs: object) -> list[MqttMessage]:
             return [
                 MqttMessage(
-                    topic="334os/b1/ahu-1000001/state",
+                    topic="demo-site/b1/ahu-1000001/state",
                     payload=b'{"system":{"hardware":{"make":"ExpectedCo","model":"Model-A"}}}',
                 ),
                 MqttMessage(
-                    topic="334os/b1/ahu-1000001/events/pointset",
+                    topic="demo-site/b1/ahu-1000001/events/pointset",
                     payload=b'{"pointset":{"points":{"co2_concentration_sensor":{"present_value":500}}}}',
                 ),
             ]
@@ -648,8 +648,8 @@ class UdmiReviewTests(unittest.TestCase):
             {
                 "broker_host": "mqtt.example.local",
                 "expected_schedule": {"asset_id": "AHU-1000001", "manufacturer": "ExpectedCo"},
-                "state_topic": "334os/b1/ahu-1000001/state",
-                "pointset_topic": "334os/b1/ahu-1000001/events/pointset",
+                "state_topic": "demo-site/b1/ahu-1000001/state",
+                "pointset_topic": "demo-site/b1/ahu-1000001/events/pointset",
                 "use_live_broker": True,
             },
             live_capture=fake_capture,
@@ -681,7 +681,7 @@ class UdmiReviewTests(unittest.TestCase):
                 "state_payload": {"system": {"hardware": {"make": "ExpectedCo", "model": "Model-A"}}},
                 "metadata_payload": {"system": {"physical_tag": {"asset": {"guid": "ifc://expected"}}}},
                 "pointset_payload": {"points": {"co2_concentration_sensor": {"present_value": 500}}},
-                "state_topic": "334os/b1/ahu-1000001/state",
+                "state_topic": "demo-site/b1/ahu-1000001/state",
                 "use_live_broker": True,
             },
             live_capture=failing_capture,
@@ -757,7 +757,7 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
                 "site_id": "demo-site",
                 "job_type": "mqtt_config_publish",
                 "parameters": {
-                    "topic": "334os/b1/ahu-1000001/config",
+                    "topic": "demo-site/b1/ahu-1000001/config",
                     "payload": '{"pointset":{"points":{"supply_air_temperature_setpoint":{"set_value":22}}}}',
                     "confirmed": True,
                     "expected_point": "supply_air_temperature_setpoint",
@@ -786,7 +786,7 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
     def test_publish_requires_confirmation_and_valid_topic(self) -> None:
         result = validate_and_publish_config(
             {
-                "topic": "334os/b1/ahu-1000001/events/pointset",
+                "topic": "demo-site/b1/ahu-1000001/events/pointset",
                 "payload": "{}",
                 "confirmed": False,
             }
@@ -798,7 +798,7 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
     def test_publish_success_observes_next_pointset_override(self) -> None:
         result = validate_and_publish_config(
             {
-                "topic": "334os/b1/ahu-1000001/config",
+                "topic": "demo-site/b1/ahu-1000001/config",
                 "payload": '{"pointset":{"points":{"supply_air_temperature_setpoint":{"set_value":22}}}}',
                 "confirmed": True,
                 "expected_point": "supply_air_temperature_setpoint",
@@ -816,7 +816,7 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
     def test_publish_surfaces_connection_detail(self) -> None:
         result = validate_and_publish_config(
             {
-                "topic": "334os/b1/ahu-1000001/config",
+                "topic": "demo-site/b1/ahu-1000001/config",
                 "payload": "{}",
                 "confirmed": True,
                 "simulate_error": "tls",
@@ -840,12 +840,12 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
             {
                 "broker_host": "mqtt.example.local",
                 "broker_port": 1883,
-                "topic": "334os/b1/ahu-1000001/config",
+                "topic": "demo-site/b1/ahu-1000001/config",
                 "payload": '{"pointset":{"points":{"supply_air_temperature_setpoint":{"set_value":22}}}}',
                 "confirmed": True,
                 "expected_point": "supply_air_temperature_setpoint",
                 "expected_value": 22,
-                "pointset_topic": "334os/b1/ahu-1000001/events/pointset",
+                "pointset_topic": "demo-site/b1/ahu-1000001/events/pointset",
                 "use_live_broker": True,
                 # A live publish is now an authorized active operation gated in
                 # the engine core; supply authorization to exercise the live path.
@@ -857,7 +857,7 @@ class MqttConfigPublishReviewTests(unittest.TestCase):
         self.assertEqual(result.result_summary["status"], "succeeded")
         self.assertEqual(result.result_summary["broker_publish_attempted"], True)
         self.assertEqual(result.result_summary["broker_status_detail"], "live_pointset_received")
-        self.assertEqual(calls["pointset_topic"], "334os/b1/ahu-1000001/events/pointset")
+        self.assertEqual(calls["pointset_topic"], "demo-site/b1/ahu-1000001/events/pointset")
 
 
 if __name__ == "__main__":

@@ -59,9 +59,39 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Changed
 
+- **One device with an odd timestamp can no longer crash the whole validation
+  run.** A payload carrying a timestamp with no timezone offset made the
+  payload-ordering comparison raise a naive-vs-aware error that failed the
+  entire run; the sort key is now always timezone-aware, so an offset-less
+  timestamp is handled gracefully (and still reported as a structural
+  RFC 3339 violation, as before).
+- **Timezone-mislabelled clocks are now diagnosed, not buried.** A device
+  stamping local wall-clock time (e.g. BST) with a `Z`/UTC suffix reads about a
+  whole hour off and used to fire a high-severity freshness fault that drowned
+  genuine issues. Those freshness issues now carry a distinct
+  `pointset_timestamp` type (new `UDMI-TS` code) so operators can tell timing
+  artifacts from data problems, and when a whole-hour offset is detected the
+  message says so — while still reporting the fault (a mislabelled clock is a
+  real conformance problem).
+
+### Changed
+
 - **"Run history" is now the consistent name** across the app — the homepage
   Recent runs card and the live run monitor both use it and link to
   Operate → Run History (previously "Jobs / job history").
+- **The issue inspector now sits beside the results table** (UDMI validation)
+  instead of stacking below it, and **selecting a row — by clicking it or its
+  View button — scrolls straight to that payload's issues**, so it is clear
+  which issues flagged a given row. The View button now names the count it
+  carries ("View N issues"). The wider two-column layout is scoped to the UDMI
+  results view so the discovery tables keep their full width.
+
+### Security
+
+- **Removed a hardcoded real site name** from the MQTT/UDMI topic examples,
+  discovery comment, tests, and review docs, replacing it with the generic
+  `demo-site` placeholder (public-repo hygiene). The value no longer appears in
+  the tracked tree.
 
 ## [0.1.19] - 2026-07-20
 

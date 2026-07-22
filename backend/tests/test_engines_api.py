@@ -653,7 +653,7 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
             run_id,
             [
                 {
-                    "topic": "334os/b1/ahu-1/state",
+                    "topic": "demo-site/b1/ahu-1/state",
                     "last_payload": {"present_value": 22},
                     "message_count": 3,
                     "attributes": {"device_ref": "AHU-1"},
@@ -665,7 +665,7 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         rows = list(load_workbook(BytesIO(resp.content)).active.iter_rows(values_only=True))
         self.assertEqual(len(rows), 2)
         data = rows[1]
-        self.assertEqual(data[0], "334os/b1/ahu-1/state")
+        self.assertEqual(data[0], "demo-site/b1/ahu-1/state")
         self.assertEqual(data[1], "AHU-1")
         self.assertEqual(data[3], "3")
         self.assertIn("present_value", data[4])
@@ -680,9 +680,9 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         discovery_routes._discovery_repository().replace_topics(
             run_id,
             [
-                {"topic": "334os/b1/ahu-1/state", "last_payload": {"a": 1}, "message_count": 1, "attributes": {}},
+                {"topic": "demo-site/b1/ahu-1/state", "last_payload": {"a": 1}, "message_count": 1, "attributes": {}},
                 {
-                    "topic": "334os/b1/ahu-1/events/pointset",
+                    "topic": "demo-site/b1/ahu-1/events/pointset",
                     "last_payload": {"b": 2},
                     "message_count": 1,
                     "attributes": {},
@@ -691,11 +691,11 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         )
         resp = self.client.get(
             f"/api/v1/discovery/runs/{run_id}/topics.xlsx",
-            params={"topic_filter": "334os/+/+/state"},
+            params={"topic_filter": "demo-site/+/+/state"},
         )
         self.assertEqual(resp.status_code, 200, resp.text)
         topics = [row[0] for row in load_workbook(BytesIO(resp.content)).active.iter_rows(min_row=2, values_only=True)]
-        self.assertEqual(topics, ["334os/b1/ahu-1/state"])
+        self.assertEqual(topics, ["demo-site/b1/ahu-1/state"])
 
     def test_topics_xlsx_404_for_unknown_run(self) -> None:
         resp = self.client.get("/api/v1/discovery/runs/run_does_not_exist/topics.xlsx")
@@ -899,7 +899,7 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
         publish = self._post(
             "/api/v1/validation/mqtt-config/runs",
             {
-                "topic": "334os/b1/ahu-1/config",
+                "topic": "demo-site/b1/ahu-1/config",
                 "payload": '{"pointset":{"points":{"sat":{"set_value":22}}}}',
                 "confirmed": True,
                 "previous_config_payload": {"pointset": {"points": {"sat": {"set_value": 18}}}},
@@ -925,7 +925,7 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
         publish = self._post(
             "/api/v1/validation/mqtt-config/runs",
             {
-                "topic": "334os/b1/ahu-1/config",
+                "topic": "demo-site/b1/ahu-1/config",
                 "payload": "{}",
                 "confirmed": True,
                 # No previous_config_payload -> nothing captured to roll back to.
@@ -941,7 +941,7 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
         response = self._post(
             "/api/v1/validation/mqtt-config/runs",
             {
-                "topic": "334os/b1/ahu-1/config",
+                "topic": "demo-site/b1/ahu-1/config",
                 "payload": "{}",
                 "confirmed": True,
                 "use_live_broker": True,

@@ -1141,9 +1141,32 @@ def _pointset_freshness_issue(
         return None
 
     age_seconds = (observed_time.astimezone(UTC) - payload_time.astimezone(UTC)).total_seconds()
+    # Whole-hour clock-labelling signature: a device stamping LOCAL wall time
+    # (e.g. BST = UTC+1) but labelling it "Z" reads ~N*3600s off, firing this as
+    # a bogus HIGH cadence miss and burying real data faults. Diagnose it in the
+    # wording (still reporting it: a mislabelled clock IS a conformance fault).
+    # abs(hour_offset)<=14 bounds it to real-world UTC offsets. The residual to
+    # the nearest whole hour is <=1800s (half the 3600s rounding unit), so an
+    # uncapped max(interval, 300) tolerance fires on EVERY stale payload once the
+    # cadence is >=30 min (the UK half-hourly fleet), misreading a dead device as
+    # a clock artifact. Cap the window at 600s so the signature only claims ages
+    # sitting genuinely NEAR a whole hour, not any stale one.
+    hour_offset = round(age_seconds / 3600)
+    tz_tolerance = min(max(interval_seconds, 300.0), 600.0)
+    tz_signature = (
+        hour_offset != 0
+        and abs(hour_offset) <= 14
+        and abs(age_seconds - hour_offset * 3600) <= tz_tolerance
+    )
+    tz_hint = (
+        f" This looks like a whole-hour clock-labelling offset, about {abs(hour_offset)} hour(s) — "
+        "check the device stamps UTC, not local, with a Z suffix."
+        if tz_signature
+        else ""
+    )
     if age_seconds < -interval_seconds or age_seconds <= interval_seconds:
         if age_seconds < -interval_seconds:
-            return _issue(issues, asset_id=asset_id, issue_type="pointset_validation", severity="high", description="Pointset payload timestamp is too far in the future for the capture clock.", expected_value="current device time", observed_value=f"{age_seconds:.1f}s age", suggested_action="Synchronize device and commissioning host clocks.", raw_evidence_uri=raw_evidence_uri)
+            return _issue(issues, asset_id=asset_id, issue_type="pointset_timestamp", severity="high", description="Pointset payload timestamp is too far in the future for the capture clock." + tz_hint, expected_value="current device time", observed_value=f"{age_seconds:.1f}s age", suggested_action="Synchronize device and commissioning host clocks.", raw_evidence_uri=raw_evidence_uri)
         return None
 
     retained = parse_bool(parameters.get("pointset_payload_retained"))
@@ -1151,12 +1174,12 @@ def _pointset_freshness_issue(
     return _issue(
         issues,
         asset_id=asset_id,
-        issue_type="pointset_validation",
+        issue_type="pointset_timestamp",
         severity="high",
         description=(
             "Pointset payload timestamp exceeds the register's Expected reporting interval "
             f"({age_seconds:.1f}s old; expected at most {interval_seconds:g}s)."
-            f"{retained_detail}"
+            f"{retained_detail}{tz_hint}"
         ),
         expected_value=f"at most {interval_seconds:g} seconds old",
         observed_value=f"{age_seconds:.1f} seconds old" + (" (retained)" if retained else ""),
@@ -1827,6 +1850,7 @@ def _issue(
         "unexpected_device": "UDMI-UN",
         "payload_error": "UDMI-PL",
         "pointset_validation": "UDMI-PS",
+        "pointset_timestamp": "UDMI-TS",
         "state_validation": "UDMI-ST",
         "metadata_validation": "UDMI-MD",
         "register_import": "UDMI-RG",
@@ -2172,7 +2196,12 @@ def _latest_payload_timestamp(parameters: dict[str, object]) -> str | None:
 
 
 def _parse_timestamp_sort_key(value: str) -> datetime:
+    # Must return an ALWAYS-aware datetime: fromisoformat accepts offset-less
+    # strings as naive, and max() comparing a naive key against an aware one
+    # raises TypeError, which would fail the whole run. Sort key is display
+    # order only; payload_last_seen still returns the raw max string.
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return datetime.min
+        return datetime.min.replace(tzinfo=UTC)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)

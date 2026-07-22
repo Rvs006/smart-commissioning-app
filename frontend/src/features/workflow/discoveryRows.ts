@@ -299,7 +299,7 @@ export function mqttRowsFromResults(results: DiscoveryResultsResponse): Record<s
 
 // MQTT wildcard match used by the Explorer-like capture panel's topic filter
 // (mq9nhbzu): '#' matches the rest of the topic, '+' matches exactly one level.
-// Mirrors broker semantics so a filter like "334os/+/+/state" behaves as the
+// Mirrors broker semantics so a filter like "demo-site/+/+/state" behaves as the
 // operator expects against the captured topic list.
 export function matchesTopicFilter(topic: string, filter: string): boolean {
   const trimmed = filter.trim();

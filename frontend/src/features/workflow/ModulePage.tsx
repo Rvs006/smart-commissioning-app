@@ -242,7 +242,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback | null>(null);
-  const [publishTopic, setPublishTopic] = useState("334os/b1/ahu-1000001/config");
+  const [publishTopic, setPublishTopic] = useState("demo-site/b1/ahu-1000001/config");
   const [publishPayload, setPublishPayload] = useState(
     '{"pointset":{"points":{"supply_air_temperature_setpoint":{"set_value":22}}}}',
   );
@@ -254,7 +254,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [publishExtraPoints, setPublishExtraPoints] = useState<PointValuePair[]>([]);
   const [publishConfirmed, setPublishConfirmed] = useState(false);
   const [publishUseLiveBroker, setPublishUseLiveBroker] = useState(false);
-  const [publishPointsetTopic, setPublishPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
+  const [publishPointsetTopic, setPublishPointsetTopic] = useState("demo-site/b1/ahu-1000001/events/pointset");
   const [publishWaitSeconds, setPublishWaitSeconds] = useState("5");
   const [scanPorts, setScanPorts] = useState<ScanPort[]>(defaultScanPorts);
   const [scanAuthorized, setScanAuthorized] = useState(false);
@@ -270,9 +270,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiMetadataPayload, setUdmiMetadataPayload] = useState(defaultMetadataPayload);
   const [udmiPointsetPayload, setUdmiPointsetPayload] = useState(defaultPointsetPayload);
   const [udmiUseLiveBroker, setUdmiUseLiveBroker] = useState(false);
-  const [udmiStateTopic, setUdmiStateTopic] = useState("334os/b1/ahu-1000001/state");
-  const [udmiMetadataTopic, setUdmiMetadataTopic] = useState("334os/b1/ahu-1000001/metadata");
-  const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("334os/b1/ahu-1000001/events/pointset");
+  const [udmiStateTopic, setUdmiStateTopic] = useState("demo-site/b1/ahu-1000001/state");
+  const [udmiMetadataTopic, setUdmiMetadataTopic] = useState("demo-site/b1/ahu-1000001/metadata");
+  const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("demo-site/b1/ahu-1000001/events/pointset");
   // Blank (the default) = run until every expected topic has reported a
   // payload or the run is cancelled; a positive number bounds the run time.
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("");
@@ -334,6 +334,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [step, setStep] = useState<ModuleStep>("setup");
   // Snap target for the results-open scroll: the top-of-page hero section.
   const heroRef = useRef<HTMLElement | null>(null);
+  // Per inspector payload-type-group DOM node, keyed `${assetId}:${payloadType}`,
+  // so selecting a live-UDMI results row can expand its asset and scroll straight
+  // to that payload's issues (ITEM-D). A ref map, not getElementById: asset ids
+  // are arbitrary imported field data, unsafe to trust as DOM element ids.
+  const payloadGroupRefs = useRef(new Map<string, HTMLDivElement>());
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
@@ -1076,6 +1081,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           // filter must key off the real verdict, not the shading tone. "none"
           // collapses to "" to match the filter's "no verdict" convention.
           __verdict: verdict === "none" ? "" : verdict,
+          // Raw payload type (no "UDMI " prefix, unlike the visible Payload cell)
+          // so a row click keys straight into the inspector's payload-group refs
+          // (ITEM-D). Hidden: not in `columns`, so it never renders as a cell.
+          __payloadType: entry.payloadType,
         };
       }),
     );
@@ -1613,35 +1622,65 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
   const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
 
+  // Selecting a live-UDMI results row (row click or its View button) opens the
+  // matching asset in the inspector and scrolls to that payload type's issues
+  // (ITEM-D), so the inspector — now beside the table — surfaces exactly which
+  // issues flagged the row. Guarded to live-UDMI rows: they carry an Issues
+  // count and a hidden __payloadType; discovery rows have neither and no
+  // inspector payload groups, so this no-ops for them.
+  const focusInspectorPayload = (row: Record<string, string>) => {
+    if (row.Issues === undefined) {
+      return;
+    }
+    setExpandedAsset(row.Asset);
+    const key = `${row.Asset}:${row.__payloadType ?? ""}`;
+    // The payload-type-group mounts only once its asset expands, so wait a frame
+    // for that re-render before scrolling to the freshly-stamped node.
+    requestAnimationFrame(() => {
+      payloadGroupRefs.current.get(key)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  };
+
   // One results-table data row. Shared by the flat (discovery) render and the
   // grouped-by-asset render (ITEM-7) so the two can never drift. rowIndex is the
   // ORIGINAL index in resultRows, so selection and detail joins stay correct
   // while the list is filtered (ISSUE-4).
-  const renderResultRow = ({ row, index: rowIndex }: { row: Record<string, string>; index: number }) => (
-    <tr
-      className={`${row.__tone ? `row-${row.__tone}` : ""}${
-        selectedResultIndex === rowIndex ? " row-selected" : ""
-      }`.trim() || undefined}
-      key={rowIndex}
-      onClick={() => setSelectedResultIndex(rowIndex)}
-    >
-      {tableColumns.map((column) => (
-        <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
-      ))}
-      <td>
-        <button
-          className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
-          onClick={() => {
-            setSelectedResultIndex(rowIndex);
-            setDetailRow(row);
-          }}
-          type="button"
-        >
-          View
-        </button>
-      </td>
-    </tr>
-  );
+  const renderResultRow = ({ row, index: rowIndex }: { row: Record<string, string>; index: number }) => {
+    // Live-UDMI rows carry a real issue count; name it on the View affordance so
+    // the button reads as "holds N issues", not a bare "View" (ITEM-D). Honest:
+    // the count is only claimed when the row actually has issues.
+    const issueCount = row.Issues === undefined ? 0 : Number(row.Issues);
+    const viewLabel = issueCount > 0 ? `View ${issueCount} issue${issueCount === 1 ? "" : "s"}` : "View";
+    return (
+      <tr
+        className={`${row.__tone ? `row-${row.__tone}` : ""}${
+          selectedResultIndex === rowIndex ? " row-selected" : ""
+        }`.trim() || undefined}
+        key={rowIndex}
+        onClick={() => {
+          setSelectedResultIndex(rowIndex);
+          focusInspectorPayload(row);
+        }}
+      >
+        {tableColumns.map((column) => (
+          <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
+        ))}
+        <td>
+          <button
+            className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
+            onClick={() => {
+              setSelectedResultIndex(rowIndex);
+              setDetailRow(row);
+              focusInspectorPayload(row);
+            }}
+            type="button"
+          >
+            {viewLabel}
+          </button>
+        </td>
+      </tr>
+    );
+  };
 
   return (
     <div className="app-page">
@@ -3014,7 +3053,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </section>
       )}
 
-      <section className="app-grid two-col wide-left" data-stepgroup="results">
+      {/* The inspector sits beside the table (two-col wide-left) only on
+          udmi-validation, where it carries live findings/compare content. On the
+          discovery/data-validation routes it holds a static empty-state note, so
+          keep the table full-width (single column) there. */}
+      <section
+        className={`app-grid${isUdmiValidation ? " two-col wide-left" : ""}`}
+        data-stepgroup="results"
+      >
         <article className="surface">
           <div className="surface-heading">
             <div>
@@ -3378,6 +3424,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                 <div
                                   className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
                                   key={entry.payloadType}
+                                  ref={(el) => {
+                                    // Register/deregister this payload group so a
+                                    // row click can scroll straight to it (ITEM-D).
+                                    if (el) {
+                                      payloadGroupRefs.current.set(payloadKey, el);
+                                    } else {
+                                      payloadGroupRefs.current.delete(payloadKey);
+                                    }
+                                  }}
                                 >
                                   <h5>{entry.payloadType}</h5>
                                   {sectionTone && (
@@ -4081,7 +4136,16 @@ function renderCell(
 ) {
   if (column === "Raw Payload" && row[column]) {
     return (
-      <button className="secondary-button compact" onClick={() => onCopyPayload(row[column], row.Asset ?? row.Topic ?? "Selected")} type="button">
+      <button
+        className="secondary-button compact"
+        onClick={(event) => {
+          // Copy sits inside the results row; without this the click also fires
+          // the row's focusInspectorPayload, collapsing/scrolling the inspector.
+          event.stopPropagation();
+          onCopyPayload(row[column], row.Asset ?? row.Topic ?? "Selected");
+        }}
+        type="button"
+      >
         Copy payload
       </button>
     );
