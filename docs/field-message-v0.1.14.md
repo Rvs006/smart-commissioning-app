@@ -1,4 +1,4 @@
-# Message to Pete — v0.1.14 (ready to send)
+# Message to field engineer — v0.1.14 (ready to send)
 
 **Written 2026-07-16, after the v0.1.11–13 wrap-up message went out.** The
 v0.1.14 Release is published with the portable zip attached and marked latest,
@@ -15,7 +15,7 @@ only known after the bundle builds, so pinning it in a repo file would always
 leave main one commit ahead of the tag it describes. Release notes can carry
 it without a commit.
 
-Pete's environment (2026-07-16): he tests on his **personal laptop**, and the
+field engineer's environment (2026-07-16): he tests on his **personal laptop**, and the
 MSI server has **no ThreatLocker/allowlisting** — so the hash-approval drill
 does not apply to his machines (it is only the dev laptop that is locked
 down). The message therefore carries the SmartScreen note, not the IT one.
@@ -23,7 +23,7 @@ down). The message therefore carries the SmartScreen note, not the IT one.
 ## The message (simplified for a non-technical read)
 
 ```text
-Hi Pete,
+Hi field engineer,
 
 New build - v0.1.14. Use this one:
 https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.14
@@ -51,11 +51,11 @@ What's in the app:
   pages stay empty until a real run
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
-- `docs/pete-message-2026-07-16.md` — the v0.1.11–13 wrap-up message (sent).
-- `docs/pete-followups-2026-07-16.md` — his open questions (unchanged by this).
+- `docs/field-message-2026-07-16.md` — the v0.1.11–13 wrap-up message (sent).
+- `docs/field-followups-2026-07-16.md` — his open questions (unchanged by this).
 - `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.

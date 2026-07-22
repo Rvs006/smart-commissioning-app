@@ -29,7 +29,7 @@ function ipResults(
     job_type: "ip_discovery",
     status: "succeeded",
     result_summary: {},
-    discovered_assets: [{ ip_address: "10.10.25.214", ...asset }],
+    discovered_assets: [{ ip_address: "192.0.2.214", ...asset }],
     devices: [],
     points: [],
     topics: [],
@@ -155,11 +155,11 @@ describe("bacnetBackendLabel", () => {
 describe("ipRowsFromResults", () => {
   it("maps a real MAC address and hostname into the row cells", () => {
     const [row] = ipRowsFromResults(
-      ipResults({ mac_address: "C0:A6:F3:F2:F3:2F", hostname: "plant-controller" }),
+      ipResults({ mac_address: "02:00:00:00:00:03", hostname: "plant-controller" }),
     );
-    expect(row["MAC Address"]).toBe("C0:A6:F3:F2:F3:2F");
+    expect(row["MAC Address"]).toBe("02:00:00:00:00:03");
     expect(row.Hostname).toBe("plant-controller");
-    expect(row["Observed IP"]).toBe("10.10.25.214");
+    expect(row["Observed IP"]).toBe("192.0.2.214");
   });
 
   it("degrades a missing MAC/hostname to a blank placeholder, never fabricated", () => {

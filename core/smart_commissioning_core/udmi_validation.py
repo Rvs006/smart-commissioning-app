@@ -672,7 +672,7 @@ def _review_payload_issues(
                 )
             )
 
-    # Version gate first (workbench contract, Pete 2026-07-09): the register's
+    # Version gate first (workbench contract, field engineer 2026-07-09): the register's
     # Expected schema version must equal each payload's declared top-level
     # version. A mismatch is reported immediately and that payload's structure
     # is NOT checked against the wrong schema; on a match (or when the register
@@ -1158,12 +1158,24 @@ def _pointset_freshness_issue(
         and abs(hour_offset) <= 14
         and abs(age_seconds - hour_offset * 3600) <= tz_tolerance
     )
-    tz_hint = (
-        f" This looks like a whole-hour clock-labelling offset, about {abs(hour_offset)} hour(s) — "
-        "check the device stamps UTC, not local, with a Z suffix."
-        if tz_signature
-        else ""
-    )
+    if tz_signature and age_seconds < 0:
+        # A future payload cannot be explained by missed cadence, so a whole-hour
+        # offset is strong clock-labelling evidence.
+        tz_hint = (
+            f" This looks like a whole-hour clock-labelling offset, about "
+            f"{abs(hour_offset)} hour(s); check that the device stamps UTC."
+        )
+    elif tz_signature:
+        # A past payload exactly one hour old is observationally identical to a
+        # device that genuinely stopped publishing one hour ago. Preserve both
+        # diagnoses instead of steering the operator to the clock alone.
+        tz_hint = (
+            f" The age is close to a whole-hour offset, about {abs(hour_offset)} "
+            "hour(s). This can be a clock-labelling error or genuine stale "
+            "publishing; check both UTC labelling and the publish cadence."
+        )
+    else:
+        tz_hint = ""
     if age_seconds < -interval_seconds or age_seconds <= interval_seconds:
         if age_seconds < -interval_seconds:
             return _issue(issues, asset_id=asset_id, issue_type="pointset_timestamp", severity="high", description="Pointset payload timestamp is too far in the future for the capture clock." + tz_hint, expected_value="current device time", observed_value=f"{age_seconds:.1f}s age", suggested_action="Synchronize device and commissioning host clocks.", raw_evidence_uri=raw_evidence_uri)
@@ -2195,13 +2207,14 @@ def _latest_payload_timestamp(parameters: dict[str, object]) -> str | None:
     return max(timestamps, key=_parse_timestamp_sort_key)
 
 
-def _parse_timestamp_sort_key(value: str) -> datetime:
-    # Must return an ALWAYS-aware datetime: fromisoformat accepts offset-less
-    # strings as naive, and max() comparing a naive key against an aware one
-    # raises TypeError, which would fail the whole run. Sort key is display
-    # order only; payload_last_seen still returns the raw max string.
+def _parse_timestamp_sort_key(value: str) -> tuple[int, datetime]:
+    # Valid offset-aware timestamps outrank invalid or offset-less values. A
+    # naive wall-clock value has no knowable position against UTC; attaching UTC
+    # would invent an instant and could falsely call it the latest payload.
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        return datetime.min.replace(tzinfo=UTC)
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+        return (0, datetime.min.replace(tzinfo=UTC))
+    if parsed.tzinfo is None:
+        return (0, datetime.min.replace(tzinfo=UTC))
+    return (1, parsed.astimezone(UTC))

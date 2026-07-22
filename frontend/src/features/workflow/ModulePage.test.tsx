@@ -50,8 +50,8 @@ const resultsPayload = {
   discovered_assets: [
     {
       asset_id: null,
-      ip_address: "10.10.25.214",
-      mac_address: "C0:A6:F3:F2:F3:2F",
+      ip_address: "192.0.2.214",
+      mac_address: "02:00:00:00:00:03",
       hostname: "plant-controller",
       observed_ports: [{ port: 443, protocol: "tcp", service: "https" }],
       match_basis: "ip",
@@ -110,7 +110,7 @@ describe("ModulePage discovery wiring", () => {
         ...resultsPayload.discovered_assets,
         {
           asset_id: null,
-          ip_address: "10.10.25.9",
+          ip_address: "192.0.2.9",
           mac_address: null,
           hostname: null,
           observed_ports: [],
@@ -120,7 +120,7 @@ describe("ModulePage discovery wiring", () => {
         },
         {
           asset_id: "AHU-7",
-          ip_address: "10.10.25.11",
+          ip_address: "192.0.2.11",
           mac_address: null,
           hostname: null,
           observed_ports: [],
@@ -1137,7 +1137,7 @@ describe("ModulePage discovery wiring", () => {
     // The now-populated MAC column renders (header + the live cell value), proving
     // the engine's mac_address flows through to the table.
     expect(await screen.findByRole("columnheader", { name: "MAC Address" })).toBeInTheDocument();
-    expect((await screen.findAllByText("C0:A6:F3:F2:F3:2F")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("02:00:00:00:00:03")).length).toBeGreaterThan(0);
 
     // Clicking the per-row "View" opens an unmistakable modal dialog whose labeled
     // fields include the real MAC and hostname for that host.
@@ -1145,7 +1145,7 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("MAC Address")).toBeInTheDocument();
-    expect(within(dialog).getByText("C0:A6:F3:F2:F3:2F")).toBeInTheDocument();
+    expect(within(dialog).getByText("02:00:00:00:00:03")).toBeInTheDocument();
     expect(within(dialog).getByText("Hostname")).toBeInTheDocument();
     expect(within(dialog).getByText("plant-controller")).toBeInTheDocument();
 
@@ -1212,7 +1212,7 @@ describe("ModulePage discovery wiring", () => {
   });
 
   // A scan that completed and genuinely found nothing used to land on the same
-  // "No results yet" as a head that had never run (Pete 2026-07-15). These are
+  // "No results yet" as a head that had never run (field engineer 2026-07-15). These are
   // text-content assertions on the always-in-DOM results section: jsdom applies
   // no theme CSS, so step-gating visibility is not assertable here.
   it("states what was probed when a scan completes and finds nothing", async () => {
@@ -1970,11 +1970,11 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Before a run there are no result rows at all — no sample preview, just
     // the honest empty state. Fabricated rows here read as real findings.
-    // MDB5-00-044-BLR-2 is unique to the old sample rows (the sample *issues*
+    // DEMO-00-044-BLR-2 is unique to the old sample rows (the sample *issues*
     // fallback in the inspector is a separate surface and still stands).
     expect(await screen.findByText("No results yet")).toBeInTheDocument();
     expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
-    expect(screen.queryByText("MDB5-00-044-BLR-2")).not.toBeInTheDocument();
+    expect(screen.queryByText("DEMO-00-044-BLR-2")).not.toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
@@ -1993,7 +1993,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getAllByText("UDMI pointset").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Pass").length).toBeGreaterThan(0);
     // The old illustrative sample asset never appears as a live result.
-    expect(screen.queryByText("MDB5-00-043-BLR-1")).not.toBeInTheDocument();
+    expect(screen.queryByText("DEMO-BLR-001")).not.toBeInTheDocument();
 
     // Expand the asset in the INSPECTOR drill-down (a separate toggle from the
     // results-table summary row, so scope the query to the inspector aside).
@@ -2250,7 +2250,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // attempt) but stayed silent: pointset + state observed_present false, an
     // engine "not_publishing" issue, and the run summary's not_publishing_devices
     // list. Every EM-2 row must read red "Offline — did not publish", even
-    // though the RUN itself SUCCEEDED — the ask as Pete experiences it.
+    // though the RUN itself SUCCEEDED — the ask as field engineer experiences it.
     const silentRun = {
       ...udmiTerminalRun,
       result_summary: {
@@ -2527,10 +2527,9 @@ describe("ModulePage UDMI workbench live results", () => {
     renderModule("udmi-validation");
 
     // The live run re-attaches its monitor with a Stop run control and the
-    // data-kept note. A REHYDRATED run must NOT lock Execute: a fossilized
-    // running/queued run (e.g. a hosted worker that died with its dispatch
-    // markers, which the startup sweep leaves alone) would otherwise disable
-    // Execute forever with no UI escape. Only a run started THIS session blocks.
+    // data-kept note. A REHYDRATED run must NOT lock Execute while worker
+    // heartbeat recovery is deciding whether the restored run is still live.
+    // Only a run started THIS session blocks.
     expect(await screen.findByRole("button", { name: "Stop run" })).toBeInTheDocument();
     expect(screen.getByText(/Stop run keeps the data collected so far/i)).toBeInTheDocument();
     await waitFor(() =>
@@ -3366,7 +3365,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    // Pete 2026-07-15: the run control belongs at the bottom, after the options.
+    // field engineer 2026-07-15: the run control belongs at the bottom, after the options.
     // The card is genuinely absent from the DOM — a render assertion, not a CSS
     // one, so the jsdom step-gating caveat does not apply here.
     expect(await screen.findByRole("button", { name: "Execute capture" })).toBeInTheDocument();
@@ -4011,7 +4010,7 @@ describe("ModulePage report controls placement", () => {
     return captured;
   }
 
-  // Pete's walkthrough bug: a finished run auto-advances to Results, and the
+  // field engineer's walkthrough bug: a finished run auto-advances to Results, and the
   // report controls — which live in the "setup run" group — go with it.
   it("renders the report controls in both the run-monitor and the results step group", async () => {
     stubTerminalRun();
@@ -4169,7 +4168,7 @@ describe("ModulePage snap-to-top when results open", () => {
     );
   }
 
-  // Pete's walkthrough ask: after a run finishes, the page stays where the
+  // field engineer's walkthrough ask: after a run finishes, the page stays where the
   // operator left it mid-Run, so the headline results land off-screen.
   it("snaps to the hero when a succeeded run advances to Results", async () => {
     const scrollSpy = spyOnScroll();

@@ -68,12 +68,12 @@ class NumericValidationTests(unittest.TestCase):
         # identity, and must not inherit the tolerance field's decimal grammar.
         row = {
             "Asset ID": "AHU-L03-017",
-            "BACnet device instance": "1532117.5",
+            "BACnet device instance": "2001117.5",
             "BACnet object type": "analogInput",
             "BACnet object instance": "300001",
             "BACnet object name": "supply_air_temperature",
             "BACnet units": "degrees-celsius",
-            "MQTT topic": "electracom/sct/1532/ahu/l03/events/pointset",
+            "MQTT topic": "demo-site/b1/ahu/l03/events/pointset",
             "MQTT field/path": "pointset.points.supply_air_temperature_sensor.present_value",
             "MQTT units": "degrees-celsius",
             "Tolerance": "0.5",

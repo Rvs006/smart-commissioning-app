@@ -1,6 +1,6 @@
 """CSV import parser hardening (v0.1.11, handoff §3b).
 
-Pete's 2026-07-15 walkthrough: real registers come out of Excel, and Excel has
+field engineer's 2026-07-15 walkthrough: real registers come out of Excel, and Excel has
 several perfectly ordinary saves that this parser used to answer with a 500, a
 raw codec message, or "all 8 required columns are missing". These pin the
 tolerant decode, the CR-only line endings, the delimiter/binary diagnostics,

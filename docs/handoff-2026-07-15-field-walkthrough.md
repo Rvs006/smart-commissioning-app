@@ -1,4 +1,4 @@
-# Handoff — Pete's 2026-07-15 v0.1.10 walkthrough punch list
+# Handoff — field engineer's 2026-07-15 v0.1.10 walkthrough punch list
 
 > **✅ SPENT 2026-07-16.** Every release this document drove is shipped:
 > v0.1.11, v0.1.12, v0.1.13 and the v0.1.14 follow-up are all released with
@@ -24,7 +24,7 @@ do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
 
 ## 1. Context
 
-- **Pete** — the field engineer validating the app, running it on a laptop and
+- **field engineer** — the field engineer validating the app, running it on a laptop and
   on a customer server. He walked through v0.1.10 end-to-end on 2026-07-15 (IP
   discovery → BACnet → MQTT discovery → UDMI workbench → reports) and produced
   the punch list below. Other reviewers will add feedback later.
@@ -41,18 +41,18 @@ do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
   scans). Do NOT remove the hosted multi-user profile code (api_key/Postgres/
   Redis/Hub) — it is Docker-independent; only the Docker packaging/docs go.
 
-### 1a. Reconciled against Pete's own notes doc (2026-07-15)
+### 1a. Reconciled against field engineer's own notes doc (2026-07-15)
 
-Pete's emailed notes (24 numbered items + 16 screenshots) were checked against
+field engineer's emailed notes (24 numbered items + 16 screenshots) were checked against
 this punch list: **every item maps onto work already listed below, and the doc
 adds no new work item.** Three details it records that this handoff originally
 did not — none of which change v0.1.11 scope:
 
-1. **The look-and-feel target is named.** Pete: "use the UDMI page and apply
+1. **The look-and-feel target is named.** field engineer: "use the UDMI page and apply
    this look and feel to the other pages." The UDMI workbench is the canonical
    reference for the consistency item (§4 IP Discovery, deferred to *Later*) —
    not a fresh design.
-2. **The MQTT inspector wants message metadata, not just the payload.** Pete:
+2. **The MQTT inspector wants message metadata, not just the payload.** field engineer:
    "can we see if it's retained, when it was published, QoS level of message."
    The §4 MQTT inspector item (small 0.5d) only planned payload + JsonTree.
    Check whether `mqtt_discovery` even captures retain/QoS/publish-time before
@@ -82,7 +82,7 @@ in-memory state:
   `reportToast` → `null` — `frontend/src/features/workflow/ModulePage.tsx:404-439`
   (`setStep("setup")` at `:427`, `setActiveRun(null)` at `:410`)
 
-Consequences Pete observed, none of which are data loss:
+Consequences field engineer observed, none of which are data loss:
 
 1. **"Report not in the Reports tab."** The report IS created (POST
    `/api/v1/reports` → `run_service.py:66-96` persists a `report_generation`
@@ -179,7 +179,7 @@ The consequence is the important part, and it is worse than the original theory:
 > **A contended UDP 47808 and a genuinely quiet network produce the IDENTICAL
 > run record today** — `succeeded`, `device_count=0`, no error, no reason.
 
-So both of the candidate causes for Pete's failed run — silent-empty broadcast,
+So both of the candidate causes for field engineer's failed run — silent-empty broadcast,
 and a port conflict — collapse into the same artifact. **His old run cannot tell
 us which it was**, retroactively, by any means. That is not a gap in our
 forensics; it is the bug.
@@ -225,8 +225,8 @@ they appear on the Configuration page): the trigger is **`Foreign Device` =
 only, and its seeded default flipped to `Disabled` (`:70`). `BBMD Address` is
 load-bearing (blank or unparseable → HTTP 400 naming the fix); `BBMD UDP Port`
 and `TTL` soft-default to 47808 / 300. **The seeded `BBMD Address` is
-`10.10.25.20` and is demo data, not a real BBMD** (`:74`) — and persisted config
-snapshots do NOT update when defaults change, so on Pete's machine this must be
+`192.0.2.20` and is demo data, not a real BBMD** (`:74`) — and persisted config
+snapshots do NOT update when defaults change, so on field engineer's machine this must be
 hand-set or the whole fix ships inert.
 
 **What a failed registration looks like now.** Before any Who-Is, the foreign
@@ -291,9 +291,9 @@ was a lie.
 - Whether the BBMD replies to lane 3's source port 47809 (Annex-J-legal, but
   nonconformant gear that hardcodes 47808 exists — fallback in the runbook).
 - The Windows errno mapping in the bind pre-flight (10048/10013) is verified **by
-  design, never by execution**. Pete's off-network smoke test is its first run.
+  design, never by execution**. field engineer's off-network smoke test is its first run.
 
-**Ask Pete:** whether the BBMD accepts FD registrations and can pre-authorise the
+**Ask field engineer:** whether the BBMD accepts FD registrations and can pre-authorise the
 laptop's IP **before Monday** (highest-value question by a distance); whether the
 register IPs are per-device or supervisor/router addresses; his current saved
 BBMD / Foreign Device / BBMD Address / TTL values; whether the BACnet browser was
@@ -312,17 +312,17 @@ Three findings:
    and the UI renders only "N accepted · M rejected" (`ModulePage.tsx:1194-1202`).
    **`GET /imports/{import_id}/errors` already exists** (`imports.py:144-149`)
    and is never called by `client.ts`. `missing_columns` is also never rendered.
-2. **The likely rejector of Pete's "made-unique" fan-coil row:**
+2. **The likely rejector of field engineer's "made-unique" fan-coil row:**
    `_validate_mqtt_asset_topic` (`import_service.py:187-211`) requires every
    Expected topic to end `/#`, `/state`, `/metadata`, `/event/pointset` or
    `/events/pointset` (empirically: `site/b1/fcu-04` rejects, `site/b1/fcu-04/#`
    accepts). GUID and Serial are **never uniqueness-checked** — the dup key is
    `(Asset ID, Expected topic)` (`import_service.py:451,717-728`) plus
-   `_conflicting_asset_topic_error` (`:264-307`). Pete was fixing the wrong
+   `_conflicting_asset_topic_error` (`:264-307`). field engineer was fixing the wrong
    fields because no reason was shown. Also: "Expected reporting interval" must
    pass `isdigit()` so Excel's `60.0` rejects (`:105-111,150-159`); a
    semicolon-locale Excel save parses as ONE column → all 8 required columns
-   "missing" → whole file rejected. Pete's end-of-line-delimiter theory was
+   "missing" → whole file rejected. field engineer's end-of-line-delimiter theory was
    **disproven empirically** (CRLF/BOM/trailing blank line/trailing-comma
    padding all parse cleanly). Real parser gaps: `io.StringIO(text)` without
    `newline=""` (`import_service.py:797-807`) → CR-only saves raise `csv.Error`
@@ -332,7 +332,7 @@ Three findings:
    exists. The file input's value is never cleared (`ModulePage.tsx:1100`,
    handler `:869-872`), so Chromium fires no change event when re-picking the
    same path → stale `File` snapshot → the previous rejection panel stays and
-   old bytes get re-sent (or `ERR_UPLOAD_FILE_CHANGED`). **Pete's corrected CSV
+   old bytes get re-sent (or `ERR_UPLOAD_FILE_CHANGED`). **field engineer's corrected CSV
    never reached the server until he renamed it.** Forensics: every upload that
    reached the server is kept verbatim at
    `%LOCALAPPDATA%\SmartCommissioning\imports\files\` on his machine.
@@ -357,11 +357,11 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 |---|---|---|
 | Version pill on hero/brand bar | small 0.5d | Version exists only at build time (`build.ps1:91-119`; CI passes `workflow_dispatch` input). Set `$env:VITE_APP_VERSION = $BuildVersion` before `npm run build` (~`build.ps1:198`); read `import.meta.env.VITE_APP_VERSION` (precedent: `VITE_REVIEW_COMMENTS`, `App.tsx:166`); render pill in brand bar (`App.tsx:~99`). Optional: echo version in `/api/v1/health`. Risk: `-SkipFrontend` reuses a dist with old baked version — add guard like the `-SkipFreeze` one (`build.ps1:212-215`). |
 | ELECTRACOM logo not showing (exe) | trivial 0.25d | File ships in dist; FastAPI SPA fallback returns index.html for `/electracom-logo.png` because only `dist/assets` is mounted (`main.py:165-168`, fallback `:184-189`). Fix generically: if requested path resolves to a real file inside FRONTEND_DIST (traversal-guarded), `FileResponse` it. Covers all future `public/` files. Add a logo-200 assertion to the portable boot smoke. |
-| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `app/App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on Pete's machines — needs migration or release note. |
+| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `app/App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on field engineer's machines — needs migration or release note. |
 | Menu naming: "BACnet" → "BACnet Discovery" | trivial 0.25d | `NAV_GROUPS` in `app/App.tsx:13-39`; also reconcile `pageTitles` (`app/App.tsx:41-53`) and `moduleData.ts` titles (three layers disagree: "IP Scanner" vs "IP Discovery" etc.). Label-only, routes unchanged (precedent `moduleData.ts:121-125`). |
 | Config tab sub-sections | small 1d | Seven flat accordion sections already exist (`ConfigurationPage.tsx:26-34`). Add group headers (Connections / System / Maintenance). Recommended extra: wire the fully-built signed backup endpoint (`POST /evidence/backup`, `backup_service.py`) to a "Download backup now" button — it currently has zero UI. |
 | Logging destinations | medium 2.5d | The whole Logging & Diagnostics config section is **decorative** — no code reads Remote Syslog Target/Port/Retention/Diagnostics Mode; no syslog handler exists. Actual logging = one JSON StreamHandler (`core/logging.py:151-173`). (a) local `RotatingFileHandler` to `RUNTIME_ROOT/logs/app.log` ~1d; (b) engineer-gated "Upload logs now" to a configured URL (httpx already frozen) ~1.5d. Secrets-masking + write-only sentinel for upload creds required. |
-| Certs "Not configured" pill | small 0.5d | ALL section status pills are static seeded strings never recomputed (`configuration_service.py:86`, save persists whatever the client echoes). Derive certificates status server-side on load from resolvable `secret://` refs + stored expiry (reuse `_secret_path().exists()`, `_stored_certificate_expiry:612-629`). Pete IS reloading keys so it may also genuinely be unconfigured. |
+| Certs "Not configured" pill | small 0.5d | ALL section status pills are static seeded strings never recomputed (`configuration_service.py:86`, save persists whatever the client echoes). Derive certificates status server-side on load from resolvable `secret://` refs + stored expiry (reuse `_secret_path().exists()`, `_stored_certificate_expiry:612-629`). field engineer IS reloading keys so it may also genuinely be unconfigured. |
 
 ### IP Discovery head (~10d total)
 
@@ -378,7 +378,7 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 | Item | Effort | Key facts |
 |---|---|---|
 | Template compare: green=in register, red=foreign | medium 1.5d | Discovery genuinely ignores the register (route `discovery.py:368-406` inherits only topic_filter/qos from config; engine emits one row per observed topic). Stamp verdicts at **results-read time**: load newest accepted `mqtt_register` import, build expected-topic filters via existing `_capture_topics_from_expected`/`_expected_assets_from_register` (`validation.py:139-328`), match with existing wildcard matchers (`discovery.py:552`, `discoveryRows.ts:175`), color via `__tone`. Works retroactively on old runs. Agree semantics: one `#` wildcard register row can green-light dozens of topics. |
-| Long-duration timer (like UDMI 48h) | medium 2d | More exists than Pete realizes: UI capture-seconds field with 0=indefinite + working cancel already there (`ModulePage.tsx:1692-1700`, engine `mqtt_discovery.py:226-237,328-335`). Ceilings to lift: `discover_mqtt` actor `time_limit=3_600_000` (1h) vs UDMI's 49h (`worker/app/tasks.py:205` vs `:231`); add `capture_seconds <= 172_800` guard reusing `parse_capture_seconds`; unit dropdown copied from UDMI block (`ModulePage.tsx:639-648,1986-2004`). **Physics first: retain-latest-per-topic before raising max_messages** or multi-day captures eat memory. Portable exe runs engines inline in the HTTP request (`run_dispatch.py:50-57`) — day-scale captures honestly require the hosted worker profile; same caveat as UDMI's existing inline note. |
+| Long-duration timer (like UDMI 48h) | medium 2d | More exists than field engineer realizes: UI capture-seconds field with 0=indefinite + working cancel already there (`ModulePage.tsx:1692-1700`, engine `mqtt_discovery.py:226-237,328-335`). Ceilings to lift: `discover_mqtt` actor `time_limit=3_600_000` (1h) vs UDMI's 49h (`worker/app/tasks.py:205` vs `:231`); add `capture_seconds <= 172_800` guard reusing `parse_capture_seconds`; unit dropdown copied from UDMI block (`ModulePage.tsx:639-648,1986-2004`). **Physics first: retain-latest-per-topic before raising max_messages** or multi-day captures eat memory. Portable exe runs engines inline in the HTTP request (`run_dispatch.py:50-57`) — day-scale captures honestly require the hosted worker profile; same caveat as UDMI's existing inline note. |
 | Wire inspector to row selection | small 0.5d | All pieces exist: `selectedResultIndex` state (`:258`), inspector aside (`:2407-2584`), `JsonTree` (`:2765-2785`), Raw Payload already in rows. Make `<tr>` clickable, render payload + JsonTree for the selected row, suppress the sample-issues fallback on discovery routes. Non-JSON payloads stored as `{"_raw_present": true}` markers (`mqtt_discovery.py:399-401`) — handle gracefully. |
 | Report button at end of results | trivial 0.5d | Extract the existing picker+button (`ModulePage.tsx:1425-1452`) into a small component; render a second instance inside the results stepgroup (`:2273`), same `canEngineer && activeRun && activeRunTerminal` guard. One change fixes all five heads. |
 
@@ -391,7 +391,7 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 | Dynamic inspector on row select | small 0.5d | Same wiring as MQTT inspector: row click → `setSelectedResultIndex` + sync `setExpandedAsset`/`setExpandedPayloadKey`; render observed payload via JsonTree + shared `gatedUdmiVerdict`. `stopPropagation` on the Copy button cell. |
 | Show rejection reasons | small 0.5d | Frontend-only — see §3b(1). Add `getImportErrors(importId)` to client.ts; red panel listing "Row N — field: message (code)" + `missing_columns`, modeled on the existing warnings panel. Zero backend work. |
 | Don't fail run on silent devices | medium 1.5d | ~70% shipped in #78 (`not_publishing` issues, `result_summary.not_publishing_devices`, honest score, report rendering). Remaining: ONE decision point `udmi_run_processor.py:84-98` — keep `failed` only for transport errors (broker_unreachable/authentication_error/broker_timeout/capture_failed family, `udmi_validation.py:1229-1241`); `live_capture_timeout` → `succeeded` with distinct stage. Update pinned tests + `docs/protocol-conformance.md:46`. Transport failures MUST stay failed (honesty rule). Ship together with RAG so silent devices read RED on a succeeded run. |
-| RAG third state (amber) | small 1d | Verdicts centralized in `operatorData.ts` (`UdmiVerdictKind:182`, `udmiPayloadVerdict:189-214`, tone `:218-223`). Pete's definition needs NO issue weighting: red=offline/not publishing, amber=publishing but non-compliant, green=compliant. Add `warn` tone + `.row-amber` CSS + amber section-verdict branch. **Confirm with Pete:** strict reading demotes today's green "pass with notes" (minor-only issues) to amber. |
+| RAG third state (amber) | small 1d | Verdicts centralized in `operatorData.ts` (`UdmiVerdictKind:182`, `udmiPayloadVerdict:189-214`, tone `:218-223`). field engineer's definition needs NO issue weighting: red=offline/not publishing, amber=publishing but non-compliant, green=compliant. Add `warn` tone + `.row-amber` CSS + amber section-verdict branch. **Confirm with field engineer:** strict reading demotes today's green "pass with notes" (minor-only issues) to amber. |
 | Nonpub schema example set | small 0.75d | Upload machinery fully shipped (#78): `udmi_schemas.py:260-302`, strict validation incl. three roots + file: refs. Missing = a downloadable example. Add public `GET /udmi/schemas/template` zipping the vendored 1.5.2 roots + $ref closure (patterns: `imports.py:20-45` public router, `reports.py:548` in-memory zip) + README.txt + frontend download button. Watch the 2MB stored-set cap vs ~30-file canonical set — ship a trimmed minimal closure. |
 
 ### Reports (~6.5d total)
@@ -420,13 +420,13 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 | **v0.1.12** (target: usable Monday 2026-07-20 lab session) | BACnet foreign-device registration + unicast Who-Is + 47808-in-use message; MQTT template-compare RAG; MQTT duration (retain-latest first); UDMI RAG amber + succeed-with-silent-devices. | ~6–7d |
 | **Later** | nmap-style discovery pane; branded per-head report content + headers/footers; ModulePage component extraction (look-and-feel); logging destinations; Docker removal; placeholder/demo-content purge; config status pills derived. | ~12d |
 
-**Open questions for Pete** (ask before/while building): whether the lab BBMD
+**Open questions for field engineer** (ask before/while building): whether the lab BBMD
 accepts foreign-device registrations, and the register/browser questions in §3a
 (note the run-status question no longer distinguishes the two BACnet hypotheses —
 see §3a Correction 2); RAG demotion of "pass with notes" (§4 UDMI); which browser
 he uses (confirms the same-filename no-change-event behavior).
 
-**Non-code context:** Pete emailed his own notes doc ("smart commissioning app
+**Non-code context:** field engineer emailed his own notes doc ("smart commissioning app
 mods") — its 24 items match this punch list exactly and add no new work.
 ITP = integrated testing and planning — reports feed ITP witnessing packs,
 hence the branding item.
@@ -440,7 +440,7 @@ the repo root:
 
 ---
 
-> Read `AGENTS.md` and `docs/handoff-2026-07-15-pete-walkthrough.md` in full
+> Read `AGENTS.md` and `docs/handoff-2026-07-15-field-walkthrough.md` in full
 > before doing anything — the handoff has code-verified root causes with
 > file:line evidence for everything below; do not re-investigate from scratch,
 > but do re-verify each cited location before editing it.
@@ -508,4 +508,4 @@ the repo root:
 
 *Written 2026-07-15 by the analysis session (Fable). Investigation: 9 agents,
 ~1.2M tokens, main @ 82e838c. Companion memory (account-local, not portable):
-`pete-asks-2026-07-15.md`.*
+`field-asks-2026-07-15.md`.*

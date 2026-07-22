@@ -6,7 +6,7 @@ created: 2026-07-10
 
 # Problem frame
 
-Pete's discovery run proves the MSI client can connect, subscribe, and receive MQTT payloads. His UDMI run still returns almost immediately with `not captured`, even when a 120-second window is entered. The original SUBACK/retained-PUBLISH ordering defect is fixed and covered by CI; this plan addresses the remaining end-to-end gap: ensuring the validation request carries the intended register topics, the live capture subscribes to exactly those topics, received payloads are routed to the correct asset, and the result exposes enough evidence to diagnose any real broker mismatch.
+field engineer's discovery run proves the MSI client can connect, subscribe, and receive MQTT payloads. His UDMI run still returns almost immediately with `not captured`, even when a 120-second window is entered. The original SUBACK/retained-PUBLISH ordering defect is fixed and covered by CI; this plan addresses the remaining end-to-end gap: ensuring the validation request carries the intended register topics, the live capture subscribes to exactly those topics, received payloads are routed to the correct asset, and the result exposes enough evidence to diagnose any real broker mismatch.
 
 ## Scope and success criteria
 
@@ -61,9 +61,9 @@ Tests: each diagnostic status produces the expected safe result fields; credenti
 
 Files: `.github/workflows/windows-portable.yml`, `packaging/windows_portable/build.ps1`, `docs/phase5-onsite-validation.md`.
 
-Add a portable smoke assertion for the live-validation request echo and diagnostic fields. Produce a runbook for Pete containing the exact CSV topic convention, timeout entry, broker log markers, and the minimum artifacts to collect: imported row, normalized filters, app result JSON, and broker log interval.
+Add a portable smoke assertion for the live-validation request echo and diagnostic fields. Produce a runbook for field engineer containing the exact CSV topic convention, timeout entry, broker log markers, and the minimum artifacts to collect: imported row, normalized filters, app result JSON, and broker log interval.
 
-Tests: Windows portable build/smoke; local fake-broker three-asset scenario; manual MSI validation against Pete's broker with Wireshark timestamps correlated to app receipt timestamps.
+Tests: Windows portable build/smoke; local fake-broker three-asset scenario; manual MSI validation against field engineer's broker with Wireshark timestamps correlated to app receipt timestamps.
 
 ## Sequencing
 

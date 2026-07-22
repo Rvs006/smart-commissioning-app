@@ -171,9 +171,9 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         # deduped Expected IP addresses (not fail) — the core bug this fixes.
         csv = (
             b"Project/site,System,Asset ID,Asset name,Expected IP address,Expected services/ports\n"
-            b"M,ACS,A1,Cam,10.10.100.230,80/tcp\n"
-            b"M,ACS,A2,Door,10.10.100.230,80/tcp\n"  # dup address -> deduped
-            b"M,ACS,A3,NVR,10.10.100.74,80/tcp\n"
+            b"M,ACS,A1,Cam,198.51.100.230,80/tcp\n"
+            b"M,ACS,A2,Door,198.51.100.230,80/tcp\n"  # dup address -> deduped
+            b"M,ACS,A3,NVR,198.51.100.74,80/tcp\n"
         )
         up = self.client.post(
             "/api/v1/imports",
@@ -190,7 +190,7 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(run.status_code, 200, run.text)
         self.assertEqual(run.json()["status"], "succeeded")
         record = self.client.get(f"/api/v1/discovery/runs/{run.json()['run_id']}").json()
-        self.assertEqual(sorted(record["parameters"]["addresses"]), ["10.10.100.230", "10.10.100.74"])
+        self.assertEqual(sorted(record["parameters"]["addresses"]), ["198.51.100.230", "198.51.100.74"])
 
     def test_no_targets_and_no_register_rejected_with_400(self) -> None:
         response = self.client.post(
@@ -421,7 +421,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         parameters = self._persisted_parameters(self._dry_run("fd-default"))
         for key in (PARAM_BACNET_MODE, PARAM_BBMD_ADDRESS, PARAM_BBMD_PORT, PARAM_FD_TTL):
             self.assertNotIn(key, parameters)
-        self.assertNotIn("10.10.25.20", str(parameters))
+        self.assertNotIn("192.0.2.20", str(parameters))
 
     def test_bbmd_enabled_alone_never_triggers_foreign_device_registration(self) -> None:
         # THE trigger-discipline guard. "BBMD" is a different, informational
@@ -431,7 +431,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         # Only "Foreign Device" == Enabled counts.
         self._save_bacnet_config(
             "fd-off",
-            {"BBMD": "Enabled", "BBMD Address": "10.10.25.20", "Foreign Device": "Disabled"},
+            {"BBMD": "Enabled", "BBMD Address": "192.0.2.20", "Foreign Device": "Disabled"},
         )
         parameters = self._persisted_parameters(self._dry_run("fd-off"))
         for key in (PARAM_BACNET_MODE, PARAM_BBMD_ADDRESS, PARAM_BBMD_PORT, PARAM_FD_TTL):
@@ -485,16 +485,16 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         self._import_register(
             "reg-dedupe",
             b"Project/site,System,Asset ID,Asset name,BACnet device instance,BACnet network,IP address\n"
-            b"M,HVAC,A1,AHU-1,101,1,10.10.100.10\n"
-            b"M,HVAC,A2,AHU-2,102,1,10.10.100.11\n"
-            b"M,HVAC,A3,AHU-1 duplicate entry,101,1,10.10.100.10\n",
+            b"M,HVAC,A1,AHU-1,101,1,198.51.100.10\n"
+            b"M,HVAC,A2,AHU-2,102,1,198.51.100.11\n"
+            b"M,HVAC,A3,AHU-1 duplicate entry,101,1,198.51.100.10\n",
             expect_accepted=3,
         )
         parameters = self._persisted_parameters(self._dry_run("reg-dedupe"))
         targets = parameters[PARAM_BACNET_TARGETS]
         self.assertEqual(
             [(t[TARGET_ADDRESS], t[TARGET_DEVICE_INSTANCE]) for t in targets],
-            [("10.10.100.10", 101), ("10.10.100.11", 102)],
+            [("198.51.100.10", 101), ("198.51.100.11", 102)],
             "deduped on (address, device_instance), first-seen (register) order",
         )
         # Rich rows, not bare addresses: the register identity is what lets the
@@ -517,7 +517,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         self._import_register(
             "reg-override",
             b"Project/site,System,Asset ID,Asset name,BACnet device instance,BACnet network,IP address\n"
-            b"M,HVAC,A1,AHU-1,101,1,10.10.100.10\n",
+            b"M,HVAC,A1,AHU-1,101,1,198.51.100.10\n",
             expect_accepted=1,
         )
         chosen = [{TARGET_ADDRESS: "192.0.2.7", TARGET_DEVICE_INSTANCE: 999}]
@@ -545,7 +545,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
             summary={},
             accepted_rows=[
                 {
-                    "IP address": "10.10.100.10",
+                    "IP address": "198.51.100.10",
                     "BACnet device instance": "101",
                     "BACnet network": "1",
                     "Asset ID": "A1",
@@ -553,7 +553,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
                 },
                 # Unusable instance: could never be matched to a discovered
                 # device, so it could never be reported as expected-but-silent.
-                {"IP address": "10.10.100.11", "BACnet device instance": "not-a-number"},
+                {"IP address": "198.51.100.11", "BACnet device instance": "not-a-number"},
                 {"IP address": "", "BACnet device instance": "103"},  # nothing to probe
                 {"BACnet device instance": "104"},  # no address at all
                 "not-even-a-row",  # corrupt record
@@ -565,7 +565,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
             self._persisted_parameters(response)[PARAM_BACNET_TARGETS],
             [
                 {
-                    TARGET_ADDRESS: "10.10.100.10",
+                    TARGET_ADDRESS: "198.51.100.10",
                     TARGET_DEVICE_INSTANCE: 101,
                     TARGET_ASSET_ID: "A1",
                     TARGET_ASSET_NAME: "AHU-1",
@@ -951,7 +951,7 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
         )
         self.assertEqual(response.status_code, 403, response.text)
         # REGRESSION: the run was created BEFORE the auth check, so a 403 left an
-        # orphan stranded at 'queued' that the startup sweep never reclaims. The
+        # orphan stranded at 'queued' until the worker liveness window expires. The
         # rejection must leave no run behind.
         after = len(self.client.get("/api/v1/validation/runs").json()["runs"])
         self.assertEqual(after, before, "a rejected live publish must leave no orphaned run")

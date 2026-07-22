@@ -59,7 +59,7 @@ def capture_topics_from_expected(expected_topic: object, payload_type: object = 
             roots.add(topic.removesuffix("/event/pointset"))
             topics["pointset_topic"] = topic
 
-    # Pete's register contract: blank Payload type represents one WHOLE asset,
+    # field engineer's register contract: blank Payload type represents one WHOLE asset,
     # so even one explicit sibling topic must require all three payload slots.
     required_slots = {"state_topic", "metadata_topic", "pointset_topic"}
     if not requested_type and roots and not required_slots.issubset(topics):

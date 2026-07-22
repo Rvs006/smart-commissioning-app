@@ -252,6 +252,8 @@ class MqttClient:
         expected_topics: set[str] | None = None,
         timeout_seconds: float,
         cancel_check: Callable[[], bool] | None = None,
+        capture_deadline: float | None = None,
+        use_timeout_as_packet_deadline: bool = True,
     ) -> MqttMessage | None:
         pending = self._take_pending_message(expected_topics)
         if pending is not None:
@@ -262,10 +264,11 @@ class MqttClient:
             # indefinite captures so the Cancel control stops them quickly).
             if cancel_check is not None and cancel_check():
                 return None
-            remaining = max(0.1, min(self.settings.timeout_seconds, deadline - time.monotonic()))
+            remaining = max(0.001, min(self.settings.timeout_seconds, deadline - time.monotonic()))
             try:
                 self._require_socket().settimeout(remaining)
-                packet_type, payload = self._read_packet()
+                packet_deadline = deadline if use_timeout_as_packet_deadline else capture_deadline
+                packet_type, payload = self._read_packet(deadline=packet_deadline)
             except TimeoutError:
                 # A quiet slice at a packet BOUNDARY (no byte of a packet consumed).
                 # Keep waiting until the caller's deadline instead of abandoning the
@@ -479,7 +482,7 @@ class MqttClient:
     def _send_packet(self, packet_type: int, payload: bytes) -> None:
         self._require_socket().sendall(bytes([packet_type]) + _encode_remaining_length(len(payload)) + payload)
 
-    def _read_packet(self) -> tuple[int, bytes]:
+    def _read_packet(self, *, deadline: float | None = None) -> tuple[int, bytes]:
         sock = self._require_socket()
         packet_type = sock.recv(1)  # times out at a BOUNDARY -> caller may keep waiting
         if not packet_type:
@@ -492,7 +495,14 @@ class MqttClient:
         # healthy capture. Give the remainder a full read timeout; a timeout even
         # then is a real stall, surfaced as a broker error (never silent desync).
         previous_timeout = sock.gettimeout()
-        sock.settimeout(max(self.settings.timeout_seconds, previous_timeout or 0.0))
+        packet_timeout = max(self.settings.timeout_seconds, previous_timeout or 0.0)
+        if deadline is not None:
+            # A packet that begins near the capture boundary may finish, but it
+            # cannot extend the operator's requested window by another full
+            # connection timeout. The stream is already mid-packet, so expiry is
+            # still surfaced as an honest partial-packet transport error.
+            packet_timeout = min(packet_timeout, max(0.001, deadline - time.monotonic()))
+        sock.settimeout(packet_timeout)
         try:
             remaining_length = _read_remaining_length(sock)
             payload = _recv_exact(sock, remaining_length)
@@ -633,6 +643,12 @@ def subscribe_and_capture(
                     expected_topics=expected_topics,
                     timeout_seconds=poll,
                     cancel_check=cancel_check,
+                    capture_deadline=deadline,
+                    # ``poll`` is only the quiet-boundary/cancel slice. Finite
+                    # captures use their real outer deadline for a packet already
+                    # in flight; indefinite captures retain the normal per-packet
+                    # connection timeout.
+                    use_timeout_as_packet_deadline=False,
                 )
             except (OSError, MqttTransportError) as error:
                 raise MqttCaptureInterrupted(messages, error) from error

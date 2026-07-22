@@ -74,7 +74,7 @@ def _issue(issue_id: str) -> dict:
         "description": f"issue {issue_id}",
         "status": "open",
         "point_name": "supply_air_temperature_sensor",
-        "topic": "electracom/sct/1532/ahu/l03/events/pointset",
+        "topic": "demo-site/b1/ahu/l03/events/pointset",
         "expected_value": "degrees-celsius",
         "observed_value": "kelvin",
         "match_basis": "point_name",

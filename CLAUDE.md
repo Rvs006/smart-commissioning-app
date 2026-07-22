@@ -123,7 +123,7 @@ collection order is alphabetical — keep it so.
   a 10-minute broker capture (operator skepticism that "not published" rows
   were wrong) and the BACnet pre-flight card (full design in session
   memory, not repo docs) which waits on the BACnet lab learnings. The
-  punchlist's §4 deferred items and §5 open Pete decisions remain the live
+  punchlist's §4 deferred items and §5 open field engineer decisions remain the live
   backlog, alongside GitHub issue #4 (production gates). Update or
   supersede this block when the state changes.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,

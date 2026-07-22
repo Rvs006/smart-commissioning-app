@@ -13,6 +13,7 @@ worker run.
 """
 
 import unittest
+from datetime import UTC, datetime, timedelta
 
 from harness import ApiTestCase
 
@@ -182,6 +183,54 @@ class OrphanRunSweepTests(ApiTestCase):
 
         self.assertNotIn(run_id, swept)
         self.assertEqual(run_service.get_run(run_id).status, "queued")
+
+    def test_running_worker_with_expired_heartbeat_is_swept(self) -> None:
+        from app.services.run_service import WORKER_INTERRUPTED_RUN_MESSAGE, RunService
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
+
+        run_service, run_id = self._new_run()
+        run_service.update_result_summary(
+            run_id, {"queue_name": "discovery", "actor_name": "discover_bacnet"}
+        )
+        run_service.update_run_status(
+            run_id, status="running", stage="engine_running", progress_percent=15
+        )
+        with run_service.engine.begin() as connection:
+            connection.execute(
+                update(Run)
+                .where(Run.id == run_id)
+                .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
+            )
+
+        swept = RunService().sweep_interrupted_runs()
+
+        self.assertIn(run_id, swept)
+        record = run_service.get_run(run_id)
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(record.stage, "worker_heartbeat_expired")
+        self.assertEqual(record.error_message, WORKER_INTERRUPTED_RUN_MESSAGE)
+
+    def test_poll_recovers_expired_worker_without_api_restart(self) -> None:
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
+
+        run_service, run_id = self._new_run()
+        run_service.update_result_summary(
+            run_id, {"queue_name": "discovery", "actor_name": "discover_bacnet"}
+        )
+        run_service.update_run_status(run_id, status="running", stage="engine_running")
+        with run_service.engine.begin() as connection:
+            connection.execute(
+                update(Run)
+                .where(Run.id == run_id)
+                .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
+            )
+
+        record = run_service.get_run(run_id)
+
+        self.assertEqual(record.status, "failed")
+        self.assertEqual(record.stage, "worker_heartbeat_expired")
 
 
 class PersisterSessionHygieneTests(ApiTestCase):
@@ -432,7 +481,7 @@ class JobQueueBrokerConstructionTests(unittest.TestCase):
     """A RedisBroker construction failure (e.g. a malformed REDIS_URL that redis
     parses eagerly) must surface as JobQueueUnavailable — the ONLY error dispatch_run
     handles — so it clears markers / falls back instead of stranding a
-    marker-stamped run at 'queued' that the startup sweep never reclaims."""
+    marker-stamped run at 'queued' until the worker liveness window expires."""
 
     def test_broker_construction_failure_becomes_job_queue_unavailable(self) -> None:
         from unittest import mock

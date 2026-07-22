@@ -5,6 +5,39 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.21] - 2026-07-22
+
+### Fixed
+
+- **Hard-killed worker runs now reach a terminal status.** Every worker actor
+  refreshes a database heartbeat while it owns a run. Startup recovery and the
+  normal run poll mark a worker-bound row failed after its heartbeat expires,
+  covering process kills and power loss that cannot raise Dramatiq's interrupt.
+- **MQTT capture windows now remain true upper bounds.** Once a packet starts,
+  its remaining bytes may use the normal network timeout only until the outer
+  capture deadline. A broker that starts a packet at the final moment can no
+  longer extend a short capture by another connection-timeout interval.
+- **UDMI timestamp reporting stays honest when evidence is ambiguous.** A
+  pointset exactly one hour old now tells the operator to check both clock
+  labelling and genuine stale publishing. Offset-less timestamps still produce
+  their RFC 3339 issue, but no longer have UTC invented for the "last seen"
+  ordering.
+- **The production BACnet wait wrappers are now regression-tested.** Blocking
+  tests drive the real `Bacpypes3Backend` adapter with a never-completing app and
+  prove object-list and present-value reads time out; the configured `who_is`
+  timeout is asserted too.
+- **Worker interruption tests now run in CI.** IP and BACnet actor time-limit
+  paths join the MQTT and UDMI checks, so a missing terminal write fails the
+  merge gate. Their terminal error now says the run exceeded its worker limit,
+  rather than incorrectly labelling an IP or BACnet scan as a live capture.
+
+### Security
+
+- **Public-repository examples have been anonymised.** Site-derived topics,
+  device identifiers and personnel names were replaced with explicit demo
+  values. A CI hygiene check scans tracked paths and URL-decoded text so the
+  known private tokens cannot return in plain or percent-encoded form.
+
 ## [0.1.20] - 2026-07-22
 
 ### Fixed
@@ -393,7 +426,7 @@ change — the app only fills in settings a snapshot is missing. So on any machi
 that has already saved a configuration, none of the BACnet work below changes a
 single scan until someone opens the Configuration page, sets **Foreign Device**
 to `Enabled`, types their real **BBMD Address**, and saves. The seeded
-`10.10.25.20` is demo data and is not a real BBMD.
+`192.0.2.20` is demo data and is not a real BBMD.
 
 Second, **the live BACnet path still has not run against real hardware.** There
 is no BACnet device in CI and no Python on the machine this was written on, so

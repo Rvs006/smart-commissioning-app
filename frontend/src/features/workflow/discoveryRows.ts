@@ -519,7 +519,7 @@ function bacnetTransportClause(summary: Record<string, unknown> | undefined): st
 //
 // A live scan additionally names its transport (see bacnetTransportClause), so
 // the pill answers both "was this real?" and "how did it actually reach the
-// network?" — the second question is what Pete's zero-device run could not
+// network?" — the second question is what field engineer's zero-device run could not
 // answer.
 export type BacnetBackendLabel = {
   kind: "simulated" | "live" | "unknown";
@@ -699,7 +699,7 @@ export function validationMetrics(
 
 // Explicit empty-state copy for a *terminal* discovery run that produced no
 // rows. Without this every such outcome collapses into the same "No results
-// yet" as a head that has never run (Pete 2026-07-15: "it can't find anything,
+// yet" as a head that has never run (field engineer 2026-07-15: "it can't find anything,
 // but it doesn't really tell us").
 //
 // The honesty rule cuts both ways here:

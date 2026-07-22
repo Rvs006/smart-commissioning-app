@@ -1,12 +1,12 @@
 ---
-title: "Fix Pete UDMI payload mapping and result presentation"
+title: "Fix field engineer UDMI payload mapping and result presentation"
 status: active
 created: 2026-07-10
 ---
 
 # Problem frame
 
-Pete's live broker test now captures all payload groups. The result screen still
+field engineer's live broker test now captures all payload groups. The result screen still
 reports registered points as absent even though the captured metadata visibly
 contains them under `pointset.points`, and it compares a flattened internal
 expectation (`manufacturer`, `udmi_version`) with full UDMI payload JSON. This
@@ -29,7 +29,7 @@ silently relax canonical validation.
   when a non-empty observed value differs.
 - Preserve strict canonical UDMI 1.5.2 structural validation and its existing
   diagnostics for non-canonical publisher fields.
-- Add regression tests using Pete-shaped payload fixtures.
+- Add regression tests using field engineer-shaped payload fixtures.
 - Add a local JSONCrack-style expandable payload tree for an explicitly selected
   captured payload; never send broker payloads, credentials, or configuration
   to a third party.
@@ -56,7 +56,7 @@ silently relax canonical validation.
 
 ## Implementation units
 
-### U1 — Characterise Pete-shaped payload matching
+### U1 — Characterise field engineer-shaped payload matching
 
 Files: `core/tests/test_udmi_validation.py`, `backend/tests/test_v1_review_contracts.py`.
 
@@ -64,7 +64,7 @@ Add fixtures for a metadata payload containing `pointset.points.<name>.units`
 and a state payload containing top-level `version` and `system.hardware` make/
 model. Cover present, missing, and mismatched fields.
 
-Verification: registered points shown in Pete's screenshots match; a genuinely
+Verification: registered points shown in field engineer's screenshots match; a genuinely
 missing point/unit and missing make/model/version each emit a precise issue.
 
 ### U2 — Correct shared validation lookup and missing-field handling
@@ -111,7 +111,7 @@ included.
 
 Files: `docs/field-quickstart.md`, `CHANGELOG.md`.
 
-Record the fixed result semantics and provide Pete a short repeat test: import
+Record the fixed result semantics and provide field engineer a short repeat test: import
 the corrected register, run 120 seconds, confirm matched point/unit evidence,
 and retain canonical-state warnings if the publisher still emits non-canonical
 fields.

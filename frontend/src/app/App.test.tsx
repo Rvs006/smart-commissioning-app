@@ -167,7 +167,7 @@ describe("App shell", () => {
   });
 
   it("shows the build-stamped version in the brand bar", async () => {
-    // Pete 2026-07-15: no way to tell which build is on screen. build.ps1 sets
+    // field engineer 2026-07-15: no way to tell which build is on screen. build.ps1 sets
     // VITE_APP_VERSION before `npm run build`; vite bakes it into the bundle.
     vi.stubEnv("VITE_APP_VERSION", "v9.9.9");
     stubDashboardFetch();
@@ -201,7 +201,7 @@ describe("App shell", () => {
   });
 
   it("names all three discovery heads '<Protocol> Discovery' in the menu", async () => {
-    // Pete 2026-07-15: "all discovery or none" — the BACnet entry read plain
+    // field engineer 2026-07-15: "all discovery or none" — the BACnet entry read plain
     // "BACnet" while its neighbours read "IP Discovery" / "MQTT Discovery".
     // Exact names, never regexes: /BACnet/ also matches the separate
     // "BACnet to MQTT Validation" link and would pass even if this regressed.

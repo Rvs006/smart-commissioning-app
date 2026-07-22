@@ -42,10 +42,10 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
         values={
             "Hostname": "sct-gateway-01",
             "IP Assignment": "Static IP",
-            "IP Address": "10.10.25.50",
+            "IP Address": "192.0.2.50",
             "Subnet Mask": "255.255.255.0",
-            "Gateway": "10.10.25.1",
-            "DNS Servers": "10.10.25.10, 8.8.8.8",
+            "Gateway": "192.0.2.1",
+            "DNS Servers": "192.0.2.10, 8.8.8.8",
             "VLAN ID": "25",
             # Empty means "never chosen" (behaves as Auto everywhere: validation
             # accepts it, engine dispatch binds nothing). The UI seeds its
@@ -60,7 +60,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
     ),
     bacnet=ConfigurationSection(
         values={
-            "BACnet Network Number": "1532",
+            "BACnet Network Number": "2001",
             "UDP Port": "47808",
             "Device Instance Range": "1 - 4194303",
             # INFORMATIONAL ONLY — discovery never reads this toggle. It seeds
@@ -77,7 +77,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             # Demo seed, NOT a real BBMD. Nothing may register against it: only
             # "Foreign Device" == Enabled triggers registration, and an operator
             # who enables it must type their real BBMD's address here.
-            "BBMD Address": "10.10.25.20",
+            "BBMD Address": "192.0.2.20",
             "BBMD UDP Port": "47808",
             "Foreign Device": "Disabled",
             "TTL": "300",
@@ -86,7 +86,7 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
     ),
     mqtt=ConfigurationSection(
         values={
-            "MQTT Broker FQDN or IP Address": "mqtt.electracom.local",
+            "MQTT Broker FQDN or IP Address": "mqtt.demo.invalid",
             "Port": "8883",
             "Use TLS": "Enabled",
             "Client ID": "sct-gateway-01",
@@ -276,7 +276,7 @@ class ConfigurationService:
             snapshot = self._persist(DEFAULT_CONFIGURATION, project_id, site_id)
         else:
             snapshot = self._merge_with_defaults(ConfigurationSnapshot.model_validate(payload))
-        # Answer Pete's question ("why does it say Not configured?") from disk:
+        # Answer field engineer's question ("why does it say Not configured?") from disk:
         # GET /configuration reports what is verifiably present right now, whether
         # or not anything was re-saved since the material was uploaded.
         self._derive_certificates_status(snapshot)
@@ -393,7 +393,7 @@ class ConfigurationService:
         THE TRIGGER IS "Foreign Device" == Enabled (casefolded) AND NOTHING ELSE.
         Not the confusingly-named "BBMD" toggle, not a non-empty "BBMD Address":
         both are seeded on a default install (with the FICTIONAL demo address
-        10.10.25.20), so keying on either would make every default install
+        192.0.2.20), so keying on either would make every default install
         register against a host that does not exist. Anything but Enabled returns
         ``{}`` and the run stays local-broadcast — byte-identical to today's
         behaviour, which is the zero-regression guarantee for the path that

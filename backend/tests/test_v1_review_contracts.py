@@ -258,7 +258,7 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
         ip_base = {
             "Project/site": "Site A",
             "System": "BMS",
-            "Expected IP address": "10.10.25.117",
+            "Expected IP address": "192.0.2.117",
             "Expected services/ports": "443/tcp",
         }
         self.assertEqual(PROFILES["ip_register"].validate_row({**ip_base, "Asset name": "AHU"}, 2), [])
@@ -277,7 +277,7 @@ class IpRegisterUdpWarningTests(unittest.TestCase):
         "Project/site": "Site A",
         "System": "BMS",
         "Asset ID": "AHU-1",
-        "Expected IP address": "10.10.25.117",
+        "Expected IP address": "192.0.2.117",
         "Expected services/ports": "443/tcp",
     }
 
@@ -327,8 +327,8 @@ class IpRegisterUdpWarningTests(unittest.TestCase):
         csv_bytes = (
             b"Project/site,System,Asset ID,Expected IP address,"
             b"Expected services/ports,Ports that should not be enabled\n"
-            b'Site A,BMS,AHU-1,10.10.25.117,"47808/udp, 443/tcp",23/tcp\n'
-            b"Site A,BMS,AHU-2,10.10.25.118,443/tcp,69/udp\n"
+            b'Site A,BMS,AHU-1,192.0.2.117,"47808/udp, 443/tcp",23/tcp\n'
+            b"Site A,BMS,AHU-2,192.0.2.118,443/tcp,69/udp\n"
         )
 
         with tempfile.TemporaryDirectory() as temp_dir:

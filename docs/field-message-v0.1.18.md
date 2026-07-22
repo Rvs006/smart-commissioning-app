@@ -1,4 +1,4 @@
-# Message to Pete + Dylan — v0.1.18 (ready to send)
+# Message to field engineer + integration engineer — v0.1.18 (ready to send)
 
 **Written 2026-07-20, ahead of the tag.** Send AFTER the v0.1.18 Release is
 published with the portable zip attached and marked latest — check the link
@@ -49,10 +49,10 @@ The big ones:
    payload compare sits side by side, scrolls as one, colours the
    JSON, and highlights the exact rows the checker flagged.
 
-Dylan - your scrollable windows and the "register already imported"
+integration engineer - your scrollable windows and the "register already imported"
 note are in there too.
 
-Pete - still curious what your 10-minute capture showed. If the tool
+field engineer - still curious what your 10-minute capture showed. If the tool
 said "not published" for things Joe definitely published, grab the log
 bundle after a run on this build and send it over - it captures the
 full story now.
@@ -61,10 +61,10 @@ And the question that won't die: does the lab have a BBMD, or is the
 whole estate flat? It decides what I build next on the BACnet side.
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
-- `docs/pete-message-v0.1.17.md` — the previous build's message.
+- `docs/field-message-v0.1.17.md` — the previous build's message.
 - `CHANGELOG.md` `[0.1.18]` — full detail.

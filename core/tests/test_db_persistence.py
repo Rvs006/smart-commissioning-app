@@ -50,7 +50,7 @@ def _issue(issue_id: str, description: str) -> dict[str, object]:
         "description": description,
         "status": "open",
         "point_name": "supply_air_temperature_sensor",
-        "topic": "electracom/sct/1532/ahu/l03/events/pointset",
+        "topic": "demo-site/b1/ahu/l03/events/pointset",
         "expected_value": "degrees-celsius",
         "observed_value": "kelvin",
         "match_basis": "point_name",
@@ -308,7 +308,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
     def test_replace_list_devices_roundtrip(self) -> None:
         devices = [
             {
-                "address": "10.10.25.117",
+                "address": "192.0.2.117",
                 "device_type": "ahu",
                 "name": "AHU-L03-017",
                 "vendor": "ExpectedCo",
@@ -317,7 +317,7 @@ class DiscoveryRepositoryTests(SqliteTestCase):
                 "site_id": "demo-site",
                 "attributes": {"mac": "aa:bb:cc:dd:ee:ff", "observed_ports": [47808]},
             },
-            {"address": "10.10.25.118", "device_type": "vav", "attributes": {}},
+            {"address": "192.0.2.118", "device_type": "vav", "attributes": {}},
         ]
 
         written = self.repository.replace_devices(self.run_id, devices)
@@ -325,19 +325,19 @@ class DiscoveryRepositoryTests(SqliteTestCase):
         self.assertEqual(len(self.repository.list_devices(self.run_id)), 2)
 
         listed = self.repository.list_devices(self.run_id)
-        self.assertEqual([row["address"] for row in listed], ["10.10.25.117", "10.10.25.118"])
+        self.assertEqual([row["address"] for row in listed], ["192.0.2.117", "192.0.2.118"])
         self.assertEqual(listed[0]["attributes"], {"mac": "aa:bb:cc:dd:ee:ff", "observed_ports": [47808]})
         self.assertEqual(listed[0]["vendor"], "ExpectedCo")
         self.assertEqual([row["position"] for row in listed], [0, 1])
 
         # replace is idempotent: re-writing fewer rows replaces, not appends.
-        self.repository.replace_devices(self.run_id, [{"address": "10.10.25.200"}])
-        self.assertEqual([r["address"] for r in self.repository.list_devices(self.run_id)], ["10.10.25.200"])
+        self.repository.replace_devices(self.run_id, [{"address": "192.0.2.200"}])
+        self.assertEqual([r["address"] for r in self.repository.list_devices(self.run_id)], ["192.0.2.200"])
 
     def test_replace_list_points_roundtrip(self) -> None:
         points = [
             {
-                "device_ref": "10.10.25.117",
+                "device_ref": "192.0.2.117",
                 "point_id": "ai-1",
                 "point_name": "supply_air_temperature_sensor",
                 "observed_value": {"present_value": 21.5},
@@ -360,19 +360,19 @@ class DiscoveryRepositoryTests(SqliteTestCase):
     def test_replace_list_topics_roundtrip(self) -> None:
         topics = [
             {
-                "topic": "electracom/sct/1532/ahu/l03/events/pointset",
+                "topic": "demo-site/b1/ahu/l03/events/pointset",
                 "last_payload": {"points": {"co2": {"present_value": 500}}},
                 "message_count": 7,
                 "attributes": {"qos": 1},
             },
-            {"topic": "electracom/sct/1532/ahu/l03/state"},
+            {"topic": "demo-site/b1/ahu/l03/state"},
         ]
 
         self.assertEqual(self.repository.replace_topics(self.run_id, topics), 2)
         self.assertEqual(len(self.repository.list_topics(self.run_id)), 2)
 
         listed = self.repository.list_topics(self.run_id)
-        self.assertEqual(listed[0]["topic"], "electracom/sct/1532/ahu/l03/events/pointset")
+        self.assertEqual(listed[0]["topic"], "demo-site/b1/ahu/l03/events/pointset")
         self.assertEqual(listed[0]["message_count"], 7)
         self.assertEqual(listed[0]["last_payload"], {"points": {"co2": {"present_value": 500}}})
         self.assertEqual(listed[1]["message_count"], 0, "message_count defaults to 0")
@@ -457,7 +457,7 @@ class ImportRepositoryTests(SqliteTestCase):
             "created_at": "2026-06-11T12:00:00+00:00",
         }
         errors = [{"row_number": 3, "field": "Expected IP address", "code": "invalid_ip", "message": "bad ip"}]
-        accepted = [{"Asset ID": "AHU-L03-017", "Expected IP address": "10.10.25.117"}]
+        accepted = [{"Asset ID": "AHU-L03-017", "Expected IP address": "192.0.2.117"}]
 
         created = self.repository.create(
             import_id="imp_20260611120000_ab12cd34",

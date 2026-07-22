@@ -1,4 +1,4 @@
-# Message to Pete + Dylan — v0.1.20 (ready to send)
+# Message to field engineer + integration engineer — v0.1.20 (ready to send)
 
 **Written 2026-07-22, ahead of the tag.** Send AFTER the v0.1.20 Release is
 published with the portable zip attached and marked latest — check the link
@@ -45,13 +45,13 @@ build - it should feel like a different tool.
 
 Two things I still need from you when you get a sec:
 - Does the lab network have a BBMD, or is it flat?
-- Dylan - any of the legacy projects on a UDMI version before 1.5.2?
+- integration engineer - any of the legacy projects on a UDMI version before 1.5.2?
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
-- `docs/pete-message-v0.1.19.md` — the previous build's message.
+- `docs/field-message-v0.1.19.md` — the previous build's message.
 - `CHANGELOG.md` `[0.1.20]` — full detail.
