@@ -70,8 +70,24 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-20 (evening) — **v0.1.11 through
-  v0.1.19 are released**. v0.1.19 (PR #89) closes round 2 of the field
+- **Current handoff**: status as of 2026-07-22 — **v0.1.11 through v0.1.20
+  are released**. v0.1.20 bundles the two 2026-07-21 on-site-day fix sets
+  (PRs #90 + #91): the BACnet field HANG is fixed (root cause = directed-
+  probe lane re-entering the shared concurrency throttle → deterministic
+  deadlock with >=16 silent register rows; de-nested; every network read now
+  has an asyncio.wait_for so a segmentation-abort/no-reply can't hang the
+  run — Codex P1 caught the missing read timeouts), Stop bites mid-device,
+  honest mid-run progress, MQTT capture window no longer truncated to ~5s
+  (likely the field "lots didn't publish" skepticism), worker Interrupt
+  handling, plus a UDMI timezone crash fix (an offset-less timestamp no
+  longer sinks the whole run), BST/whole-hour clock-mislabel diagnosis (new
+  UDMI-TS pointset_timestamp category, still reports the fault), payload-
+  issues inspector-beside-table + click-scrolls-to-issues UX, and a
+  hardcoded site-name scrubbed to demo-site (tree residue = 0; git-history
+  rewrite DECIDED-NO 2026-07-22, tree-scrub-only). 26+ bugs fixed via
+  multi-agent workflows across the two days; every PR Codex-reviewed.
+  Two Wireshark captures from the field engineer were decisive in root-
+  causing the hang. Earlier releases: v0.1.19 (PR #89) closes round 2 of the field
   review: empty units/present_value flagged as real high-severity issues
   (empty != absent; per-payload legality; 0/false never flag) and Reports
   "Export selected" bundling multiple reports into one zip via
