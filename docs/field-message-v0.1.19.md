@@ -1,4 +1,4 @@
-# Message to Pete + Dylan — v0.1.19 (ready to send)
+# Message to field engineer + integration engineer — v0.1.19 (ready to send)
 
 **Written 2026-07-20, ahead of the tag.** Send AFTER the v0.1.19 Release is
 published with the portable zip attached and marked latest — check the link
@@ -35,14 +35,14 @@ agreed, and smarter matching goes on the later list.
 
 That's every implementable item from both rounds of today's doc done.
 Still parked by choice: newer UDMI versions (pinned 1.5.2), export
-encryption. Still waiting on: Pete's 10-minute capture verdict, the
-BBMD question, and Dylan's check on legacy pre-1.5.2 projects.
+encryption. Still waiting on: field engineer's 10-minute capture verdict, the
+BBMD question, and integration engineer's check on legacy pre-1.5.2 projects.
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
-- `docs/pete-message-v0.1.18.md` — earlier today's build.
+- `docs/field-message-v0.1.18.md` — earlier today's build.
 - `CHANGELOG.md` `[0.1.19]` — full detail.

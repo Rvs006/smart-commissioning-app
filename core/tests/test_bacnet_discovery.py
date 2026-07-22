@@ -926,6 +926,53 @@ class Bacpypes3BackendSignatureTests(unittest.TestCase):
         self.assertEqual(params, ["self", "device", "obj"])
 
 
+class Bacpypes3BackendTimeoutTests(unittest.TestCase):
+    """Exercise production wait bounds without importing bacpypes3 or using a socket."""
+
+    def test_read_waits_are_bounded_when_the_app_never_completes(self) -> None:
+        class SilentApp:
+            async def read_property(self, *_args: Any) -> Any:
+                await asyncio.Event().wait()
+
+        async def main() -> None:
+            backend = Bacpypes3Backend(timeout_s=0.01)
+            backend._app = SilentApp()
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(
+                    backend.read_object_list({"address": "192.0.2.1", "device_instance": 1}),
+                    timeout=0.2,
+                )
+            with self.assertRaises(TimeoutError):
+                await asyncio.wait_for(
+                    backend.read_present_value(
+                        {"address": "192.0.2.1", "device_instance": 1},
+                        {"object_identifier": "analog-input,1"},
+                    ),
+                    timeout=0.2,
+                )
+
+        asyncio.run(main())
+
+    def test_who_is_receives_the_configured_timeout(self) -> None:
+        class RecordingApp:
+            def __init__(self) -> None:
+                self.timeout: float | None = None
+
+            async def who_is(self, **kwargs: Any) -> list[Any]:
+                self.timeout = kwargs.get("timeout")
+                return []
+
+        async def main() -> None:
+            app = RecordingApp()
+            backend = Bacpypes3Backend(timeout_s=0.25)
+            backend._app = app
+            backend._registration_verified = True
+            self.assertEqual(await backend.who_is(1, 100), [])
+            self.assertEqual(app.timeout, 0.25)
+
+        asyncio.run(main())
+
+
 class LocalAddressParsingTests(unittest.TestCase):
     """The address splitter — PURE, and load-bearing for both the bind and the BBMD."""
 
@@ -1297,7 +1344,7 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         fd_backend = ScriptedBacnetBackend(
             broadcast=[{"device_instance": 3001, "address": "10.20.0.7:47808"}]
         )
-        params = {**_AUTHORIZED, PARAM_BBMD_ADDRESS: "10.10.25.20"}  # the seeded default, no mode
+        params = {**_AUTHORIZED, PARAM_BBMD_ADDRESS: "192.0.2.20"}  # the seeded default, no mode
         result, _ = self._run(store, _ctx(store, parameters=params), backend, fd_backend=fd_backend)
 
         self.assertEqual(result["status"], "succeeded")

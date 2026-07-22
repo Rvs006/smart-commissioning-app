@@ -143,7 +143,7 @@ class SchemaVersionMatchTests(unittest.TestCase):
         self.assertIsNone(declared_version({"version": ""}))
         self.assertIsNone(declared_version({}))
 
-    def test_pete_metadata_shape_matches_registered_point_units(self) -> None:
+    def test_field_metadata_shape_matches_registered_point_units(self) -> None:
         issues = _issues(
             {
                 "expected_schedule": _schedule(
@@ -1005,14 +1005,14 @@ class MetadataPointCoverageTests(unittest.TestCase):
         result = validate_udmi_full_report(
             {
                 "expected_schedule": _schedule(
-                    asset_id="EM-1002001",
+                    asset_id="DEMO-1000001",
                     manufacturer="Schneider",
                     model="PM5121",
                     serial="SN-1",
                     firmware="1.2.3",
                     guid="ifc://changeMe0123",
-                    site="GB-LON-IES",
-                    room="METER-ROOM-R093",
+                    site="ZZ-DEMO-01",
+                    room="DEMO-ROOM-01",
                     points=["primary_ratio_sensor"],
                     units={"primary_ratio_sensor": "no_units"},
                 ),
@@ -1041,17 +1041,17 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(expected_by_type["state"]["system"]["serial_no"], "SN-1")
         self.assertEqual(expected_by_type["state"]["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
         self.assertEqual(expected_by_type["state"]["system"]["software"], {"firmware": "1.2.3"})
-        self.assertEqual(expected_by_type["metadata"]["system"]["physical_tag"]["asset"], {"guid": "ifc://changeMe0123", "name": "EM-1002001"})
-        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "GB-LON-IES", "section": "METER-ROOM-R093"})
+        self.assertEqual(expected_by_type["metadata"]["system"]["physical_tag"]["asset"], {"guid": "ifc://changeMe0123", "name": "DEMO-1000001"})
+        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "ZZ-DEMO-01", "section": "DEMO-ROOM-01"})
         self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
         self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": None}})
 
     def test_room_that_fits_location_room_is_embedded_without_a_note(self) -> None:
-        # "METER_ROOM_R093" fails the strict section pattern (underscores) but
+        # "DEMO_ROOM_01" fails the strict section pattern (underscores) but
         # is perfectly canonical as system.location.room — real devices publish
         # either field (on-site 2026-07-13: location.room = "2-09_Meter_Room").
         result = validate_udmi_full_report(
-            {"expected_schedule": _schedule(site="GB-LON-IES", room="METER_ROOM_R093")},
+            {"expected_schedule": _schedule(site="ZZ-DEMO-01", room="DEMO_ROOM_01")},
             live_capture=None,
         )
         descriptions = " ".join(issue.description for issue in result.issues)
@@ -1065,7 +1065,7 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(structural_issues("metadata", expected_metadata), [])
         self.assertEqual(
             expected_metadata["system"]["location"],
-            {"site": "GB-LON-IES", "room": "METER_ROOM_R093"},
+            {"site": "ZZ-DEMO-01", "room": "DEMO_ROOM_01"},
         )
 
     def test_register_room_matches_metadata_location_room(self) -> None:
@@ -1183,7 +1183,7 @@ class MetadataPointCoverageTests(unittest.TestCase):
         ))
 
     def test_numeric_asset_id_and_free_text_room_keep_template_valid(self) -> None:
-        # Pete's site register: asset IDs like "2001" and free-text rooms can
+        # field engineer's site register: asset IDs like "2001" and free-text rooms can
         # never fit canonical UDMI patterns; each gets a named note and a
         # schema-valid placeholder in the template.
         result = validate_udmi_full_report(
@@ -1496,7 +1496,7 @@ class RegisterDrivenAssetsTests(unittest.TestCase):
             {
                 "assets": [{"expected_schedule": _schedule()}],
                 "register_duplicate_asset_ids": [
-                    {"asset_id": "EM-1002002", "topic_roots": ["MNVRHS/EM-1002001", "MNVRHS/EM-1002002"]},
+                    {"asset_id": "DEMO-1000002", "topic_roots": ["demo-site/DEMO-1000001", "demo-site/DEMO-1000002"]},
                 ],
             },
             live_capture=None,
@@ -1504,8 +1504,8 @@ class RegisterDrivenAssetsTests(unittest.TestCase):
         collisions = [issue for issue in result.issues if issue.issue_type == "register_import"]
         self.assertEqual(len(collisions), 1)
         self.assertEqual(collisions[0].severity, "high")
-        self.assertIn("multiple rows with Asset ID 'EM-1002002'", collisions[0].description)
-        self.assertIn("MNVRHS/EM-1002001, MNVRHS/EM-1002002", collisions[0].description)
+        self.assertIn("multiple rows with Asset ID 'DEMO-1000002'", collisions[0].description)
+        self.assertIn("demo-site/DEMO-1000001, demo-site/DEMO-1000002", collisions[0].description)
 
 
 class CaptureTopicTests(unittest.TestCase):
@@ -1825,9 +1825,10 @@ class PointsetTimestampDiagnosisTests(unittest.TestCase):
         self.assertIn("too far in the future", issue.description)
         self.assertIn("whole-hour clock-labelling offset, about 1 hour", issue.description)
 
-    def test_whole_hour_past_names_clock_labelling_offset(self) -> None:
-        # Same fault the other way: stamp reads one hour OLD (age +3600s), firing
-        # the stale trigger; the whole-hour cause is still named.
+    def test_whole_hour_past_keeps_clock_and_cadence_diagnoses(self) -> None:
+        # A payload exactly one hour old could be a local-clock label or a device
+        # that genuinely stopped publishing. The evidence cannot choose between
+        # them, so the finding must tell the operator to check both.
         issue = self._freshness(
             payload_ts="2026-07-09T09:00:00Z",
             observed_ts="2026-07-09T10:00:00Z",
@@ -1837,7 +1838,8 @@ class PointsetTimestampDiagnosisTests(unittest.TestCase):
         self.assertEqual(issue.issue_type, "pointset_timestamp")
         self.assertTrue(issue.issue_id.startswith("UDMI-TS-"))
         self.assertIn("reporting interval", issue.description)
-        self.assertIn("whole-hour clock-labelling offset, about 1 hour", issue.description)
+        self.assertIn("clock-labelling error or genuine stale publishing", issue.description)
+        self.assertIn("publish cadence", issue.description)
 
     def test_genuine_stale_reads_as_cadence_fault_without_clock_hint(self) -> None:
         # 45s old against a 20s cadence is a real freshness miss, not a whole-hour
@@ -1990,7 +1992,7 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
 
     def test_partial_capture_succeeds_and_names_silent_topics(self) -> None:
-        # Pete's "expected 4 / publishing 3" shape: one topic reports, the rest
+        # field engineer's "expected 4 / publishing 3" shape: one topic reports, the rest
         # are silent. The window completed, so the run succeeds and the silent
         # topics are named in a not_publishing issue.
         store = _FakeRunStore()
@@ -2146,14 +2148,14 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         # A single controller stamping an offset-less (naive) timestamp used to
         # make max() compare a naive sort key against an aware one, raising a
         # TypeError that failed the WHOLE run with the sanitized message. The key
-        # is now always aware, so the run reaches a normal terminal status and
-        # still reports the raw latest stamp (sort key is display-order only).
+        # now ranks valid aware timestamps ahead of invalid wall-clock values, so
+        # the run succeeds without inventing UTC for the naive stamp.
         store = _FakeRunStore()
         record = process_udmi_validation_run(
             "run-naive-ts",
             {
                 "expected_schedule": _schedule(),
-                "state_payload": _state(timestamp="2026-07-09T10:00:00Z"),
+                "state_payload": _state(timestamp="2026-07-09T10:45:00Z"),
                 "metadata_payload": _metadata(timestamp="2026-07-09T10:00:00Z"),
                 "pointset_payload": _pointset(timestamp="2026-07-09T11:30:00"),
             },
@@ -2162,7 +2164,10 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             live_capture=None,
         )
         self.assertEqual(record["status"], "succeeded")
-        self.assertEqual(store.summaries[-1]["payload_last_seen"], "2026-07-09T11:30:00")
+        self.assertEqual(store.summaries[-1]["payload_last_seen"], "2026-07-09T10:45:00Z")
+        self.assertTrue(
+            any("not an RFC 3339 date-time string" in issue.description for issue in store.issues)
+        )
 
     def test_cancel_observed_marks_the_run_cancelled(self) -> None:
         store = _FakeRunStore(cancel=True)

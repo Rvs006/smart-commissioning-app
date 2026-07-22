@@ -300,7 +300,7 @@ class SystemInterface(BaseModel):
   and each widens the host-fingerprint surface exposed over the API. Exclude
   loopback and APIPA from the list (section 4.3).
 
-  > **Update (NIC UX v2, 2026-07-03 meeting — product-owner decision):** Pete
+  > **Update (NIC UX v2, 2026-07-03 meeting — product-owner decision):** field engineer
   > explicitly reversed the gateway/DNS omission: field engineers need the
   > selected adapter's default gateway and DNS visible (read-only) to confirm
   > the tool reads the NIC correctly, and confirming the NIC's gateway

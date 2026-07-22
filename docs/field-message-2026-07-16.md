@@ -1,17 +1,17 @@
-# Message to Pete — v0.1.11–v0.1.13 wrap-up (ready to send)
+# Message to field engineer — v0.1.11–v0.1.13 wrap-up (ready to send)
 
 **Written 2026-07-16, updated same day after the Releases went live.** All three
 GitHub Releases are published with portable zips attached (v0.1.13 = latest), so
 this message is true as written — paste it into Teams or email as-is.
 
-The follow-up questions (`docs/pete-followups-2026-07-16.md`) and the lab-day
-runbook (`docs/lab-day-2026-07-20-runbook.md`) should reach Pete alongside this
+The follow-up questions (`docs/field-followups-2026-07-16.md`) and the lab-day
+runbook (`docs/lab-day-2026-07-20-runbook.md`) should reach field engineer alongside this
 if he doesn't have them yet — "the runbook" below means that file.
 
 ## The message (sent 2026-07-16)
 
 ```text
-Hi Pete,
+Hi field engineer,
 
 Here's your walkthrough list against the new build. One download, v0.1.13,
 has everything:
@@ -61,13 +61,13 @@ Still on you: a port list for the nmap-style scanner, and BBMD plus Foreign
 Device set by hand on your kit before Monday. Step one in the runbook.
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
 - `docs/release-publishing-handoff.md` — the publish job (executed 2026-07-16).
-- `docs/pete-followups-2026-07-16.md` — the pre-Monday questions (decisions
-  shipped with defaults that want Pete's confirmation).
+- `docs/field-followups-2026-07-16.md` — the pre-Monday questions (decisions
+  shipped with defaults that want field engineer's confirmation).
 - `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.
 - `docs/handoff-v0.1.13-remaining-punchlist.md` — what was deferred and why.

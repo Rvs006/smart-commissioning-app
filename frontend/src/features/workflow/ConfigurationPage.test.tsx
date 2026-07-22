@@ -25,12 +25,12 @@ function configurationPayload() {
       values: {
         Hostname: "sct-gateway-01",
         "IP Assignment": "Static IP",
-        "IP Address": "10.10.25.50",
+        "IP Address": "192.0.2.50",
       },
       status: "Healthy",
     },
     bacnet: {
-      values: { "BACnet Network Number": "1532", "UDP Port": "47808", BBMD: "Enabled", "Foreign Device": "Disabled" },
+      values: { "BACnet Network Number": "2001", "UDP Port": "47808", BBMD: "Enabled", "Foreign Device": "Disabled" },
       status: "Listening",
     },
     mqtt: {
@@ -373,7 +373,7 @@ describe("ConfigurationPage", () => {
   // scan. The two controls are independent — this app is never itself a BBMD —
   // so all four blockers are gone and these tests hold them gone.
   //
-  // The fixture is Pete's shape: BBMD "Enabled", Foreign Device "Disabled".
+  // The fixture is field engineer's shape: BBMD "Enabled", Foreign Device "Disabled".
   it("lets Foreign Device be enabled while BBMD is Enabled (v0.1.12 unlock)", async () => {
     stubFetch((url) => {
       if (url.endsWith("/api/v1/configuration")) {
@@ -631,7 +631,7 @@ describe("ConfigurationPage", () => {
   });
 
   it("offers an only-up-virtual adapter without auto-picking it or hinting (Hyper-V host)", async () => {
-    // Pete's field case (2026-07-14): the machine's only routable adapter is
+    // field engineer's field case (2026-07-14): the machine's only routable adapter is
     // a Hyper-V vEthernet flagged virtual. It must be OFFERED (the fix), but
     // never auto-picked by the wired-first default, and the multi-adapter
     // Auto hint must stay quiet.

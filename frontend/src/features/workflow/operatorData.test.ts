@@ -135,8 +135,8 @@ describe("udmiPayloadVerdict / udmiVerdictTone — RAG scheme (mqf-udmi-rag)", (
     expect(udmiVerdictTone("fail")).toBe("warn");
   });
 
-  it("amber for minor-only issues (strict default; Pete flip point is udmiVerdictTone)", () => {
-    // OPEN Pete question (2026-07-15): strict reading demotes minor-only
+  it("amber for minor-only issues (strict default; field engineer flip point is udmiVerdictTone)", () => {
+    // OPEN field engineer question (2026-07-15): strict reading demotes minor-only
     // "Pass with notes" to amber. To restore green, change the single
     // `pass-notes` branch in udmiVerdictTone to return "pass" — this test and
     // that one line move together.
@@ -216,7 +216,7 @@ describe("asset facet filters (ITEM-10)", () => {
   it("derives a type prefix (uppercased) with an 'Other' fallback", () => {
     expect(assetTypePrefix("AHU-1000001")).toBe("AHU");
     expect(assetTypePrefix("em-42")).toBe("EM");
-    expect(assetTypePrefix("  MDB5-00 ")).toBe("MDB");
+    expect(assetTypePrefix("  DEMO-00 ")).toBe("DEMO");
     expect(assetTypePrefix("1234")).toBe("Other");
   });
 

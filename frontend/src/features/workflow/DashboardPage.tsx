@@ -74,7 +74,7 @@ function severityClass(severity: string): "critical" | "major" | "minor" {
 // Reformats a single blocking finding into two readable lines instead of one
 // run-on string. Reuses derivePayloadType so the homepage labels payloads
 // ("UDMI pointset") the same way the validation module does.
-//   headline: asset + payload type, e.g. "MDB5-00-043-BLR-1 · UDMI pointset"
+//   headline: asset + payload type, e.g. "DEMO-BLR-001 · UDMI pointset"
 //   detail:   the point problem, e.g. "fault_status — expected STRING but received NUMBER"
 // The made-up ISS-#### id is intentionally dropped in favour of this framing.
 type ParsedFinding = {

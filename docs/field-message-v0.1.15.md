@@ -1,4 +1,4 @@
-# Message to Pete — v0.1.15 (ready to send)
+# Message to field engineer — v0.1.15 (ready to send)
 
 **Written 2026-07-17, ahead of the tag.** Send AFTER the v0.1.15 Release is
 published with the portable zip attached and marked latest — check the link
@@ -6,7 +6,7 @@ resolves first.
 
 > **CORRECTION (2026-07-17, after the live session):** steps 2 and 5 of the
 > message below assume the target network sits behind a BBMD (the 2026-07-20
-> lab premise). Pete's own test network is a flat single subnet with **no
+> lab premise). field engineer's own test network is a flat single subnet with **no
 > BBMD** — on such networks Foreign Device stays **Disabled**, the BBMD fields
 > are left alone, and a dry-run plan saying "local broadcast only" is the
 > CORRECT, healthy state — not a failed save. Following step 2 as written
@@ -28,14 +28,14 @@ The exe SHA-256 lives in the Release notes, NOT here, on purpose (same
 reasoning as v0.1.14: the hash is only known after the bundle builds, and a
 repo file pinning it would always trail the tag it describes).
 
-Pete's environment (2026-07-16): personal laptop and the MSI server, no
+field engineer's environment (2026-07-16): personal laptop and the MSI server, no
 ThreatLocker/allowlisting — SmartScreen note applies to him, not the IT
 hash-approval drill.
 
 ## The message (simplified for a non-technical read, BACnet steps included)
 
 ```text
-Hi Pete,
+Hi field engineer,
 
 New build before Monday - v0.1.15:
 https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.15
@@ -68,10 +68,10 @@ The first real scan may pop a Windows firewall prompt - accept it, and
 do that first run before the session starts, not during it.
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
-- `docs/pete-message-v0.1.14.md` — the previous build's message (sent).
+- `docs/field-message-v0.1.14.md` — the previous build's message (sent).
 - `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.

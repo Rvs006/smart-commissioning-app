@@ -72,7 +72,8 @@ class UdmiCaptureWindowCapTests(ApiTestCase):
         source = _WORKER_TASKS.read_text(encoding="utf-8")
         match = re.search(
             r'@dramatiq\.actor\(queue_name="validation", max_retries=0, '
-            r"time_limit=([\d_]+)\)\s*\ndef validate_udmi_payloads",
+            r"time_limit=([\d_]+)\)\s*\n@_with_worker_heartbeat\s*\n"
+            r"def validate_udmi_payloads",
             source,
         )
         self.assertIsNotNone(match, "validate_udmi_payloads actor declaration not found")

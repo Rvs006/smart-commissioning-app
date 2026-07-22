@@ -83,7 +83,7 @@ remaining-length varint encoding/decoding.
 | Config-publish + wait-for-next-pointset | Tested (flow with fake); live-untested | `publish_config_and_wait_for_pointset`; live broker write requires authorization (`docs/security-posture.md`). |
 | Retained-message evidence | Tested | Incoming RETAIN is preserved on `MqttMessage` and payload views. A retained pointset older than the register's Expected reporting interval is a validation issue, never current commissioning evidence. |
 | Keep-alive PINGREQ | Tested (framing); live-untested | Long/indefinite captures ping at half the configured keep-alive; broker-drop errors preserve partial evidence. |
-| QoS > 0 PUBLISH acknowledgement | Not implemented | SUBSCRIBE requests the configured maximum QoS, but outbound config PUBLISH remains QoS0 and the client is not a general-purpose QoS1/2 session implementation. Validate Niagara publishes at QoS0 (as in Pete's 2026-07-10 broker log) or set subscribe QoS0 until this is implemented. |
+| QoS > 0 PUBLISH acknowledgement | Not implemented | SUBSCRIBE requests the configured maximum QoS, but outbound config PUBLISH remains QoS0 and the client is not a general-purpose QoS1/2 session implementation. Validate Niagara publishes at QoS0 (as in field engineer's 2026-07-10 broker log) or set subscribe QoS0 until this is implemented. |
 
 Connection settings (`mqtt_settings.py`) parse broker host/port, client id,
 keep-alive, username/password, and TLS material; `secret://` references are not
@@ -130,7 +130,7 @@ exists solely to reach devices behind routers on other subnets. Operator docs
 and messages must never present "local broadcast only" as an error, and must
 never instruct enabling the BBMD fields except for sites that actually have
 one — a 2026-07-17 field session was misdirected by exactly that (see the
-correction note in `docs/pete-message-v0.1.15.md`).
+correction note in `docs/field-message-v0.1.15.md`).
 
 Install the real path with the optional extra:
 `pip install 'smart-commissioning-core[bacnet]'` (not installed by default; see

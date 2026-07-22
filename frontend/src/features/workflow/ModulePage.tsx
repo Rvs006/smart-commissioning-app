@@ -425,11 +425,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Only a run the operator STARTED here this session hard-blocks a second start
   // (ITEM-4: prevent an accidental parallel capture). A REHYDRATED run (restored
   // from a prior visit) still shows its live monitor + Stop control, but must NOT
-  // gate Execute: a run fossilized at running/queued — a hosted worker that died
-  // with its dispatch markers, so the startup sweep leaves it alone — would
-  // otherwise disable Execute forever with no UI escape (the cancel flag it sets
-  // is never observed). Gating only freshly-started runs keeps ITEM-4's guard
-  // where it belongs and can never fossilize into a permanent lock.
+  // gate Execute. Worker heartbeat recovery now terminates a dead hosted run,
+  // but a restored monitor must remain usable during that recovery window.
+  // Gating only freshly-started runs keeps ITEM-4's parallel-run guard scoped to
+  // the current session.
   const startedRunActive = runIsActive && !activeRun?.restored;
 
   // Validation issues — fetched only once the validation run is terminal.
@@ -683,7 +682,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [activeRunTerminal, activeRunStatus, activeRun]);
 
-  // Pete's walkthrough ask (2026-07-15): when Results opens, snap to the top of
+  // field engineer's walkthrough ask (2026-07-15): when Results opens, snap to the top of
   // the page so the operator sees the headline results first, not whatever
   // mid-page scroll position the Run step left behind.
   //
@@ -1365,7 +1364,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   // Terminal empty-state: a discovery run that completed with zero rows must say
   // so explicitly — distinct from "no run yet" / "in flight" / "failed"
-  // (Pete 2026-07-15: "it can't find anything, but it doesn't really tell us").
+  // (field engineer 2026-07-15: "it can't find anything, but it doesn't really tell us").
   // Gating on activeRun keeps this composable with run rehydration: a restored
   // terminal run sets activeRun and lights this state up unchanged.
   const discoveryEmptyState =
@@ -1433,7 +1432,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setImportOutcome(null);
     // Chromium fires no change event when the same path is re-picked while the
     // input still holds it, so a corrected CSV saved over the original was
-    // silently never re-read (Pete had to rename the file to get it uploaded).
+    // silently never re-read (field engineer had to rename the file to get it uploaded).
     // Clearing the value makes every pick deliver a fresh File snapshot. The
     // File captured into state above stays valid for the upload, and the staged
     // name is rendered from state since the native input now always reads
@@ -3533,7 +3532,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       </section>
 
       {/* Second instance of the report controls, at the END of the Results step
-          (Pete's 2026-07-15 walkthrough: a run finishes, the step auto-advances
+          (field engineer's 2026-07-15 walkthrough: a run finishes, the step auto-advances
           to Results, and the run monitor's copy — which lives in the "setup run"
           stepgroup — vanishes with it, so the operator had to click back a step
           to generate the report they just earned). Both instances render the
@@ -3821,7 +3820,7 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
 // Structured issue card (ITEM-9): the description reads as the headline, then the
 // expected/observed comparison, any status detail, and the suggested action sit
 // on their own readable lines — instead of one run-on <strong> string. `context`
-// is the eyebrow's secondary label (the payload area, or the asset id). Pete's
+// is the eyebrow's secondary label (the payload area, or the asset id). field engineer's
 // own word "empty" for a present-but-blank value survives inside expectedObserved
 // (built in toIssueRow) byte-identical.
 function IssueCard({ issue, context }: { issue: IssueRow; context: string }) {
@@ -4006,7 +4005,7 @@ function JsonTree({ value }: { value: unknown }) {
 }
 
 // A present-but-empty expected/observed value ("") is flagged as the explicit
-// word "empty" (Pete's own word, ISSUE-10) rather than rendering as blank; an
+// word "empty" (field engineer's own word, ISSUE-10) rather than rendering as blank; an
 // absent value (null/undefined) stays "n/a". Keeps the comparison segment
 // whenever EITHER side is present so an all-empty pair no longer drops the
 // whole clause and leaves a dangling "observed " before the suggested action.

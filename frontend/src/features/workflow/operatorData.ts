@@ -242,7 +242,7 @@ export function udmiPayloadVerdict(input: {
 // both hard fails (critical/major) AND minor-only "Pass with notes"; red (fail)
 // for an offline / not-publishing device; null (no shade) for "Not received".
 //
-// Pete-pending (2026-07-15 field ask): the strict reading maps minor-only
+// field engineer-pending (2026-07-15 field ask): the strict reading maps minor-only
 // "Pass with notes" to amber. If he wants minor-only to stay green instead,
 // flip the single `pass-notes` line below to `return "pass"` — this function is
 // the one and only place that decision lives.

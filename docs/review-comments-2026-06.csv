@@ -3,11 +3,11 @@ review-mq9l6bd7,2026-06-11T14:21:53.035Z,DP,Homepage,Issue,Medium,/,Error is con
 On homepage
 The error in Continue UDMI validation.
 What is ISS-1042 ? Full error below
-ISS-1042fault_status expected STRING but received NUMBER.MDB5-00-043-BLR-1 · UDMI pointset
+ISS-1042fault_status expected STRING but received NUMBER.DEMO-BLR-001 · UDMI pointset
 
-So BLR Pointset payload has an issue, it would be good to separate and emphasise the part of the payload the issue is in, and to improve readability. 
+So BLR Pointset payload has an issue, it would be good to separate and emphasise the part of the payload the issue is in, and to improve readability.
 E.g.
-MDB5-00-043-BLR-1 · UDMI pointset
+DEMO-BLR-001 · UDMI pointset
 ""fault_status"" point - expected STRING but received NUMBER",2552x1274
 review-mq9ll2vf,2026-06-11T14:33:21.867Z,DP,Configuration,UX comment,Medium,/configuration,Cert expiry,I don't think certificate expiry is required as an INPUT. Maybe it can confirm to the user if the current certificate they have uploaded/specified is expired or not? Maybe highlight the box red if expired.,2552x1274
 review-mq9lmokb,2026-06-11T14:34:36.635Z,DP,Configuration,UX comment,Medium,/configuration,Collapsable sections,"Can Network Basics, Bacnet Discovery, MQTT Settings boxes and etc be collapsable?",2552x1274
@@ -16,11 +16,11 @@ review-mq9lq5ii,2026-06-11T14:37:18.570Z,DP,Configuration,Question,Low,/configur
 review-mq9lsooa,2026-06-11T14:39:16.714Z,DP,Configuration,UX comment,Medium,/configuration,Timezone dropdown,"Would be good to have a timezone dropdown for all the different timezones, for future projects that want to use UTC or ones not in Europe/London.",2552x1274
 review-mq9lv0g2,2026-06-11T14:41:05.282Z,DP,Configuration,Question,Medium,/configuration,Where will backup location be stored?,Where will the backup location be stored on the BACKUP & RESTORE section? Is it within the app or can a directory on the host laptop be specified?,2552x1274
 review-mq9lxgf6,2026-06-11T14:42:59.298Z,DP,Configuration,UX comment,Medium,/configuration,Double statuses,"There seems to be double statuses everywhere, e.g. Healthy Healthy, Listening Listening, Connected Connected - only need one! But it should be descriptive and allow enough space characters for fault statuses as well, e.g. Disconnected due to TLS Protocol error or etc.",2552x1274
-review-mq9m4bnv,2026-06-11T14:48:19.723Z,DP,UDMI,UX comment,Medium,/udmi-validation,Previous UI for the results 1,"The previous UI for the results had ""expected payload"" which was cool. Some assets will have multiple payloads, e.g. MDB5-00-043-BLR-1 would have a pointset, metadata and state payload. 
+review-mq9m4bnv,2026-06-11T14:48:19.723Z,DP,UDMI,UX comment,Medium,/udmi-validation,Previous UI for the results 1,"The previous UI for the results had ""expected payload"" which was cool. Some assets will have multiple payloads, e.g. DEMO-BLR-001 would have a pointset, metadata and state payload.
 Maybe for the assets with multiple payload types, you can drop down the asset to see it's results on a per payload type basis (when it is not dropped down, you get summary of all of the payload types).",2552x1274
 review-mq9m6uay,2026-06-11T14:50:17.194Z,DP,UDMI,UX comment,Medium,/udmi-validation,Previous UI for the results 2,"Result = Pass or Fail (and the reasons why it failed = e.g. Type mismatch like you have) is good. There won't be an inbetween of ""warning""",2552x1274
 review-mq9mbmsh,2026-06-11T14:54:00.737Z,DP,BACnet,UX comment,Medium,/bacnet-discovery,Previous UI,"IP address details, if appliable, in Results - BACnet Devices would be good. Network number should also be re-added",2552x1274
-review-mq9mvkki,2026-06-11T15:09:30.978Z,DP,UDMI,Question,Medium,/udmi-validation,What does Queue UDMI Validation do?,"What does Queue UDMI Validation do? Is it just stating the UDMI validation based on the user's register input? 
+review-mq9mvkki,2026-06-11T15:09:30.978Z,DP,UDMI,Question,Medium,/udmi-validation,What does Queue UDMI Validation do?,"What does Queue UDMI Validation do? Is it just stating the UDMI validation based on the user's register input?
 Maybe instead of ""Queue"" it can be ""Run Validation""? The term queing is quite confusing, so a different word should be used where applicable.",2552x1274
 review-mq9n11wi,2026-06-11T15:13:46.722Z,DP,UDMI,Positive note,Medium,/udmi-validation,MQTT Config,MQTT Config controlled publish looks good. It would be good to change it to be able to write and confirm back the values of multiple inputs. E.g. supply_air_temperature_setpoint and heating_valve_percentage_command may both be written to with one config payload.,2552x1274
 review-mq9n7pbe,2026-06-11T15:18:57.002Z,DP,UDMI,Missing requirement,Medium,/udmi-validation,Schedule and Payload Evidence,"I like this section... It would be good if there is a button in this section that says execute, so it can go out and grab the state/metadata/pointset payloads specified in the topics.",2552x1274

@@ -260,20 +260,20 @@
           fields: {
             "Hostname": "sct-gateway-01",
             "IP Assignment": "Static IP",
-            "IP Address": "10.10.25.50",
+            "IP Address": "192.0.2.50",
             "Subnet Mask": "255.255.255.0",
-            "Gateway": "10.10.25.1",
-            "DNS Servers": "10.10.25.10, 8.8.8.8",
+            "Gateway": "192.0.2.1",
+            "DNS Servers": "192.0.2.10, 8.8.8.8",
             "VLAN ID": "25"
           }
         },
         "BACnet Discovery": {
           status: "Listening",
           fields: {
-            "BACnet Network Number": "1532",
+            "BACnet Network Number": "2001",
             "UDP Port": "47808",
             "BBMD": "Enabled",
-            "BBMD Address": "10.10.25.20",
+            "BBMD Address": "192.0.2.20",
             "BBMD UDP Port": "47808",
             "Foreign Device": "Enabled",
             "TTL": "300"
@@ -282,10 +282,10 @@
         "MQTT Settings": {
           status: "Connected",
           fields: {
-            "MQTT Broker FQDN or IP Address": "mqtt.electracom.local",
+            "MQTT Broker FQDN or IP Address": "mqtt.demo.invalid",
             "Port": "8883",
             "Client ID": "sct-gateway-01",
-            "Root Topic": "electracom/sct/1532",
+            "Root Topic": "demo-site/b1",
             "QoS": "1 - At least once",
             "Keep Alive Interval": "60",
             "MQTT Username": "",
@@ -327,7 +327,7 @@
           fields: {
             "Log Level": "Info",
             "Log Retention": "30 days",
-            "Remote Syslog Target": "10.10.25.60",
+            "Remote Syslog Target": "192.0.2.60",
             "Syslog Port": "514",
             "Diagnostics Mode": "Disabled"
           }
@@ -338,35 +338,35 @@
           title: "Network Scan Results",
           columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
           rows: [
-            ["Boiler 1 Controller", "10.10.25.101", "Online", "90:2C:D0:B0:03:36", "47808/udp, 443/tcp", "MAC", "48 sec ago", "Responded to UDP BACnet and HTTPS checks", "Matched"],
-            ["AHU Level 3", "10.10.25.117", "Online", "5C:A1:1D:8D:6F:FF", "47808/udp", "IP", "7 min ago", "BACnet reachable, HTTP missing", "Service mismatch"],
-            ["Unknown host", "-", "10.10.25.214", "C0:A6:F3:F2:F3:2F", "80/tcp, 443/tcp", "None", "Now", "Matched no imported MAC address", "Rogue"]
+            ["Boiler 1 Controller", "192.0.2.101", "Online", "02:00:00:00:00:01", "47808/udp, 443/tcp", "MAC", "48 sec ago", "Responded to UDP BACnet and HTTPS checks", "Matched"],
+            ["AHU Level 3", "192.0.2.117", "Online", "02:00:00:00:00:02", "47808/udp", "IP", "7 min ago", "BACnet reachable, HTTP missing", "Service mismatch"],
+            ["Unknown host", "-", "192.0.2.214", "02:00:00:00:00:03", "80/tcp, 443/tcp", "None", "Now", "Matched no imported MAC address", "Rogue"]
           ]
         },
         bacnet: {
           title: "BACnet Devices",
           columns: ["Device", "Instance", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
           rows: [
-            ["Boiler 1 Controller", "1532001", "118", "48 sec ago", "I-Am received and object list captured", "Ready"],
-            ["Level 3 AHU", "1532117", "204", "7 min ago", "BACnet reliability flagged stale on four points", "Four required points missing"],
-            ["CHW Pump Panel", "1532041", "96", "2 min ago", "Operational with no fault or stale flags", "Ready"]
+            ["Boiler 1 Controller", "2001001", "118", "48 sec ago", "I-Am received and object list captured", "Ready"],
+            ["Level 3 AHU", "2001117", "204", "7 min ago", "BACnet reliability flagged stale on four points", "Four required points missing"],
+            ["CHW Pump Panel", "2001041", "96", "2 min ago", "Operational with no fault or stale flags", "Ready"]
           ]
         },
         mqtt: {
           title: "MQTT Topic Observations",
           columns: ["Topic", "Asset", "Payload Last Seen", "Message Count", "Detailed Connection Status", "Raw Payload", "Result"],
           rows: [
-            ["electracom/sct/1532/boiler/1/pointset", "MDB5-00-043-BLR-1", "2 min ago", "47", "Connected; payload type mismatch", "{\"points\":{\"fault_status\":{\"present_value\":1}}}", "Type mismatch"],
-            ["electracom/sct/1532/meter/009/pointset", "MTR-ENERGY-009", "15 sec ago", "126", "Connected; TLS session healthy", "{\"points\":{\"energy_sensor\":{\"present_value\":1294.4}}}", "Ready"],
-            ["electracom/sct/1532/ahu/l03/state", "AHU-L03-017", "7 min ago", "8", "Connected; reporting slower than expected", "{\"system\":{\"operation\":{\"operational\":true}}}", "Slow interval"]
+            ["demo-site/b1/boiler/1/pointset", "DEMO-BLR-001", "2 min ago", "47", "Connected; payload type mismatch", "{\"points\":{\"fault_status\":{\"present_value\":1}}}", "Type mismatch"],
+            ["demo-site/b1/meter/009/pointset", "MTR-ENERGY-009", "15 sec ago", "126", "Connected; TLS session healthy", "{\"points\":{\"energy_sensor\":{\"present_value\":1294.4}}}", "Ready"],
+            ["demo-site/b1/ahu/l03/state", "AHU-L03-017", "7 min ago", "8", "Connected; reporting slower than expected", "{\"system\":{\"operation\":{\"operational\":true}}}", "Slow interval"]
           ]
         },
         udmi: {
           title: "UDMI Payload Checks",
           columns: ["Asset", "State", "Pointset", "Payload Last Seen", "Message Count", "Raw Payload", "Result"],
           rows: [
-            ["MDB5-00-043-BLR-1", "Present", "Present", "2 min ago", "47", "{\"pointset\":{\"points\":{\"fault_status\":{\"present_value\":1}}}}", "Type mismatch"],
-            ["MDB5-00-044-BLR-2", "Present", "Present", "48 sec ago", "52", "{\"pointset\":{\"points\":{\"supply_air_temperature_setpoint\":{\"present_value\":22}}}}", "Ready"],
+            ["DEMO-BLR-001", "Present", "Present", "2 min ago", "47", "{\"pointset\":{\"points\":{\"fault_status\":{\"present_value\":1}}}}", "Type mismatch"],
+            ["DEMO-00-044-BLR-2", "Present", "Present", "48 sec ago", "52", "{\"pointset\":{\"points\":{\"supply_air_temperature_setpoint\":{\"present_value\":22}}}}", "Ready"],
             ["AHU-L03-017", "Present", "Late", "7 min ago", "8", "{\"system\":{\"hardware\":{\"make\":\"Schneider\",\"model\":\"PM5111\"}}}", "Warning"]
           ]
         },
@@ -391,9 +391,9 @@
         }
       },
       issues: [
-        ["ISS-1042", "MDB5-00-043-BLR-1", "critical", "UDMI pointset", "fault_status expected STRING but received NUMBER.", "BMS contractor"],
+        ["ISS-1042", "DEMO-BLR-001", "critical", "UDMI pointset", "fault_status expected STRING but received NUMBER.", "BMS contractor"],
         ["ISS-1037", "AHU-L03-017", "major", "BACnet discovery", "Four required points are absent from the live object list.", "Controls engineer"],
-        ["ISS-1028", "MDB5-00-043-BLR-1", "major", "MQTT discovery", "Telemetry interval exceeds configured tolerance by 70 seconds.", "Integration engineer"],
+        ["ISS-1028", "DEMO-BLR-001", "major", "MQTT discovery", "Telemetry interval exceeds configured tolerance by 70 seconds.", "Integration engineer"],
         ["ISS-1019", "MTR-ENERGY-009", "minor", "Report metadata", "Asset location is missing floor reference in imported register.", "Commissioning lead"]
       ]
     };

@@ -54,7 +54,7 @@ Everything else is per-path:
 
 - **Path A:** leave the whole BACnet section alone. Foreign Device stays
   Disabled, the BBMD fields stay untouched (the seeded demo address
-  `10.10.25.20` is fictional and harmless while Foreign Device is Disabled —
+  `192.0.2.20` is fictional and harmless while Foreign Device is Disabled —
   nothing reads it).
 - **Path B:** the seeded defaults are a trap — the entire foreign-device path
   is inert until you set the Section 1B fields by hand and press Save. Saved
@@ -104,7 +104,7 @@ section. Set these fields:
 | Field | Set it to | Why |
 |---|---|---|
 | **Foreign Device** | **Enabled** | This is the **only** switch that turns on BBMD registration. Nothing else does. |
-| **BBMD Address** | The lab BBMD's **real IP**, e.g. `10.20.30.4` | Seeded value `10.10.25.20` is demo data and does not exist. **Bare IP only** — no `:port`. |
+| **BBMD Address** | The lab BBMD's **real IP**, e.g. `10.20.30.4` | Seeded value `192.0.2.20` is demo data and does not exist. **Bare IP only** — no `:port`. |
 | **BBMD UDP Port** | The BBMD's port (normally `47808`) | If it is blank or junk, the app quietly uses 47808. |
 | **TTL** | `300` unless the site says otherwise | Registration lifetime in seconds. Junk here quietly becomes 300. |
 
@@ -668,7 +668,7 @@ footnote.
 | | Path A — flat (no BBMD) | Path B — behind a BBMD |
 |---|---|---|
 | **Config gate** | Network Basics → **Source Interface** = wired lab NIC → **Save** | Same, PLUS BACnet Discovery → **Foreign Device = Enabled** + real **BBMD Address** → **Save** |
-| **The trap** | A selected-looking Source Interface is not saved until you press Save | Saved settings never auto-update; seeded BBMD Address `10.10.25.20` is fictional |
+| **The trap** | A selected-looking Source Interface is not saved until you press Save | Saved settings never auto-update; seeded BBMD Address `192.0.2.20` is fictional |
 | **Ignore** | The whole BACnet section, incl. the **BBMD** toggle | The **BBMD** toggle (discovery never reads it) |
 | **Dry-run must say** | `using local broadcast only` (**correct here**) | `using foreign-device registration via BBMD <ip>:<port>` |
 | **Diagnostics `mode`** | `broadcast` (correct) | `foreign_device` |

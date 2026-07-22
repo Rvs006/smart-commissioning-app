@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime, timedelta
 
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.models import Run
@@ -45,6 +46,18 @@ INTERRUPTED_RUN_MESSAGE = (
     "so no results were saved. Please run it again."
 )
 
+WORKER_INTERRUPTED_RUN_MESSAGE = (
+    "The background worker stopped updating this run before it could finish, "
+    "so the result is incomplete. Please run it again."
+)
+
+# A running actor refreshes Run.updated_at every 30 seconds from worker/app/tasks.py.
+# Four missed beats is long enough to ride out a brief database stall without
+# leaving a hard-killed worker's row alive forever. Queued messages get a much
+# larger allowance because a healthy worker pool may legitimately be busy.
+_RUNNING_WORKER_STALE_AFTER = timedelta(minutes=2)
+_QUEUED_WORKER_STALE_AFTER = timedelta(hours=1)
+
 
 def _was_queued_to_worker(result_summary: dict[str, object]) -> bool:
     """Return True if the run was handed to the background (Dramatiq) worker queue.
@@ -61,6 +74,23 @@ def _was_queued_to_worker(result_summary: dict[str, object]) -> bool:
     included), so they cannot tell an inline run apart from a queued one.
     """
     return bool(result_summary.get("queue_name") or result_summary.get("actor_name"))
+
+
+def _worker_run_is_stale(
+    *,
+    status: str,
+    updated_at: datetime,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a worker-bound active run has missed its liveness window."""
+    if status not in {"queued", "running"}:
+        return False
+    observed = updated_at if updated_at.tzinfo is not None else updated_at.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    threshold = (
+        _QUEUED_WORKER_STALE_AFTER if status == "queued" else _RUNNING_WORKER_STALE_AFTER
+    )
+    return current - observed.astimezone(UTC) > threshold
 
 
 class RunService:
@@ -131,6 +161,10 @@ class RunService:
         return run, report
 
     def get_run(self, run_id: str) -> RunRecord:
+        # Polling a run doubles as a liveness check. A hard-killed worker cannot
+        # execute an exception handler, so its heartbeat is the only reliable
+        # distinction between a live actor and a fossilized marker-bearing row.
+        self._recover_stale_worker_run(run_id)
         return RunRecord.model_validate(self._store.get_run(run_id))
 
     def list_runs(
@@ -242,12 +276,11 @@ class RunService:
         stayed disabled across restarts (the run rehydrates as a live monitor that
         can never terminate).
 
-        CRITICAL GATE: only runs NOT dispatched to the worker queue are swept. A
-        queued/worker run may still be waiting in — or executing off — the worker
-        queue in the hosted deployment, so touching it here would race a live run;
-        see :func:`_was_queued_to_worker` for the discriminator. Inline runs (the
-        portable exe path) carry no worker markers, so they are the ones this
-        reclaims. Returns the ids swept (may be empty).
+        Worker-bound rows are reclaimed only after their liveness window expires:
+        one hour while queued, or two minutes while a running actor should be
+        writing 30-second heartbeats. Fresh worker rows are left untouched. Inline
+        runs carry no worker markers and are reclaimed immediately at startup.
+        Returns the ids swept (may be empty).
         """
         statement = select(Run.id, Run.result_summary).where(Run.status.in_(("running", "queued")))
         with self._engine.connect() as connection:
@@ -256,6 +289,8 @@ class RunService:
         for run_id, result_summary in rows:
             summary = result_summary if isinstance(result_summary, dict) else {}
             if _was_queued_to_worker(summary):
+                if self._recover_stale_worker_run(run_id):
+                    swept.append(run_id)
                 continue
             self.update_run_status(
                 run_id,
@@ -266,6 +301,40 @@ class RunService:
             )
             swept.append(run_id)
         return swept
+
+    def _recover_stale_worker_run(self, run_id: str) -> bool:
+        """Atomically fail a worker-bound run whose heartbeat has expired."""
+        statement = (
+            select(Run.status, Run.result_summary, Run.updated_at)
+            .where(Run.id == run_id)
+            .with_for_update()
+        )
+        with self._engine.begin() as connection:
+            row = connection.execute(statement).one_or_none()
+            if row is None:
+                return False
+            summary = row.result_summary if isinstance(row.result_summary, dict) else {}
+            if not _was_queued_to_worker(summary) or not _worker_run_is_stale(
+                status=row.status,
+                updated_at=row.updated_at,
+            ):
+                return False
+            result = connection.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.status == row.status)
+                .values(
+                    status="failed",
+                    stage="worker_heartbeat_expired",
+                    progress_percent=100,
+                    error_message=WORKER_INTERRUPTED_RUN_MESSAGE,
+                    cancel_requested=True,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+        recovered = bool(result.rowcount)
+        if recovered:
+            logger.warning("worker heartbeat expired for run_id=%s", run_id)
+        return recovered
 
     def update_result_summary(
         self,

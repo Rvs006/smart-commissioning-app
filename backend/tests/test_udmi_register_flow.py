@@ -46,9 +46,9 @@ _PER_TYPE_REGISTER_CSV = (
 _DUPLICATE_ID_REGISTER_CSV = (
     "Project/site,System,Asset ID,Expected topic,Expected schema version,"
     "Expected points,Expected units,Expected reporting interval,Source protocol\n"
-    'Site A,BMS,EM-1002002,MNVRHS/EM-1002001/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
-    'Site A,BMS,EM-1002002,MNVRHS/EM-1002002/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
-    'Site A,BMS,FCU-1008888,MNVRHS/FCU-1008888/#,1.5.2,supply_air_temperature_sensor,degrees_celsius,60,MQTT\n'
+    'Site A,BMS,DEMO-1000002,demo-site/DEMO-1000001/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
+    'Site A,BMS,DEMO-1000002,demo-site/DEMO-1000002/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
+    'Site A,BMS,DEMO-1000003,demo-site/DEMO-1000003/#,1.5.2,supply_air_temperature_sensor,degrees_celsius,60,MQTT\n'
 )
 
 # Second row's topic has no recognised payload suffix, so the import rejects it
@@ -173,9 +173,9 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(error["row_number"], 3)
         self.assertEqual(error["field"], "Expected topic")
         self.assertEqual(error["code"], "conflicting_asset_topic")
-        self.assertIn("EM-1002002", error["message"])
-        self.assertIn("MNVRHS/EM-1002001", error["message"])
-        self.assertIn("MNVRHS/EM-1002002", error["message"])
+        self.assertIn("DEMO-1000002", error["message"])
+        self.assertIn("demo-site/DEMO-1000001", error["message"])
+        self.assertIn("demo-site/DEMO-1000002", error["message"])
         self.assertIn("unique Asset ID", error["message"])
 
         response = self._post_run(project, site)
@@ -184,14 +184,14 @@ class UdmiRegisterFlowTests(ApiTestCase):
 
         assets = run["parameters"]["assets"]
         roots = sorted(entry.get("register_topic_filter", "") for entry in assets)
-        self.assertEqual(roots, ["MNVRHS/EM-1002001/#", "MNVRHS/FCU-1008888/#"])
+        self.assertEqual(roots, ["demo-site/DEMO-1000001/#", "demo-site/DEMO-1000003/#"])
         rejections = [
             issue for issue in run["issues"] if issue["issue_type"] == "register_import"
         ]
         self.assertEqual(len(rejections), 1)
         self.assertEqual(rejections[0]["severity"], "high")
         self.assertIn("rejected 1 row(s)", rejections[0]["description"])
-        self.assertIn("MNVRHS/EM-1002002", rejections[0]["description"])
+        self.assertIn("demo-site/DEMO-1000002", rejections[0]["description"])
 
     def test_preexisting_conflicting_rows_stay_separate_and_are_reported(self) -> None:
         # Imports accepted BEFORE the import-time conflicting-Asset-ID gate can
@@ -226,14 +226,14 @@ class UdmiRegisterFlowTests(ApiTestCase):
             stored_file_path="legacy-register.csv",
             summary={"status": "accepted"},
             accepted_rows=[
-                register_row("EM-1002002", "MNVRHS/EM-1002001/#", "energy_sensor"),
+                register_row("DEMO-1000002", "demo-site/DEMO-1000001/#", "energy_sensor"),
                 # The SECOND device under the duplicated ID arrives as legacy
                 # per-payload-type rows: they must coalesce into ONE entry even
                 # though their shared root is not the identity's first-seen root.
-                register_row("EM-1002002", "MNVRHS/EM-1002002/state", "energy_sensor"),
-                register_row("EM-1002002", "MNVRHS/EM-1002002/metadata", "energy_sensor"),
-                register_row("EM-1002002", "MNVRHS/EM-1002002/events/pointset", "energy_sensor"),
-                register_row("FCU-1008888", "MNVRHS/FCU-1008888/#", "supply_air_temperature_sensor"),
+                register_row("DEMO-1000002", "demo-site/DEMO-1000002/state", "energy_sensor"),
+                register_row("DEMO-1000002", "demo-site/DEMO-1000002/metadata", "energy_sensor"),
+                register_row("DEMO-1000002", "demo-site/DEMO-1000002/events/pointset", "energy_sensor"),
+                register_row("DEMO-1000003", "demo-site/DEMO-1000003/#", "supply_air_temperature_sensor"),
             ],
         )
 
@@ -249,24 +249,24 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(
             state_topics,
             [
-                "MNVRHS/EM-1002001/state",
-                "MNVRHS/EM-1002002/state",
-                "MNVRHS/FCU-1008888/state",
+                "demo-site/DEMO-1000001/state",
+                "demo-site/DEMO-1000002/state",
+                "demo-site/DEMO-1000003/state",
             ],
         )
         second_device = next(
-            entry for entry in assets if entry.get("state_topic") == "MNVRHS/EM-1002002/state"
+            entry for entry in assets if entry.get("state_topic") == "demo-site/DEMO-1000002/state"
         )
-        self.assertEqual(second_device["metadata_topic"], "MNVRHS/EM-1002002/metadata")
-        self.assertEqual(second_device["pointset_topic"], "MNVRHS/EM-1002002/events/pointset")
+        self.assertEqual(second_device["metadata_topic"], "demo-site/DEMO-1000002/metadata")
+        self.assertEqual(second_device["pointset_topic"], "demo-site/DEMO-1000002/events/pointset")
         collisions = [
             issue for issue in run["issues"] if issue["issue_type"] == "register_import"
         ]
         self.assertEqual(len(collisions), 1)
         self.assertEqual(collisions[0]["severity"], "high")
-        self.assertIn("multiple rows with Asset ID 'EM-1002002'", collisions[0]["description"])
-        self.assertIn("MNVRHS/EM-1002001", collisions[0]["description"])
-        self.assertIn("MNVRHS/EM-1002002", collisions[0]["description"])
+        self.assertIn("multiple rows with Asset ID 'DEMO-1000002'", collisions[0]["description"])
+        self.assertIn("demo-site/DEMO-1000001", collisions[0]["description"])
+        self.assertIn("demo-site/DEMO-1000002", collisions[0]["description"])
 
     def test_rejected_register_rows_are_reported_by_the_run(self) -> None:
         # On-site 2026-07-13: a publishing device was missing from the results

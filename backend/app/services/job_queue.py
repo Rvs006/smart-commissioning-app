@@ -68,7 +68,8 @@ class JobQueueService:
         # REDIS_URL raises at construction (redis parses the URL eagerly), and if
         # that raw error escaped as anything but JobQueueUnavailable, dispatch_run's
         # handler would miss it and strand a marker-stamped run at 'queued' that the
-        # startup sweep never reclaims. broker stays None until built, so the
+        # run would wait for heartbeat expiry instead of failing immediately.
+        # broker stays None until built, so the
         # finally can skip close() when construction itself failed.
         broker: RedisBroker | None = None
         try:

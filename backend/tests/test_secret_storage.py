@@ -303,7 +303,7 @@ class DerivedCertificatesStatusTests(SecretStorageTestCase):
         self.assertEqual(self.service.load().certificates.status, "Not configured")
 
     def test_uploading_private_key_updates_status(self) -> None:
-        # Pete's exact scenario: after an upload the pill answers "did my keys
+        # field engineer's exact scenario: after an upload the pill answers "did my keys
         # load?" on the next GET, with no explicit save.
         self.service.store_secret(
             SecretMaterialRequest(field="Private Key", file_name="device.key", content=KEY_CONTENT)

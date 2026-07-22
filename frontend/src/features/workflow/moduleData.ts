@@ -119,7 +119,7 @@ const modules: ModuleDefinition[] = [
     importTypes: ["mqtt_register", "asset_validation", "mqtt_points"],
     runActions: [
       {
-        // Hidden from the Run Controls card (Pete 2026-07-15: the run control
+        // Hidden from the Run Controls card (field engineer 2026-07-15: the run control
         // belongs at the bottom, after the operator has been through the
         // options — the "Execute capture" button in Schedule and Payload
         // Evidence starts this same action).

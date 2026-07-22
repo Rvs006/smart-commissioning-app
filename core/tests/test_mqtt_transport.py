@@ -60,10 +60,10 @@ class PublishFilterTests(unittest.TestCase):
         sock = RecordingSocket()
         client = MqttClient(_settings(), socket_factory=lambda _addr, _t: sock)
         client._socket = sock
-        topic = "MNVRHS-09-R09-LIGH-LT0399/events/pointset"
+        topic = "DEMO-ASSET-001/events/pointset"
         payload = len(topic).to_bytes(2, "big") + topic.encode("utf-8") + b'{"ok":true}'
 
-        for expected_filter in ("#", "MNVRHS-09-R09-LIGH-LT0399/#"):
+        for expected_filter in ("#", "DEMO-ASSET-001/#"):
             with self.subTest(expected_filter=expected_filter):
                 with mock.patch.object(client, "_read_packet", return_value=(0x30, payload)):
                     message = client.read_publish_any(
@@ -122,6 +122,34 @@ class PublishFilterTests(unittest.TestCase):
         with self.assertRaises(MqttTransportError) as cm:
             client._read_packet()
         self.assertIn("partial packet", str(cm.exception))
+
+    def test_mid_packet_read_is_capped_by_the_capture_deadline(self) -> None:
+        class _DeadlineSocket:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.timeouts: list[float] = []
+
+            def gettimeout(self) -> float:
+                return 1.0
+
+            def settimeout(self, value: float) -> None:
+                self.timeouts.append(value)
+
+            def recv(self, _n: int) -> bytes:
+                self.calls += 1
+                if self.calls == 1:
+                    return b"\x30"
+                raise TimeoutError()
+
+        sock = _DeadlineSocket()
+        client = MqttClient(_settings(timeout_seconds=5.0))
+        client._socket = sock
+        deadline = mqtt_transport.time.monotonic() + 0.05
+
+        with self.assertRaises(MqttTransportError):
+            client._read_packet(deadline=deadline)
+
+        self.assertLessEqual(sock.timeouts[0], 0.05 + 1e-6)
 
     def test_read_publish_preserves_the_mqtt_retain_flag(self) -> None:
         sock = RecordingSocket()
@@ -393,6 +421,8 @@ class _FakeCaptureClient:
         expected_topics: set[str] | None = None,
         timeout_seconds: float,
         cancel_check: Any = None,
+        capture_deadline: float | None = None,
+        use_timeout_as_packet_deadline: bool = True,
     ) -> MqttMessage | None:
         item = self._reads.pop(0)
         if isinstance(item, Exception):

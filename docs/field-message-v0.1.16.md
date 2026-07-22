@@ -1,11 +1,11 @@
-# Message to Pete — v0.1.16 (ready to send)
+# Message to field engineer — v0.1.16 (ready to send)
 
 **Written 2026-07-17, ahead of the tag.** Send AFTER the v0.1.16 Release is
 published with the portable zip attached and marked latest — check the link
 resolves first.
 
 Context for the next session: v0.1.16 is the fix bundle from the 2026-07-17
-live session on Pete's flat (no-BBMD) network. His Wireshark capture proved
+live session on field engineer's flat (no-BBMD) network. His Wireshark capture proved
 the scan worked on the wire while every real run 500'd and froze at
 "running" — raw bacpypes3 values failing JSON persistence, plus a run-wrapper
 double-fault that skipped the terminal status. His log bundle came back empty
@@ -20,7 +20,7 @@ v0.1.14/15: the hash is only known after the bundle builds).
 ## The message (simplified for a non-technical read, flat-network steps)
 
 ```text
-Hi Pete,
+Hi field engineer,
 
 New build with the fixes from our call - v0.1.16:
 https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.16
@@ -58,13 +58,13 @@ it flat like yours? If there's no BBMD I'll rework the session notes
 before Monday so they don't send anyone in circles.
 
 Cheers,
-Raj
+Product team
 ```
 
 ## Related docs
 
-- `docs/pete-message-v0.1.15.md` — the previous build's message (sent; carries
+- `docs/field-message-v0.1.15.md` — the previous build's message (sent; carries
   a correction note about its BBMD steps).
 - `docs/protocol-conformance.md` §3 — the recorded BBMD-optional requirement.
 - `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session (rewrite
-  pending Pete's BBMD answer).
+  pending field engineer's BBMD answer).

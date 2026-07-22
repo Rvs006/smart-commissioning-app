@@ -21,6 +21,10 @@ requires on-site validation.
 """
 
 import logging
+import threading
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
 
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
@@ -71,6 +75,51 @@ _DEFAULT_SCAN_CONNECT_TIMEOUT_S = 5.0
 # Hard floor for the rate limiter: a request may lower the rate but can never
 # disable it (None/unlimited). Mirrors engine_dispatch._MIN_RATE_LIMIT_PER_SEC.
 _MIN_SCAN_RATE_LIMIT_PER_SEC = 0.1
+_WORKER_HEARTBEAT_SECONDS = 30.0
+
+
+def _with_worker_heartbeat(function: Callable[..., None]) -> Callable[..., None]:
+    """Refresh an active run while its actor is alive.
+
+    Dramatiq cannot deliver ``Interrupt`` after a process kill or power loss.
+    The API therefore treats four missed 30-second heartbeats as a dead running
+    actor. Terminal-state protection in DbRunStore makes a late beat harmless.
+    """
+
+    @wraps(function)
+    def wrapped(run_id: str, *args: Any, **kwargs: Any) -> None:
+        stopped = threading.Event()
+
+        def refresh() -> bool:
+            try:
+                record = run_store.update_run_status(run_id, status="running")
+            except Exception:
+                logger.exception("Could not refresh worker heartbeat", extra={"run_id": run_id})
+                return True
+            return not isinstance(record, dict) or record.get("status") == "running"
+
+        def beat() -> None:
+            while not stopped.wait(_WORKER_HEARTBEAT_SECONDS):
+                if not refresh():
+                    stopped.set()
+                    break
+
+        if not refresh():
+            logger.warning("Skipping actor because run is already terminal", extra={"run_id": run_id})
+            return
+        heartbeat = threading.Thread(
+            target=beat,
+            name=f"run-heartbeat-{run_id}",
+            daemon=True,
+        )
+        heartbeat.start()
+        try:
+            return function(run_id, *args, **kwargs)
+        finally:
+            stopped.set()
+            heartbeat.join(timeout=1.0)
+
+    return wrapped
 
 
 def _build_throttle(parameters: dict) -> ThrottleConfig:
@@ -137,7 +186,7 @@ def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) 
     # Limit-agnostic wording: each actor sets its own time_limit (15 min to
     # 49h), so naming a specific duration here would go stale per actor.
     if isinstance(interrupt, TimeLimitExceeded):
-        message = "live capture exceeded the worker time limit"
+        message = "run exceeded the worker time limit"
     else:
         message = f"run interrupted by the worker ({type(interrupt).__name__})"
     try:
@@ -165,10 +214,11 @@ def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) 
 # 'failed' run, not a stranded 'running' row.
 # discover_ip_range / discover_bacnet catch dramatiq's Interrupt (a BaseException
 # that bypasses run_engine's `except Exception`) so a time-limit kill records a real
-# 'failed' run rather than a row stranded at 'running' that the marker-aware startup
-# sweep never reclaims. A BACnet scan against large object-lists with dead points is
-# not as bounded as once assumed, so it can reach the 1h ceiling.
+# 'failed' run promptly; the worker heartbeat is the fallback for process death
+# that cannot raise an interrupt. A BACnet scan against large object-lists with
+# dead points is not as bounded as once assumed, so it can reach the 1h ceiling.
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
+@_with_worker_heartbeat
 def discover_ip_range(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting IP discovery", extra={"actor": "discover_ip_range"})
@@ -190,6 +240,7 @@ def discover_ip_range(run_id: str, parameters: dict) -> None:
 
 
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
+@_with_worker_heartbeat
 def discover_bacnet(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet discovery", extra={"actor": "discover_bacnet"})
@@ -215,6 +266,7 @@ def discover_bacnet(run_id: str, parameters: dict) -> None:
 
 
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=176_400_000)
+@_with_worker_heartbeat
 def discover_mqtt(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting MQTT discovery", extra={"actor": "discover_mqtt"})
@@ -250,6 +302,7 @@ def discover_mqtt(run_id: str, parameters: dict) -> None:
 # backend routes/discovery.py) and validate_udmi_payloads here. The remaining
 # validation actors keep their 15 min ceiling.
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=176_400_000)
+@_with_worker_heartbeat
 def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting UDMI validation", extra={"actor": "validate_udmi_payloads"})
@@ -272,6 +325,7 @@ def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
 
 
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
+@_with_worker_heartbeat
 def publish_mqtt_config(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting MQTT config publish", extra={"actor": "publish_mqtt_config"})
@@ -288,6 +342,7 @@ def publish_mqtt_config(run_id: str, parameters: dict) -> None:
 
 
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
+@_with_worker_heartbeat
 def validate_bacnet_points(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet point validation", extra={"actor": "validate_bacnet_points"})
@@ -304,6 +359,7 @@ def validate_bacnet_points(run_id: str, parameters: dict) -> None:
 
 
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
+@_with_worker_heartbeat
 def compare_bacnet_mqtt(run_id: str, parameters: dict) -> None:
     with run_id_context(run_id):
         logger.info("Starting BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})

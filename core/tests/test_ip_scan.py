@@ -633,11 +633,11 @@ class LoopbackSocketTests(unittest.TestCase):
             "run_arp", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80]},
             run_store=store, execution_mode="x",
             connect=fake_connect,
-            arp_lookup=lambda ip: "C0:A6:F3:F2:F3:2F",
+            arp_lookup=lambda ip: "02:00:00:00:00:03",
         )
         self.assertEqual(result["status"], "succeeded")
         asset = store.summary_calls[-1]["discovered_assets"][0]
-        self.assertEqual(asset["mac_address"], "C0:A6:F3:F2:F3:2F")
+        self.assertEqual(asset["mac_address"], "02:00:00:00:00:03")
         # match_basis stays "ip": MAC is enrichment, not the discovery basis.
         self.assertEqual(asset["match_basis"], "ip")
 
@@ -838,7 +838,7 @@ class RegisterPortUnionTests(unittest.TestCase):
         self.assertEqual(persisted[0][1][0]["attributes"]["missing_expected_ports"], [445])
 
     def test_all_expected_open_records_explicit_pass(self) -> None:
-        # Pete's field case: blank port field (-> defaults) with the register
+        # field engineer's field case: blank port field (-> defaults) with the register
         # expecting 445,135,139,443,5985,7070 and forbidding 23,21. Every
         # register port must be probed, and a fully-clean host records an
         # explicit EXPECTED PORTS OK decision instead of silence.
@@ -952,7 +952,7 @@ class ArpLookupUnitTests(unittest.TestCase):
     """Pure ARP-cache parsing / normalisation (subprocess + /proc mocked)."""
 
     def test_normalise_dashes_to_colons_upper(self) -> None:
-        self.assertEqual(ip_scan._normalise_mac("c0-a6-f3-f2-f3-2f"), "C0:A6:F3:F2:F3:2F")
+        self.assertEqual(ip_scan._normalise_mac("02-00-00-00-00-03"), "02:00:00:00:00:03")
 
     def test_all_zero_incomplete_entry_degrades_to_none(self) -> None:
         # An incomplete ARP entry must render blank, never a fabricated 00:00:...
@@ -962,11 +962,11 @@ class ArpLookupUnitTests(unittest.TestCase):
     def test_arp_lookup_posix_parses_proc_table(self) -> None:
         proc = (
             "IP address       HW type     Flags       HW address            Mask     Device\n"
-            "10.0.0.5         0x1         0x2         c0:a6:f3:f2:f3:2f     *        eth0\n"
+            "10.0.0.5         0x1         0x2         02:00:00:00:00:03     *        eth0\n"
             "10.0.0.6         0x1         0x0         00:00:00:00:00:00     *        eth0\n"
         )
         with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
-            self.assertEqual(ip_scan._arp_lookup_posix("10.0.0.5"), "C0:A6:F3:F2:F3:2F")
+            self.assertEqual(ip_scan._arp_lookup_posix("10.0.0.5"), "02:00:00:00:00:03")
         # Incomplete (all-zero) entry -> None, not a fabricated MAC.
         with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
             self.assertIsNone(ip_scan._arp_lookup_posix("10.0.0.6"))
@@ -978,11 +978,11 @@ class ArpLookupUnitTests(unittest.TestCase):
         output = (
             "\nInterface: 10.0.0.2 --- 0x5\n"
             "  Internet Address      Physical Address      Type\n"
-            "  10.0.0.5              c0-a6-f3-f2-f3-2f     dynamic\n"
+            "  10.0.0.5              02-00-00-00-00-03     dynamic\n"
         )
         completed = mock.Mock(stdout=output)
         with mock.patch.object(ip_scan.subprocess, "run", return_value=completed):
-            self.assertEqual(ip_scan._arp_lookup_windows("10.0.0.5"), "C0:A6:F3:F2:F3:2F")
+            self.assertEqual(ip_scan._arp_lookup_windows("10.0.0.5"), "02:00:00:00:00:03")
         # A "no entries" dump degrades to None.
         completed_none = mock.Mock(stdout="No ARP Entries Found.\n")
         with mock.patch.object(ip_scan.subprocess, "run", return_value=completed_none):

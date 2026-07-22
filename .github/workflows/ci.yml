@@ -21,12 +21,18 @@ jobs:
       - name: Ruff lint
         run: ruff check backend worker core
 
+      - name: Public repository hygiene
+        run: python scripts/check_public_hygiene.py
+
       - name: Core unit tests
         run: python -m unittest discover -s core/tests
 
       - name: Backend unit tests
         working-directory: backend
         run: python -m unittest discover -s tests
+
+      - name: Worker unit tests
+        run: python -m unittest discover -s worker/tests
 
       # Mypy is informational only — backend/ and worker/ both ship a
       # top-level package named "app", so it runs once per package.
