@@ -59,14 +59,6 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Changed
 
-- **"Run history" is now the consistent name** across the app — the homepage
-  Recent runs card and the live run monitor both use it and link to
-  Operate → Run History (previously "Jobs / job history").
-
-## [Unreleased]
-
-### Fixed
-
 - **One device with an odd timestamp can no longer crash the whole validation
   run.** A payload carrying a timestamp with no timezone offset made the
   payload-ordering comparison raise a naive-vs-aware error that failed the
@@ -84,6 +76,9 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Changed
 
+- **"Run history" is now the consistent name** across the app — the homepage
+  Recent runs card and the live run monitor both use it and link to
+  Operate → Run History (previously "Jobs / job history").
 - **The issue inspector now sits beside the results table** (UDMI validation)
   instead of stacking below it, and **selecting a row — by clicking it or its
   View button — scrolls straight to that payload's issues**, so it is clear
