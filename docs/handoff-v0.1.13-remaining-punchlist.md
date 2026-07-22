@@ -182,7 +182,7 @@ Everything below already works with a default; these are Pete's calls, not block
 - **MQTT subscribe QoS.** Default shipped: subscription QoS stays **0**, so the new "Delivery QoS"
   column will almost always read 0. Raising it to QoS 2 would make the field meaningful but changes
   broker traffic per message — deliberately **not** changed silently; Pete decides.
-- **MQTT wildcard semantics.** Default shipped: a register row like `334os/b1/#` greens **every**
+- **MQTT wildcard semantics.** Default shipped: a register row like `demo-site/b1/#` greens **every**
   topic under that prefix (including a rogue publishing inside the namespace), with the matched
   wildcard shown per row. Alternative is an amber "covered by wildcard, not individually listed."
   Also open: are `$SYS/#` broker-internal topics red "not in register" (default) or excluded?

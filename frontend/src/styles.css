@@ -705,7 +705,15 @@ label {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.wide-left,
+/* Results view (ITEM-D): the table takes the wide first column and the inspector
+   sits BESIDE it as a narrower second column. Declared after .two-col so it wins
+   the equal-specificity tie on the shared `two-col wide-left` element; the
+   <=980px media query below (which lists .two-col) collapses it back to one
+   stacked column on narrow screens. */
+.wide-left {
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
+}
+
 .home-main-grid,
 .home-support-grid {
   grid-template-columns: minmax(0, 1fr);

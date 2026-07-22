@@ -10,13 +10,13 @@ describe("matchesTopicFilter (MQTT wildcards)", () => {
   });
 
   it("matches a single level with '+'", () => {
-    expect(matchesTopicFilter("334os/b1/ahu/state", "334os/+/+/state")).toBe(true);
-    expect(matchesTopicFilter("334os/b1/ahu/metadata", "334os/+/+/state")).toBe(false);
+    expect(matchesTopicFilter("demo-site/b1/ahu/state", "demo-site/+/+/state")).toBe(true);
+    expect(matchesTopicFilter("demo-site/b1/ahu/metadata", "demo-site/+/+/state")).toBe(false);
   });
 
   it("matches a multi-level tail with '#'", () => {
-    expect(matchesTopicFilter("334os/b1/ahu/events/pointset", "334os/#")).toBe(true);
-    expect(matchesTopicFilter("other/b1/ahu", "334os/#")).toBe(false);
+    expect(matchesTopicFilter("demo-site/b1/ahu/events/pointset", "demo-site/#")).toBe(true);
+    expect(matchesTopicFilter("other/b1/ahu", "demo-site/#")).toBe(false);
   });
 
   it("requires an exact length match without trailing wildcard", () => {

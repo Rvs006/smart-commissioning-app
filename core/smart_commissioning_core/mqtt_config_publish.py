@@ -84,7 +84,7 @@ def validate_and_publish_config(
                 severity="high",
                 description="Config payload topic must be a valid MQTT topic ending in /config.",
                 topic=topic or None,
-                suggested_action="Use the device config topic, for example 334os/b1/ahu-1000001/config.",
+                suggested_action="Use the device config topic, for example demo-site/b1/ahu-1000001/config.",
                 status_detail="invalid_topic",
             )
         )

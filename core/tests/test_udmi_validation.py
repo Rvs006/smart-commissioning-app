@@ -27,6 +27,7 @@ from smart_commissioning_core.udmi_validation import (
     DEFAULT_MAX_MESSAGES,
     _capture_topics,
     _conformance_fields,
+    _pointset_freshness_issue,
     validate_udmi_full_report,
 )
 
@@ -1628,7 +1629,7 @@ class CaptureRunTimeTests(unittest.TestCase):
 
         stale = [issue for issue in result.issues if "reporting interval" in issue.description]
         self.assertEqual(len(stale), 1)
-        self.assertEqual(stale[0].issue_type, "pointset_validation")
+        self.assertEqual(stale[0].issue_type, "pointset_timestamp")
         self.assertIn("retained", stale[0].description)
         self.assertTrue(result.result_summary["payload_views"][0]["payload_types"][2]["retained"])
 
@@ -1790,6 +1791,81 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
             cancel_check=lambda: False,
         )
         self.assertIn("site/a1/#", capture.calls[0]["topics"])
+
+
+class PointsetTimestampDiagnosisTests(unittest.TestCase):
+    """Freshness issues carry the pointset_timestamp category (UDMI-TS) so they
+    filter apart from data faults, and name a whole-hour clock-labelling cause
+    (a device stamping LOCAL wall time, e.g. BST, but labelling it 'Z') when the
+    age is a near-exact hour — while a genuine non-whole-hour stale still reads
+    as a cadence fault with no misleading clock hint.
+    """
+
+    def _freshness(self, *, payload_ts: str, observed_ts: str, interval: str):
+        return _pointset_freshness_issue(
+            parameters={"pointset_payload_received_at": observed_ts},
+            expected={"reporting_interval_seconds": interval},
+            pointset_payload={"timestamp": payload_ts},
+            issues=[],
+            asset_id="EM-1",
+            raw_evidence_uri="mqtt://capture/pointset",
+        )
+
+    def test_whole_hour_future_names_clock_labelling_offset(self) -> None:
+        # Stamp reads one hour AHEAD of the capture clock (age -3600s): the future
+        # trigger fires and the whole-hour cause is named, but it is still reported.
+        issue = self._freshness(
+            payload_ts="2026-07-09T11:00:00Z",
+            observed_ts="2026-07-09T10:00:00Z",
+            interval="60",
+        )
+        assert issue is not None
+        self.assertEqual(issue.issue_type, "pointset_timestamp")
+        self.assertTrue(issue.issue_id.startswith("UDMI-TS-"))
+        self.assertIn("too far in the future", issue.description)
+        self.assertIn("whole-hour clock-labelling offset, about 1 hour", issue.description)
+
+    def test_whole_hour_past_names_clock_labelling_offset(self) -> None:
+        # Same fault the other way: stamp reads one hour OLD (age +3600s), firing
+        # the stale trigger; the whole-hour cause is still named.
+        issue = self._freshness(
+            payload_ts="2026-07-09T09:00:00Z",
+            observed_ts="2026-07-09T10:00:00Z",
+            interval="60",
+        )
+        assert issue is not None
+        self.assertEqual(issue.issue_type, "pointset_timestamp")
+        self.assertTrue(issue.issue_id.startswith("UDMI-TS-"))
+        self.assertIn("reporting interval", issue.description)
+        self.assertIn("whole-hour clock-labelling offset, about 1 hour", issue.description)
+
+    def test_genuine_stale_reads_as_cadence_fault_without_clock_hint(self) -> None:
+        # 45s old against a 20s cadence is a real freshness miss, not a whole-hour
+        # offset: it keeps the new category but must NOT claim a clock-labelling cause.
+        issue = self._freshness(
+            payload_ts="2026-07-09T09:59:15Z",
+            observed_ts="2026-07-09T10:00:00Z",
+            interval="20",
+        )
+        assert issue is not None
+        self.assertEqual(issue.issue_type, "pointset_timestamp")
+        self.assertIn("reporting interval", issue.description)
+        self.assertNotIn("clock-labelling", issue.description)
+
+    def test_long_cadence_stale_omits_clock_labelling_hint(self) -> None:
+        # A >=30-min cadence makes the whole-hour residual window (max 1800s) span
+        # every possible age, so an uncapped tolerance would stamp the clock hint
+        # onto a genuinely dead device. A half-hourly register 45 min stale must
+        # read as a plain cadence fault, with no clock-labelling claim.
+        issue = self._freshness(
+            payload_ts="2026-07-09T09:15:00Z",
+            observed_ts="2026-07-09T10:00:00Z",
+            interval="1800",
+        )
+        assert issue is not None
+        self.assertEqual(issue.issue_type, "pointset_timestamp")
+        self.assertIn("reporting interval", issue.description)
+        self.assertNotIn("clock-labelling", issue.description)
 
 
 class _FakeRunStore:
@@ -2065,6 +2141,28 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         )
         self.assertEqual(record["status"], "succeeded")
         self.assertFalse(store.summaries[-1]["broker_capture_attempted"])
+
+    def test_offset_less_timestamp_does_not_crash_the_run(self) -> None:
+        # A single controller stamping an offset-less (naive) timestamp used to
+        # make max() compare a naive sort key against an aware one, raising a
+        # TypeError that failed the WHOLE run with the sanitized message. The key
+        # is now always aware, so the run reaches a normal terminal status and
+        # still reports the raw latest stamp (sort key is display-order only).
+        store = _FakeRunStore()
+        record = process_udmi_validation_run(
+            "run-naive-ts",
+            {
+                "expected_schedule": _schedule(),
+                "state_payload": _state(timestamp="2026-07-09T10:00:00Z"),
+                "metadata_payload": _metadata(timestamp="2026-07-09T10:00:00Z"),
+                "pointset_payload": _pointset(timestamp="2026-07-09T11:30:00"),
+            },
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=None,
+        )
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(store.summaries[-1]["payload_last_seen"], "2026-07-09T11:30:00")
 
     def test_cancel_observed_marks_the_run_cancelled(self) -> None:
         store = _FakeRunStore(cancel=True)

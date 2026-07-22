@@ -49,8 +49,8 @@ Validated features (each exercised by unit tests with inline/fixture payloads):
 
 Issue taxonomy emitted (`ValidationIssueRecord`, prefixes): `UDMI-NP`
 (not_publishing), `UDMI-UN` (unexpected_device), `UDMI-PL` (payload_error),
-`UDMI-PS` (pointset_validation), `UDMI-ST` (state_validation), `UDMI-MD`
-(metadata_validation).
+`UDMI-PS` (pointset_validation), `UDMI-TS` (pointset_timestamp), `UDMI-ST`
+(state_validation), `UDMI-MD` (metadata_validation).
 
 **Live capture** (subscribing to a device's `…/state`, `…/metadata`,
 `…/pointset` topics, or a broader `#` / `prefix/#` filter on a live broker) is

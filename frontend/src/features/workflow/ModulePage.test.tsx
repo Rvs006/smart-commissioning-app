@@ -952,7 +952,7 @@ describe("ModulePage discovery wiring", () => {
       points: [],
       topics: [
         {
-          topic: "334os/b1/ahu-1/state",
+          topic: "demo-site/b1/ahu-1/state",
           message_count: 3,
           last_payload: { online: true },
           created_at: "2026-07-15T09:05:00Z",
@@ -960,12 +960,12 @@ describe("ModulePage discovery wiring", () => {
             device_ref: "AHU-1",
             position: 0,
             register_match: "matched",
-            register_matched_filter: "334os/b1/ahu-1/#",
+            register_matched_filter: "demo-site/b1/ahu-1/#",
             register_asset_id: "AHU-1",
           },
         },
         {
-          topic: "334os/rogue/x/state",
+          topic: "demo-site/rogue/x/state",
           message_count: 1,
           last_payload: { present_value: 1 },
           created_at: "2026-07-15T09:05:00Z",
@@ -978,7 +978,7 @@ describe("ModulePage discovery wiring", () => {
         matched_count: 1,
         unmatched_count: 1,
         expected_filter_count: 2,
-        unobserved_filters: [{ asset_id: "FCU-2", filter: "334os/b1/fcu-2/state" }],
+        unobserved_filters: [{ asset_id: "FCU-2", filter: "demo-site/b1/fcu-2/state" }],
       },
     };
 
@@ -1024,14 +1024,14 @@ describe("ModulePage discovery wiring", () => {
     ).toBeInTheDocument();
     // The counts note is present on its own line.
     expect(screen.getByText(/1 topic matches the register/)).toBeInTheDocument();
-    expect(screen.getByText(/334os\/b1\/fcu-2\/state/)).toBeInTheDocument();
+    expect(screen.getByText(/demo-site\/b1\/fcu-2\/state/)).toBeInTheDocument();
 
     // The matched row shades green, the foreign row red. Assert on classes only
     // (jsdom cannot see the theme CSS that hides/reveals rows).
     const passRow = document.querySelector("tr.row-pass");
     const failRow = document.querySelector("tr.row-fail");
-    expect(passRow?.textContent).toContain("334os/b1/ahu-1/state");
-    expect(failRow?.textContent).toContain("334os/rogue/x/state");
+    expect(passRow?.textContent).toContain("demo-site/b1/ahu-1/state");
+    expect(failRow?.textContent).toContain("demo-site/rogue/x/state");
   });
 
   it("prompts to upload a register when no MQTT register import exists", async () => {
@@ -1045,7 +1045,7 @@ describe("ModulePage discovery wiring", () => {
       points: [],
       topics: [
         {
-          topic: "334os/rogue/x/state",
+          topic: "demo-site/rogue/x/state",
           message_count: 1,
           last_payload: { present_value: 1 },
           created_at: "2026-07-15T09:05:00Z",
@@ -2105,9 +2105,9 @@ describe("ModulePage UDMI workbench live results", () => {
     // Ensure the issues query has merged before opening the detail.
     await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
-    // First View = the pointset row, which carries the run's single critical
-    // issue; the modal shows its id and full message inline.
-    fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
+    // The pointset row carries the run's single critical issue, so its View
+    // affordance names the count (ITEM-D); the modal shows the id + full message.
+    fireEvent.click(screen.getByRole("button", { name: "View 1 issue" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("UDMI-PS-001")).toBeInTheDocument();
     expect(
@@ -2142,13 +2142,45 @@ describe("ModulePage UDMI workbench live results", () => {
     // Ensure the issues query has merged before opening the detail.
     await screen.findAllByText("Non-compliant — 3 issues (1 critical)");
 
-    fireEvent.click(screen.getAllByRole("button", { name: "View" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "View 3 issues" }));
     const dialog = await screen.findByRole("dialog");
     expect(
       within(dialog).getByText("3 issues — see the issue details below the table."),
     ).toBeInTheDocument();
     // The full message text stays in the issue panel below, not the modal.
     expect(within(dialog).queryByText(/Pointset problem 1\./)).not.toBeInTheDocument();
+  });
+
+  it("names a row's issue count on its View button and drives the inspector to those issues (ITEM-D)", async () => {
+    const scrollSpy = vi.spyOn(window.HTMLElement.prototype, "scrollIntoView");
+    stubUdmiRunFetch(udmiIssuesPayload);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/Live validation results/i)).toBeInTheDocument();
+    await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
+
+    // (C) The View affordance names the count it carries: the pointset row holds
+    // the single critical issue; the clean metadata row keeps the bare label.
+    const table = screen.getByRole("table");
+    const pointsetView = within(table).getByRole("button", { name: "View 1 issue" });
+    expect(within(table).getByRole("button", { name: "View" })).toBeInTheDocument();
+
+    // (A) The inspector's asset group is collapsed on its own (independent of the
+    // table's auto-expand), so the per-payload issue verdict is not shown yet.
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(within(inspector).queryByText(/see details below/i)).not.toBeInTheDocument();
+
+    // Selecting the row expands its asset in the inspector — surfacing exactly the
+    // issues that flagged it — and scrolls straight to that payload's group.
+    scrollSpy.mockClear();
+    fireEvent.click(pointsetView);
+    expect(within(inspector).getByText(/see details below/i)).toBeInTheDocument();
+    await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
+
+    scrollSpy.mockRestore();
   });
 
   it("stamps the shared RAG verdict on the per-asset payload sections", async () => {

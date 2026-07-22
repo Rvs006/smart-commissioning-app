@@ -443,8 +443,8 @@ describe("getDiscoveryTopicsXlsxPath", () => {
   });
 
   it("appends a URL-encoded topic_filter when provided", () => {
-    expect(getDiscoveryTopicsXlsxPath("run_1", "334os/+/+/#")).toBe(
-      "/discovery/runs/run_1/topics.xlsx?topic_filter=334os%2F%2B%2F%2B%2F%23",
+    expect(getDiscoveryTopicsXlsxPath("run_1", "demo-site/+/+/#")).toBe(
+      "/discovery/runs/run_1/topics.xlsx?topic_filter=demo-site%2F%2B%2F%2B%2F%23",
     );
   });
 
