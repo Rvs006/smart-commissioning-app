@@ -184,10 +184,11 @@ class OrphanRunSweepTests(ApiTestCase):
         self.assertNotIn(run_id, swept)
         self.assertEqual(run_service.get_run(run_id).status, "queued")
 
-    def test_running_worker_with_expired_heartbeat_is_swept(self) -> None:
+    def test_running_worker_requires_a_second_stale_window_before_sweep(self) -> None:
         from app.services.run_service import WORKER_INTERRUPTED_RUN_MESSAGE, RunService
+        from smart_commissioning_core.db.db_run_store import WORKER_STALE_OBSERVED_AT_KEY
         from smart_commissioning_core.db.models import Run
-        from sqlalchemy import update
+        from sqlalchemy import select, update
 
         run_service, run_id = self._new_run()
         run_service.update_result_summary(
@@ -196,22 +197,48 @@ class OrphanRunSweepTests(ApiTestCase):
         run_service.update_run_status(
             run_id, status="running", stage="engine_running", progress_percent=15
         )
+        stale_heartbeat = datetime.now(UTC) - timedelta(minutes=3)
         with run_service.engine.begin() as connection:
             connection.execute(
                 update(Run)
                 .where(Run.id == run_id)
-                .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
+                .values(updated_at=stale_heartbeat)
             )
 
-        swept = RunService().sweep_interrupted_runs()
+        first_sweep = RunService().sweep_interrupted_runs()
 
-        self.assertIn(run_id, swept)
-        record = run_service.get_run(run_id)
-        self.assertEqual(record.status, "failed")
-        self.assertEqual(record.stage, "worker_heartbeat_expired")
-        self.assertEqual(record.error_message, WORKER_INTERRUPTED_RUN_MESSAGE)
+        self.assertNotIn(run_id, first_sweep)
+        suspected = run_service._store.get_run(run_id)
+        self.assertEqual(suspected["status"], "running")
+        self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected["result_summary"])
+        with run_service.engine.connect() as connection:
+            observed_heartbeat = connection.execute(
+                select(Run.updated_at).where(Run.id == run_id)
+            ).scalar_one()
+        self.assertEqual(observed_heartbeat, stale_heartbeat)
+
+        # Bound the regression without sleeping: age only the separate
+        # confirmation marker, leaving the real heartbeat timestamp untouched.
+        aged_summary = dict(suspected["result_summary"])
+        aged_summary[WORKER_STALE_OBSERVED_AT_KEY] = (
+            datetime.now(UTC) - timedelta(minutes=3)
+        ).isoformat()
+        with run_service.engine.begin() as connection:
+            connection.execute(
+                update(Run).where(Run.id == run_id).values(result_summary=aged_summary)
+            )
+
+        second_sweep = RunService().sweep_interrupted_runs()
+
+        self.assertIn(run_id, second_sweep)
+        record = run_service._store.get_run(run_id)
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(record["stage"], "worker_heartbeat_expired")
+        self.assertEqual(record["error_message"], WORKER_INTERRUPTED_RUN_MESSAGE)
+        self.assertNotIn(WORKER_STALE_OBSERVED_AT_KEY, record["result_summary"])
 
     def test_poll_recovers_expired_worker_without_api_restart(self) -> None:
+        from smart_commissioning_core.db.db_run_store import WORKER_STALE_OBSERVED_AT_KEY
         from smart_commissioning_core.db.models import Run
         from sqlalchemy import update
 
@@ -227,10 +254,84 @@ class OrphanRunSweepTests(ApiTestCase):
                 .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
             )
 
+        suspected = run_service.get_run(run_id)
+
+        self.assertEqual(suspected.status, "running")
+        self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected.result_summary)
+        aged_summary = dict(suspected.result_summary)
+        aged_summary[WORKER_STALE_OBSERVED_AT_KEY] = (
+            datetime.now(UTC) - timedelta(minutes=3)
+        ).isoformat()
+        with run_service.engine.begin() as connection:
+            connection.execute(
+                update(Run).where(Run.id == run_id).values(result_summary=aged_summary)
+            )
+
         record = run_service.get_run(run_id)
 
         self.assertEqual(record.status, "failed")
         self.assertEqual(record.stage, "worker_heartbeat_expired")
+
+    def test_live_worker_heartbeat_clears_stale_observation(self) -> None:
+        from smart_commissioning_core.db.db_run_store import WORKER_STALE_OBSERVED_AT_KEY
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
+
+        run_service, run_id = self._new_run()
+        run_service.update_result_summary(
+            run_id, {"queue_name": "discovery", "actor_name": "discover_bacnet"}
+        )
+        run_service.update_run_status(run_id, status="running", stage="engine_running")
+        with run_service.engine.begin() as connection:
+            connection.execute(
+                update(Run)
+                .where(Run.id == run_id)
+                .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
+            )
+
+        suspected = run_service.get_run(run_id)
+        self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected.result_summary)
+
+        # This is the worker heartbeat that arrives just after the API wins the
+        # first post-outage row lock. It proves the actor is live and must cancel
+        # the pending stale decision atomically.
+        refreshed = run_service.update_run_status(run_id, status="running")
+
+        self.assertEqual(refreshed.status, "running")
+        self.assertNotIn(WORKER_STALE_OBSERVED_AT_KEY, refreshed.result_summary)
+        self.assertEqual(run_service.get_run(run_id).status, "running")
+
+    def test_live_worker_result_write_clears_stale_observation(self) -> None:
+        from smart_commissioning_core.db.db_run_store import WORKER_STALE_OBSERVED_AT_KEY
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
+
+        run_service, run_id = self._new_run()
+        run_service.update_result_summary(
+            run_id, {"queue_name": "discovery", "actor_name": "discover_bacnet"}
+        )
+        run_service.update_run_status(run_id, status="running", stage="engine_running")
+        with run_service.engine.begin() as connection:
+            connection.execute(
+                update(Run)
+                .where(Run.id == run_id)
+                .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
+            )
+
+        suspected = run_service.get_run(run_id)
+        self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected.result_summary)
+
+        refreshed = run_service.update_result_summary(
+            run_id,
+            {"progress": {"devices_completed": 1, "devices_total": 4}},
+        )
+
+        self.assertEqual(refreshed.status, "running")
+        self.assertNotIn(WORKER_STALE_OBSERVED_AT_KEY, refreshed.result_summary)
+        self.assertEqual(
+            refreshed.result_summary["progress"],
+            {"devices_completed": 1, "devices_total": 4},
+        )
 
 
 class PersisterSessionHygieneTests(ApiTestCase):

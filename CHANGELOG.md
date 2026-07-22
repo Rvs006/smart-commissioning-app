@@ -5,6 +5,16 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.22] - 2026-07-22
+
+### Fixed
+
+- **A recovering database can no longer race a live worker into a false
+  failure.** An expired worker heartbeat now enters a two-minute confirmation
+  window before becoming terminal. Any fresh worker lifecycle, result, or issue
+  write cancels that pending decision, while a genuinely dead worker is still
+  failed with an explicit incomplete-result message after continued silence.
+
 ## [0.1.21] - 2026-07-22
 
 ### Fixed
