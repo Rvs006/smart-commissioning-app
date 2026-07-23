@@ -3,6 +3,7 @@ import {
   AUTH_REQUIRED_MESSAGE,
   cancelRun,
   clearApiKey,
+  createReport,
   downloadFile,
   formatApiDetail,
   getApiKey,
@@ -12,6 +13,7 @@ import {
   getHealth,
   getLatestImport,
   getMe,
+  getValidationJsonExportPath,
   listReports,
   listRuns,
   parseSseBuffer,
@@ -272,6 +274,45 @@ describe("downloadFile", () => {
       message: "Report artefact missing.",
       name: "ApiError",
       status: 404,
+    });
+  });
+});
+
+describe("UDMI reporting API functions", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("URL-encodes a validation run id in the raw JSON export path", () => {
+    expect(getValidationJsonExportPath("run/id with spaces")).toBe(
+      "/validation/runs/run%2Fid%20with%20spaces/export.json",
+    );
+  });
+
+  it("sends the operator's report title with the source run", async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({
+        report_id: "report-1",
+        report_type: "udmi_validation",
+        output_format: "pdf",
+        status: "queued",
+        created_at: "2026-06-11T09:00:00Z",
+        source_run_ids: ["run-1"],
+      }),
+    );
+
+    await createReport({
+      format: "pdf",
+      reportTitle: "Demo Campus Smart Validation",
+      reportType: "udmi_validation",
+      sourceRunIds: ["run-1"],
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      report_title: "Demo Campus Smart Validation",
+      report_type: "udmi_validation",
+      source_run_ids: ["run-1"],
     });
   });
 });

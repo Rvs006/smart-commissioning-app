@@ -1,6 +1,13 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { listRuns, type JobStatus, type JobSummary, type JobType } from "../../api/client";
+import {
+  downloadFile,
+  getValidationJsonExportPath,
+  listRuns,
+  type JobStatus,
+  type JobSummary,
+  type JobType,
+} from "../../api/client";
 import {
   formatAbsoluteTime,
   formatDuration,
@@ -76,10 +83,23 @@ function downloadRunsCsv(rows: JobSummary[]): void {
   URL.revokeObjectURL(url);
 }
 
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 export function RunHistoryPage() {
   const [jobType, setJobType] = useState<JobType | "">("");
   const [status, setStatus] = useState<JobStatus | "">("");
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
+  const [jsonPendingRunId, setJsonPendingRunId] = useState<string | null>(null);
+  const [jsonDownloadError, setJsonDownloadError] = useState<string | null>(null);
 
   // One fetch of the full history; filter + sort + export happen client-side over
   // that array, so the exported rows are exactly what the table shows. Reuse the
@@ -101,6 +121,19 @@ export function RunHistoryPage() {
     // Sort by Started (created_at); default newest-first.
     return [...filtered].sort((a, b) => dir * (Date.parse(a.created_at) - Date.parse(b.created_at)));
   }, [runsQuery.data, jobType, status, sortDir]);
+
+  const downloadValidationJson = async (runId: string) => {
+    setJsonPendingRunId(runId);
+    setJsonDownloadError(null);
+    try {
+      const { blob, filename } = await downloadFile(getValidationJsonExportPath(runId));
+      saveBlob(blob, filename ?? `udmi-validation-${runId}.json`);
+    } catch (cause) {
+      setJsonDownloadError(cause instanceof Error ? cause.message : "Raw JSON download failed.");
+    } finally {
+      setJsonPendingRunId(null);
+    }
+  };
 
   return (
     <div className="app-page hub-page">
@@ -208,6 +241,13 @@ export function RunHistoryPage() {
           </button>
         </div>
 
+        {jsonDownloadError && (
+          <div className="state-panel error" role="alert">
+            <strong>Raw JSON download failed</strong>
+            <span>{jsonDownloadError}</span>
+          </div>
+        )}
+
         <div className="data-table-wrap">
           {runsQuery.isError ? (
             <div className="state-panel error">
@@ -231,6 +271,7 @@ export function RunHistoryPage() {
                   <th>Started</th>
                   <th>Finished</th>
                   <th>Duration</th>
+                  <th>Evidence</th>
                 </tr>
               </thead>
               <tbody>
@@ -247,6 +288,21 @@ export function RunHistoryPage() {
                       <td>{formatAbsoluteTime(run.created_at)}</td>
                       <td>{terminal ? formatAbsoluteTime(run.updated_at) : "—"}</td>
                       <td>{terminal ? formatDuration(run.created_at, run.updated_at) : "—"}</td>
+                      <td>
+                        {terminal && run.job_type === "udmi_validation" ? (
+                          <button
+                            aria-label={`Download raw JSON for ${run.run_id}`}
+                            className="secondary-button compact"
+                            disabled={jsonPendingRunId !== null}
+                            onClick={() => void downloadValidationJson(run.run_id)}
+                            type="button"
+                          >
+                            {jsonPendingRunId === run.run_id ? "Downloading..." : "Raw JSON"}
+                          </button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
                     </tr>
                   );
                 })}

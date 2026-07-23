@@ -8,7 +8,7 @@ regenerated artifact. This writer therefore emits NO /Info dictionary (so no
 function of the content added to the document.
 
 Scope, deliberately small:
-  * PDF 1.4, A4 portrait, base-14 Helvetica / Helvetica-Bold with
+  * PDF 1.4, A4 portrait or landscape, base-14 Helvetica / Helvetica-Bold with
     WinAnsiEncoding (no font embedding).
   * Bold headings, word-wrapped paragraphs, fixed-column tables whose cells
     are truncated with an ellipsis, automatic page breaks with a repeated
@@ -25,11 +25,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-# A4 portrait in PDF points.
+# A4 portrait in PDF points. Landscape swaps the same pair per document.
 _PAGE_WIDTH = 595
 _PAGE_HEIGHT = 842
 _MARGIN = 50
-_CONTENT_WIDTH = _PAGE_WIDTH - 2 * _MARGIN
 # Lowest allowed text baseline for body content; the footer sits below at y=30.
 _BOTTOM_LIMIT = _MARGIN
 
@@ -39,12 +38,18 @@ _FOOTER_BASELINE = 30
 _HEADING_SIZES = {1: 16.0, 2: 13.0}
 _CELL_PADDING = 2.0
 
+# Electracom report palette. Values are deliberately restrained so dense
+# commissioning tables stay legible in print and in greyscale.
+_INK = (44 / 255, 42 / 255, 40 / 255)
+_MUTED_INK = (107 / 255, 101 / 255, 96 / 255)
+_BRAND_DARK = (32 / 255, 55 / 255, 70 / 255)
+_BRAND_ACCENT = (42 / 255, 123 / 255, 155 / 255)
+_BRAND_MIST = (238 / 255, 247 / 255, 249 / 255)
+
 # Optional branding band (text only). The header wordmark baseline sits near the
 # top margin with a thin rule below it; _HEADER_RESERVE is the vertical space the
 # content cursor drops by on every page so body text never collides with the
 # band. Applied only when the caller supplies header furniture.
-_HEADER_BASELINE = _PAGE_HEIGHT - 34
-_HEADER_RULE_Y = _PAGE_HEIGHT - 40
 _HEADER_RESERVE = 46.0
 
 # Helvetica / Helvetica-Bold advance widths (standard AFM metrics, units per
@@ -211,30 +216,80 @@ def _truncate(text: str, size: float, bold: bool, max_width: float) -> str:
 class _PageBuilder:
     """Accumulates content-stream operations page by page, tracking the cursor."""
 
-    def __init__(self, top_reserve: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        page_height: float,
+        margin: float,
+        bottom_limit: float,
+        top_reserve: float = 0.0,
+    ) -> None:
         self.pages: list[list[bytes]] = []
+        self.page_height = page_height
+        self.margin = margin
+        self.bottom_limit = bottom_limit
         self.top_reserve = top_reserve
         self.y = 0.0
         self.new_page()
 
     def new_page(self) -> None:
         self.pages.append([])
-        self.y = float(_PAGE_HEIGHT - _MARGIN) - self.top_reserve
+        self.y = float(self.page_height - self.margin) - self.top_reserve
 
     def fits(self, height: float) -> bool:
-        return self.y - height >= _BOTTOM_LIMIT
+        return self.y - height >= self.bottom_limit
 
     def ensure(self, height: float) -> None:
         if not self.fits(height):
             self.new_page()
 
-    def text(self, x: float, y: float, content: str, size: float, bold: bool) -> None:
+    def text(
+        self,
+        x: float,
+        y: float,
+        content: str,
+        size: float,
+        bold: bool,
+        *,
+        color: tuple[float, float, float] = _INK,
+    ) -> None:
         font = b"/F2" if bold else b"/F1"
         operands = f" {_num(size)} Tf {_num(x)} {_num(y)} Td (".encode("ascii")
-        self.pages[-1].append(b"BT " + font + operands + _escape_string(content) + b") Tj ET\n")
+        color_op = f"{_num(color[0])} {_num(color[1])} {_num(color[2])} rg ".encode("ascii")
+        self.pages[-1].append(
+            b"q " + color_op + b"BT " + font + operands + _escape_string(content) + b") Tj ET Q\n"
+        )
 
-    def rule(self, x0: float, y: float, x1: float) -> None:
-        self.pages[-1].append(f"0.5 w {_num(x0)} {_num(y)} m {_num(x1)} {_num(y)} l S\n".encode("ascii"))
+    def fill_rect(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        color: tuple[float, float, float],
+    ) -> None:
+        self.pages[-1].append(
+            (
+                f"q {_num(color[0])} {_num(color[1])} {_num(color[2])} rg "
+                f"{_num(x)} {_num(y)} {_num(width)} {_num(height)} re f Q\n"
+            ).encode("ascii")
+        )
+
+    def rule(
+        self,
+        x0: float,
+        y: float,
+        x1: float,
+        *,
+        color: tuple[float, float, float] = _BRAND_DARK,
+        width: float = 0.5,
+    ) -> None:
+        self.pages[-1].append(
+            (
+                f"q {_num(color[0])} {_num(color[1])} {_num(color[2])} RG "
+                f"{_num(width)} w {_num(x0)} {_num(y)} m {_num(x1)} {_num(y)} l S Q\n"
+            ).encode("ascii")
+        )
 
 
 class PdfDocument:
@@ -252,8 +307,14 @@ class PdfDocument:
         header_right: str | None = None,
         footer_left: str | None = None,
         footer_right: str | None = None,
+        landscape: bool = False,
     ) -> None:
         self._items: list[tuple[object, ...]] = []
+        self._page_width = float(_PAGE_HEIGHT if landscape else _PAGE_WIDTH)
+        self._page_height = float(_PAGE_WIDTH if landscape else _PAGE_HEIGHT)
+        self._content_width = self._page_width - 2 * _MARGIN
+        self._header_baseline = self._page_height - 34
+        self._header_rule_y = self._page_height - 40
         # Furniture strings for the optional branding band, normalised to the
         # measured WinAnsi subset at construction. All default None -> the
         # output is byte-identical to the furniture-less writer.
@@ -262,12 +323,32 @@ class PdfDocument:
         self._footer_left = _normalize(footer_left) if footer_left is not None else None
         self._footer_right = _normalize(footer_right) if footer_right is not None else None
 
-    def add_heading(self, text: str, *, level: int = 2) -> None:
+    def add_heading(
+        self,
+        text: str,
+        *,
+        level: int = 2,
+        keep_with_next: float = 36.0,
+    ) -> None:
         size = _HEADING_SIZES.get(level, _HEADING_SIZES[2])
-        self._items.append(("text", _normalize(text), size, True, 10.0, 4.0))
+        self._items.append(
+            ("text", _normalize(text), size, True, 10.0, 4.0, keep_with_next, _BRAND_DARK)
+        )
 
-    def add_paragraph(self, text: str, *, bold: bool = False) -> None:
-        self._items.append(("text", _normalize(text), _BODY_SIZE, bold, 0.0, 5.0))
+    def add_paragraph(
+        self,
+        text: str,
+        *,
+        bold: bool = False,
+        keep_with_next: float = 0.0,
+    ) -> None:
+        self._items.append(
+            ("text", _normalize(text), _BODY_SIZE, bold, 0.0, 5.0, keep_with_next, _INK)
+        )
+
+    def add_page_break(self) -> None:
+        """Start the next item on a fresh page without hiding any content."""
+        self._items.append(("page_break",))
 
     def add_table(
         self,
@@ -295,33 +376,63 @@ class PdfDocument:
 
     def render(self) -> bytes:
         has_header = self._header_left is not None or self._header_right is not None
-        builder = _PageBuilder(top_reserve=_HEADER_RESERVE if has_header else 0.0)
+        builder = _PageBuilder(
+            page_height=self._page_height,
+            margin=_MARGIN,
+            bottom_limit=_BOTTOM_LIMIT,
+            top_reserve=_HEADER_RESERVE if has_header else 0.0,
+        )
         for item in self._items:
-            if item[0] == "text":
-                _, text, size, bold, space_before, space_after = item
-                self._layout_text(builder, str(text), float(size), bool(bold), float(space_before), float(space_after))
+            if item[0] == "page_break":
+                # Do not create a blank trailing page if a caller accidentally
+                # appends a page break after all content.
+                if builder.pages[-1]:
+                    builder.new_page()
+            elif item[0] == "text":
+                _, text, size, bold, space_before, space_after, keep_with_next, color = item
+                self._layout_text(
+                    builder,
+                    str(text),
+                    float(size),
+                    bool(bold),
+                    float(space_before),
+                    float(space_after),
+                    float(keep_with_next),
+                    color,
+                )
             else:
                 _, headers, rows, weights, size = item
                 self._layout_table(builder, headers, rows, weights, float(size))  # type: ignore[arg-type]
         if has_header:
             self._append_headers(builder.pages)
         self._append_footers(builder.pages)
-        return _assemble(builder.pages)
+        return _assemble(builder.pages, self._page_width, self._page_height)
 
-    @staticmethod
     def _layout_text(
-        builder: _PageBuilder, text: str, size: float, bold: bool, space_before: float, space_after: float
+        self,
+        builder: _PageBuilder,
+        text: str,
+        size: float,
+        bold: bool,
+        space_before: float,
+        space_after: float,
+        keep_with_next: float,
+        color: tuple[float, float, float],
     ) -> None:
         line_height = size * 1.3
+        lines = _wrap(text, size, bold, self._content_width)
+        builder.ensure(
+            space_before + line_height * len(lines) + space_after + keep_with_next
+        )
         builder.y -= space_before
-        for line in _wrap(text, size, bold, float(_CONTENT_WIDTH)):
+        for line in lines:
             builder.ensure(line_height)
             builder.y -= line_height
-            builder.text(_MARGIN, builder.y, line, size, bold)
+            builder.text(_MARGIN, builder.y, line, size, bold, color=color)
         builder.y -= space_after
 
-    @staticmethod
     def _layout_table(
+        self,
         builder: _PageBuilder,
         headers: tuple[str, ...],
         rows: tuple[tuple[str, ...], ...],
@@ -330,15 +441,29 @@ class PdfDocument:
     ) -> None:
         row_height = size + 5.0
         total_weight = sum(weights) or float(len(weights))
-        column_widths = [_CONTENT_WIDTH * weight / total_weight for weight in weights]
+        column_widths = [self._content_width * weight / total_weight for weight in weights]
         x_positions: list[float] = []
         x = float(_MARGIN)
         for width in column_widths:
             x_positions.append(x)
             x += width
 
-        def emit_cells(cells: Sequence[str], bold: bool) -> None:
+        def emit_cells(
+            cells: Sequence[str],
+            bold: bool,
+            *,
+            fill: tuple[float, float, float] | None = None,
+            text_color: tuple[float, float, float] = _INK,
+        ) -> None:
             builder.y -= row_height
+            if fill is not None:
+                builder.fill_rect(
+                    _MARGIN,
+                    builder.y - 3,
+                    self._content_width,
+                    row_height,
+                    fill,
+                )
             for cell_x, width, cell in zip(x_positions, column_widths, cells, strict=False):
                 usable = width - 2 * _CELL_PADDING
                 builder.text(
@@ -347,21 +472,28 @@ class PdfDocument:
                     _truncate(cell, size, bold, usable),
                     size,
                     bold,
+                    color=text_color,
                 )
 
         def emit_header() -> None:
-            emit_cells(headers, True)
-            builder.rule(_MARGIN, builder.y - 3, _MARGIN + _CONTENT_WIDTH)
+            emit_cells(headers, True, fill=_BRAND_DARK, text_color=(1.0, 1.0, 1.0))
+            builder.rule(
+                _MARGIN,
+                builder.y - 3,
+                _MARGIN + self._content_width,
+                color=_BRAND_ACCENT,
+                width=1.2,
+            )
 
         # Never orphan the header: require room for it plus one body row.
         builder.ensure(2 * row_height + 6)
         emit_header()
-        for row in rows:
+        for row_index, row in enumerate(rows):
             if not builder.fits(row_height + 6):
                 builder.new_page()
                 emit_header()
-            emit_cells(row, False)
-        builder.rule(_MARGIN, builder.y - 3, _MARGIN + _CONTENT_WIDTH)
+            emit_cells(row, False, fill=_BRAND_MIST if row_index % 2 else None)
+        builder.rule(_MARGIN, builder.y - 3, _MARGIN + self._content_width)
         builder.y -= 10.0
 
     def _append_headers(self, pages: list[list[bytes]]) -> None:
@@ -378,32 +510,50 @@ class PdfDocument:
         need a raw image XObject plus a separate /SMask (or a pre-flattened
         opaque-RGB asset). Out of scope here.
         """
+        left_width = (
+            _text_width(self._header_left, _BODY_SIZE, True) if self._header_left else 0.0
+        )
+        right_edge = self._page_width - _MARGIN
+        right_start_limit = _MARGIN + left_width + (18.0 if self._header_left else 0.0)
+        right_max_width = max(right_edge - right_start_limit, 1.0)
+        right_label = (
+            _truncate(self._header_right, _BODY_SIZE, False, right_max_width)
+            if self._header_right
+            else None
+        )
         for operations in pages:
             if self._header_left:
                 operations.append(
-                    b"BT /F2 "
-                    + f"{_num(_BODY_SIZE)} Tf {_num(_MARGIN)} {_num(_HEADER_BASELINE)} Td (".encode("ascii")
+                    b"q "
+                    + f"{_num(_BRAND_DARK[0])} {_num(_BRAND_DARK[1])} {_num(_BRAND_DARK[2])} rg ".encode("ascii")
+                    + b"BT /F2 "
+                    + f"{_num(_BODY_SIZE)} Tf {_num(_MARGIN)} {_num(self._header_baseline)} Td (".encode("ascii")
                     + _escape_string(self._header_left)
-                    + b") Tj ET\n"
+                    + b") Tj ET Q\n"
                 )
-            if self._header_right:
-                x = _PAGE_WIDTH - _MARGIN - _text_width(self._header_right, _BODY_SIZE, False)
+            if right_label:
+                x = right_edge - _text_width(right_label, _BODY_SIZE, False)
                 operations.append(
-                    b"BT /F1 "
-                    + f"{_num(_BODY_SIZE)} Tf {_num(x)} {_num(_HEADER_BASELINE)} Td (".encode("ascii")
-                    + _escape_string(self._header_right)
-                    + b") Tj ET\n"
+                    b"q "
+                    + f"{_num(_MUTED_INK[0])} {_num(_MUTED_INK[1])} {_num(_MUTED_INK[2])} rg ".encode("ascii")
+                    + b"BT /F1 "
+                    + f"{_num(_BODY_SIZE)} Tf {_num(x)} {_num(self._header_baseline)} Td (".encode("ascii")
+                    + _escape_string(right_label)
+                    + b") Tj ET Q\n"
                 )
             operations.append(
-                f"0.5 w {_num(_MARGIN)} {_num(_HEADER_RULE_Y)} m "
-                f"{_num(_MARGIN + _CONTENT_WIDTH)} {_num(_HEADER_RULE_Y)} l S\n".encode("ascii")
+                (
+                    f"q {_num(_BRAND_ACCENT[0])} {_num(_BRAND_ACCENT[1])} {_num(_BRAND_ACCENT[2])} RG "
+                    f"1.2 w {_num(_MARGIN)} {_num(self._header_rule_y)} m "
+                    f"{_num(_MARGIN + self._content_width)} {_num(self._header_rule_y)} l S Q\n"
+                ).encode("ascii")
             )
 
     def _append_footers(self, pages: list[list[bytes]]) -> None:
         total = len(pages)
         for number, operations in enumerate(pages, start=1):
             label = f"Page {number} of {total}"
-            x = (_PAGE_WIDTH - _text_width(label, _FOOTER_SIZE, False)) / 2
+            x = (self._page_width - _text_width(label, _FOOTER_SIZE, False)) / 2
             operations.append(
                 b"BT /F1 "
                 + f"{_num(_FOOTER_SIZE)} Tf {_num(x)} {_FOOTER_BASELINE} Td (".encode("ascii")
@@ -418,7 +568,7 @@ class PdfDocument:
                     + b") Tj ET\n"
                 )
             if self._footer_right:
-                right_x = _PAGE_WIDTH - _MARGIN - _text_width(self._footer_right, _FOOTER_SIZE, False)
+                right_x = self._page_width - _MARGIN - _text_width(self._footer_right, _FOOTER_SIZE, False)
                 operations.append(
                     b"BT /F1 "
                     + f"{_num(_FOOTER_SIZE)} Tf {_num(right_x)} {_FOOTER_BASELINE} Td (".encode("ascii")
@@ -427,7 +577,7 @@ class PdfDocument:
                 )
 
 
-def _assemble(pages: list[list[bytes]]) -> bytes:
+def _assemble(pages: list[list[bytes]], page_width: float, page_height: float) -> bytes:
     """Serialize pages into a PDF 1.4 file with a correct xref table.
 
     Object layout: 1 Catalog, 2 Pages, 3 /F1 Helvetica, 4 /F2 Helvetica-Bold,
@@ -444,7 +594,7 @@ def _assemble(pages: list[list[bytes]]) -> bytes:
         contents_ref = 6 + 2 * index
         objects.append(
             (
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {_PAGE_WIDTH} {_PAGE_HEIGHT}] "
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {_num(page_width)} {_num(page_height)}] "
                 f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {contents_ref} 0 R >>"
             ).encode("ascii")
         )

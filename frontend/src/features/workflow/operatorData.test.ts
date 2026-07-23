@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { UdmiAssetPayloadView } from "../../api/client";
 import {
   assetMatchesFacetFilter,
-  assetTypePrefix,
   buildAssetFacts,
   mergeAssetGroups,
   moduleWorkspaces,
@@ -31,6 +30,7 @@ describe("mergeAssetGroups (mq9m4bnv)", () => {
     const payloadViews: UdmiAssetPayloadView[] = [
       {
         asset_id: "AHU-1",
+        system: "BMS",
         payload_types: [
           { payload_type: "pointset", expected: { units: {} }, observed: { points: {} }, observed_present: true },
           { payload_type: "state", expected: { manufacturer: "X" }, observed: null, observed_present: false },
@@ -38,6 +38,7 @@ describe("mergeAssetGroups (mq9m4bnv)", () => {
       },
       {
         asset_id: "AHU-2",
+        system: "Lighting",
         payload_types: [
           { payload_type: "state", expected: null, observed: { system: {} }, observed_present: true },
         ],
@@ -49,6 +50,7 @@ describe("mergeAssetGroups (mq9m4bnv)", () => {
 
     // AHU-1: pointset has the issue AND a payload view; state has a payload view, zero issues.
     const a1 = byAsset["AHU-1"];
+    expect(a1.system).toBe("BMS");
     expect(a1.issues).toHaveLength(1);
     const a1Types = Object.fromEntries(a1.payloadTypes.map((t) => [t.payloadType, t]));
     expect(a1Types.pointset.issues).toHaveLength(1);
@@ -60,6 +62,7 @@ describe("mergeAssetGroups (mq9m4bnv)", () => {
 
     // AHU-2 has payloads but zero issues and still appears.
     const a2 = byAsset["AHU-2"];
+    expect(a2.system).toBe("Lighting");
     expect(a2.issues).toHaveLength(0);
     expect(a2.payloadTypes.map((t) => t.payloadType)).toEqual(["state"]);
     expect(a2.payloadTypes[0].observedPresent).toBe(true);
@@ -108,7 +111,7 @@ describe("udmiPayloadVerdict / udmiVerdictTone — RAG scheme (mqf-udmi-rag)", (
   it("red offline wins only when a capture was attempted AND nothing was observed", () => {
     const verdict = udmiVerdictForIssues([sev("major")], false, true);
     expect(verdict.verdict).toBe("offline");
-    expect(verdict.label).toBe("Offline — did not publish");
+    expect(verdict.label).toBe("Not observed this run");
     expect(udmiVerdictTone("offline")).toBe("fail"); // offline shades RED
   });
 
@@ -196,8 +199,7 @@ describe("udmiPayloadVerdict / udmiVerdictTone — RAG scheme (mqf-udmi-rag)", (
   });
 });
 
-// Inspector facet filters (ITEM-10). Pure functions, so no DOM — every fact is
-// derived honestly and the offline gate mirrors udmiPayloadVerdict exactly.
+// Inspector facets use the register's System field and this run's observation.
 describe("asset facet filters (ITEM-10)", () => {
   function payloadType(observedPresent: boolean): MergedPayloadType {
     return {
@@ -209,45 +211,31 @@ describe("asset facet filters (ITEM-10)", () => {
       hasPayloadView: true,
     };
   }
-  function group(assetId: string, observedPresent: boolean): MergedAssetGroup {
-    return { assetId, issues: [], payloadTypes: [payloadType(observedPresent)] };
+  function group(assetId: string, system: string, observedPresent: boolean): MergedAssetGroup {
+    return { assetId, system, issues: [], payloadTypes: [payloadType(observedPresent)] };
   }
 
-  it("derives a type prefix (uppercased) with an 'Other' fallback", () => {
-    expect(assetTypePrefix("AHU-1000001")).toBe("AHU");
-    expect(assetTypePrefix("em-42")).toBe("EM");
-    expect(assetTypePrefix("  DEMO-00 ")).toBe("DEMO");
-    expect(assetTypePrefix("1234")).toBe("Other");
+  it("builds register-backed system and observation facts", () => {
+    const facts = buildAssetFacts([
+      group("EM-1", "BMS", true),
+      group("EM-2", "Lighting", false),
+    ]);
+    expect(facts.get("EM-1")).toEqual({ system: "BMS", observed: true });
+    expect(facts.get("EM-2")).toEqual({ system: "Lighting", observed: false });
   });
 
-  it("builds seen/offline facts; offline only when silent AND unobserved", () => {
-    const facts = buildAssetFacts(
-      [group("EM-1", true), group("EM-2", false)],
-      new Set(["EM-2"]),
-    );
-    expect(facts.get("EM-1")).toEqual({ type: "EM", seen: true, offline: false });
-    expect(facts.get("EM-2")).toEqual({ type: "EM", seen: false, offline: true });
+  it("matches by system and observed/not-observed status", () => {
+    const lighting = { system: "Lighting", observed: false };
+    const bms = { system: "BMS", observed: true };
+    expect(assetMatchesFacetFilter(lighting, { system: "all", observation: "not-observed" })).toBe(true);
+    expect(assetMatchesFacetFilter(bms, { system: "all", observation: "not-observed" })).toBe(false);
+    expect(assetMatchesFacetFilter(bms, { system: "all", observation: "observed" })).toBe(true);
+    expect(assetMatchesFacetFilter(bms, { system: "Lighting", observation: "all" })).toBe(false);
   });
 
-  it("never marks an OBSERVED asset offline even if it is in the offline set (honesty gate)", () => {
-    const facts = buildAssetFacts([group("EM-3", true)], new Set(["EM-3"]));
-    expect(facts.get("EM-3")!.offline).toBe(false);
-  });
-
-  it("matches by type, seen, and online/offline state", () => {
-    const em2 = { type: "EM", seen: false, offline: true };
-    const ahu = { type: "AHU", seen: true, offline: false };
-    expect(assetMatchesFacetFilter(em2, { type: "all", seen: "all", state: "offline" })).toBe(true);
-    expect(assetMatchesFacetFilter(ahu, { type: "all", seen: "all", state: "offline" })).toBe(false);
-    expect(assetMatchesFacetFilter(ahu, { type: "all", seen: "all", state: "online" })).toBe(true);
-    expect(assetMatchesFacetFilter(ahu, { type: "EM", seen: "all", state: "all" })).toBe(false);
-    expect(assetMatchesFacetFilter(em2, { type: "all", seen: "not-seen", state: "all" })).toBe(true);
-    expect(assetMatchesFacetFilter(ahu, { type: "all", seen: "not-seen", state: "all" })).toBe(false);
-  });
-
-  it("an asset with NO facts (pasted run) matches only the all-clear filter", () => {
-    expect(assetMatchesFacetFilter(undefined, { type: "all", seen: "all", state: "all" })).toBe(true);
-    expect(assetMatchesFacetFilter(undefined, { type: "all", seen: "seen", state: "all" })).toBe(false);
-    expect(assetMatchesFacetFilter(undefined, { type: "all", seen: "all", state: "offline" })).toBe(false);
+  it("an asset with no facts matches only the all-clear filter", () => {
+    expect(assetMatchesFacetFilter(undefined, { system: "all", observation: "all" })).toBe(true);
+    expect(assetMatchesFacetFilter(undefined, { system: "BMS", observation: "all" })).toBe(false);
+    expect(assetMatchesFacetFilter(undefined, { system: "all", observation: "observed" })).toBe(false);
   });
 });

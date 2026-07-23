@@ -91,6 +91,16 @@ function renderModule(route: string) {
   );
 }
 
+async function submitReportDialog(opener: HTMLElement, title?: string) {
+  fireEvent.click(opener);
+  const dialog = await screen.findByRole("dialog", { name: "Name this validation report" });
+  const titleInput = within(dialog).getByLabelText("Report title");
+  if (title !== undefined) {
+    fireEvent.change(titleInput, { target: { value: title } });
+  }
+  fireEvent.click(within(dialog).getByRole("button", { name: "Generate report" }));
+}
+
 describe("ModulePage discovery wiring", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -1934,6 +1944,135 @@ describe("ModulePage UDMI workbench live results", () => {
     ],
   };
 
+  it("renders persisted provisional metrics and payload rows while capture is running", async () => {
+    const zeroFaults = {
+      payload_formatting_issues: 0,
+      missing_points: 0,
+      point_naming_issues: 0,
+      additional_points: 0,
+      stale_or_cadence: 0,
+      other_issues: 0,
+    };
+    const runningRun = {
+      ...udmiTerminalRun,
+      status: "running",
+      stage: "capturing_live_mqtt",
+      progress_percent: 25,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        provisional: true,
+        payload_view_source: "live_capture",
+        payload_views: [
+          {
+            asset_id: "ACTIVE-1",
+            system: "BMS",
+            payload_types: [
+              {
+                payload_type: "state",
+                expected: { version: "1.5.2" },
+                observed: { version: "1.5.2", timestamp: "2026-07-09T09:01:00Z" },
+                observed_present: true,
+              },
+            ],
+          },
+        ],
+        validation_summary_v1: {
+          schema_version: "1.0",
+          asset_metrics: {
+            expected: 2,
+            observed: 1,
+            not_observed: 1,
+            with_issues: 0,
+            successfully_validated: 0,
+          },
+          payload_metrics: {
+            expected: 2,
+            received: 1,
+            with_issues: 0,
+            successfully_validated: 1,
+          },
+          fault_metrics: zeroFaults,
+          issue_metrics: { blocking: 0, warning: 0 },
+          system_metrics: [],
+          asset_results: [
+            {
+              asset_id: "ACTIVE-1",
+              system: "BMS",
+              observed: true,
+              expected_payloads: 1,
+              received_payloads: 1,
+              all_expected_payloads_received: true,
+              all_received_payloads_successfully_validated: true,
+              successfully_validated: true,
+              issue_count: 0,
+              blocking_issue_count: 0,
+              last_observed_at: "2026-07-09T09:01:00Z",
+              payload_results: [
+                {
+                  payload_type: "state",
+                  expected: true,
+                  received: true,
+                  has_issues: false,
+                  blocking_issue_count: 0,
+                  successfully_validated: true,
+                  topic: "site/active-1/state",
+                  received_at: "2026-07-09T09:01:00Z",
+                },
+              ],
+            },
+          ],
+          fault_rows: [],
+        },
+      },
+    };
+    let issuesFetches = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: [
+              {
+                run_id: "run-udmi-1",
+                job_type: "udmi_validation",
+                status: "running",
+                stage: "capturing_live_mqtt",
+                progress_percent: 25,
+                created_at: runningRun.created_at,
+                updated_at: runningRun.updated_at,
+                edge_id: null,
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          issuesFetches += 1;
+          return jsonResponse({ run_id: "run-udmi-1", issues: [] });
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(runningRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+
+    expect(
+      await screen.findByRole("heading", { name: "Provisional validation summary" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Provisional results below update as payloads arrive/i)).toBeInTheDocument();
+    expect(screen.getByText(/Provisional live validation results/i)).toBeInTheDocument();
+    expect(screen.getAllByText("ACTIVE-1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
+    expect(screen.getByText("Unexpected devices: Not measured.")).toBeInTheDocument();
+    expect(issuesFetches).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Download raw JSON" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate report from this run" })).not.toBeInTheDocument();
+  });
+
   it("shows no rows until a terminal run, then real per-asset payload rows", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1972,7 +2111,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // the honest empty state. Fabricated rows here read as real findings.
     // DEMO-00-044-BLR-2 is unique to the old sample rows (the sample *issues*
     // fallback in the inspector is a separate surface and still stands).
-    expect(await screen.findByText("No results yet")).toBeInTheDocument();
+    expect(await screen.findByText("No validation run yet")).toBeInTheDocument();
     expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
     expect(screen.queryByText("DEMO-00-044-BLR-2")).not.toBeInTheDocument();
 
@@ -2066,7 +2205,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Nothing has run, so there are no rows to shade — and no sample rows
     // masquerading as results either.
-    expect(await screen.findByText("No results yet")).toBeInTheDocument();
+    expect(await screen.findByText("No validation run yet")).toBeInTheDocument();
     expect(document.querySelector("tr.row-pass, tr.row-fail, tr.row-warn")).toBeNull();
 
     const runButton = await screen.findByRole("button", { name: "Execute capture" });
@@ -2245,7 +2384,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect((await screen.findAllByText("Pointset payload version is blank.")).length).toBeGreaterThan(0);
   });
 
-  it("shades silent devices red (offline) on a succeeded run (RAG)", async () => {
+  it("shades assets not observed during the run red on a succeeded run (RAG)", async () => {
     // EM-1 publishes with one major issue → amber. EM-2 was CAPTURED (a real
     // attempt) but stayed silent: pointset + state observed_present false, an
     // engine "not_publishing" issue, and the run summary's not_publishing_devices
@@ -2341,11 +2480,11 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Wait for the offline verdict to land (issues merged) on the now-visible
     // EM-2 rows.
-    await screen.findAllByText("Offline — did not publish");
+    await screen.findAllByText("Not observed this run");
 
     // Every EM-2 data row (the rows carrying the offline verdict) is red offline.
     const em2Rows = screen
-      .getAllByText("Offline — did not publish")
+      .getAllByText("Not observed this run")
       .map((cell) => cell.closest("tr"))
       .filter((row): row is HTMLTableRowElement => row !== null);
     expect(em2Rows.length).toBeGreaterThan(0);
@@ -2359,11 +2498,17 @@ describe("ModulePage UDMI workbench live results", () => {
       .filter((row): row is HTMLTableRowElement => row !== null);
     expect(em1Rows.some((row) => row.classList.contains("row-warn"))).toBe(true);
 
-    // The EM-2 section line reads OFFLINE once its INSPECTOR asset group expands.
+    // Selecting an EM-2 payload row replaces the inspector's EM-1 evidence with
+    // EM-2 only; expanding that selected asset reveals its run-observation line.
+    fireEvent.click(em2Rows[0]);
     const inspectorEm2 = document.querySelector(".inspector") as HTMLElement;
-    fireEvent.click(within(inspectorEm2).getByRole("button", { name: /EM-2.*issue/i }));
+    const inspectorToggle = await within(inspectorEm2).findByRole("button", { name: /EM-2.*issue/i });
+    if (inspectorToggle.getAttribute("aria-expanded") !== "true") {
+      fireEvent.click(inspectorToggle);
+    }
+    expect(within(inspectorEm2).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
     expect(
-      (await screen.findAllByText("OFFLINE — device did not publish during the capture window")).length,
+      (await screen.findAllByText("NOT OBSERVED THIS RUN — no payload arrived during the capture window")).length,
     ).toBeGreaterThan(0);
   });
 
@@ -2430,7 +2575,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(dialog).getByText("AHU-9")).toBeInTheDocument();
   });
 
-  it("filters the results and inspector by ONLINE/OFFLINE state (ITEM-10)", async () => {
+  it("filters the results and inspector by observed/not-observed state (ITEM-10)", async () => {
     const run = {
       ...udmiTerminalRun,
       result_summary: {
@@ -2470,11 +2615,295 @@ describe("ModulePage UDMI workbench live results", () => {
     const table = screen.getByRole("table");
     expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
 
-    // State = Offline hides the observed EM-1 asset and keeps only the silent EM-2.
-    fireEvent.change(screen.getByLabelText("State"), { target: { value: "offline" } });
+    // Observation = not observed hides EM-1 and keeps only the silent EM-2.
+    fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "not-observed" } });
     expect(within(table).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
     expect(within(table).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
     expect(screen.getByText(/across 1 asset\b/i)).toBeInTheDocument();
+  });
+
+  it("shows versioned metrics and filters the table and inspector by a partial topic", async () => {
+    const zeroFaults = {
+      payload_formatting_issues: 0,
+      missing_points: 0,
+      point_naming_issues: 0,
+      additional_points: 0,
+      stale_or_cadence: 0,
+      other_issues: 0,
+    };
+    const run = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        payload_views: [
+          {
+            asset_id: "EM-1",
+            system: "SEC",
+            payload_types: [
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: { version: "1.5.2", points: {} },
+                observed_present: true,
+              },
+            ],
+          },
+          {
+            asset_id: "EM-2",
+            system: "BMS",
+            payload_types: [
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: { version: "1.5.2", points: {} },
+                observed_present: true,
+              },
+            ],
+          },
+        ],
+        validation_summary_v1: {
+          schema_version: "1.0",
+          asset_metrics: {
+            expected: 5,
+            observed: 5,
+            not_observed: 0,
+            with_issues: 1,
+            successfully_validated: 4,
+          },
+          payload_metrics: {
+            expected: 10,
+            received: 10,
+            with_issues: 1,
+            successfully_validated: 9,
+          },
+          fault_metrics: { ...zeroFaults, missing_points: 1 },
+          issue_metrics: { blocking: 1, warning: 2 },
+          system_metrics: [
+            {
+              system: "BMS",
+              asset_metrics: {
+                expected: 5,
+                observed: 5,
+                not_observed: 0,
+                with_issues: 1,
+                successfully_validated: 4,
+              },
+              payload_metrics: {
+                expected: 10,
+                received: 10,
+                with_issues: 1,
+                successfully_validated: 9,
+              },
+              fault_metrics: { ...zeroFaults, missing_points: 1 },
+              issue_metrics: { blocking: 1, warning: 2 },
+            },
+            {
+              system: "Lighting",
+              asset_metrics: {
+                expected: 0,
+                observed: 0,
+                not_observed: 0,
+                with_issues: 0,
+                successfully_validated: 0,
+              },
+              payload_metrics: {
+                expected: 0,
+                received: 0,
+                with_issues: 0,
+                successfully_validated: 0,
+              },
+              fault_metrics: zeroFaults,
+              issue_metrics: { blocking: 0, warning: 0 },
+            },
+          ],
+          asset_results: [
+            {
+              asset_id: "EM-1",
+              system: "SEC",
+              observed: true,
+              expected_payloads: 1,
+              received_payloads: 1,
+              all_expected_payloads_received: true,
+              all_received_payloads_successfully_validated: true,
+              successfully_validated: false,
+              issue_count: 2,
+              blocking_issue_count: 1,
+              last_observed_at: "2026-06-11T09:04:00Z",
+              payload_results: [
+                {
+                  payload_type: "pointset",
+                  expected: true,
+                  received: true,
+                  has_issues: true,
+                  blocking_issue_count: 1,
+                  successfully_validated: false,
+                  topic: "HV/SEC/02/MTS-100/pointset",
+                  received_at: "2026-06-11T09:04:00Z",
+                },
+                {
+                  payload_type: "unexpected_event",
+                  expected: false,
+                  received: true,
+                  has_issues: false,
+                  blocking_issue_count: 0,
+                  successfully_validated: true,
+                  topic: "HV/SEC/02/MTS-100/unexpected_event",
+                  received_at: "2026-06-11T09:04:10Z",
+                },
+              ],
+            },
+            {
+              asset_id: "EM-2",
+              system: "BMS",
+              observed: true,
+              expected_payloads: 1,
+              received_payloads: 1,
+              all_expected_payloads_received: true,
+              all_received_payloads_successfully_validated: true,
+              successfully_validated: true,
+              issue_count: 0,
+              blocking_issue_count: 0,
+              last_observed_at: "2026-06-11T09:04:30Z",
+              payload_results: [
+                {
+                  payload_type: "pointset",
+                  expected: true,
+                  received: true,
+                  has_issues: false,
+                  blocking_issue_count: 0,
+                  successfully_validated: true,
+                  topic: "hv/bms/00/MTS-200/pointset",
+                  received_at: "2026-06-11T09:04:30Z",
+                },
+              ],
+            },
+          ],
+          fault_rows: [
+            {
+              issue_id: "issue-pointset",
+              asset_id: "EM-1",
+              system: "SEC",
+              payload_type: "pointset",
+              category: "missing_points",
+              severity: "critical",
+              description: "Expected point missing.",
+              point_name: "supply_temp",
+              expected_value: "present",
+              observed_value: null,
+              suggested_action: "Publish the registered point.",
+              raw_evidence_uri: null,
+            },
+            {
+              issue_id: "issue-other-payload",
+              asset_id: "EM-1",
+              system: "SEC",
+              payload_type: "metadata",
+              category: "schema",
+              severity: "warning",
+              description: "Metadata warning.",
+              point_name: null,
+              expected_value: null,
+              observed_value: null,
+              suggested_action: null,
+              raw_evidence_uri: null,
+            },
+          ],
+        },
+      },
+    };
+    stubTwoAssetUdmi(run, { run_id: "run-udmi-1", issues: [] });
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    const summaryHeading = await screen.findByRole("heading", { name: "Validation summary" });
+    const summaryPanelBeforeFilter = summaryHeading.closest(".udmi-summary") as HTMLElement;
+    const overallMetric = within(summaryPanelBeforeFilter)
+      .getByText("Overall compliance")
+      .closest("div") as HTMLElement;
+    expect(within(overallMetric).getByText("80%")).toBeInTheDocument();
+    expect(within(overallMetric).getByText("(4 / 5 assets)")).toBeInTheDocument();
+    const initialPayloadGroup = within(summaryPanelBeforeFilter)
+      .getByRole("heading", { name: "Payload metrics" })
+      .closest(".udmi-metric-group") as HTMLElement;
+    const initiallyCorrect = within(initialPayloadGroup).getByText("Payloads correct").closest("div") as HTMLElement;
+    const initiallyIncorrect = within(initialPayloadGroup)
+      .getByText("Payloads incorrect")
+      .closest("div") as HTMLElement;
+    expect(within(initiallyCorrect).getByText("90%")).toBeInTheDocument();
+    expect(within(initiallyCorrect).getByText("9 / 10 expected")).toBeInTheDocument();
+    expect(within(initiallyIncorrect).getByText("10%")).toBeInTheDocument();
+    expect(within(initiallyIncorrect).getByText("1 / 10 expected")).toBeInTheDocument();
+    const systemSection = screen
+      .getByRole("heading", { name: "Completion by system" })
+      .closest(".udmi-system-summary") as HTMLElement;
+    const bmsRow = within(systemSection).getByText("BMS").closest("tr") as HTMLTableRowElement;
+    expect(within(bmsRow).getByText("80%")).toBeInTheDocument();
+    expect(within(bmsRow).getByText("(4 / 5 assets)")).toBeInTheDocument();
+    const lightingRow = within(systemSection).getByText("Lighting").closest("tr") as HTMLTableRowElement;
+    expect(within(lightingRow).getByText("N/A")).toBeInTheDocument();
+    expect(within(lightingRow).getByText("(0 / 0 assets)")).toBeInTheDocument();
+
+    const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
+    const resultsGrid = resultsTable.closest(".app-grid") as HTMLElement;
+    expect(resultsGrid).not.toHaveClass("two-col");
+    expect(resultsGrid.children[1]).toHaveClass("inspector");
+    expect(within(resultsTable).getByRole("columnheader", { name: "Topic" })).toBeInTheDocument();
+    expect(within(resultsTable).getByText("HV/SEC/02/MTS-100/pointset")).toBeInTheDocument();
+    expect(within(resultsTable).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(within(resultsTable).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "hv/sec" } });
+    expect(within(resultsTable).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(within(resultsTable).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    const summaryPanel = screen
+      .getByRole("heading", { name: "Validation summary" })
+      .closest(".udmi-summary") as HTMLElement;
+    const expectedAssetsMetric = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
+    expect(within(expectedAssetsMetric).getByText("1")).toBeInTheDocument();
+    const payloadGroup = within(summaryPanel)
+      .getByRole("heading", { name: "Payload metrics" })
+      .closest(".udmi-metric-group") as HTMLElement;
+    expect(
+      within(within(payloadGroup).getByText("Expected payloads").closest("div") as HTMLElement).getByText("1"),
+    ).toBeInTheDocument();
+    expect(
+      within(within(payloadGroup).getByText("Received payloads").closest("div") as HTMLElement).getByText("1"),
+    ).toBeInTheDocument();
+    expect(
+      within(within(payloadGroup).getByText("Successfully validated").closest("div") as HTMLElement).getByText("0"),
+    ).toBeInTheDocument();
+    const filteredCorrect = within(payloadGroup).getByText("Payloads correct").closest("div") as HTMLElement;
+    const filteredIncorrect = within(payloadGroup).getByText("Payloads incorrect").closest("div") as HTMLElement;
+    expect(within(filteredCorrect).getByText("0%")).toBeInTheDocument();
+    expect(within(filteredIncorrect).getByText("100%")).toBeInTheDocument();
+    expect(
+      within(payloadGroup).getByText(
+        "Expected payloads are the denominator. Unexpected received payloads are excluded.",
+      ),
+    ).toBeInTheDocument();
+    const issueMetric = within(summaryPanel).getByText("Blocking / warning").closest("div") as HTMLElement;
+    expect(within(issueMetric).getByText("1 / 0")).toBeInTheDocument();
+    expect(within(summaryPanel).getByText(/Asset issues and compliance remain whole-asset/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "" } });
+    expect(within(resultsTable).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    expect(within(expectedAssetsMetric).getByText("5")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "no/such/topic" } });
+    expect(within(overallMetric).getByText("N/A")).toBeInTheDocument();
+    expect(within(overallMetric).getByText("(0 / 0 assets)")).toBeInTheDocument();
+    expect(within(filteredCorrect).getByText("N/A")).toBeInTheDocument();
+    expect(within(filteredIncorrect).getByText("N/A")).toBeInTheDocument();
+    expect(within(inspector).getByText("No asset selected in the filtered results")).toBeInTheDocument();
   });
 
   it("re-attaches a still-running run on arrival and offers Stop run, without locking Execute (ITEM-4)", async () => {
@@ -3284,9 +3713,13 @@ describe("ModulePage UDMI workbench live results", () => {
       name: /Generate report from this run/i,
     });
     expect(generateButtons).toHaveLength(2);
-    fireEvent.click(generateButtons[1]);
+    await submitReportDialog(generateButtons[1], "Demo Campus Smart Validation");
     await waitFor(() => expect(reportBody).not.toBeNull());
     expect((reportBody as unknown as Record<string, unknown>).output_format).toBe("pdf");
+    expect((reportBody as unknown as Record<string, unknown>).report_title).toBe(
+      "Demo Campus Smart Validation",
+    );
+    expect((reportBody as unknown as Record<string, unknown>).report_type).toBe("udmi_validation");
   });
 
   // THE BREAKAGE-CATCHER. The Run Controls card for this action is hidden, which
@@ -3937,7 +4370,7 @@ describe("ModulePage reports visibility", () => {
     const generateButtons = await screen.findAllByRole("button", {
       name: /Generate report from this run/i,
     });
-    fireEvent.click(generateButtons[1]);
+    await submitReportDialog(generateButtons[1]);
 
     // The toast tells the operator to look in the Reports tab, so the cached
     // list behind that tab must not still be the pre-report one.
@@ -4059,7 +4492,7 @@ describe("ModulePage report controls placement", () => {
     const buttons = await screen.findAllByRole("button", {
       name: /Generate report from this run/i,
     });
-    fireEvent.click(buttons[0]);
+    await submitReportDialog(buttons[0]);
     await waitFor(() => expect(captured.reportBody).not.toBeNull());
     expect(captured.reportBody?.output_format).toBe("docx");
   });

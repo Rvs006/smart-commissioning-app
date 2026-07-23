@@ -5,6 +5,39 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.23] - 2026-07-23
+
+### Added
+
+- **UDMI validation now produces a stable evidence contract.** Completed,
+  failed, and cancelled runs can be downloaded as deterministic,
+  schema-versioned JSON with asset, payload, fault, and per-system results.
+  Secret-like fields and private-key material are removed from the export.
+- **UDMI reports now cover the commissioning decision.** PDF, DOCX, XLSX,
+  and ZIP outputs include an executive summary, completion by register System,
+  an expected-asset schedule, a fault matrix, detailed findings, metric
+  definitions, and an operator-supplied report title.
+- **Stored UDMI results can be investigated in the app.** The results view has
+  System, observation, and partial topic filters, a payload inspector, compact
+  summary metrics, raw JSON download, and report generation from the selected
+  retained run.
+
+### Changed
+
+- **Presence wording is now evidence-based.** Reports and screens use
+  `Observed` and `Not observed` instead of claiming that an asset was online or
+  offline without a connectivity test.
+- **Report timestamps and partial runs are explicit.** Validation time is kept
+  separate from report generation time, and incomplete source evidence is
+  identified rather than presented as a successful validation.
+
+### Security
+
+- **Generated evidence stays within the selected project and site.** Report
+  sources are checked for scope, UDMI type, and terminal status before output
+  is created. Spreadsheet text is written as inert data so register and issue
+  values cannot become formulas.
+
 ## [0.1.22] - 2026-07-22
 
 ### Fixed
@@ -689,7 +722,7 @@ the truth about what it found and what it did.
   issue naming exactly what to upload — never a silent pass. Re-uploads take
   effect without a restart.
 
-- **End-to-end validation report** (field ask via Jon, 2026-07-14). Reports
+- **End-to-end validation report** (field request, 2026-07-14). Reports
   generated from a validation run now carry three sections in every format:
   "Summary" (per-run expected/publishing/silent/blocking counts + compliance
   %, with a device-weighted overall line), "Failure detail" (per-point

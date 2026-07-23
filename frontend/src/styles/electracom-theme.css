@@ -148,14 +148,13 @@
   font-size: 11px;
   font-weight: 650;
   white-space: nowrap;
-  transition: background 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
 .header-pill:hover {
   border-color: var(--accent);
   background: var(--accent-bg);
   color: var(--accent);
-  transform: translateY(-1px);
 }
 
 .header-pill.accent {
@@ -1332,7 +1331,7 @@
   justify-content: flex-end;
   flex-shrink: 0;
   gap: 3px;
-  padding: 7px 14px 0;
+  padding: 7px 5px 0;
 }
 
 /* Hairline divider between stage groups. */
@@ -1362,12 +1361,12 @@
 }
 
 .app-tabs.grouped .app-tab {
-  padding: 9px 12px;
+  padding: 9px 8px;
 }
 
 @media (max-width: 720px) {
   .nav-group {
-    padding: 6px 10px 0;
+    padding: 6px 8px 0;
   }
 }
 

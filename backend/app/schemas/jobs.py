@@ -1,7 +1,8 @@
+import unicodedata
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 # ValidationIssueRecord moved to the shared core package; imported here so existing
 # `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
@@ -198,6 +199,27 @@ class ReportRequest(BaseModel):
     ]
     output_format: ReportFormat = "zip"
     source_run_ids: list[str] = Field(default_factory=list)
+    report_title: str | None = None
+
+    @field_validator("report_title")
+    @classmethod
+    def validate_report_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        title = value.strip()
+        if not title:
+            raise ValueError("Report title must not be blank.")
+        if len(title) > 160:
+            raise ValueError("Report title must be 160 characters or fewer.")
+        if any(
+            unicodedata.category(character) in {"Cc", "Cs"}
+            or ord(character) in {0xFFFE, 0xFFFF}
+            for character in title
+        ):
+            raise ValueError(
+                "Report title must not contain control or invalid Unicode characters."
+            )
+        return title
 
 
 class ReportSummary(BaseModel):
@@ -214,6 +236,10 @@ class ReportSummary(BaseModel):
     # mask a construction site that forgot to pass it.
     created_at: datetime
     source_run_ids: list[str] = Field(default_factory=list)
+    # Optional on the response model so older persisted report runs still
+    # validate; API projections resolve those records to the format-specific
+    # default title before returning them.
+    report_title: str | None = None
 
 
 class ReportListResponse(BaseModel):

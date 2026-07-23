@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { clearApiKey } from "../../api/client";
 import { RunHistoryPage } from "./RunHistoryPage";
@@ -30,6 +30,26 @@ const runsPayload = {
       created_at: "2026-06-11T09:10:00Z",
       updated_at: "2026-06-11T09:11:00Z",
       edge_id: "edge-west-2",
+    },
+    {
+      run_id: "run-failed-udmi",
+      job_type: "udmi_validation",
+      status: "failed",
+      stage: "validation_failed",
+      progress_percent: 72,
+      created_at: "2026-06-11T09:20:00Z",
+      updated_at: "2026-06-11T09:24:00Z",
+      edge_id: null,
+    },
+    {
+      run_id: "run-cancelled-udmi",
+      job_type: "udmi_validation",
+      status: "cancelled",
+      stage: "cancelled",
+      progress_percent: 45,
+      created_at: "2026-06-11T09:30:00Z",
+      updated_at: "2026-06-11T09:32:00Z",
+      edge_id: null,
     },
   ],
 };
@@ -137,5 +157,40 @@ describe("RunHistoryPage", () => {
     renderPage();
 
     expect(await screen.findByText("No runs to show")).toBeInTheDocument();
+  });
+
+  it("downloads raw JSON evidence for a terminal UDMI run, including failed runs", async () => {
+    const fileBlob = new Blob(['{"schema_version":"1.0"}'], { type: "application/json" });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/runs")) {
+        return jsonResponse(runsPayload);
+      }
+      if (url.includes("/api/v1/validation/runs/run-failed-udmi/export.json")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'attachment; filename="stored-evidence.json"' },
+          blob: async () => fileBlob,
+        } as unknown as Response;
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    renderPage();
+
+    await screen.findByText("run-failed-udmi");
+    expect(
+      screen.getByRole("button", { name: "Download raw JSON for run-cancelled-udmi" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Download raw JSON for run-failed-udmi" }));
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/v1/validation/runs/run-failed-udmi/export.json"),
+      )).toBe(true);
+      expect(clickSpy).toHaveBeenCalled();
+    });
   });
 });

@@ -226,8 +226,14 @@ export function BriefPage() {
             <span className="dc-brand-kind">Product Brief</span>
           </div>
           <div className="dc-header-actions">
-            <button className="dc-ghost" onClick={onToggleTheme}>
-              {mode === "dark" ? "☀ Light" : "☾ Dark"}
+            <button
+              aria-label={mode === "dark" ? "Switch to light colour theme" : "Switch to dark colour theme"}
+              className="dc-ghost"
+              onClick={onToggleTheme}
+              title={mode === "dark" ? "Switch to light colour theme" : "Switch to dark colour theme"}
+              type="button"
+            >
+              {mode === "dark" ? "Use light theme" : "Use dark theme"}
             </button>
             <Link className="dc-launch" to="/">
               <span className="dc-launch-dot" />

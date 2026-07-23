@@ -713,11 +713,17 @@ export function LearningPage() {
               ← Back to Brief
             </Link>
             <button
+              aria-label={
+                themeMode === "dark" ? "Switch to light colour theme" : "Switch to dark colour theme"
+              }
               className="dc-ghost"
-              type="button"
               onClick={() => setThemeMode(toggleTheme())}
+              title={
+                themeMode === "dark" ? "Switch to light colour theme" : "Switch to dark colour theme"
+              }
+              type="button"
             >
-              {themeMode === "dark" ? "☀ Light" : "☾ Dark"}
+              {themeMode === "dark" ? "Use light theme" : "Use dark theme"}
             </button>
             <Link className="dc-launch" to="/">
               <span className="dc-launch-dot" />

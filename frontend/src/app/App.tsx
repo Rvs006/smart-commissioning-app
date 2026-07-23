@@ -180,13 +180,13 @@ function ThemeToggle() {
 
   return (
     <button
-      aria-label="Toggle colour theme"
+      aria-label={mode === "dark" ? "Switch to light colour theme" : "Switch to dark colour theme"}
       className="header-pill"
       onClick={() => setMode(toggleTheme())}
-      title="Toggle light / dark"
+      title={mode === "dark" ? "Switch to light colour theme" : "Switch to dark colour theme"}
       type="button"
     >
-      {mode === "dark" ? "☀ Light" : "☾ Dark"}
+      {mode === "dark" ? "Use light theme" : "Use dark theme"}
     </button>
   );
 }

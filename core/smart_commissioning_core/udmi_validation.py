@@ -26,6 +26,7 @@ from smart_commissioning_core.mqtt_transport import (
     subscribe_and_capture,
 )
 from smart_commissioning_core.records import ValidationIssueRecord
+from smart_commissioning_core.udmi_results import build_validation_summary_v1
 from smart_commissioning_core.udmi_schema import (
     declared_version,
     is_nonpub_version,
@@ -130,6 +131,7 @@ class UdmiValidationResult:
 
 LiveCapture = Callable[..., list[MqttMessage]]
 CancelCheck = Callable[[], bool]
+ProgressCallback = Callable[[Callable[[], UdmiValidationResult]], None]
 
 # Capture defaults: the window matches mqtt_discovery's DEFAULT_CAPTURE_SECONDS;
 # the message cap is a SAFETY ceiling only — completion is decided by
@@ -145,10 +147,16 @@ def validate_udmi_full_report(
     *,
     live_capture: LiveCapture | None = subscribe_and_capture,
     cancel_check: CancelCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> UdmiValidationResult:
     parameters = dict(parameters or {})
     capture_issues: list[ValidationIssueRecord] = []
-    capture_summary = _capture_live_payloads(parameters, live_capture=live_capture, cancel_check=cancel_check)
+    capture_summary = _capture_live_payloads(
+        parameters,
+        live_capture=live_capture,
+        cancel_check=cancel_check,
+        progress_callback=progress_callback,
+    )
     if capture_summary["issue"] is not None:
         capture_issues.append(capture_summary["issue"])
 
@@ -216,7 +224,20 @@ def validate_udmi_full_report(
             captured_topics=capture_summary["captured_topics"],
             has_views=bool(payload_views),
         ),
+        # A terminal validator return always replaces any in-progress snapshots
+        # written by ``progress_callback``. Consumers can therefore distinguish
+        # a live projection from the final evidence without inferring from
+        # counts that may still change.
+        "provisional": False,
     }
+    result_summary["validation_summary_v1"] = build_validation_summary_v1(
+        parameters,
+        issues,
+        fallback_expected_asset_ids=expected_devices,
+        fallback_observed_asset_ids=[
+            device for device in expected_devices if str(device) not in {str(item) for item in not_publishing}
+        ],
+    )
     return UdmiValidationResult(
         result_summary=result_summary,
         issues=issues,
@@ -1339,11 +1360,148 @@ def _invalid_payload_issue(
     )
 
 
+def _serialise_capture_message(message: MqttMessage) -> dict[str, object]:
+    """Persistable latest-message evidence for a live progress snapshot."""
+    return {
+        "topic": message.topic,
+        "payload": message.json_payload(),
+        "retained": message.retained,
+        "received_at": message.received_at.isoformat(),
+    }
+
+
+def _route_capture_messages_to_assets(
+    entries: list[dict],
+    per_entry_topics: list[list[str]],
+    messages: list[MqttMessage],
+    *,
+    observed_at: str,
+) -> None:
+    """Route the latest live evidence into every matching register asset."""
+    for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
+        entry["capture_observed_at"] = observed_at
+        entry["subscribed_topics"] = list(entry_topics)
+        entry_messages = [
+            message
+            for message in messages
+            if any(_topic_matches_filter(message.topic, topic) for topic in entry_topics)
+        ]
+        entry["messages"] = [_serialise_capture_message(message) for message in entry_messages]
+        _route_latest_payloads(entry, entry_messages)
+
+
+def _progressive_invalid_payload_issues(
+    messages: list[MqttMessage],
+    existing_issues: list[ValidationIssueRecord],
+) -> list[ValidationIssueRecord]:
+    """Describe malformed payloads already observed without claiming future silence."""
+    issues = [*existing_issues]
+    first_new_issue = len(issues)
+    for topic in sorted(
+        {message.topic for message in messages if not isinstance(message.json_payload(), dict)}
+    ):
+        issues.append(
+            _issue(
+                issues,
+                asset_id="UDMI assets",
+                issue_type="payload_error",
+                severity="critical",
+                description=f"MQTT message on {topic} is not a valid JSON object.",
+                observed_value="invalid JSON object",
+                suggested_action="Fix the publisher so the topic carries a JSON object.",
+            )
+        )
+    return issues[first_new_issue:]
+
+
+def _build_progressive_result(
+    parameters: dict[str, object],
+    messages: list[MqttMessage],
+    *,
+    capture_mode: str,
+    capture_window_seconds: float | None,
+    subscribed_topics: list[str],
+    message_count: int,
+) -> UdmiValidationResult:
+    """Build an honest in-progress projection from evidence received so far.
+
+    Silence is deliberately not an issue until the capture window closes. The
+    projection can report missing expected payloads as a current count, while
+    ``provisional`` makes clear that later messages can still change it.
+    """
+    # ``_inline_full_report`` only creates not-publishing findings when a live
+    # capture is complete. Use a shallow top-level copy with that final-window
+    # inference disabled while retaining the real, already-routed asset data.
+    provisional_parameters = dict(parameters)
+    provisional_parameters["use_live_broker"] = False
+    full_report = _inline_full_report(provisional_parameters)
+    issues = _normalise_issues(full_report)
+    register_rejection = _register_rejection_issue(parameters, issues)
+    if register_rejection is not None:
+        issues.append(register_rejection)
+    issues.extend(_register_duplicate_id_issues(parameters, issues))
+    issues.extend(_review_all_payload_issues(parameters, issues))
+    issues.extend(_progressive_invalid_payload_issues(messages, issues))
+
+    expected_devices = _list_value(full_report, "DeviceList")
+    payload_views = _build_payload_views(parameters)
+    observed_asset_ids = [
+        str(view.get("asset_id"))
+        for view in payload_views
+        if any(
+            bool(payload.get("observed_present"))
+            for payload in view.get("payload_types", [])
+            if isinstance(payload, dict)
+        )
+    ]
+    captured_topics = _ordered_valid_payload_topics(messages)
+    conformance = _conformance_fields(expected_devices, [], issues)
+    result_summary: dict[str, object] = {
+        "expected_devices": len(expected_devices),
+        "publishing_seen": len(set(observed_asset_ids)),
+        "not_publishing": 0,
+        "not_publishing_devices": [],
+        "pointset_valid": 0,
+        "state_valid": 0,
+        "issue_count": len(issues),
+        "blocking_issue_count": conformance["blocking_issue_count"],
+        "payload_conformance_percent": conformance["payload_conformance_percent"],
+        "message_count": message_count,
+        "payload_last_seen": _latest_payload_timestamp(parameters),
+        "source": "schedule_payload_inputs",
+        "source_fixture": "live_capture_in_progress",
+        "broker_capture_attempted": True,
+        "broker_status_detail": "live_capture_in_progress",
+        "capture_mode": capture_mode,
+        "capture_window_seconds": capture_window_seconds,
+        "captured_topics": captured_topics,
+        "subscribed_topics": list(subscribed_topics),
+        "payload_views": payload_views,
+        "payload_view_source": _payload_view_source(
+            captured_topics=captured_topics,
+            has_views=bool(payload_views),
+        ),
+        "provisional": True,
+    }
+    result_summary["validation_summary_v1"] = build_validation_summary_v1(
+        parameters,
+        issues,
+        fallback_expected_asset_ids=expected_devices,
+        fallback_observed_asset_ids=observed_asset_ids,
+    )
+    return UdmiValidationResult(
+        result_summary=result_summary,
+        issues=issues,
+        source_fixture="live_capture_in_progress",
+    )
+
+
 def _capture_live_payloads(
     parameters: dict[str, object],
     *,
     live_capture: LiveCapture | None,
     cancel_check: CancelCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, object]:
     if not parse_bool(parameters.get("use_live_broker")):
         return {
@@ -1355,7 +1513,13 @@ def _capture_live_payloads(
 
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
-        return _capture_live_payloads_per_asset(parameters, assets, live_capture=live_capture, cancel_check=cancel_check)
+        return _capture_live_payloads_per_asset(
+            parameters,
+            assets,
+            live_capture=live_capture,
+            cancel_check=cancel_check,
+            progress_callback=progress_callback,
+        )
 
     if live_capture is None:
         return {
@@ -1392,6 +1556,31 @@ def _capture_live_payloads(
     groups = _capture_topic_groups(topics)
     parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
+    latest_progress_messages: dict[str, MqttMessage] = {}
+    progress_message_count = 0
+
+    def on_message(message: MqttMessage) -> None:
+        nonlocal progress_message_count
+        progress_message_count += 1
+        latest_progress_messages[message.topic] = message
+        progress_messages = list(latest_progress_messages.values())
+        parameters["capture_observed_at"] = message.received_at.isoformat()
+        parameters["messages"] = [
+            _serialise_capture_message(captured) for captured in progress_messages
+        ]
+        _route_latest_payloads(parameters, progress_messages)
+        if progress_callback is not None:
+            progress_callback(
+                lambda: _build_progressive_result(
+                    parameters,
+                    progress_messages,
+                    capture_mode=capture_mode,
+                    capture_window_seconds=timeout_seconds,
+                    subscribed_topics=topics,
+                    message_count=progress_message_count,
+                )
+            )
+
     try:
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
@@ -1404,6 +1593,7 @@ def _capture_live_payloads(
             qos=parse_int(parameters.get("qos"), default=0),
             cancel_check=cancel_check,
             stop_when=_capture_stop_when(groups),
+            on_message=on_message,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
@@ -1427,15 +1617,7 @@ def _capture_live_payloads(
 
     capture_observed_at = datetime.now(UTC).isoformat()
     parameters["capture_observed_at"] = capture_observed_at
-    parameters["messages"] = [
-        {
-            "topic": message.topic,
-            "payload": message.json_payload(),
-            "retained": message.retained,
-            "received_at": message.received_at.isoformat(),
-        }
-        for message in messages
-    ]
+    parameters["messages"] = [_serialise_capture_message(message) for message in messages]
     _route_latest_payloads(parameters, messages)
 
     # Without a transport failure, "captured" is claimed only when EVERY
@@ -1496,6 +1678,7 @@ def _capture_live_payloads_per_asset(
     *,
     live_capture: LiveCapture | None,
     cancel_check: CancelCheck | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, object]:
     """Capture live payloads for every asset entry in ONE shared subscription.
 
@@ -1550,6 +1733,57 @@ def _capture_live_payloads_per_asset(
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
     parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
+    latest_progress_messages: dict[str, MqttMessage] = {}
+    latest_progress_messages_by_entry: list[dict[str, MqttMessage]] = [
+        {} for _ in entries
+    ]
+    exact_topic_routes: dict[str, set[int]] = {}
+    wildcard_topic_routes: list[tuple[int, str]] = []
+    for entry_index, entry_topics in enumerate(per_entry_topics):
+        for topic_filter in entry_topics:
+            if "+" in topic_filter or "#" in topic_filter:
+                wildcard_topic_routes.append((entry_index, topic_filter))
+            else:
+                exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
+    progress_message_count = 0
+
+    def on_message(message: MqttMessage) -> None:
+        nonlocal progress_message_count
+        progress_message_count += 1
+        latest_progress_messages[message.topic] = message
+        progress_messages = list(latest_progress_messages.values())
+        matching_entries = set(exact_topic_routes.get(message.topic, ()))
+        for entry_index, topic_filter in wildcard_topic_routes:
+            if _topic_matches_filter(message.topic, topic_filter):
+                matching_entries.add(entry_index)
+        observed_at = message.received_at.isoformat()
+        # Update only entries that can receive this topic. Re-routing the full
+        # accumulated capture through every asset on each broker message makes
+        # a chatty expected topic quadratic in both register size and distinct
+        # topics. Exact expected topics, the normal register case, are O(1).
+        for entry_index in matching_entries:
+            entry_messages = latest_progress_messages_by_entry[entry_index]
+            entry_messages[message.topic] = message
+            routed_messages = list(entry_messages.values())
+            entry = entries[entry_index]
+            entry["capture_observed_at"] = observed_at
+            entry["subscribed_topics"] = list(per_entry_topics[entry_index])
+            entry["messages"] = [
+                _serialise_capture_message(captured) for captured in routed_messages
+            ]
+            _route_latest_payloads(entry, routed_messages)
+        if progress_callback is not None:
+            progress_callback(
+                lambda: _build_progressive_result(
+                    parameters,
+                    progress_messages,
+                    capture_mode=capture_mode,
+                    capture_window_seconds=timeout_seconds,
+                    subscribed_topics=topics,
+                    message_count=progress_message_count,
+                )
+            )
+
     try:
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
@@ -1562,6 +1796,7 @@ def _capture_live_payloads_per_asset(
             qos=parse_int(parameters.get("qos"), default=0),
             cancel_check=cancel_check,
             stop_when=_capture_stop_when(groups),
+            on_message=on_message,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
@@ -1582,27 +1817,12 @@ def _capture_live_payloads_per_asset(
 
     # Route every message back to each entry whose subscribed topics match it,
     # mirroring the single-asset routing (last payload per slot wins).
-    for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
-        entry["capture_observed_at"] = capture_observed_at
-        # Kept for the per-asset not-publishing diagnostics: an asset with no
-        # payload can then say WHICH topics were subscribed and what (if
-        # anything) actually arrived under them.
-        entry["subscribed_topics"] = list(entry_topics)
-        entry_messages = [
-            message
-            for message in messages
-            if any(_topic_matches_filter(message.topic, topic) for topic in entry_topics)
-        ]
-        entry["messages"] = [
-            {
-                "topic": message.topic,
-                "payload": message.json_payload(),
-                "retained": message.retained,
-                "received_at": message.received_at.isoformat(),
-            }
-            for message in entry_messages
-        ]
-        _route_latest_payloads(entry, entry_messages)
+    _route_capture_messages_to_assets(
+        entries,
+        per_entry_topics,
+        messages,
+        observed_at=capture_observed_at,
+    )
 
     valid_messages = _valid_payload_messages(messages)
     valid_topics = _ordered_valid_payload_topics(messages)
@@ -1710,8 +1930,10 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
             expected = _dict_or_empty(entry.get("expected_schedule"))
             asset_id = str(expected.get("asset_id") or "UDMI asset")
             report["DeviceList"].append(asset_id)  # type: ignore[union-attr]
+            # An empty JSON object is still an observed payload (albeit one that
+            # will fail structural validation), so presence cannot use bool({}).
             has_payload = any(
-                _dict_or_empty(entry.get(key))
+                key in entry and isinstance(entry.get(key), (dict, str))
                 for key in ("state_payload", "metadata_payload", "pointset_payload")
             )
             if capture_attempted and not has_payload:
@@ -2070,7 +2292,10 @@ def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict
 def _asset_payload_view(
     expected: dict[str, Any],
     observed_by_type: dict[str, dict],
+    observed_present_by_type: dict[str, bool],
     retained_by_type: dict[str, bool],
+    received_at_by_type: dict[str, str | None],
+    topic_by_type: dict[str, str | None],
 ) -> dict[str, object] | None:
     """Build ONE asset's per-payload-type expected-vs-observed view, or None.
 
@@ -2081,21 +2306,25 @@ def _asset_payload_view(
     for payload_type in ("state", "metadata", "pointset"):
         observed = observed_by_type[payload_type]
         expected_facet = _expected_payload_facet(expected, payload_type) if expected else None
-        if not observed and not expected_facet:
+        observed_present = observed_present_by_type[payload_type]
+        if not observed_present and not expected_facet:
             continue
         payload_types.append(
             {
                 "payload_type": payload_type,
                 "expected": expected_facet,
                 "observed": observed or None,
-                "observed_present": bool(observed),
+                "observed_present": observed_present,
                 "retained": retained_by_type[payload_type],
+                "received_at": received_at_by_type[payload_type],
+                "topic": topic_by_type[payload_type],
             }
         )
     if not payload_types:
         return None
     asset_id = str(expected.get("asset_id") or "UDMI asset")
-    return {"asset_id": asset_id, "payload_types": payload_types}
+    system = str(expected.get("system") or "").strip() or "Unspecified"
+    return {"asset_id": asset_id, "system": system, "payload_types": payload_types}
 
 
 def _observed_by_type(source: dict[str, object]) -> dict[str, dict]:
@@ -2106,9 +2335,39 @@ def _observed_by_type(source: dict[str, object]) -> dict[str, dict]:
     }
 
 
+def _observed_present_by_type(source: dict[str, object]) -> dict[str, bool]:
+    return {
+        payload_type: f"{payload_type}_payload" in source
+        and isinstance(source.get(f"{payload_type}_payload"), (dict, str))
+        for payload_type in ("state", "metadata", "pointset")
+    }
+
+
 def _retained_by_type(source: dict[str, object]) -> dict[str, bool]:
     return {
         payload_type: parse_bool(source.get(f"{payload_type}_payload_retained"))
+        for payload_type in ("state", "metadata", "pointset")
+    }
+
+
+def _received_at_by_type(source: dict[str, object]) -> dict[str, str | None]:
+    return {
+        payload_type: (
+            str(source.get(f"{payload_type}_payload_received_at"))
+            if source.get(f"{payload_type}_payload_received_at")
+            else None
+        )
+        for payload_type in ("state", "metadata", "pointset")
+    }
+
+
+def _topic_by_type(source: dict[str, object]) -> dict[str, str | None]:
+    return {
+        payload_type: (
+            str(source.get(f"{payload_type}_topic"))
+            if source.get(f"{payload_type}_topic")
+            else None
+        )
         for payload_type in ("state", "metadata", "pointset")
     }
 
@@ -2138,7 +2397,10 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
             view = _asset_payload_view(
                 _dict_or_empty(entry.get("expected_schedule")),
                 _observed_by_type(entry),
+                _observed_present_by_type(entry),
                 _retained_by_type(entry),
+                _received_at_by_type(entry),
+                _topic_by_type(entry),
             )
             if view is not None:
                 views.append(view)
@@ -2147,7 +2409,10 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
     view = _asset_payload_view(
         _dict_or_empty(parameters.get("expected_schedule")),
         _observed_by_type(parameters),
+        _observed_present_by_type(parameters),
         _retained_by_type(parameters),
+        _received_at_by_type(parameters),
+        _topic_by_type(parameters),
     )
     return [view] if view is not None else []
 

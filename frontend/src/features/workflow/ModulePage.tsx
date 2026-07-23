@@ -1,4 +1,4 @@
-import { ChangeEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -14,6 +14,7 @@ import {
   getImportErrors,
   getLatestImport,
   getValidationIssues,
+  getValidationJsonExportPath,
   getValidationRun,
   getImportTemplatePath,
   getReportDownloadPath,
@@ -35,6 +36,7 @@ import {
   ReportFormat,
   ReportType,
   UdmiAssetPayloadView,
+  UdmiValidationSummaryV1,
   ValidationIssueRecord,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
@@ -293,12 +295,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // filtered view preserves original indices (see visibleResultRows).
   const [resultsTextFilter, setResultsTextFilter] = useState("");
   const [resultsToneFilter, setResultsToneFilter] = useState("all");
-  // Inspector facet filters (ITEM-10), udmi-validation only: by asset type, by
-  // seen/not-seen, and by ONLINE/OFFLINE. Composed on top of the text + verdict
-  // filter above and applied to BOTH the results table and the drill-down list.
-  const [resultsAssetTypeFilter, setResultsAssetTypeFilter] = useState("all");
-  const [resultsSeenFilter, setResultsSeenFilter] = useState("all");
-  const [resultsStateFilter, setResultsStateFilter] = useState("all");
+  const [resultsTopicContainsFilter, setResultsTopicContainsFilter] = useState("");
+  // UDMI facets use register System and this run's actual observation. Silence
+  // is never presented as proof that a connected device is offline.
+  const [resultsSystemFilter, setResultsSystemFilter] = useState("all");
+  const [resultsObservationFilter, setResultsObservationFilter] = useState("all");
   // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
   // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
@@ -317,6 +318,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // PDF default: the field deliverable is a human-readable handover document
   // (ask 2026-07-14); Word/Excel/zip remain for editable/evidence workflows.
   const [reportExportFormat, setReportExportFormat] = useState<ReportFormat>("pdf");
+  const [reportDialogOpen, setReportDialogOpen] = useState(false);
+  const [reportTitle, setReportTitle] = useState("");
+  const reportDialogRef = useRef<HTMLDialogElement | null>(null);
+  const reportTitleInputRef = useRef<HTMLInputElement | null>(null);
+  const reportDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
   // MQTT Explorer-like capture inputs (mq9nhbzu). The live broker capture itself
   // is on-site-untested; this drives the existing mqtt discovery run + topics.
   // Default BLANK: a blank filter is OMITTED from the run parameters, so the
@@ -342,6 +348,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const templateDownload = useFileDownload();
   const reportDownload = useFileDownload();
   const exportDownload = useFileDownload();
+  const validationJsonDownload = useFileDownload();
   const schemaTemplateDownload = useFileDownload();
 
   const profilesQuery = useQuery({
@@ -356,19 +363,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const sseEvent = runEvents.event;
   const sseDriving = runEvents.sseActive && sseEvent !== null;
 
-  // Validation run monitor — polls until terminal (the proven 1.5s pattern,
-  // generalized to any validation run, not only UDMI). While SSE is the live
-  // source we pause the interval; if SSE drops we fall back to polling.
+  // Validation run monitor. SSE carries scalar status/stage/progress only, so
+  // the run record must keep polling while active to refresh progressive UDMI
+  // payload views, metrics, and issue counts.
   const validationRunQuery = useQuery({
     enabled: Boolean(activeRun) && activeRun?.kind === "validation",
     queryFn: () => getValidationRun(activeRun?.runId ?? ""),
     queryKey: ["validation-run", activeRun?.runId],
     refetchInterval: (query) =>
-      runPollInterval({
-        reachedTerminal: runEvents.reachedTerminal,
-        recordTerminal: isTerminalStatus(query.state.data?.status),
-        sseDriving,
-      }),
+      isTerminalStatus(query.state.data?.status) ? false : 1500,
   });
 
   // Discovery run monitor — same polling contract, against the discovery
@@ -431,14 +434,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // the current session.
   const startedRunActive = runIsActive && !activeRun?.restored;
 
-  // Validation issues — fetched only once the validation run is terminal.
+  // Validation issues are replaced alongside each progressive result snapshot.
+  // Poll during an active validation and stop when the polled run is terminal.
   const validationIssuesQuery = useQuery({
     enabled:
       Boolean(activeRun) &&
-      activeRun?.kind === "validation" &&
-      isTerminalStatus(validationRunQuery.data?.status),
+      activeRun?.kind === "validation",
     queryFn: () => getValidationIssues(activeRun?.runId ?? ""),
     queryKey: ["validation-issues", activeRun?.runId],
+    refetchInterval: () =>
+      isTerminalStatus(validationRunQuery.data?.status) ? false : 1500,
   });
 
   // Discovery results — fetched only once the discovery run is terminal.
@@ -547,9 +552,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
-  // When SSE reports the run terminal but polling is paused, the polled record
-  // (and its result_summary) may still be mid-run. Trigger a single refetch so
-  // the terminal-gated issues/results queries fire against fresh data.
+  // When SSE reports the run terminal, the polled record may still be mid-run.
+  // Trigger a single refetch so the terminal snapshot lands promptly.
   const refetchValidationRun = validationRunQuery.refetch;
   const refetchDiscoveryRun = discoveryRunQuery.refetch;
   useEffect(() => {
@@ -563,9 +567,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
   }, [runEvents.reachedTerminal, activeRun, refetchDiscoveryRun, refetchValidationRun]);
 
+  // The issues query also runs during live validation. Once the run flips
+  // terminal, fetch once more before its interval stops so a snapshot taken a
+  // moment before completion cannot leave stale provisional issues on screen.
+  const refetchValidationIssues = validationIssuesQuery.refetch;
+  useEffect(() => {
+    if (activeRun?.kind === "validation" && activeRunTerminal) {
+      void refetchValidationIssues();
+    }
+  }, [activeRun?.kind, activeRunTerminal, refetchValidationIssues]);
+
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
+  const resetValidationJsonDownload = validationJsonDownload.reset;
 
   useEffect(() => {
     setSelectedImportType(module.importTypes[0] ?? "");
@@ -578,12 +593,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setSelectedResultIndex(0);
     setResultsTextFilter("");
     setResultsToneFilter("all");
-    setResultsAssetTypeFilter("all");
-    setResultsSeenFilter("all");
-    setResultsStateFilter("all");
+    setResultsTopicContainsFilter("");
+    setResultsSystemFilter("all");
+    setResultsObservationFilter("all");
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
     setReportToast(null);
+    setReportDialogOpen(false);
+    setReportTitle("");
     setScanAuthorized(false);
     setScanDryRun(false);
     setScanTarget("");
@@ -599,12 +616,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetTemplateDownload();
     resetReportDownload();
     resetExportDownload();
+    resetValidationJsonDownload();
   }, [
     module.route,
     module.importTypes,
     resetTemplateDownload,
     resetReportDownload,
     resetExportDownload,
+    resetValidationJsonDownload,
   ]);
 
   // Re-attach this head's most recent succeeded run (see lastRunQuery above).
@@ -656,6 +675,37 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     const timer = setTimeout(() => setReportToast(null), 8000);
     return () => clearTimeout(timer);
   }, [reportToast]);
+
+  // One native modal is shared by both report buttons. showModal supplies focus
+  // containment and Escape handling in browsers; the open-attribute fallback
+  // keeps the control testable in jsdom without changing production behaviour.
+  useEffect(() => {
+    if (!reportDialogOpen) {
+      return;
+    }
+    const dialog = reportDialogRef.current;
+    if (!dialog) {
+      return;
+    }
+    try {
+      if (!dialog.open && typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else if (!dialog.open) {
+        dialog.setAttribute("open", "");
+      }
+    } catch {
+      dialog.setAttribute("open", "");
+    }
+    const frame = window.requestAnimationFrame(() => reportTitleInputRef.current?.focus());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (dialog.open && typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    };
+  }, [reportDialogOpen]);
 
   // Step flow: advance to Run the moment a run is queued, and to Results when it
   // reaches a terminal state, so the operator follows the job rather than
@@ -871,9 +921,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // originating run via source_run_ids so the report actually traces to it.
   // Format is operator-chosen (field ask 2026-07-14: PDF and Word exports).
   const reportFromRunMutation = useMutation({
-    mutationFn: ({ reportType, runId }: { reportType: ReportType; runId: string }) =>
-      createReport({ format: reportExportFormat, reportType, sourceRunIds: [runId] }),
+    mutationFn: ({ reportTitle: title, reportType, runId }: { reportTitle: string; reportType: ReportType; runId: string }) =>
+      createReport({ format: reportExportFormat, reportTitle: title, reportType, sourceRunIds: [runId] }),
     onSuccess: (result) => {
+      setReportDialogOpen(false);
+      window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
       setReportToast(
         `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
       );
@@ -935,7 +987,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // row View detail, the per-asset payload sections) must stay neutral instead
   // of deriving a false green "Pass" from the empty array. Reuses the 'none'
   // verdict kind, which carries no tone class.
-  const udmiIssuesSettled = validationIssuesQuery.isSuccess;
+  const udmiIssuesSettled = validationIssuesQuery.isSuccess && activeRunTerminal;
   const gatedUdmiVerdict = useCallback(
     (issues: IssueRow[], observedPresent: boolean, assetOffline: boolean): UdmiVerdict =>
       // Keep the "Verdict pending" gate FIRST so a summary-derived offline
@@ -984,15 +1036,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return Array.isArray(raw) ? (raw as UdmiAssetPayloadView[]) : null;
   }, [module.route, activeRun, validationRunQuery.data]);
 
-  // Asset ids a capture attempt found SILENT — the red "offline" set for the
-  // RAG scheme (mqf-udmi-rag). Derived from real capture evidence only: issues
+  // Asset ids a capture attempt did not observe. This is evidence about the run
+  // window, never proof that the device was disconnected or offline. Derived
+  // from real capture evidence only: issues
   // stamped issue_type "not_publishing" (the complete path — single-asset
   // capture timeouts report silence ONLY as an issue, never in the summary
   // list), unioned with result_summary.not_publishing_devices (the
   // DevicesNotPublishing path) as defensive insurance. Never inferred from
   // observed_present=false alone, so a pasted-payload run (no capture attempted)
   // never paints a device red (honesty rule).
-  const offlineAssets = useMemo<Set<string>>(() => {
+  const notObservedAssets = useMemo<Set<string>>(() => {
     const ids = new Set<string>();
     if (module.route !== "udmi-validation" || activeRun?.kind !== "validation") {
       return ids;
@@ -1027,6 +1080,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? formatCaptureWindow(validationRunQuery.data.result_summary)
       : null;
 
+  const validationSummary = useMemo(
+    () => readValidationSummary(validationRunQuery.data?.result_summary),
+    [validationRunQuery.data?.result_summary],
+  );
+  const validationSummaryDisplay = useMemo(
+    () => buildValidationSummaryDisplay(validationSummary),
+    [validationSummary],
+  );
+  const validationAssetResultsById = useMemo(
+    () => new Map((validationSummary?.asset_results ?? []).map((asset) => [asset.asset_id, asset])),
+    [validationSummary],
+  );
+  const hasPersistedValidationEvidence =
+    validationSummary !== null ||
+    (payloadViews?.length ?? 0) > 0 ||
+    (validationIssuesQuery.data?.issues.length ?? 0) > 0 ||
+    typeof validationRunQuery.data?.result_summary?.expected_devices === "number";
+
   // Merge issue groups with payload views so an asset with payloads but no
   // issues still shows, and each payload type can reveal expected vs observed.
   const mergedAssetGroups = useMemo(() => {
@@ -1042,32 +1113,36 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [module.route, activeRun, assetIssueGroups, payloadViews]);
 
   // Live UDMI results table: one row per asset x payload type, derived only
-  // from the terminal run's real payload_views + issues (never fabricated).
-  // Replaces the illustrative sample rows that previously showed after a run.
+  // from persisted real payload_views + issues (never fabricated). Active-run
+  // rows stay verdict-pending until the terminal issue snapshot lands.
   const udmiLiveResults = useMemo<{ columns: string[]; rows: Array<Record<string, string>> } | null>(() => {
     // job_type guard: mqtt_config_publish runs share this route's run monitor;
     // only a udmi_validation run may populate the per-asset payload table.
     if (
       module.route !== "udmi-validation" ||
       !mergedAssetGroups ||
-      validationRunQuery.data?.job_type !== "udmi_validation" ||
-      !isTerminalStatus(validationRunQuery.data?.status)
+      validationRunQuery.data?.job_type !== "udmi_validation"
     ) {
       return null;
     }
     const rows = mergedAssetGroups.flatMap((group) =>
       group.payloadTypes.map((entry) => {
         const observed = entry.hasPayloadView ? (entry.observedPresent ? "Yes" : "No") : "—";
+        const topic = validationAssetResultsById
+          .get(group.assetId)
+          ?.payload_results.find((payload) => payload.payload_type === entry.payloadType)?.topic;
         // Shared (issues-gated) verdict helper so the row, its View detail,
         // and the per-asset payload sections can never disagree on the verdict.
         const { label, verdict } = gatedUdmiVerdict(
           entry.issues,
           entry.observedPresent,
-          offlineAssets.has(group.assetId),
+          notObservedAssets.has(group.assetId),
         );
         return {
+          System: group.system,
           Asset: group.assetId,
           Payload: `UDMI ${entry.payloadType}`,
+          Topic: topic || "—",
           Observed: observed,
           Issues: String(entry.issues.length),
           "Raw Payload": entry.observed ? JSON.stringify(entry.observed) : "",
@@ -1090,8 +1165,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (rows.length === 0) {
       return null;
     }
-    return { columns: ["Asset", "Payload", "Observed", "Issues", "Raw Payload", "Result"], rows };
-  }, [module.route, mergedAssetGroups, validationRunQuery.data, gatedUdmiVerdict, offlineAssets]);
+    return { columns: ["System", "Asset", "Payload", "Topic", "Observed", "Issues", "Raw Payload", "Result"], rows };
+  }, [
+    module.route,
+    mergedAssetGroups,
+    validationRunQuery.data,
+    gatedUdmiVerdict,
+    notObservedAssets,
+    validationAssetResultsById,
+  ]);
 
   // Reset the row selection when the live UDMI view replaces the sample rows so
   // the inspector never shows a stale sample-row selection against live results.
@@ -1105,9 +1187,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // join the same reset choreography for the same reason.
       setResultsTextFilter("");
       setResultsToneFilter("all");
-      setResultsAssetTypeFilter("all");
-      setResultsSeenFilter("all");
-      setResultsStateFilter("all");
+      setResultsTopicContainsFilter("");
+      setResultsSystemFilter("all");
+      setResultsObservationFilter("all");
       setExpandedResultAssets(new Set());
     }
   }, [hasUdmiLiveResults]);
@@ -1167,28 +1249,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // any plain query) uses substring matching. Rows keep their ORIGINAL index so
   // selection, the Inspector, and the View modal never point at the wrong row.
   const resultsTopicColumn = tableColumns.includes("Topic") ? "Topic" : undefined;
-  // Per-asset facts for the inspector facet filters (ITEM-10), derived from the
-  // same merged groups + offline set the verdicts use — so the filters can never
-  // claim more than the app observed. Non-udmi routes get an empty map (unused).
+  // Per-asset facts for the System and observation filters. Both come from the
+  // run snapshot; no asset-id heuristic or connection-state inference is used.
   const isUdmiValidation = module.route === "udmi-validation";
   const assetFacts = useMemo(
-    () => buildAssetFacts(mergedAssetGroups ?? [], offlineAssets),
-    [mergedAssetGroups, offlineAssets],
+    () => buildAssetFacts(mergedAssetGroups ?? []),
+    [mergedAssetGroups],
   );
-  const assetTypeOptions = useMemo(() => {
-    const types = new Set<string>();
+  const systemOptions = useMemo(() => {
+    const systems = new Set<string>();
     for (const facts of assetFacts.values()) {
-      types.add(facts.type);
+      systems.add(facts.system);
     }
-    return Array.from(types).sort();
+    return Array.from(systems).sort();
   }, [assetFacts]);
   const facetFilterActive =
     isUdmiValidation &&
-    (resultsAssetTypeFilter !== "all" ||
-      resultsSeenFilter !== "all" ||
-      resultsStateFilter !== "all");
+    (resultsSystemFilter !== "all" || resultsObservationFilter !== "all");
   const isResultsFilterActive =
-    resultsTextFilter.trim() !== "" || resultsToneFilter !== "all" || facetFilterActive;
+    resultsTextFilter.trim() !== "" ||
+    resultsTopicContainsFilter.trim() !== "" ||
+    resultsToneFilter !== "all" ||
+    facetFilterActive;
   const visibleResultRows = useMemo(
     () =>
       resultRows
@@ -1203,31 +1285,33 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           ) {
             return false;
           }
+          const topicNeedle = resultsTopicContainsFilter.trim().toLocaleLowerCase();
+          if (topicNeedle && !String(row.Topic ?? "").toLocaleLowerCase().includes(topicNeedle)) {
+            return false;
+          }
           // Facet filters are a claim about the ASSET, so they apply on the
           // udmi-validation route only (other routes have no asset facts).
           return isUdmiValidation
             ? assetMatchesFacetFilter(assetFacts.get(row.Asset), {
-                type: resultsAssetTypeFilter,
-                seen: resultsSeenFilter,
-                state: resultsStateFilter,
+                system: resultsSystemFilter,
+                observation: resultsObservationFilter,
               })
             : true;
         }),
     [
       resultRows,
       resultsTextFilter,
+      resultsTopicContainsFilter,
       resultsToneFilter,
       resultsTopicColumn,
       isUdmiValidation,
       assetFacts,
-      resultsAssetTypeFilter,
-      resultsSeenFilter,
-      resultsStateFilter,
+      resultsSystemFilter,
+      resultsObservationFilter,
     ],
   );
-  // The drill-down list mirrors the same facet filter so "show me all EMs that
-  // are offline" filters the inspector groups too — table and inspector can
-  // never disagree (ITEM-10). Text/tone are cell-level, so they are NOT applied
+  // The drill-down list mirrors the same facets, so the table and inspector can
+  // never disagree. Text/tone are cell-level, so they are not applied
   // here (they filter payload-type rows, not whole assets).
   const visibleAssetGroups = useMemo(() => {
     if (!mergedAssetGroups) {
@@ -1236,21 +1320,53 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!isUdmiValidation) {
       return mergedAssetGroups;
     }
-    return mergedAssetGroups.filter((group) =>
-      assetMatchesFacetFilter(assetFacts.get(group.assetId), {
-        type: resultsAssetTypeFilter,
-        seen: resultsSeenFilter,
-        state: resultsStateFilter,
-      }),
-    );
+    const topicNeedle = resultsTopicContainsFilter.trim().toLocaleLowerCase();
+    return mergedAssetGroups.flatMap((group) => {
+      if (!assetMatchesFacetFilter(assetFacts.get(group.assetId), {
+        system: resultsSystemFilter,
+        observation: resultsObservationFilter,
+      })) {
+        return [];
+      }
+      if (!topicNeedle) {
+        return [group];
+      }
+      const matchingTypes = new Set(
+        (validationAssetResultsById.get(group.assetId)?.payload_results ?? [])
+          .filter((payload) => (payload.topic ?? "").toLocaleLowerCase().includes(topicNeedle))
+          .map((payload) => payload.payload_type),
+      );
+      const payloadTypes = group.payloadTypes.filter((payload) => matchingTypes.has(payload.payloadType));
+      return payloadTypes.length > 0 ? [{ ...group, payloadTypes }] : [];
+    });
   }, [
     mergedAssetGroups,
     isUdmiValidation,
     assetFacts,
-    resultsAssetTypeFilter,
-    resultsSeenFilter,
-    resultsStateFilter,
+    resultsSystemFilter,
+    resultsObservationFilter,
+    resultsTopicContainsFilter,
+    validationAssetResultsById,
   ]);
+  const summaryFiltersActive =
+    isUdmiValidation &&
+    (resultsSystemFilter !== "all" ||
+      resultsObservationFilter !== "all" ||
+      resultsTopicContainsFilter.trim() !== "");
+  const displayedValidationSummary = useMemo(
+    () =>
+      filterValidationSummary(validationSummaryDisplay, {
+        observation: resultsObservationFilter,
+        system: resultsSystemFilter,
+        topicContains: resultsTopicContainsFilter,
+      }),
+    [
+      validationSummaryDisplay,
+      resultsObservationFilter,
+      resultsSystemFilter,
+      resultsTopicContainsFilter,
+    ],
+  );
   // The selected row, resolved WITHIN the filtered view so the Inspector can
   // never show a row the table is hiding (ISSUE-4): when the active selection is
   // filtered out we fall back to the first visible row, and when NOTHING matches
@@ -1269,6 +1385,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     selectedResult && hasUdmiLiveResults && !expandedResultAssets.has(selectedResult.Asset)
       ? null
       : selectedResult;
+  const selectedInspectorAssetGroup =
+    inspectorResult && visibleAssetGroups
+      ? (visibleAssetGroups.find((group) => group.assetId === inspectorResult.Asset) ?? null)
+      : null;
   const resultDetails = inspectorResult
     ? buildResultDetailItems(module.route, inspectorResult, usingLiveResults, mergedAssetGroups)
     : [];
@@ -1323,7 +1443,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             { label: "Pass", value: "pass" },
             { label: "Pass with notes", value: "pass-notes" },
             { label: "Non-compliant", value: "fail" },
-            { label: "Offline", value: "offline" },
+            { label: "Not observed this run", value: "offline" },
             { label: "No verdict", value: "none" },
           ]
         : [
@@ -1371,6 +1491,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     isDiscoveryModule && activeRun && activeRunTerminal && resultRows.length === 0
       ? discoveryEmptyStateFor(module.route, discoveryResultsQuery.data, activeRunError)
       : null;
+  const validationEmptyState =
+    module.route === "udmi-validation" && resultRows.length === 0
+      ? udmiResultsEmptyState({
+          error: validationRunQuery.error,
+          hasRun: Boolean(activeRun),
+          loading: validationRunQuery.isLoading,
+          status: activeRunStatus,
+        })
+      : null;
 
   // Honest headline metrics: real numbers derived from the latest terminal run
   // (discovery, validation, or reports). When nothing has run there is no number
@@ -1389,6 +1518,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       (module.route === "udmi-validation" || module.route === "data-validation") &&
       isTerminalStatus(validationRunQuery.data?.status)
     ) {
+      if (module.route === "udmi-validation" && displayedValidationSummary) {
+        return {
+          primary: formatMetricPercent(
+            displayedValidationSummary.asset_metrics.successfully_validated,
+            displayedValidationSummary.asset_metrics.expected,
+          ),
+          primaryLabel: "overall compliance",
+          secondary: formatMetricCount(displayedValidationSummary.issue_metrics.blocking),
+          secondaryLabel: "blocking issues",
+        };
+      }
       const derived = validationMetrics(module.route, validationRunQuery.data?.result_summary);
       if (derived) {
         return derived;
@@ -1405,7 +1545,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       };
     }
     return null;
-  }, [liveMetrics, module.route, validationRunQuery.data, reportsQuery.isLoading, reportsQuery.data]);
+  }, [
+    liveMetrics,
+    module.route,
+    validationRunQuery.data,
+    displayedValidationSummary,
+    reportsQuery.isLoading,
+    reportsQuery.data,
+  ]);
 
   const activeStatusClass = activeRunStatus ? toHealthState(activeRunStatus) : "queued";
   // Mid-run device progress for the monitor (BACnet enrichment writes it into
@@ -1417,15 +1564,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // viewer/reviewer monitoring a run never sees a button that would 403.
   const canCancel =
     canEngineer && Boolean(activeRun) && Boolean(activeRunStatus) && !activeRunTerminal;
+  const canDownloadValidationJson =
+    activeRun?.kind === "validation" &&
+    validationRunQuery.data?.job_type === "udmi_validation" &&
+    isTerminalStatus(validationRunQuery.data.status);
 
-  // Export wiring: a report download fits the reports module (uses the last
-  // queued report). Elsewhere there is no per-run results download endpoint, so
-  // the button is disabled with an explanatory tooltip rather than faked.
+  // Export wiring: report downloads use the generated artifact endpoint. A
+  // terminal UDMI run can also download its persisted, versioned JSON evidence.
   const exportReport = module.route === "reports" ? lastReport : null;
-  const exportEnabled = Boolean(exportReport);
-  const exportTooltip = exportEnabled
-    ? `Download ${exportReport?.file_name ?? "report"}`
-    : "Generate a report first to enable a real download. Discovery/validation results have no per-run file export endpoint yet.";
+  const exportEnabled = Boolean(exportReport) || canDownloadValidationJson;
+  const exportTooltip = canDownloadValidationJson
+    ? "Download the stored validation evidence as versioned JSON."
+    : exportReport
+      ? `Download ${exportReport.file_name ?? "report"}`
+      : "Generate a report first to enable a real download.";
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSelectedFile(event.target.files?.[0] ?? null);
@@ -1487,6 +1639,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   };
 
   const handleExport = () => {
+    if (canDownloadValidationJson) {
+      handleValidationJsonDownload();
+      return;
+    }
     if (!exportReport) {
       return;
     }
@@ -1541,9 +1697,27 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // "Generate report from this run" affordance shown on a terminal validation/
   // discovery run (mqautz9j). Scopes the report to the originating run id via
   // source_run_ids so the report traces back to it.
-  const handleGenerateReportFromRun = () => {
+  const handleGenerateReportFromRun = (opener: HTMLButtonElement) => {
     const runId = activeRun?.runId;
     if (!runId) {
+      return;
+    }
+    reportDialogOpenerRef.current = opener;
+    setReportTitle(defaultReportTitle(activeRunRecord));
+    reportFromRunMutation.reset();
+    setReportDialogOpen(true);
+  };
+
+  const closeReportDialog = () => {
+    setReportDialogOpen(false);
+    window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
+  };
+
+  const handleReportDialogSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const runId = activeRun?.runId;
+    const title = reportTitle.trim();
+    if (!runId || !title || title.length > 160) {
       return;
     }
     const reportType: ReportType =
@@ -1553,8 +1727,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             : module.route === "bacnet-discovery"
               ? "bacnet_discovery"
               : "mqtt_discovery") as ReportType)
-        : "issue_report";
-    reportFromRunMutation.mutate({ reportType, runId });
+        : validationRunQuery.data?.job_type === "udmi_validation"
+          ? "udmi_validation"
+          : "issue_report";
+    reportFromRunMutation.mutate({ reportTitle: title, reportType, runId });
+  };
+
+  const handleValidationJsonDownload = () => {
+    const run = validationRunQuery.data;
+    if (!run || run.job_type !== "udmi_validation" || !isTerminalStatus(run.status)) {
+      return;
+    }
+    void validationJsonDownload.download(
+      "validation-json",
+      getValidationJsonExportPath(run.run_id),
+      `udmi-validation-${run.run_id}.json`,
+    );
   };
 
   // Latest payload per topic for the MQTT Explorer-like capture (mq9nhbzu),
@@ -2164,6 +2352,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     {cancelMutation.isPending ? "Stopping..." : "Stop run"}
                   </button>
                 )}
+                {canDownloadValidationJson && (
+                  <button
+                    className="secondary-button compact"
+                    disabled={validationJsonDownload.pendingKey !== null}
+                    onClick={handleValidationJsonDownload}
+                    type="button"
+                  >
+                    {validationJsonDownload.pendingKey === "validation-json"
+                      ? "Downloading JSON..."
+                      : "Download raw JSON"}
+                  </button>
+                )}
                 {canEngineer &&
                   activeRun.kind === "validation" &&
                   validationRunQuery.data?.job_type === "mqtt_config_publish" &&
@@ -2199,6 +2399,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               )}
               {reportFromRunMutation.isError && (
                 <span className="error-text">{reportFromRunMutation.error.message}</span>
+              )}
+              {validationJsonDownload.error && (
+                <span className="error-text">Raw JSON download failed: {validationJsonDownload.error}</span>
               )}
 
               {cancelMutation.isError && (
@@ -3052,12 +3255,67 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </section>
       )}
 
-      {/* The inspector sits beside the table (two-col wide-left) only on
-          udmi-validation, where it carries live findings/compare content. On the
-          discovery/data-validation routes it holds a static empty-state note, so
-          keep the table full-width (single column) there. */}
+      {isUdmiValidation && activeRun?.kind === "validation" && (
+        <section className="udmi-summary-shell" data-stepgroup="results">
+          {validationRunQuery.isError ? (
+            <div className="state-panel error" role="alert">
+              <strong>Could not load validation results</strong>
+              <span>
+                {validationRunQuery.error instanceof Error
+                  ? validationRunQuery.error.message
+                  : "The validation snapshot request failed."}
+              </span>
+            </div>
+          ) : !activeRunTerminal ? (
+            <div className="state-panel" role="status">
+              <strong>Validation in progress</strong>
+              <span>
+                Provisional results below update as payloads arrive. Counts can change until the
+                capture finishes; raw JSON and reports remain unavailable until then.
+              </span>
+            </div>
+          ) : activeRunStatus === "cancelled" ? (
+            <div className="state-panel warning" role="status">
+              <strong>{hasPersistedValidationEvidence ? "Partial results from a cancelled run" : "Run cancelled"}</strong>
+              <span>
+                {hasPersistedValidationEvidence
+                  ? "Only evidence collected before cancellation is included."
+                  : "No validation evidence was stored for this run."}
+              </span>
+            </div>
+          ) : activeRunStatus === "failed" ? (
+            <div className="state-panel error" role="alert">
+              <strong>{hasPersistedValidationEvidence ? "Partial results from a failed run" : "Validation failed"}</strong>
+              <span>
+                {hasPersistedValidationEvidence
+                  ? "Stored evidence remains available, but this is not a complete validation."
+                  : activeRunError ?? "No validation evidence was stored for this run."}
+              </span>
+            </div>
+          ) : null}
+
+          {displayedValidationSummary ? (
+            <UdmiSummaryPanel
+              filtered={summaryFiltersActive}
+              lastRunAt={validationRunQuery.data?.updated_at}
+              provisional={!activeRunTerminal}
+              summary={displayedValidationSummary}
+              topicFiltered={resultsTopicContainsFilter.trim() !== ""}
+            />
+          ) : activeRunTerminal && !validationRunQuery.isLoading ? (
+            <div className="empty-workspace">
+              <strong>No summary metrics available</strong>
+              <span>This legacy or empty run has no metric snapshot to display.</span>
+            </div>
+          ) : null}
+        </section>
+      )}
+
+      {/* Keep the results table full-width. The inspector follows below it so a
+          long topic or payload value never has to compete with a narrow side
+          column, and the selected evidence remains readable at normal zoom. */}
       <section
-        className={`app-grid${isUdmiValidation ? " two-col wide-left" : ""}`}
+        className="app-grid"
         data-stepgroup="results"
       >
         <article className="surface">
@@ -3068,12 +3326,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </div>
             <button
               className="secondary-button compact"
-              disabled={!exportEnabled || exportDownload.pendingKey !== null}
+              disabled={
+                !exportEnabled ||
+                exportDownload.pendingKey !== null ||
+                validationJsonDownload.pendingKey !== null
+              }
               onClick={handleExport}
               title={exportTooltip}
               type="button"
             >
-              {exportDownload.pendingKey === "export" ? "Exporting..." : "Export"}
+              {validationJsonDownload.pendingKey === "validation-json"
+                ? "Downloading JSON..."
+                : exportDownload.pendingKey === "export"
+                  ? "Exporting..."
+                  : canDownloadValidationJson
+                    ? "Download raw JSON"
+                    : "Export"}
             </button>
           </div>
 
@@ -3106,11 +3374,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
                 )
               ) : (
-                `Live validation results — per-asset payload checks from the latest run. Observed payloads were ${
+                `${activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
                   payloadViewSource === "live_capture"
                     ? "captured from the MQTT broker"
                     : "supplied directly (pasted), not captured from a broker"
-                }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}`
+                }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}${
+                  activeRunTerminal ? "" : " Verdicts remain pending until the run finishes."
+                }`
               )}
             </div>
           )}
@@ -3123,7 +3393,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <div className="sample-banner" role="note">
                 {bacnetBackend.text}
               </div>
-            ))}
+             ))}
+
+          {validationJsonDownload.error && (
+            <div className="state-panel error" role="alert">
+              <strong>Raw JSON download failed</strong>
+              <span>{validationJsonDownload.error}</span>
+            </div>
+          )}
 
           {resultRows.length > 0 && (
             <div className="results-filter-bar">
@@ -3152,45 +3429,40 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ))}
                 </select>
               </label>
-              {/* Facet filters (ITEM-10): asset-type, seen, and online/offline
-                  are asset-level claims, so they show on the udmi-validation
-                  route only, where each row maps to a real asset with facts. */}
+              {/* System is register-backed; observation describes only this run. */}
               {isUdmiValidation && (
                 <>
+                  <label className="results-filter-text results-topic-filter">
+                    Topic contains
+                    <input
+                      onChange={(event) => setResultsTopicContainsFilter(event.target.value)}
+                      placeholder="HV/SEC or HV/SEC/02"
+                      value={resultsTopicContainsFilter}
+                    />
+                  </label>
                   <label className="results-filter-facet">
-                    Asset type
+                    System
                     <select
-                      onChange={(event) => setResultsAssetTypeFilter(event.target.value)}
-                      value={resultsAssetTypeFilter}
+                      onChange={(event) => setResultsSystemFilter(event.target.value)}
+                      value={resultsSystemFilter}
                     >
-                      <option value="all">All types</option>
-                      {assetTypeOptions.map((type) => (
-                        <option key={type} value={type}>
-                          {type}
+                      <option value="all">All systems</option>
+                      {systemOptions.map((system) => (
+                        <option key={system} value={system}>
+                          {system}
                         </option>
                       ))}
                     </select>
                   </label>
                   <label className="results-filter-facet">
-                    Seen
+                    Observation
                     <select
-                      onChange={(event) => setResultsSeenFilter(event.target.value)}
-                      value={resultsSeenFilter}
+                      onChange={(event) => setResultsObservationFilter(event.target.value)}
+                      value={resultsObservationFilter}
                     >
-                      <option value="all">Seen or not</option>
-                      <option value="seen">Payload observed</option>
-                      <option value="not-seen">Not observed</option>
-                    </select>
-                  </label>
-                  <label className="results-filter-facet">
-                    State
-                    <select
-                      onChange={(event) => setResultsStateFilter(event.target.value)}
-                      value={resultsStateFilter}
-                    >
-                      <option value="all">Any state</option>
-                      <option value="online">Online (published this run)</option>
-                      <option value="offline">Offline (did not publish)</option>
+                      <option value="all">Observed or not observed</option>
+                      <option value="observed">Observed this run</option>
+                      <option value="not-observed">Not observed this run</option>
                     </select>
                   </label>
                 </>
@@ -3207,10 +3479,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   className="secondary-button compact"
                   onClick={() => {
                     setResultsTextFilter("");
+                    setResultsTopicContainsFilter("");
                     setResultsToneFilter("all");
-                    setResultsAssetTypeFilter("all");
-                    setResultsSeenFilter("all");
-                    setResultsStateFilter("all");
+                    setResultsSystemFilter("all");
+                    setResultsObservationFilter("all");
                   }}
                   type="button"
                 >
@@ -3224,14 +3496,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             {resultRows.length === 0 ? (
               <div className="empty-workspace">
                 <strong>
-                  {discoveryEmptyState
+                  {validationEmptyState
+                    ? validationEmptyState.title
+                    : discoveryEmptyState
                     ? discoveryEmptyState.title
                     : isDiscoveryModule && activeRun && !activeRunTerminal
                       ? "Run in progress..."
                       : "No results yet"}
                 </strong>
                 <span>
-                  {discoveryEmptyState
+                  {validationEmptyState
+                    ? validationEmptyState.detail
+                    : discoveryEmptyState
                     ? discoveryEmptyState.detail
                     : isDiscoveryModule
                       ? "Run a discovery; observed devices, points, or topics appear here once it completes."
@@ -3369,14 +3645,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           : "No payload content for this run (fixture summary only); expand an asset for issue detail per payload type."}
                     </p>
                   )}
-                  {(visibleAssetGroups ?? []).length === 0 && facetFilterActive && (
-                    // A claim about the FILTER, never the scan (ISSUE-4 pattern).
+                  {!selectedInspectorAssetGroup && (
                     <div className="empty-workspace">
-                      <strong>No assets match the current filters</strong>
-                      <span>Adjust or clear the filters to see the captured assets.</span>
+                      <strong>
+                        {visibleResultRows.length === 0 && isResultsFilterActive
+                          ? "No asset selected in the filtered results"
+                          : "No asset selected"}
+                      </strong>
+                      <span>
+                        {visibleResultRows.length === 0 && isResultsFilterActive
+                          ? "Adjust or clear the filters, then select a result row to inspect its evidence."
+                          : "Select an expanded result row above to inspect that asset's payload evidence."}
+                      </span>
                     </div>
                   )}
-                  {(visibleAssetGroups ?? []).map((group) => {
+                  {selectedInspectorAssetGroup && [selectedInspectorAssetGroup].map((group) => {
                     const isOpen = expandedAsset === group.assetId;
                     const typeSummary = group.payloadTypes
                       .map((entry) => {
@@ -3416,7 +3699,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               const sectionVerdict = gatedUdmiVerdict(
                                 entry.issues,
                                 entry.observedPresent,
-                                offlineAssets.has(group.assetId),
+                                notObservedAssets.has(group.assetId),
                               );
                               const sectionTone = udmiVerdictTone(sectionVerdict.verdict);
                               return (
@@ -3441,7 +3724,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                         : sectionVerdict.verdict === "pass-notes"
                                           ? "PASS WITH NOTES — minor issues below"
                                           : sectionVerdict.verdict === "offline"
-                                            ? "OFFLINE — device did not publish during the capture window"
+                                            ? "NOT OBSERVED THIS RUN — no payload arrived during the capture window"
                                             : "NON-COMPLIANT — please see details below"}
                                     </p>
                                   )}
@@ -3581,6 +3864,62 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           )}
         </section>
       )}
+      {reportDialogOpen && (
+        <dialog
+          aria-describedby="report-title-help"
+          aria-labelledby="report-title-heading"
+          className="report-title-dialog"
+          onCancel={(event) => {
+            event.preventDefault();
+            closeReportDialog();
+          }}
+          ref={reportDialogRef}
+        >
+          <form onSubmit={handleReportDialogSubmit}>
+            <div className="report-title-dialog-heading">
+              <span className="eyebrow">Report details</span>
+              <h3 id="report-title-heading">Name this validation report</h3>
+              <p id="report-title-help">
+                Use a title that identifies the site, systems, or capture window. It will appear at
+                the top of the generated {reportExportFormat.toUpperCase()} report.
+              </p>
+            </div>
+            <label>
+              Report title
+              <input
+                maxLength={160}
+                onChange={(event) => setReportTitle(event.target.value)}
+                ref={reportTitleInputRef}
+                required
+                value={reportTitle}
+              />
+            </label>
+            <small>{reportTitle.length}/160 characters</small>
+            {reportFromRunMutation.isError && (
+              <span className="error-text" role="alert">
+                {reportFromRunMutation.error.message}
+              </span>
+            )}
+            <div className="inline-actions report-title-dialog-actions">
+              <button
+                className="secondary-button compact"
+                disabled={reportFromRunMutation.isPending}
+                onClick={closeReportDialog}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="primary-button compact"
+                disabled={reportFromRunMutation.isPending || reportTitle.trim().length === 0}
+                type="submit"
+              >
+                {reportFromRunMutation.isPending ? "Generating..." : "Generate report"}
+              </button>
+            </div>
+          </form>
+        </dialog>
+      )}
       </div>
     </div>
   );
@@ -3644,7 +3983,7 @@ function ReportFromRunControls({
 }: {
   format: ReportFormat;
   onFormatChange: (next: ReportFormat) => void;
-  onGenerate: () => void;
+  onGenerate: (opener: HTMLButtonElement) => void;
   pending: boolean;
 }) {
   return (
@@ -3665,7 +4004,7 @@ function ReportFromRunControls({
       <button
         className="secondary-button compact"
         disabled={pending}
-        onClick={onGenerate}
+        onClick={(event) => onGenerate(event.currentTarget)}
         title="Generate a report for this run type, then find it in the Reports tab."
         type="button"
       >
@@ -3673,6 +4012,464 @@ function ReportFromRunControls({
       </button>
     </>
   );
+}
+
+type UdmiSummaryDisplay = UdmiValidationSummaryV1;
+
+type SummaryMetric = {
+  label: string;
+  value: number;
+};
+
+function hasNumericFields(value: unknown, fields: string[]): boolean {
+  return (
+    isRecord(value) &&
+    fields.every((field) => typeof value[field] === "number" && Number.isFinite(value[field]))
+  );
+}
+
+function readValidationSummary(
+  resultSummary: Record<string, unknown> | undefined,
+): UdmiValidationSummaryV1 | null {
+  const candidate = resultSummary?.validation_summary_v1;
+  if (!isRecord(candidate) || candidate.schema_version !== "1.0") {
+    return null;
+  }
+  const valid =
+    hasNumericFields(candidate.asset_metrics, [
+      "expected",
+      "observed",
+      "not_observed",
+      "with_issues",
+      "successfully_validated",
+    ]) &&
+    hasNumericFields(candidate.payload_metrics, [
+      "expected",
+      "received",
+      "with_issues",
+      "successfully_validated",
+    ]) &&
+    hasNumericFields(candidate.fault_metrics, [
+      "payload_formatting_issues",
+      "missing_points",
+      "point_naming_issues",
+      "additional_points",
+      "stale_or_cadence",
+      "other_issues",
+    ]) &&
+    hasNumericFields(candidate.issue_metrics, ["blocking", "warning"]) &&
+    Array.isArray(candidate.system_metrics) &&
+    Array.isArray(candidate.asset_results) &&
+    Array.isArray(candidate.fault_rows);
+  return valid ? (candidate as unknown as UdmiValidationSummaryV1) : null;
+}
+
+function buildValidationSummaryDisplay(
+  summary: UdmiValidationSummaryV1 | null,
+): UdmiSummaryDisplay | null {
+  return summary;
+}
+
+function formatMetricCount(value: number): string {
+  return value.toLocaleString();
+}
+
+function formatMetricPercent(successful: number, expected: number): string {
+  if (expected === 0) {
+    return "N/A";
+  }
+  return `${Math.round((successful / expected) * 100)}%`;
+}
+
+type SummaryAssetResult = UdmiValidationSummaryV1["asset_results"][number];
+type SummaryFaultRow = UdmiValidationSummaryV1["fault_rows"][number];
+
+function summaryMetricsForAssets(
+  assets: SummaryAssetResult[],
+  faults: SummaryFaultRow[],
+  scopeIssuesToFaults: boolean,
+) {
+  const payloads = assets.flatMap((asset) => asset.payload_results);
+  const expectedPayloads = payloads.filter((payload) => payload.expected);
+  const faultMetrics = {
+    payload_formatting_issues: 0,
+    missing_points: 0,
+    point_naming_issues: 0,
+    additional_points: 0,
+    stale_or_cadence: 0,
+    other_issues: 0,
+  };
+  for (const fault of faults) {
+    const category = fault.category.toLocaleLowerCase();
+    if (category.includes("missing") && category.includes("point")) {
+      faultMetrics.missing_points += 1;
+    } else if (category.includes("naming") || category.includes("point_name")) {
+      faultMetrics.point_naming_issues += 1;
+    } else if (
+      category.includes("additional") ||
+      category.includes("extra_point") ||
+      category.includes("unexpected_point")
+    ) {
+      faultMetrics.additional_points += 1;
+    } else if (
+      category.includes("stale") ||
+      category.includes("cadence") ||
+      category.includes("reporting_interval")
+    ) {
+      faultMetrics.stale_or_cadence += 1;
+    } else if (category.includes("format") || category.includes("schema")) {
+      faultMetrics.payload_formatting_issues += 1;
+    } else {
+      faultMetrics.other_issues += 1;
+    }
+  }
+  const blocking = scopeIssuesToFaults
+    ? faults.filter((fault) => ["critical", "high", "blocking"].includes(fault.severity.toLocaleLowerCase())).length
+    : assets.reduce((total, asset) => total + asset.blocking_issue_count, 0);
+  const issueCount = scopeIssuesToFaults
+    ? faults.length
+    : assets.reduce((total, asset) => total + asset.issue_count, 0);
+  return {
+    asset_metrics: {
+      expected: assets.length,
+      observed: assets.filter((asset) => asset.observed).length,
+      not_observed: assets.filter((asset) => !asset.observed).length,
+      with_issues: assets.filter((asset) => asset.issue_count > 0).length,
+      successfully_validated: assets.filter((asset) => asset.successfully_validated).length,
+    },
+    payload_metrics: {
+      expected: expectedPayloads.length,
+      received: expectedPayloads.filter((payload) => payload.received).length,
+      with_issues: expectedPayloads.filter((payload) => payload.has_issues).length,
+      successfully_validated: expectedPayloads.filter((payload) => payload.successfully_validated).length,
+    },
+    fault_metrics: faultMetrics,
+    issue_metrics: {
+      blocking,
+      warning: Math.max(0, issueCount - blocking),
+    },
+  };
+}
+
+function filterValidationSummary(
+  summary: UdmiSummaryDisplay | null,
+  filter: { observation: string; system: string; topicContains: string },
+): UdmiSummaryDisplay | null {
+  if (!summary) {
+    return null;
+  }
+  const topicNeedle = filter.topicContains.trim().toLocaleLowerCase();
+  if (filter.system === "all" && filter.observation === "all" && !topicNeedle) {
+    return summary;
+  }
+
+  const assets = summary.asset_results.flatMap((asset) => {
+    if (filter.system !== "all" && asset.system !== filter.system) {
+      return [];
+    }
+    if (filter.observation === "observed" && !asset.observed) {
+      return [];
+    }
+    if (filter.observation === "not-observed" && asset.observed) {
+      return [];
+    }
+    const payloadResults = topicNeedle
+      ? asset.payload_results.filter((payload) =>
+          (payload.topic ?? "").toLocaleLowerCase().includes(topicNeedle),
+        )
+      : asset.payload_results;
+    return payloadResults.length > 0 ? [{ ...asset, payload_results: payloadResults }] : [];
+  });
+  const assetIds = new Set(assets.map((asset) => asset.asset_id));
+  const payloadKeys = new Set(
+    assets.flatMap((asset) =>
+      asset.payload_results.map((payload) => `${asset.asset_id}\u0000${payload.payload_type}`),
+    ),
+  );
+  const faultRows = summary.fault_rows.filter((fault) => {
+    if (!fault.asset_id || !assetIds.has(fault.asset_id)) {
+      return false;
+    }
+    return !topicNeedle || !fault.payload_type || payloadKeys.has(`${fault.asset_id}\u0000${fault.payload_type}`);
+  });
+  const overall = summaryMetricsForAssets(assets, faultRows, Boolean(topicNeedle));
+  const systems = Array.from(new Set(assets.map((asset) => asset.system || "Unspecified"))).sort();
+  const systemMetrics = systems.map((system) => {
+    const systemAssets = assets.filter((asset) => (asset.system || "Unspecified") === system);
+    const systemAssetIds = new Set(systemAssets.map((asset) => asset.asset_id));
+    const systemFaults = faultRows.filter(
+      (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
+    );
+    return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, Boolean(topicNeedle)) };
+  });
+  return {
+    ...summary,
+    ...overall,
+    asset_results: assets,
+    fault_rows: faultRows,
+    system_metrics: systemMetrics,
+  };
+}
+
+function SummaryMetricGroup({ metrics, title }: { metrics: SummaryMetric[]; title: string }) {
+  return (
+    <section className="udmi-metric-group">
+      <h4>{title}</h4>
+      <dl>
+        {metrics.map((metric) => (
+          <div key={metric.label}>
+            <dt>{metric.label}</dt>
+            <dd>{formatMetricCount(metric.value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
+function PayloadMetricGroup({ summary }: { summary: UdmiSummaryDisplay }) {
+  const metrics: SummaryMetric[] = [
+    { label: "Expected payloads", value: summary.payload_metrics.expected },
+    { label: "Received payloads", value: summary.payload_metrics.received },
+    { label: "Payloads with issues", value: summary.payload_metrics.with_issues },
+    { label: "Successfully validated", value: summary.payload_metrics.successfully_validated },
+  ];
+  const expected = summary.payload_metrics.expected;
+  const correct = summary.payload_metrics.successfully_validated;
+  const incorrect = Math.max(0, expected - correct);
+  return (
+    <section className="udmi-metric-group">
+      <h4>Payload metrics</h4>
+      <dl>
+        {metrics.map((metric) => (
+          <div key={metric.label}>
+            <dt>{metric.label}</dt>
+            <dd>{formatMetricCount(metric.value)}</dd>
+          </div>
+        ))}
+      </dl>
+      <dl className="udmi-payload-rates">
+        <div>
+          <dt>Payloads correct</dt>
+          <dd>{formatMetricPercent(correct, expected)}</dd>
+          <small>
+            {formatMetricCount(correct)} / {formatMetricCount(expected)} expected
+          </small>
+        </div>
+        <div>
+          <dt>Payloads incorrect</dt>
+          <dd>{formatMetricPercent(incorrect, expected)}</dd>
+          <small>
+            {formatMetricCount(incorrect)} / {formatMetricCount(expected)} expected
+          </small>
+        </div>
+      </dl>
+      <p className="udmi-metric-basis">
+        Expected payloads are the denominator. Unexpected received payloads are excluded.
+      </p>
+    </section>
+  );
+}
+
+function UdmiSummaryPanel({
+  filtered,
+  lastRunAt,
+  provisional,
+  summary,
+  topicFiltered,
+}: {
+  filtered: boolean;
+  lastRunAt: string | undefined;
+  provisional: boolean;
+  summary: UdmiSummaryDisplay;
+  topicFiltered: boolean;
+}) {
+  const assets: SummaryMetric[] = [
+    { label: "Expected assets", value: summary.asset_metrics.expected },
+    { label: "Observed assets", value: summary.asset_metrics.observed },
+    { label: "Not observed", value: summary.asset_metrics.not_observed },
+    { label: "Assets with issues", value: summary.asset_metrics.with_issues },
+    { label: "Successfully validated", value: summary.asset_metrics.successfully_validated },
+  ];
+  const faults: SummaryMetric[] = [
+    { label: "Payload formatting", value: summary.fault_metrics.payload_formatting_issues },
+    { label: "Missing points", value: summary.fault_metrics.missing_points },
+    { label: "Point naming", value: summary.fault_metrics.point_naming_issues },
+    { label: "Additional points", value: summary.fault_metrics.additional_points },
+    { label: "Cadence or stale", value: summary.fault_metrics.stale_or_cadence },
+    { label: "Other issues", value: summary.fault_metrics.other_issues },
+  ];
+
+  return (
+    <article className="surface udmi-summary" aria-labelledby="udmi-summary-heading">
+      <div className="surface-heading udmi-summary-heading">
+        <div>
+          <h3 id="udmi-summary-heading">
+            {provisional ? "Provisional validation summary" : "Validation summary"}
+          </h3>
+          {topicFiltered ? (
+            <p className="section-copy">
+              Asset counts show the selected assets. Asset issues and compliance remain whole-asset;
+              payload and fault metrics follow the Topic contains filter.
+            </p>
+          ) : filtered ? (
+            <p className="section-copy">Metrics reflect the active System and observation filters.</p>
+          ) : null}
+        </div>
+        <dl className="udmi-summary-run-meta">
+          <div>
+            <dt>Overall compliance</dt>
+            <dd>
+              {formatMetricPercent(
+                summary.asset_metrics.successfully_validated,
+                summary.asset_metrics.expected,
+              )}{" "}
+              <span>
+                ({formatMetricCount(summary.asset_metrics.successfully_validated)} /{" "}
+                {formatMetricCount(summary.asset_metrics.expected)} assets)
+              </span>
+            </dd>
+          </div>
+          <div>
+            <dt>{provisional ? "Snapshot updated" : "Last validation run"}</dt>
+            <dd>{lastRunAt ? formatAbsoluteTime(lastRunAt) : "Not recorded"}</dd>
+          </div>
+          <div>
+            <dt>Blocking / warning</dt>
+            <dd>
+              {formatMetricCount(summary.issue_metrics.blocking)} / {formatMetricCount(summary.issue_metrics.warning)}
+            </dd>
+          </div>
+        </dl>
+      </div>
+
+      <div className="udmi-metric-groups">
+        <SummaryMetricGroup metrics={assets} title="Asset metrics" />
+        <PayloadMetricGroup summary={summary} />
+        <SummaryMetricGroup metrics={faults} title="Fault metrics" />
+      </div>
+
+      <p className="udmi-metric-basis">
+        <strong>Unexpected devices: Not measured.</strong> Validation subscribes to expected register
+        topics; run MQTT discovery to measure publishers that are absent from the register.
+      </p>
+
+      <section className="udmi-system-summary" aria-labelledby="udmi-system-summary-heading">
+        <div>
+          <h4 id="udmi-system-summary-heading">Completion by system</h4>
+          <p>Successfully validated assets divided by expected assets from the register.</p>
+        </div>
+        {summary.system_metrics.length > 0 ? (
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>System</th>
+                  <th>Completion</th>
+                  <th>Observed</th>
+                  <th>Issues</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.system_metrics.map((system) => (
+                  <tr key={system.system}>
+                    <td>{system.system || "Unspecified"}</td>
+                    <td>
+                      <strong>
+                        {formatMetricPercent(
+                          system.asset_metrics.successfully_validated,
+                          system.asset_metrics.expected,
+                        )}
+                      </strong>{" "}
+                      <span>
+                        ({formatMetricCount(system.asset_metrics.successfully_validated)} /{" "}
+                        {formatMetricCount(system.asset_metrics.expected)} assets)
+                      </span>
+                    </td>
+                    <td>
+                      {formatMetricCount(system.asset_metrics.observed)} /{" "}
+                      {formatMetricCount(system.asset_metrics.expected)}
+                    </td>
+                    <td>
+                      {formatMetricCount(system.issue_metrics.blocking)} blocking,{" "}
+                      {formatMetricCount(system.issue_metrics.warning)} warning
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="section-copy">No system values were stored for this run.</p>
+        )}
+      </section>
+    </article>
+  );
+}
+
+function defaultReportTitle(
+  run: { created_at?: string; job_type?: string; site_id?: string } | null | undefined,
+): string {
+  const label =
+    run?.job_type === "udmi_validation"
+      ? "UDMI Validation Report"
+      : run?.job_type?.includes("discovery")
+        ? "Discovery Report"
+        : "Commissioning Report";
+  const parsed = run?.created_at ? new Date(run.created_at) : new Date();
+  const validDate = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  const date = new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(validDate);
+  const site = run?.site_id && run.site_id !== "demo-site" ? ` - ${run.site_id}` : "";
+  return `${label}${site} - ${date}`;
+}
+
+function udmiResultsEmptyState(input: {
+  error: unknown;
+  hasRun: boolean;
+  loading: boolean;
+  status: string | undefined;
+}): { title: string; detail: string } {
+  if (input.error) {
+    return {
+      title: "Could not load validation results",
+      detail: input.error instanceof Error ? input.error.message : "The validation request failed.",
+    };
+  }
+  if (!input.hasRun) {
+    return {
+      title: "No validation run yet",
+      detail: "Start a UDMI validation to populate asset, payload, and fault results.",
+    };
+  }
+  if (input.loading) {
+    return { title: "Loading validation results...", detail: "Fetching the stored run snapshot." };
+  }
+  if (input.status === "queued" || input.status === "running") {
+    return {
+      title: "Validation in progress...",
+      detail: "Result rows will appear as the run snapshot is updated.",
+    };
+  }
+  if (input.status === "failed") {
+    return {
+      title: "Validation failed with no result rows",
+      detail: "Check the run error above. Any stored summary evidence remains available for export.",
+    };
+  }
+  if (input.status === "cancelled") {
+    return {
+      title: "Validation was cancelled",
+      detail: "No payload rows were stored before the run stopped.",
+    };
+  }
+  return {
+    title: "Validation completed with no result rows",
+    detail: "The run finished, but its stored snapshot contains no asset or payload rows.",
+  };
 }
 
 function scanPortSpecification(ports: ScanPort[]): string {

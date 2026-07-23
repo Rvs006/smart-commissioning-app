@@ -1,12 +1,16 @@
+import logging
+import time
+from collections.abc import Callable
 from typing import Any
 
 from smart_commissioning_core.engines.base import make_cancel_checker
-from smart_commissioning_core.mqtt_settings import parse_capture_seconds
+from smart_commissioning_core.mqtt_settings import parse_bool, parse_capture_seconds
 from smart_commissioning_core.mqtt_transport import subscribe_and_capture
 from smart_commissioning_core.run_store import RunStore
 from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
     LiveCapture,
+    UdmiValidationResult,
     validate_udmi_full_report,
 )
 
@@ -24,6 +28,8 @@ _SANITIZED_FAILURE_MESSAGE = "UDMI validation failed; see server logs."
 # the same reason.
 _CAPTURE_COMPLETED_STATUSES = frozenset({"live_payloads_captured", "live_capture_timeout"})
 _SILENT_DEVICE_STAGE = "udmi_validation_complete_with_silent_devices"
+_PROGRESS_PERSIST_INTERVAL_SECONDS = 1.0
+_LOGGER = logging.getLogger(__name__)
 
 
 def process_udmi_validation_run(
@@ -72,9 +78,58 @@ def process_udmi_validation_run(
     if indefinite_requested and cancel_check is not None and not run_is_backgrounded:
         parameters["capture_seconds"] = DEFAULT_CAPTURE_SECONDS
     indefinite_bounded_inline = indefinite_requested and (cancel_check is None or not run_is_backgrounded)
+    last_progress_write: float | None = None
 
     try:
-        validation_result = validate_udmi_full_report(parameters, live_capture=live_capture, cancel_check=cancel_check)
+        if parse_bool(parameters.get("use_live_broker")):
+            run_store.update_run_status(
+                run_id,
+                status="running",
+                stage="capturing_live_mqtt",
+                progress_percent=25,
+            )
+
+        def persist_progress(
+            progress_factory: Callable[[], UdmiValidationResult],
+        ) -> None:
+            nonlocal last_progress_write
+            now = time.monotonic()
+            if (
+                last_progress_write is not None
+                and now - last_progress_write < _PROGRESS_PERSIST_INTERVAL_SECONDS
+            ):
+                return
+            # Advance the throttle before persistence so a temporarily failing
+            # store cannot turn a high-rate broker callback into a tight retry
+            # loop. The terminal snapshot below is always written unthrottled.
+            last_progress_write = now
+            try:
+                progress_result = progress_factory()
+                progress_summary = {
+                    **progress_result.result_summary,
+                    "execution_mode": execution_mode,
+                    "worker_required": execution_mode != "inline_local_fallback",
+                    "indefinite_bounded_inline": indefinite_bounded_inline,
+                }
+                if fallback_reason:
+                    progress_summary["fallback_reason"] = fallback_reason
+                run_store.update_result_summary(run_id, progress_summary, merge=False)
+                run_store.replace_issues(run_id, progress_result.issues)
+            except Exception as error:
+                # A progress write is observability, not validation evidence
+                # collection. Keep the MQTT capture alive and avoid logging the
+                # exception text, which may contain database or field data.
+                _LOGGER.warning(
+                    "UDMI progress snapshot update failed (%s); capture continues.",
+                    type(error).__name__,
+                )
+
+        validation_result = validate_udmi_full_report(
+            parameters,
+            live_capture=live_capture,
+            cancel_check=cancel_check,
+            progress_callback=persist_progress,
+        )
         result_summary = {
             **validation_result.result_summary,
             "execution_mode": execution_mode,

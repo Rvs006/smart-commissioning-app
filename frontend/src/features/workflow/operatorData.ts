@@ -107,6 +107,7 @@ export type MergedPayloadType = {
 
 export type MergedAssetGroup = {
   assetId: string;
+  system: string;
   issues: IssueRow[];
   payloadTypes: MergedPayloadType[];
 };
@@ -122,13 +123,13 @@ export function mergeAssetGroups(
   issueGroups: AssetIssueGroup[],
   payloadViews: UdmiAssetPayloadView[],
 ): MergedAssetGroup[] {
-  type Acc = { issues: IssueRow[]; types: Map<string, MergedPayloadType> };
+  type Acc = { issues: IssueRow[]; system: string; types: Map<string, MergedPayloadType> };
   const order: string[] = [];
   const byAsset = new Map<string, Acc>();
   const ensureAsset = (assetId: string): Acc => {
     let acc = byAsset.get(assetId);
     if (!acc) {
-      acc = { issues: [], types: new Map() };
+      acc = { issues: [], system: "Unspecified", types: new Map() };
       byAsset.set(assetId, acc);
       order.push(assetId);
     }
@@ -159,6 +160,10 @@ export function mergeAssetGroups(
   }
   for (const view of payloadViews) {
     const acc = ensureAsset(view.asset_id);
+    const system = view.system?.trim();
+    if (system) {
+      acc.system = system;
+    }
     for (const pt of view.payload_types) {
       const entry = ensureType(acc, pt.payload_type);
       entry.expected = pt.expected;
@@ -173,14 +178,14 @@ export function mergeAssetGroups(
     const payloadTypes = Array.from(acc.types.values()).sort(
       (a, b) => payloadTypeRank(a.payloadType) - payloadTypeRank(b.payloadType),
     );
-    return { assetId, issues: acc.issues, payloadTypes };
+    return { assetId, system: acc.system, issues: acc.issues, payloadTypes };
   });
 }
 
 // Single source of truth for the per-payload-type UDMI verdict, shared by the
 // results-table rows, the row "View" detail, and the per-asset payload sections
 // so the three surfaces can never disagree. RAG scheme per the 2026-07-15 field
-// ask: red = device offline / not publishing (only ever when a capture was
+// ask: red = expected asset not observed during the capture (only ever when a capture was
 // actually attempted), amber = publishing but not UDMI compliant (any severity,
 // no issue weighting), green = compliant and observed. "Not received" — no
 // capture evidence either way — stays neutral: no shade, no claim.
@@ -204,7 +209,7 @@ export function udmiPayloadVerdict(input: {
   // an actually-observed payload from ever being painted offline (honesty rule:
   // never render an observation the app did not make).
   if (assetOffline && !observedPresent) {
-    return { label: "Offline — did not publish", verdict: "offline" };
+    return { label: "Not observed this run", verdict: "offline" };
   }
   if (criticalCount > 0) {
     return {
@@ -240,7 +245,7 @@ export function udmiPayloadVerdict(input: {
 // Shading tone for a verdict under the RAG scheme: green (pass) for a compliant
 // observed payload; amber (warn) for a publishing-but-non-compliant payload —
 // both hard fails (critical/major) AND minor-only "Pass with notes"; red (fail)
-// for an offline / not-publishing device; null (no shade) for "Not received".
+// for an expected asset not observed during this run; null for "Not received".
 //
 // field engineer-pending (2026-07-15 field ask): the strict reading maps minor-only
 // "Pass with notes" to amber. If he wants minor-only to stay green instead,
@@ -277,76 +282,44 @@ export function udmiVerdictForIssues(
   });
 }
 
-// Inspector facet filters (ITEM-10): asset type, seen/not-seen, and
-// ONLINE/OFFLINE, composed on top of the existing text + verdict-tone results
-// filter. Every fact is derived HONESTLY from the same data the verdicts use, so
-// a filter can never claim more than the app actually observed.
+// Inspector facets use the register's System value and the observation made in
+// this run. They deliberately avoid inferring connection state from silence.
 export type AssetFacts = {
-  // Heuristic type from the asset-id prefix (the register carries no type field).
-  type: string;
-  // A payload was observed for this asset during the run.
-  seen: boolean;
-  // A capture attempt found this asset silent AND nothing was observed — mirrors
-  // udmiPayloadVerdict's offline gate exactly, so OFFLINE never paints a
-  // pasted-run asset red (honesty rule).
-  offline: boolean;
+  system: string;
+  observed: boolean;
 };
 
-// Leading-alpha prefix, uppercased (AHU-1000001 -> AHU, EM-... -> EM); "Other"
-// when the id has no alpha prefix. Heuristic: the register schema carries no
-// asset-type field, so the prefix is the only derivable type signal. If real
-// types are ever needed, the register import needs a type column — do not infer
-// more than the prefix here.
-export function assetTypePrefix(assetId: string): string {
-  const match = /^[A-Za-z]+/.exec(assetId.trim());
-  return match ? match[0].toUpperCase() : "Other";
-}
-
-export function buildAssetFacts(
-  groups: MergedAssetGroup[],
-  offlineAssets: ReadonlySet<string>,
-): Map<string, AssetFacts> {
+export function buildAssetFacts(groups: MergedAssetGroup[]): Map<string, AssetFacts> {
   const facts = new Map<string, AssetFacts>();
   for (const group of groups) {
-    const seen = group.payloadTypes.some((entry) => entry.observedPresent);
+    const observed = group.payloadTypes.some((entry) => entry.observedPresent);
     facts.set(group.assetId, {
-      type: assetTypePrefix(group.assetId),
-      seen,
-      offline: offlineAssets.has(group.assetId) && !seen,
+      system: group.system || "Unspecified",
+      observed,
     });
   }
   return facts;
 }
 
 export type AssetFacetFilter = {
-  type: string; // "all" or a type prefix
-  seen: string; // "all" | "seen" | "not-seen"
-  state: string; // "all" | "online" | "offline"
+  system: string; // "all" or a register System value
+  observation: string; // "all" | "observed" | "not-observed"
 };
 
-// Online = published during this run (seen); Offline = the offline-gated fact.
-// Assets that are NEITHER (pasted runs, no capture attempted) match only "all",
-// so the UI never makes an online/offline claim the engine never made.
 export function assetMatchesFacetFilter(
   facts: AssetFacts | undefined,
   filter: AssetFacetFilter,
 ): boolean {
   if (!facts) {
-    return filter.type === "all" && filter.seen === "all" && filter.state === "all";
+    return filter.system === "all" && filter.observation === "all";
   }
-  if (filter.type !== "all" && facts.type !== filter.type) {
+  if (filter.system !== "all" && facts.system !== filter.system) {
     return false;
   }
-  if (filter.seen === "seen" && !facts.seen) {
+  if (filter.observation === "observed" && !facts.observed) {
     return false;
   }
-  if (filter.seen === "not-seen" && facts.seen) {
-    return false;
-  }
-  if (filter.state === "online" && !facts.seen) {
-    return false;
-  }
-  if (filter.state === "offline" && !facts.offline) {
+  if (filter.observation === "not-observed" && facts.observed) {
     return false;
   }
   return true;
