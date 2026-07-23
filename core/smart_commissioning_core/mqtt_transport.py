@@ -593,6 +593,8 @@ def subscribe_and_capture(
     qos: int = 0,
     retain_latest: bool = False,
     on_message: Callable[[MqttMessage], None] | None = None,
+    primary_topics: list[str] | None = None,
+    secondary_max_messages: int | None = None,
 ) -> list[MqttMessage]:
     """Subscribe to ``topics`` and collect messages up to ``max_messages``.
 
@@ -616,10 +618,28 @@ def subscribe_and_capture(
     dedup, including a message that merely replaces an earlier one on the same
     topic. It lets a caller keep an honest per-topic total that the deduped
     return list can no longer show under retention.
+
+    ``primary_topics`` gives one class of retained topics a protected budget:
+    ``max_messages`` then applies only to distinct concrete topics matching
+    those filters. Non-matching topics retain at most
+    ``secondary_max_messages`` distinct entries and cannot end the capture or
+    consume a primary slot. This is used when an observational wildcard shares
+    a capture with expected validation topics. Passing ``None`` preserves the
+    historical single-budget behavior exactly.
     """
+    if primary_topics is not None and not primary_topics:
+        raise ValueError("primary_topics must contain at least one topic filter")
     messages: list[MqttMessage] = []
     topic_positions: dict[str, int] = {}
     expected_topics = set(topics)
+    partitioned_budget = primary_topics is not None
+    primary_filters = tuple(primary_topics or ())
+    secondary_limit = max(
+        0,
+        max_messages if secondary_max_messages is None else secondary_max_messages,
+    )
+    primary_retained = 0
+    secondary_retained = 0
     deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
     # Keepalive: ping at keep_alive/2 so a quiet broker does not drop a long /
     # indefinite capture (the loop is otherwise recv-only after SUBSCRIBE).
@@ -627,7 +647,7 @@ def subscribe_and_capture(
     last_ping = time.monotonic()
     with MqttClient(settings) as client:
         client.subscribe_many(topics, qos)
-        while len(messages) < max_messages:
+        while primary_retained < max_messages if partitioned_budget else len(messages) < max_messages:
             if cancel_check is not None and cancel_check():
                 break
             if ping_interval is not None and time.monotonic() - last_ping >= ping_interval:
@@ -659,18 +679,36 @@ def subscribe_and_capture(
             except (OSError, MqttTransportError) as error:
                 raise MqttCaptureInterrupted(messages, error) from error
             if message is not None:
+                is_primary = not partitioned_budget or any(
+                    _topic_matches_filter(message.topic, topic_filter)
+                    for topic_filter in primary_filters
+                )
+                existing_position = topic_positions.get(message.topic)
+                if (
+                    partitioned_budget
+                    and not is_primary
+                    and existing_position is None
+                    and secondary_retained >= secondary_limit
+                ):
+                    # The observational budget is full. Drop only this new
+                    # secondary topic and keep waiting for protected traffic.
+                    continue
                 if on_message is not None:
                     # Fires for every accepted message, including one that
                     # replaces a duplicate below — keeps per-topic counts honest.
                     on_message(message)
-                if stop_when is None and not retain_latest:
+                if stop_when is None and not retain_latest and not partitioned_budget:
                     messages.append(message)
-                elif message.topic in topic_positions:
-                    index = topic_positions[message.topic]
-                    messages[index] = message
+                elif existing_position is not None:
+                    messages[existing_position] = message
                 else:
                     topic_positions[message.topic] = len(messages)
                     messages.append(message)
+                    if partitioned_budget:
+                        if is_primary:
+                            primary_retained += 1
+                        else:
+                            secondary_retained += 1
                 if stop_when is not None and stop_when(messages):
                     break
             # No message this slice: keep looping (re-check cancel/deadline)

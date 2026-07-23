@@ -1434,19 +1434,50 @@ def _serialise_capture_message(message: MqttMessage) -> dict[str, object]:
 
 def _route_capture_messages_to_assets(
     entries: list[dict],
-    per_entry_topics: list[list[str]],
+    per_entry_subscribed_topics: list[list[str]],
+    per_entry_validation_topics: list[list[str]],
     messages: list[MqttMessage],
     *,
     observed_at: str,
 ) -> None:
     """Route the latest live evidence into every matching register asset."""
-    for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
+    for entry, subscribed_topics, validation_topics in zip(
+        entries,
+        per_entry_subscribed_topics,
+        per_entry_validation_topics,
+        strict=True,
+    ):
         entry["capture_observed_at"] = observed_at
-        entry["subscribed_topics"] = list(entry_topics)
+        entry["subscribed_topics"] = list(subscribed_topics)
+        publisher_root = _entry_publisher_root(entry, subscribed_topics)
+        diagnostic_messages = [
+            message
+            for message in messages
+            if any(
+                _topic_matches_filter(message.topic, topic)
+                for topic in subscribed_topics
+            )
+            and (
+                any(
+                    _topic_matches_filter(message.topic, topic)
+                    for topic in validation_topics
+                )
+                or (
+                    publisher_root is not None
+                    and _topic_within_publisher_root(message.topic, publisher_root)
+                )
+            )
+        ]
+        entry["observed_topics"] = list(
+            dict.fromkeys(message.topic for message in diagnostic_messages)
+        )
         entry_messages = [
             message
             for message in messages
-            if any(_topic_matches_filter(message.topic, topic) for topic in entry_topics)
+            if any(
+                _topic_matches_filter(message.topic, topic)
+                for topic in validation_topics
+            )
         ]
         entry["messages"] = [_serialise_capture_message(message) for message in entry_messages]
         _route_latest_payloads(entry, entry_messages)
@@ -1785,6 +1816,15 @@ def _capture_live_payloads_per_asset(
         for entry, entry_topics in zip(entries, per_entry_topics, strict=True)
     ]
     measurement_scope = _unexpected_measurement_scope(expected_publisher_roots)
+    per_entry_validation_topics = [
+        _capture_validation_topics(entry, entry_topics, publisher_root)
+        for entry, entry_topics, publisher_root in zip(
+            entries,
+            per_entry_topics,
+            expected_publisher_roots,
+            strict=True,
+        )
+    ]
     parameters["unexpected_devices"] = []
     parameters["unexpected_devices_measured"] = False
     parameters["unexpected_devices_measurement_scope"] = measurement_scope
@@ -1793,6 +1833,13 @@ def _capture_live_payloads_per_asset(
         for topic in entry_topics:
             if topic not in topics:
                 topics.append(topic)
+    validation_topics = list(
+        dict.fromkeys(
+            topic
+            for entry_topics in per_entry_validation_topics
+            for topic in entry_topics
+        )
+    )
     if measurement_scope and measurement_scope not in topics:
         # The measurement subscription is observational only. It never enters
         # ``groups`` below, so an absent unexpected publisher cannot block an
@@ -1814,26 +1861,37 @@ def _capture_live_payloads_per_asset(
         }
 
     groups: list[list[str]] = []
-    for entry_topics in per_entry_topics:
+    for entry_topics in per_entry_validation_topics:
         groups.extend(_capture_topic_groups(entry_topics))
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
     max_messages = parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES)
+    unexpected_max_messages = parse_int(
+        parameters.get("unexpected_max_messages"),
+        default=max_messages,
+    )
     parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
     capture_cancelled = False
     latest_progress_messages: dict[str, MqttMessage] = {}
+    latest_progress_validation_messages: dict[str, MqttMessage] = {}
     latest_progress_messages_by_entry: list[dict[str, MqttMessage]] = [
         {} for _ in entries
     ]
     exact_topic_routes: dict[str, set[int]] = {}
     wildcard_topic_routes: list[tuple[int, str]] = []
-    for entry_index, entry_topics in enumerate(per_entry_topics):
+    for entry_index, entry_topics in enumerate(per_entry_validation_topics):
         for topic_filter in entry_topics:
             if "+" in topic_filter or "#" in topic_filter:
                 wildcard_topic_routes.append((entry_index, topic_filter))
             else:
                 exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
     progress_message_count = 0
+
+    def matches_validation_topic(message: MqttMessage) -> bool:
+        return any(
+            _topic_matches_filter(message.topic, topic_filter)
+            for topic_filter in validation_topics
+        )
 
     def capture_cancel_check() -> bool:
         """Latch cancellation observed by the capture loop.
@@ -1850,9 +1908,14 @@ def _capture_live_payloads_per_asset(
 
     def on_message(message: MqttMessage) -> None:
         nonlocal progress_message_count
-        progress_message_count += 1
         latest_progress_messages[message.topic] = message
         progress_messages = list(latest_progress_messages.values())
+        if matches_validation_topic(message):
+            progress_message_count += 1
+            latest_progress_validation_messages[message.topic] = message
+        progress_validation_messages = list(
+            latest_progress_validation_messages.values()
+        )
         _measure_unexpected_publishers(
             parameters,
             progress_messages,
@@ -1884,7 +1947,7 @@ def _capture_live_payloads_per_asset(
             progress_callback(
                 lambda: _build_progressive_result(
                     parameters,
-                    progress_messages,
+                    progress_validation_messages,
                     capture_mode=capture_mode,
                     capture_window_seconds=timeout_seconds,
                     subscribed_topics=topics,
@@ -1903,18 +1966,34 @@ def _capture_live_payloads_per_asset(
             if measurement_scope and capture_mode != "indefinite"
             else expected_complete
         )
-        messages = live_capture(
-            build_mqtt_connection_settings(parameters),
-            topics=topics,
+        capture_options: dict[str, object] = {
+            "topics": topics,
             # timeout_seconds stays None in the summary (capture_mode "indefinite");
             # the transport gets the 48h backstop so an indefinite capture still
             # ends with its data rather than hanging on a never-publishing device.
-            timeout_seconds=timeout_seconds if timeout_seconds is not None else INDEFINITE_BACKSTOP_SECONDS,
-            max_messages=max_messages,
-            qos=parse_int(parameters.get("qos"), default=0),
-            cancel_check=capture_cancel_check if cancel_check is not None else None,
-            stop_when=stop_when,
-            on_message=on_message,
+            "timeout_seconds": (
+                timeout_seconds
+                if timeout_seconds is not None
+                else INDEFINITE_BACKSTOP_SECONDS
+            ),
+            "max_messages": max_messages,
+            "qos": parse_int(parameters.get("qos"), default=0),
+            "cancel_check": (
+                capture_cancel_check if cancel_check is not None else None
+            ),
+            "stop_when": stop_when,
+            "on_message": on_message,
+        }
+        if validation_topics:
+            # Reserve the configured cap for the concrete expected payload
+            # filters. Register wildcards and other observation-only traffic
+            # get a separate bounded budget, so neither sibling publishers nor
+            # unrelated topics beneath an expected root can consume a slot.
+            capture_options["primary_topics"] = validation_topics
+            capture_options["secondary_max_messages"] = unexpected_max_messages
+        messages = live_capture(
+            build_mqtt_connection_settings(parameters),
+            **capture_options,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
@@ -1933,11 +2012,26 @@ def _capture_live_payloads_per_asset(
 
     capture_observed_at = datetime.now(UTC).isoformat()
 
+    expected_messages = [
+        message
+        for message in messages
+        if matches_validation_topic(message)
+    ]
+    expected_topic_count = len({message.topic for message in expected_messages})
+    observation_topic_count = len(
+        {
+            message.topic
+            for message in messages
+            if not matches_validation_topic(message)
+        }
+    )
+
     # Route every message back to each entry whose subscribed topics match it,
     # mirroring the single-asset routing (last payload per slot wins).
     _route_capture_messages_to_assets(
         entries,
         per_entry_topics,
+        per_entry_validation_topics,
         messages,
         observed_at=capture_observed_at,
     )
@@ -1949,12 +2043,15 @@ def _capture_live_payloads_per_asset(
         measured=(
             capture_error_status is None
             and not capture_cancelled
-            and len(messages) < max_messages
+            and expected_topic_count < max_messages
+            and observation_topic_count < unexpected_max_messages
         ),
     )
 
-    valid_messages = _valid_payload_messages(messages)
-    valid_topics = _ordered_valid_payload_topics(messages)
+    # Measurement-only wildcard traffic must never become a validation issue.
+    # It is retained solely for the separate unexpected-device summary above.
+    valid_messages = _valid_payload_messages(expected_messages)
+    valid_topics = _ordered_valid_payload_topics(expected_messages)
     missing = _unseen_groups(groups, {message.topic for message in valid_messages})
     if capture_error_status:
         return {
@@ -1980,10 +2077,10 @@ def _capture_live_payloads_per_asset(
         else (
             _invalid_payload_issue(
                 asset_id=None,
-                messages=messages,
+                messages=expected_messages,
                 missing=missing,
             )
-            if len(valid_messages) != len(messages)
+            if len(valid_messages) != len(expected_messages)
             else _missing_topics_issue(
                 asset_id=None,
                 missing=missing,
@@ -2013,6 +2110,42 @@ def _capture_topics(parameters: dict[str, object]) -> list[str]:
         if topic and topic not in unique:
             unique.append(topic)
     return unique
+
+
+def _capture_validation_topics(
+    parameters: dict[str, object],
+    subscribed_topics: list[str],
+    publisher_root: str | None,
+) -> list[str]:
+    """Payload filters that may affect validation for one register asset.
+
+    ``register_topic_filter`` remains in the broker subscription for evidence,
+    but it is deliberately excluded here because a broad parent wildcard can
+    also match siblings or unrelated device topics. The backend normally
+    derives concrete payload siblings from every register wildcard. The root
+    fallback keeps hand-built inputs safe when those concrete fields are absent.
+    """
+    candidates = [
+        _string(parameters.get("state_topic")),
+        _string(parameters.get("metadata_topic")),
+        _string(parameters.get("pointset_topic")),
+    ]
+    extra = parameters.get("extra_capture_topics")
+    if isinstance(extra, list):
+        candidates.extend(_string(topic) for topic in extra)
+    validation_topics = [
+        topic for topic in candidates if topic and _payload_key_for_topic(topic)
+    ]
+    if not validation_topics and publisher_root:
+        validation_topics = [
+            f"{publisher_root}/state",
+            f"{publisher_root}/metadata",
+            f"{publisher_root}/events/pointset",
+            f"{publisher_root}/event/pointset",
+        ]
+    if not validation_topics:
+        validation_topics = list(subscribed_topics)
+    return list(dict.fromkeys(validation_topics))
 
 
 def _entry_publisher_root(entry: dict, entry_topics: list[str]) -> str | None:
@@ -2068,6 +2201,13 @@ def _publisher_root_from_filter(topic_filter: str) -> str | None:
     if not parts or any(not part or part in {"+", "#"} for part in parts):
         return None
     return "/".join(parts)
+
+
+def _topic_within_publisher_root(topic: str, publisher_root: str) -> bool:
+    """Whether a concrete broker topic belongs to one literal publisher root."""
+    concrete = topic.strip().strip("/")
+    root = publisher_root.strip().strip("/")
+    return bool(root and (concrete == root or concrete.startswith(f"{root}/")))
 
 
 def _unexpected_measurement_scope(expected_roots: list[str | None]) -> str | None:
@@ -2309,24 +2449,30 @@ def _asset_capture_detail(entry: dict) -> str:
     if not subscribed:
         return ""
     raw_messages = entry.get("messages")
-    observed = list(
+    validation_observed = list(
         dict.fromkeys(
             str(message.get("topic"))
             for message in (raw_messages if isinstance(raw_messages, list) else [])
             if isinstance(message, dict) and message.get("topic")
         )
     )
-    if observed:
-        slot_topics = [topic for topic in observed if _payload_key_for_topic(topic)]
-        if slot_topics:
-            return (
-                f"Messages arrived on {', '.join(slot_topics)} but their payloads "
-                "were not JSON objects."
-            )
+    raw_observed_topics = entry.get("observed_topics")
+    if isinstance(raw_observed_topics, list):
+        observed = list(dict.fromkeys(str(topic) for topic in raw_observed_topics if str(topic)))
+    else:
+        # Backward-compatible fallback for persisted/imported runs produced
+        # before diagnostic observations were kept separate from validation.
+        observed = list(validation_observed)
+    if validation_observed:
         return (
-            f"Messages arrived on {', '.join(observed)} but none is a recognised UDMI "
-            "payload topic (ending /state, /metadata, or /pointset); check the "
-            "register's Expected topic against the device's actual topics."
+            f"Messages arrived on {', '.join(validation_observed)} but their payloads "
+            "were not JSON objects."
+        )
+    if observed:
+        return (
+            f"Messages arrived on {', '.join(observed)} but none matches this asset's "
+            "expected state, metadata, or pointset topic; check the register's Expected "
+            "topics against the device's actual topics."
         )
     return (
         f"Nothing arrived on the subscribed topics ({', '.join(subscribed)}) during the "

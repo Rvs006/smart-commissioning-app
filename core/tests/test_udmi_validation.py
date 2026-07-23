@@ -27,6 +27,7 @@ from smart_commissioning_core.udmi_schema import (
 from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
     DEFAULT_MAX_MESSAGES,
+    UdmiValidationResult,
     _capture_topics,
     _conformance_fields,
     _normalise_issues,
@@ -2130,8 +2131,14 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         self.assertEqual(call["timeout_seconds"], 10.0)
         self.assertFalse(call["stop_when"](capture.messages))
 
-    def test_message_cap_marks_unexpected_measurement_as_partial(self) -> None:
-        capture = RecordingCapture([_msg("site/a1/state"), _msg("site/a3/state")])
+    def test_observation_cap_is_separate_and_marks_measurement_as_partial(self) -> None:
+        capture = RecordingCapture(
+            [
+                _msg("site/a1/state"),
+                _msg("site/a3/state"),
+                _msg("site/a3/metadata"),
+            ]
+        )
         result = validate_udmi_full_report(
             {
                 **_BROKER,
@@ -2146,9 +2153,76 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
             cancel_check=lambda: False,
         )
         self.assertEqual(capture.calls[0]["max_messages"], 2)
+        self.assertEqual(
+            capture.calls[0]["primary_topics"],
+            ["site/a1/state", "site/a2/state"],
+        )
+        self.assertEqual(capture.calls[0]["secondary_max_messages"], 2)
         self.assertFalse(result.result_summary["unexpected_devices_measured"])
         self.assertEqual(result.result_summary["unexpected_device_count"], 1)
         self.assertNotIn("UDMI assets", {issue.asset_id for issue in result.issues})
+
+    def test_invalid_unexpected_payload_does_not_create_a_validation_issue(self) -> None:
+        capture = ProgressRecordingCapture(
+            [
+                _msg("site/a1/state", b'{"source":"a1"}'),
+                _msg("site/a2/state", b'{"source":"a2"}'),
+                _msg("site/a3/state", b"not-json"),
+            ]
+        )
+        assets = [
+            {
+                "expected_schedule": {"asset_id": "A1"},
+                "state_topic": "site/a1/state",
+                "register_topic_filter": "site/#",
+            },
+            {
+                "expected_schedule": {"asset_id": "A2"},
+                "state_topic": "site/a2/state",
+                "register_topic_filter": "site/#",
+            },
+        ]
+        provisional_results: list[UdmiValidationResult] = []
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": assets,
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+            progress_callback=lambda build: provisional_results.append(build()),
+        )
+
+        self.assertEqual(result.result_summary["unexpected_device_count"], 1)
+        self.assertEqual(
+            capture.calls[0]["primary_topics"],
+            ["site/a1/state", "site/a2/state"],
+        )
+        self.assertEqual(
+            [[message["topic"] for message in asset["messages"]] for asset in assets],
+            [["site/a1/state"], ["site/a2/state"]],
+        )
+        self.assertEqual(
+            [asset["observed_topics"] for asset in assets],
+            [["site/a1/state"], ["site/a2/state"]],
+        )
+        self.assertFalse(
+            [
+                issue
+                for issue in result.issues
+                if issue.asset_id is None and issue.issue_type == "payload_error"
+            ]
+        )
+        self.assertTrue(provisional_results)
+        self.assertFalse(
+            [
+                issue
+                for snapshot in provisional_results
+                for issue in snapshot.issues
+                if issue.asset_id is None and issue.issue_type == "payload_error"
+            ]
+        )
 
     def test_bounded_cancel_keeps_partial_unexpected_rows_but_not_measured(self) -> None:
         messages = [_msg("site/a1/state"), _msg("site/a3/state")]
@@ -2207,7 +2281,7 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
                     {
                         "expected_schedule": {"asset_id": "A2"},
                         "state_topic": "site/a2/state",
-                        "register_topic_filter": "site/a2/#",
+                        "register_topic_filter": "site/#",
                     },
                     {"expected_schedule": {"asset_id": "A3"}, "state_topic": "site/a3/state"},
                 ],
@@ -2222,9 +2296,37 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         }
         self.assertEqual(set(by_asset), {"A2", "A3"})
         self.assertIn("site/a2/events/system", by_asset["A2"])
-        self.assertIn("none is a recognised UDMI payload topic", by_asset["A2"])
+        self.assertIn("none matches this asset's expected", by_asset["A2"])
         self.assertIn("Nothing arrived on the subscribed topics", by_asset["A3"])
         self.assertIn("site/a3/state", by_asset["A3"])
+
+    def test_valid_json_on_unknown_same_device_topic_is_a_topic_mismatch(self) -> None:
+        capture = RecordingCapture(
+            [_msg("site/a2/wrong/state", b'{"source":"a2"}')]
+        )
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 1,
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A2"},
+                        "state_topic": "site/a2/state",
+                        "register_topic_filter": "site/#",
+                    }
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        issue = next(
+            issue
+            for issue in result.issues
+            if issue.issue_type == "not_publishing" and issue.asset_id == "A2"
+        )
+        self.assertIn("site/a2/wrong/state", issue.description)
+        self.assertIn("none matches this asset's expected", issue.description)
+        self.assertNotIn("were not JSON objects", issue.description)
 
     def test_register_wildcard_is_subscribed_alongside_derived_topics(self) -> None:
         capture = RecordingCapture([_msg("site/a1/state")])

@@ -16,7 +16,9 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 - **Unexpected publishers have a separate measured category.** A bounded,
   register-derived MQTT scope produces a numeric count and filter without
   adding unregistered publishers to expected assets, observed assets,
-  compliance, the Fault Matrix, or validation findings.
+  compliance, the Fault Matrix, or validation findings. Observational wildcard
+  traffic has its own retained-topic budget, so it cannot consume the cap
+  reserved for expected validation payloads.
 - **Timestamp style consistency is checked within each payload.** Valid
   seasonal offsets remain accepted, while mixed fractional precision or mixed
   `Z` and signed-offset notation produces one focused formatting issue.

@@ -16,7 +16,9 @@ be misleading. This release makes the selected run and rows explicit instead.
   record change cannot alter a download from that report run.
 - Unexpected MQTT publishers inside the bounded register topic scope have their
   own numeric metric and filter. They remain outside expected, observed,
-  compliance, Fault Matrix, and validation-detail totals.
+  compliance, Fault Matrix, and validation-detail totals. Their wildcard
+  traffic also uses a separate retained-topic budget, so a chatty unregistered
+  publisher cannot crowd expected payloads out of the capture.
 - Payloads With Issues now counts received expected payloads only. A separate
   Not Received value keeps silence visible without mixing it into received
   evidence.
