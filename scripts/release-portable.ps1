@@ -61,6 +61,8 @@
 .PARAMETER RunId
     Optional workflow run id to publish from. When omitted, the newest completed
     + successful "Windows Portable Bundle" workflow_dispatch run on main is used.
+    In verify mode, pass the original run id to prove the published tag points
+    at the exact commit that produced the asset.
 
 .PARAMETER NotesFile
     Markdown release-notes template (required for publishing). Tokens
@@ -83,7 +85,7 @@
 
 .EXAMPLE
     # Re-verify what is already published (no mutations):
-    powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.16 -VerifyExisting
+    powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.16 -RunId 123456789 -VerifyExisting
 #>
 [CmdletBinding(DefaultParameterSetName = 'Publish')]
 param(
@@ -92,6 +94,7 @@ param(
     [string]$Version,
 
     [Parameter(ParameterSetName = 'Publish')]
+    [Parameter(ParameterSetName = 'Verify')]
     [long]$RunId,
 
     [Parameter(Mandatory, ParameterSetName = 'Publish')]
@@ -184,11 +187,17 @@ function Get-RunInfo {
     # Explicit run: fetch + validate. --jq reshapes to the same field names.
     $raw = Invoke-Gh @(
         'api', "repos/$RepoSlug/actions/runs/$RunId",
-        '--jq', '{databaseId: .id, status: .status, conclusion: .conclusion, headSha: .head_sha}'
+        '--jq', '{databaseId: .id, status: .status, conclusion: .conclusion, headSha: .head_sha, name: .name, path: .path, event: .event, headBranch: .head_branch}'
     ) "gh api run $RunId"
     $run = ($raw -join "`n") | ConvertFrom-Json
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
         throw "Run $RunId is status='$($run.status)' conclusion='$($run.conclusion)' - refusing to publish from a run that did not complete successfully."
+    }
+    if ($run.name -ne $WorkflowName -or $run.path -notlike '.github/workflows/windows-portable.yml*') {
+        throw "Run $RunId is '$($run.name)' at '$($run.path)', not the $WorkflowName workflow."
+    }
+    if ($run.event -ne 'workflow_dispatch' -or $run.headBranch -ne 'main') {
+        throw "Run $RunId used event='$($run.event)' branch='$($run.headBranch)'; publishing requires a workflow_dispatch run from main."
     }
     return [pscustomobject]@{ Id = [long]$run.databaseId; HeadSha = [string]$run.headSha }
 }
@@ -210,6 +219,42 @@ function Get-ArtifactInfo {
         throw "Artifact '$ArtifactName' on run $RunId has EXPIRED (retention lapsed). Re-run the workflow to produce a fresh artifact."
     }
     return $art
+}
+
+function Resolve-CommitSha {
+    # GitHub's commit endpoint resolves branches, lightweight tags, and
+    # annotated tags to the commit they name. Do not trust targetCommitish from
+    # `gh release view`: GitHub may return the literal branch name instead of a
+    # commit SHA.
+    param(
+        [Parameter(Mandatory)][string]$RepoSlug,
+        [Parameter(Mandatory)][string]$Reference
+    )
+    $raw = Invoke-Gh @(
+        'api', "repos/$RepoSlug/commits/$Reference",
+        '--jq', '.sha'
+    ) "resolve commit '$Reference'"
+    $sha = ($raw -join '').Trim()
+    if ($sha -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "Reference '$Reference' resolved to an invalid commit SHA '$sha'."
+    }
+    return $sha.ToLowerInvariant()
+}
+
+function Assert-ReleaseBodyDigests {
+    param(
+        [Parameter(Mandatory)][string]$Body,
+        [Parameter(Mandatory)][string]$ExeSha256,
+        [Parameter(Mandatory)][string]$ZipSha256
+    )
+    foreach ($expected in @($ExeSha256, $ZipSha256)) {
+        if ($expected -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "Cannot verify release notes against invalid SHA-256 '$expected'."
+        }
+        if ($Body.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            throw "Release notes do not contain verified SHA-256 $expected."
+        }
+    }
 }
 
 function Get-ArtifactArchive {
@@ -332,12 +377,21 @@ function Test-BundleZip {
         # Prove the version from inside the artifact (failure #4). build.ps1 writes
         # "  Version: <BuildVersion>" into README_FIRST.txt from the same -Version
         # that stamps the exe metadata.
-        $readmeText = Get-Content -LiteralPath $readmePath -Raw
-        if (-not $readmeText.Contains("Version: $Version")) {
-            $found = (Get-Content -LiteralPath $readmePath |
+        $readmeLines = Get-Content -LiteralPath $readmePath
+        $expectedVersionLine = "Version: $Version"
+        $exactVersionLine = $readmeLines |
+            Where-Object { $_.Trim() -ceq $expectedVersionLine } |
+            Select-Object -First 1
+        if ($null -eq $exactVersionLine) {
+            $found = ($readmeLines |
                 Where-Object { $_ -match 'Version:' }) -join ' | '
             if ([string]::IsNullOrWhiteSpace($found)) { $found = '<no Version: line found>' }
-            throw "README_FIRST.txt does not declare 'Version: $Version' - this artifact was built for a different version. Found: $found"
+            throw "README_FIRST.txt does not contain the exact line '$expectedVersionLine' - this artifact was built for a different version. Found: $found"
+        }
+
+        $exeProductVersion = (Get-Item -LiteralPath $exePath).VersionInfo.ProductVersion
+        if ($exeProductVersion -cne $Version) {
+            throw "SmartCommissioningApp.exe ProductVersion '$exeProductVersion' does not equal '$Version'."
         }
 
         $exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
@@ -383,9 +437,18 @@ try {
         $viewRaw = Invoke-Gh @(
             'release', 'view', $Version,
             '--repo', $RepoSlug,
-            '--json', 'assets,url,targetCommitish'
+            '--json', 'assets,body,url,targetCommitish'
         ) "gh release view $Version"
         $view = ($viewRaw -join "`n") | ConvertFrom-Json
+
+        $tagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
+        $verifiedRun = $null
+        if ($PSBoundParameters.ContainsKey('RunId')) {
+            $verifiedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $false
+            if ($tagSha -ine $verifiedRun.HeadSha) {
+                throw "Release tag $Version resolves to $tagSha, but workflow run $RunId built $($verifiedRun.HeadSha)."
+            }
+        }
 
         $asset = $view.assets | Where-Object { $_.name -eq $ZipName } | Select-Object -First 1
         if ($null -eq $asset) {
@@ -420,12 +483,19 @@ try {
 
         # Open the zip and hash the contained exe (also re-proves the version).
         $bundle = Test-BundleZip -ZipPath $zipPath -Version $Version -StageDir $stage
+        Assert-ReleaseBodyDigests `
+            -Body ([string]$view.body) `
+            -ExeSha256 $bundle.ExeSha256 `
+            -ZipSha256 $zipHash
 
         Write-Host ""
         Write-Host "===================== VERIFY SUMMARY ====================="
         Write-Host "  version        : $Version"
         Write-Host "  release        : $($view.url)"
-        Write-Host "  target commit  : $($view.targetCommitish)"
+        Write-Host "  tag commit     : $tagSha"
+        if ($null -ne $verifiedRun) {
+            Write-Host "  verified run   : $($verifiedRun.Id)"
+        }
         Write-Host "  asset          : $ZipName ($zipLen bytes)"
         Write-Host "  exe SHA-256    : $($bundle.ExeSha256)"
         Write-Host "  zip SHA-256    : $zipHash"
@@ -453,6 +523,11 @@ try {
         Write-Host "Validating run $RunId..."
     }
     $run = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $autoLocate
+    $run.HeadSha = $run.HeadSha.ToLowerInvariant()
+    $mainShaBefore = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+    if ($mainShaBefore -ine $run.HeadSha) {
+        throw "Remote main is $mainShaBefore, but workflow run $($run.Id) built $($run.HeadSha). Dispatch a fresh bundle from current main."
+    }
     $shortSha = if ($run.HeadSha.Length -ge 7) { $run.HeadSha.Substring(0, 7) } else { $run.HeadSha }
     Write-Host "    run id     : $($run.Id)"
     Write-Host "    head sha   : $($run.HeadSha) (short $shortSha)"
@@ -495,7 +570,7 @@ try {
     Invoke-Gh @(
         'release', 'create', $Version,
         '--repo', $RepoSlug,
-        '--target', 'main',
+        '--target', $run.HeadSha,
         '--title', $Title,
         '--notes-file', $resolvedNotes,
         $zipPath
@@ -508,7 +583,7 @@ try {
     $viewRaw = Invoke-Gh @(
         'release', 'view', $Version,
         '--repo', $RepoSlug,
-        '--json', 'assets,targetCommitish,url'
+        '--json', 'assets,body,targetCommitish,url'
     ) "gh release view $Version"
     $view = ($viewRaw -join "`n") | ConvertFrom-Json
 
@@ -531,9 +606,17 @@ try {
     if ([int64]$asset.size -ne [int64]$zipLen) {
         throw "Post-verify MISMATCH: published asset size ($($asset.size)) != uploaded size ($zipLen). DELETE the release (gh release delete $Version --repo $RepoSlug) and investigate."
     }
-    if ($view.targetCommitish -and $view.targetCommitish -ne $run.HeadSha) {
-        # Non-fatal: main may have advanced between build and publish. Surface it.
-        Write-Warning "Release target commit ($($view.targetCommitish)) differs from the build's head sha ($($run.HeadSha)). Expected if main moved on since the run."
+    Assert-ReleaseBodyDigests `
+        -Body ([string]$view.body) `
+        -ExeSha256 $bundle.ExeSha256 `
+        -ZipSha256 $zipHash
+    $tagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
+    if ($tagSha -ine $run.HeadSha) {
+        throw "Post-verify MISMATCH: release tag $Version resolves to $tagSha, not workflow commit $($run.HeadSha). DELETE the release and investigate."
+    }
+    $mainShaAfter = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+    if ($mainShaAfter -ine $run.HeadSha) {
+        throw "Post-verify MISMATCH: remote main moved to $mainShaAfter while release $Version was created from $($run.HeadSha). The release is pinned correctly, but final main/tag alignment is not satisfied."
     }
 
     # 9. Summary + cleanup.
@@ -542,6 +625,7 @@ try {
     Write-Host "  version        : $Version"
     Write-Host "  run id         : $($run.Id)"
     Write-Host "  commit         : $shortSha"
+    Write-Host "  tag commit     : $tagSha"
     Write-Host "  exe SHA-256    : $($bundle.ExeSha256)"
     Write-Host "  zip SHA-256    : $zipHash"
     Write-Host "  asset          : $ZipName ($zipLen bytes)"

@@ -137,19 +137,21 @@ export function diffPayloadLines(expected: unknown, observed: unknown): PayloadD
 // side's non-filler lines, joined and JSON.parsed, deep-equal the input. Pinned
 // in payloadDiff.test.ts. Do NOT "restore" byte-for-byte here — that would defeat
 // the alignment. VALUES are still never compared: the red row highlight is driven
-// only by the engine's own flagged point names (flaggedKeys), never a value diff
-// (expected values are template sentinels). flaggedKeys are matched only against
-// the keys DIRECTLY under a "points" object (where UDMI point names live), so a
-// structural key that collides with a point name never lights up red. Arrays and
-// type-mismatched nodes stay leaves, exactly as in diffPayloadLines.
+// only by exact JSON Pointer paths from validation evidence, never a value diff
+// (expected values are template sentinels). A unit mismatch can therefore mark
+// only `/pointset/points/<point>/units`, without tinting the whole point object.
+// Arrays and type-mismatched nodes stay leaves, exactly as in diffPayloadLines.
 
 export type AlignedRow = {
   expected: DiffLine | null;
   observed: DiffLine | null;
-  // Set on the first row of a key whose name is in flaggedKeys — the engine
-  // flagged this point in its validation issues, so the whole row reads red.
+  // Set on the first row at an exact path supplied by validation evidence.
   flagged: boolean;
 };
+
+function jsonPointer(path: string[]): string {
+  return `/${path.map((part) => part.replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`;
+}
 
 // Clean (mark null) or fully-marked (one-sided) serialisation of one side. `other`
 // is undefined so presence is never compared here — one-sidedness is the caller's
@@ -191,8 +193,8 @@ function alignPair(
   expected: unknown,
   observed: unknown,
   depth: number,
-  flaggedKeys: ReadonlySet<string>,
-  keysAreFlaggable: boolean,
+  flaggedPaths: ReadonlySet<string>,
+  path: string[],
 ): AlignedRow[] {
   const indent = indentOf(depth);
 
@@ -225,16 +227,14 @@ function alignPair(
       },
     ];
     for (const key of unionOrder) {
+      const childPath = [...path, key];
       const inExpected = expectedKeys.includes(key);
       const inObserved = observedKeys.includes(key);
       let childRows: AlignedRow[];
       if (inExpected && inObserved) {
-        // flaggedKeys holds engine point names, which are the keys DIRECTLY under
-        // a UDMI "points" object (pointset.points / metadata.pointset.points). A
-        // child object's keys are flaggable only when this key IS "points" — so a
-        // structural key that happens to collide with a point name (a top-level
-        // "version"/"timestamp") is never painted red.
-        childRows = alignPair(expected[key], observed[key], depth + 1, flaggedKeys, key === "points");
+        // Carry the exact object path through recursion. The caller decides
+        // which path is authoritative; no key-name heuristic is applied here.
+        childRows = alignPair(expected[key], observed[key], depth + 1, flaggedPaths, childPath);
         prefixKeyOnSide(childRows, key, "expected", depth + 1);
         prefixKeyOnSide(childRows, key, "observed", depth + 1);
       } else if (inExpected) {
@@ -258,7 +258,7 @@ function alignPair(
       if (inObserved && key !== lastObservedInOutput) {
         appendCommaOnSide(childRows, "observed");
       }
-      if (keysAreFlaggable && flaggedKeys.has(key) && childRows.length > 0) {
+      if (flaggedPaths.has(jsonPointer(childPath)) && childRows.length > 0) {
         childRows[0].flagged = true;
       }
       rows.push(...childRows);
@@ -291,11 +291,9 @@ function alignPair(
 export function alignPayloadDiff(
   expected: unknown,
   observed: unknown,
-  flaggedKeys: ReadonlySet<string> = new Set(),
+  flaggedPaths: ReadonlySet<string> = new Set(),
 ): AlignedRow[] {
-  // Top-level keys are structural (version, timestamp, pointset, ...), never
-  // point names, so flagging starts disabled and turns on only under a "points".
-  return alignPair(expected, observed, 0, flaggedKeys, false);
+  return alignPair(expected, observed, 0, flaggedPaths, []);
 }
 
 // --- JSON syntax colouring (ITEM-8) -----------------------------------------

@@ -203,7 +203,7 @@ or, equivalently:
 scripts/smoke_local.sh http://127.0.0.1:8000
 ```
 
-### Expected smoke output — all 6 checks PASS (plus the 3b logo check)
+### Expected smoke output: all 10 assertions PASS across 6 check categories
 
 1. `PASS GET /api/v1/health -> 200 status=ok`
 2. `PASS GET /api/v1/ready -> 200 status=ready`  (local SQLite only; no Redis/PG
@@ -213,7 +213,7 @@ scripts/smoke_local.sh http://127.0.0.1:8000
      — the bundle serves the built frontend, so this one always runs here. A
      FAIL naming `text/html` means the SPA fallback swallowed the asset (the
      v0.1.10 logo bug). Only a backend-only stack (no dist at `/`) skips it with
-     an Info line, so the footer count is 7 for the portable bundle.
+     an Info line, so the footer count is 10 for the portable bundle.
 4. `PASS GET /api/v1/configuration -> 200 snapshot returned`  (demo-project/demo-site)
 5. UDMI validation against the **bundled fixture, no network**:
    `PASS POST /api/v1/validation/udmi/runs -> 200 run_id=…`,
@@ -251,7 +251,7 @@ Footer: `SMOKE PASSED  N/N checks OK` (exit 0). Any FAIL → exit 1.
 - The actual **PyInstaller freeze + bundle assembly on Windows** and a
   double-click run of the resulting `SmartCommissioningApp.exe` (I did not build
   the exe or launch a server here).
-- The 6 PASS lines coming from the **running .exe** specifically (verified the
+- The 10 PASS assertions coming from the **running .exe** specifically (verified the
   underlying migrate + script parsing, not an exe boot).
 - Windows SmartScreen / AV behaviour on first launch (unsigned tester build, per
   the bundle's `README_FIRST.txt`).

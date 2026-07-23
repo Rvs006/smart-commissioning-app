@@ -23,6 +23,10 @@ from app.schemas.jobs import (
     RunRecord,
     ValidationIssueRecord,
 )
+from app.services.udmi_report_model import (
+    build_udmi_report_model,
+    normalise_udmi_report_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +156,7 @@ class RunService:
         # A report must never silently change scope because a source id is bad or
         # belongs to another project/site. Empty source lists remain valid for a
         # metadata-only report.
+        sources: list[RunRecord] = []
         for source_run_id in request.source_run_ids:
             try:
                 source = self.get_run(source_run_id)
@@ -173,22 +178,60 @@ class RunService:
                         f"Source run '{source_run_id}' is not terminal "
                         f"(status '{source.status}'). Wait for it to succeed, fail, or be cancelled."
                     )
+            sources.append(source)
 
-        report_title = request.report_title or (
-            _DEFAULT_UDMI_REPORT_TITLE
-            if request.report_type == "udmi_validation"
-            else _DEFAULT_REPORT_TITLE
-        )
+        parameters: dict[str, object] = {
+            "output_format": request.output_format,
+            "report_type": request.report_type,
+            "source_run_ids": request.source_run_ids,
+            "report_title": request.report_title
+            or (
+                _DEFAULT_UDMI_REPORT_TITLE
+                if request.report_type == "udmi_validation"
+                else _DEFAULT_REPORT_TITLE
+            ),
+        }
+        snapshot_sources: list[RunRecord] = []
+        seen_source_ids: set[str] = set()
+        for source in sources:
+            if source.run_id in seen_source_ids:
+                continue
+            seen_source_ids.add(source.run_id)
+            snapshot_sources.append(source)
+        if request.udmi_scope is not None:
+            snapshot_source_objects: list[object] = list(snapshot_sources)
+            parameters["udmi_scope"] = normalise_udmi_report_scope(
+                request.udmi_scope.model_dump(mode="json"),
+                snapshot_source_objects,
+            )
+        if request.report_type == "udmi_validation":
+            snapshot_source_objects = list(snapshot_sources)
+            report_snapshot = build_udmi_report_model(
+                snapshot_source_objects,
+                parameters.get("udmi_scope"),
+            )
+            parameters["udmi_report_snapshot"] = report_snapshot
+            if report_snapshot is None:
+                # Pre-contract validation runs still use the legacy renderers.
+                # Retain their complete, redacted records so those renderers do
+                # not re-read mutable source evidence at download time.
+                parameters["source_run_snapshots"] = [
+                    source.model_dump(mode="json") for source in snapshot_sources
+                ]
+
+        report_title = str(parameters["report_title"])
         run = self._create_run(
             project_id=request.project_id,
             site_id=request.site_id,
             job_type="report_generation",
-            parameters={
-                "output_format": request.output_format,
-                "report_type": request.report_type,
-                "source_run_ids": request.source_run_ids,
-                "report_title": report_title,
-            },
+            parameters=parameters,
+        )
+        # Pin the rendered timestamp at creation. New reports therefore build
+        # entirely from their own stored record and downloads never need to
+        # mutate this provenance field.
+        run = self.update_result_summary(
+            run.run_id,
+            {"report_generated_at": run.created_at.isoformat()},
         )
         # Reports are NOT processed by a worker actor: the artifact is built
         # on-demand from the stored run record at GET /reports/{id}/download. A
@@ -456,6 +499,45 @@ class RunService:
     ) -> RunRecord:
         record = self._store.update_result_summary(run_id, result_summary, merge=merge)
         return RunRecord.model_validate(record)
+
+    def initialize_report_summary_value(
+        self,
+        run_id: str,
+        key: str,
+        value: object,
+    ) -> object:
+        """Atomically set one report-summary value only when it is absent.
+
+        Report artifacts are generated on demand, so two viewer downloads can
+        reach the same pre-upgrade report before either request has persisted its
+        generated timestamp or integrity record. The row lock serializes that
+        first-write decision on Postgres; the engine's ``BEGIN IMMEDIATE`` hook
+        provides the equivalent read-modify-write exclusion on SQLite.
+        """
+
+        statement = (
+            select(Run.job_type, Run.result_summary)
+            .where(Run.id == run_id)
+            .with_for_update()
+        )
+        with self._engine.begin() as connection:
+            row = connection.execute(statement).one_or_none()
+            if row is None:
+                raise FileNotFoundError(run_id)
+            if row.job_type != "report_generation":
+                raise ValueError(f"Run '{run_id}' is not a report-generation run.")
+            current = row.result_summary if isinstance(row.result_summary, dict) else {}
+            if key in current:
+                return current[key]
+            next_summary = {**current, key: value}
+            result = connection.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.job_type == "report_generation")
+                .values(result_summary=next_summary, updated_at=datetime.now(UTC))
+            )
+            if not result.rowcount:
+                raise FileNotFoundError(run_id)
+        return value
 
     def replace_issues(
         self,

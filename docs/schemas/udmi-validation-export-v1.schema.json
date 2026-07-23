@@ -85,8 +85,15 @@
         "observed": { "type": "integer", "minimum": 0 },
         "not_observed": { "type": "integer", "minimum": 0 },
         "with_issues": { "type": "integer", "minimum": 0 },
-        "successfully_validated": { "type": "integer", "minimum": 0 }
+        "successfully_validated": { "type": "integer", "minimum": 0 },
+        "unexpected": { "type": "integer", "minimum": 0 }
       }
+    },
+    "assetMetricsV11": {
+      "allOf": [
+        { "$ref": "#/$defs/assetMetrics" },
+        { "required": ["unexpected"] }
+      ]
     },
     "payloadMetrics": {
       "type": "object",
@@ -95,9 +102,16 @@
       "properties": {
         "expected": { "type": "integer", "minimum": 0 },
         "received": { "type": "integer", "minimum": 0 },
+        "not_received": { "type": "integer", "minimum": 0 },
         "with_issues": { "type": "integer", "minimum": 0 },
         "successfully_validated": { "type": "integer", "minimum": 0 }
       }
+    },
+    "payloadMetricsV11": {
+      "allOf": [
+        { "$ref": "#/$defs/payloadMetrics" },
+        { "required": ["not_received"] }
+      ]
     },
     "faultMetrics": {
       "type": "object",
@@ -216,6 +230,21 @@
         "raw_evidence_uri": { "type": ["string", "null"] }
       }
     },
+    "unexpectedDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "topic_root", "topics", "last_seen"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "topic_root": { "type": "string" },
+        "topics": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "last_seen": { "type": ["string", "null"] }
+      }
+    },
     "systemMetric": {
       "type": "object",
       "additionalProperties": false,
@@ -228,20 +257,60 @@
         "issue_metrics": { "$ref": "#/$defs/issueMetrics" }
       }
     },
+    "systemMetricV11": {
+      "allOf": [
+        { "$ref": "#/$defs/systemMetric" },
+        {
+          "properties": {
+            "asset_metrics": { "$ref": "#/$defs/assetMetricsV11" },
+            "payload_metrics": { "$ref": "#/$defs/payloadMetricsV11" }
+          }
+        }
+      ]
+    },
     "validationSummary": {
       "type": "object",
       "additionalProperties": false,
       "required": ["schema_version", "asset_metrics", "payload_metrics", "fault_metrics", "issue_metrics", "system_metrics", "asset_results", "fault_rows"],
       "properties": {
-        "schema_version": { "const": "1.0" },
+        "schema_version": { "enum": ["1.0", "1.1"] },
         "asset_metrics": { "$ref": "#/$defs/assetMetrics" },
         "payload_metrics": { "$ref": "#/$defs/payloadMetrics" },
         "fault_metrics": { "$ref": "#/$defs/faultMetrics" },
         "issue_metrics": { "$ref": "#/$defs/issueMetrics" },
         "system_metrics": { "type": "array", "items": { "$ref": "#/$defs/systemMetric" } },
         "asset_results": { "type": "array", "items": { "$ref": "#/$defs/assetResult" } },
-        "fault_rows": { "type": "array", "items": { "$ref": "#/$defs/faultRow" } }
-      }
+        "fault_rows": { "type": "array", "items": { "$ref": "#/$defs/faultRow" } },
+        "unexpected_devices": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/unexpectedDevice" }
+        },
+        "unexpected_devices_measured": { "type": "boolean" },
+        "unexpected_devices_measurement_scope": { "type": ["string", "null"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "schema_version": { "const": "1.1" } },
+            "required": ["schema_version"]
+          },
+          "then": {
+            "required": [
+              "unexpected_devices",
+              "unexpected_devices_measured",
+              "unexpected_devices_measurement_scope"
+            ],
+            "properties": {
+              "asset_metrics": { "$ref": "#/$defs/assetMetricsV11" },
+              "payload_metrics": { "$ref": "#/$defs/payloadMetricsV11" },
+              "system_metrics": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/systemMetricV11" }
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -36,6 +36,7 @@ import {
   ReportFormat,
   ReportType,
   UdmiAssetPayloadView,
+  UdmiReportScopeV1,
   UdmiValidationSummaryV1,
   ValidationIssueRecord,
 } from "../../api/client";
@@ -301,9 +302,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // is never presented as proof that a connected device is offline.
   const [resultsSystemFilter, setResultsSystemFilter] = useState("all");
   const [resultsObservationFilter, setResultsObservationFilter] = useState("all");
-  // Per-row "View" opens this result in a modal detail dialog (mqe-view). null =
-  // closed; the clicked row's already-formatted cells drive buildResultDetailItems.
+  const [resultsCategoryFilter, setResultsCategoryFilter] = useState<
+    UdmiReportScopeV1["filters"]["category"]
+  >("all");
+  // Per-row "View" opens this result in a native modal dialog (mqe-view). null
+  // means closed; the formatted cells drive buildResultDetailItems.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
+  const detailDialogRef = useRef<HTMLDialogElement | null>(null);
+  const detailDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
   // Per-asset expansion in the UDMI per-payload-type results view (mq9m4bnv),
   // and the nested expected-vs-observed payload expand keyed `${asset}:${type}`.
   const [expandedAsset, setExpandedAsset] = useState<string | null>(null);
@@ -708,6 +714,37 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     };
   }, [reportDialogOpen]);
 
+  // Result detail uses the same native-dialog contract as report naming. The
+  // browser owns focus containment and Escape; the fallback keeps jsdom and
+  // older embedded engines functional without changing the visible state.
+  useEffect(() => {
+    if (!detailRow) {
+      return;
+    }
+    const dialog = detailDialogRef.current;
+    if (!dialog) {
+      return;
+    }
+    try {
+      if (!dialog.open && typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else if (!dialog.open) {
+        dialog.setAttribute("open", "");
+      }
+    } catch {
+      dialog.setAttribute("open", "");
+    }
+    const frame = window.requestAnimationFrame(() => dialog.focus());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (dialog.open && typeof dialog.close === "function") {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    };
+  }, [detailRow]);
+
   // Step flow: advance to Run the moment a run is queued, and to Results when it
   // reaches a terminal state, so the operator follows the job rather than
   // hunting down a long page. Manual step clicks still override at any time.
@@ -922,8 +959,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // originating run via source_run_ids so the report actually traces to it.
   // Format is operator-chosen (field ask 2026-07-14: PDF and Word exports).
   const reportFromRunMutation = useMutation({
-    mutationFn: ({ reportTitle: title, reportType, runId }: { reportTitle: string; reportType: ReportType; runId: string }) =>
-      createReport({ format: reportExportFormat, reportTitle: title, reportType, sourceRunIds: [runId] }),
+    mutationFn: ({
+      reportTitle: title,
+      reportType,
+      runId,
+      udmiScope,
+    }: {
+      reportTitle: string;
+      reportType: ReportType;
+      runId: string;
+      udmiScope?: UdmiReportScopeV1;
+    }) =>
+      createReport({
+        format: reportExportFormat,
+        reportTitle: title,
+        reportType,
+        sourceRunIds: [runId],
+        udmiScope,
+      }),
     onSuccess: (result) => {
       setReportDialogOpen(false);
       window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
@@ -1007,9 +1060,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // run existed — the last placeholder surface to survive the v0.1.13 purge.
   // Pre-run the list is empty and the inspector shows its "Run a validation"
   // empty state below.
+  const retiredUnexpectedIssueIds = useMemo(
+    () =>
+      new Set(
+        (validationIssuesQuery.data?.issues ?? [])
+          .filter((issue) => issue.issue_type.toLocaleLowerCase() === "unexpected_device")
+          .map((issue) => issue.issue_id)
+          .filter(Boolean),
+      ),
+    [validationIssuesQuery.data],
+  );
+  const retainedValidationIssues = useMemo(
+    () =>
+      (validationIssuesQuery.data?.issues ?? []).filter(
+        (issue) => !retiredUnexpectedIssueIds.has(issue.issue_id),
+      ),
+    [retiredUnexpectedIssueIds, validationIssuesQuery.data],
+  );
   const liveIssues =
     activeRun?.kind === "validation" && validationIssuesQuery.data
-      ? validationIssuesQuery.data.issues.map(toIssueRow)
+      ? retainedValidationIssues.map(toIssueRow)
       : null;
   const visibleIssues = liveIssues ?? [];
 
@@ -1020,12 +1090,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (module.route !== "udmi-validation" || activeRun?.kind !== "validation") {
       return null;
     }
-    const records = validationIssuesQuery.data?.issues;
+    const records = retainedValidationIssues;
     if (!records || records.length === 0) {
       return null;
     }
     return groupIssuesByAsset(records, toIssueRow);
-  }, [module.route, activeRun, validationIssuesQuery.data]);
+  }, [module.route, activeRun, retainedValidationIssues]);
 
   // Authoritative per-payload-type expected-vs-observed payloads from the run's
   // result_summary (mq9m4bnv). Real content only (pasted/captured); never faked.
@@ -1086,8 +1156,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     [validationRunQuery.data?.result_summary],
   );
   const validationSummaryDisplay = useMemo(
-    () => buildValidationSummaryDisplay(validationSummary),
-    [validationSummary],
+    () => buildValidationSummaryDisplay(validationSummary, retiredUnexpectedIssueIds),
+    [retiredUnexpectedIssueIds, validationSummary],
   );
   const validationAssetResultsById = useMemo(
     () => new Map((validationSummary?.asset_results ?? []).map((asset) => [asset.asset_id, asset])),
@@ -1112,26 +1182,71 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return mergeAssetGroups(groups, views);
   }, [module.route, activeRun, assetIssueGroups, payloadViews]);
+  const resultAssetGroups = useMemo(() => {
+    if (!validationSummary) {
+      // Before the versioned summary lands, payload_views and live issues are
+      // the only persisted evidence available. Keep those provisional rows.
+      return mergedAssetGroups;
+    }
+    const mergedByAsset = new Map(
+      (mergedAssetGroups ?? []).map((group) => [group.assetId, group]),
+    );
+    return validationSummary.asset_results.flatMap((asset) => {
+      const group = mergedByAsset.get(asset.asset_id);
+      const payloadTypes = asset.payload_results
+        .filter(
+          (payload) =>
+            payload.payload_type === "state" ||
+            payload.payload_type === "metadata" ||
+            payload.payload_type === "pointset",
+        )
+        .map((payload) => {
+          const evidence = group?.payloadTypes.find(
+            (entry) => entry.payloadType === payload.payload_type,
+          );
+          return (
+            evidence ?? {
+              payloadType: payload.payload_type,
+              issues: [],
+              expected: null,
+              observed: null,
+              observedPresent: payload.received,
+              hasPayloadView: false,
+            }
+          );
+        });
+      return payloadTypes.length > 0
+        ? [
+            {
+              assetId: asset.asset_id,
+              system: group?.system ?? asset.system,
+              issues: payloadTypes.flatMap((entry) => entry.issues),
+              payloadTypes,
+            },
+          ]
+        : [];
+    });
+  }, [mergedAssetGroups, validationSummary]);
 
-  // Live UDMI results table: one row per asset x payload type, derived only
-  // from persisted real payload_views + issues (never fabricated). Active-run
-  // rows stay verdict-pending until the terminal issue snapshot lands.
+  // Live UDMI results table: before a versioned summary exists, rows come from
+  // persisted payload views and issues. Once it exists, its exact canonical
+  // payload keys own the row set; missing rich evidence stays neutral.
   const udmiLiveResults = useMemo<{ columns: string[]; rows: Array<Record<string, string>> } | null>(() => {
     // job_type guard: mqtt_config_publish runs share this route's run monitor;
     // only a udmi_validation run may populate the per-asset payload table.
     if (
       module.route !== "udmi-validation" ||
-      !mergedAssetGroups ||
       validationRunQuery.data?.job_type !== "udmi_validation"
     ) {
       return null;
     }
-    const rows = mergedAssetGroups.flatMap((group) =>
+    const expectedRows = (resultAssetGroups ?? []).flatMap((group) =>
       group.payloadTypes.map((entry) => {
         const observed = entry.hasPayloadView ? (entry.observedPresent ? "Yes" : "No") : "—";
-        const topic = validationAssetResultsById
+        const payloadSummary = validationAssetResultsById
           .get(group.assetId)
-          ?.payload_results.find((payload) => payload.payload_type === entry.payloadType)?.topic;
+          ?.payload_results.find((payload) => payload.payload_type === entry.payloadType);
+        const topic = payloadSummary?.topic;
         // Shared (issues-gated) verdict helper so the row, its View detail,
         // and the per-asset payload sections can never disagree on the verdict.
         const { label, verdict } = gatedUdmiVerdict(
@@ -1157,19 +1272,49 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           // collapses to "" to match the filter's "no verdict" convention.
           __verdict: verdict === "none" ? "" : verdict,
           // Raw payload type (no "UDMI " prefix, unlike the visible Payload cell)
-          // so a row click keys straight into the inspector's payload-group refs
+          // so the row's evidence controls key into the inspector payload refs
           // (ITEM-D). Hidden: not in `columns`, so it never renders as a cell.
           __payloadType: entry.payloadType,
+          // Non-expected payloads stay visible as evidence, but the report API
+          // accepts expected schedule rows only. Keep that boundary explicit.
+          __expected:
+            payloadSummary !== undefined
+              ? payloadSummary.expected
+                ? "true"
+                : "false"
+              : entry.expected !== null
+                ? "true"
+                : "false",
+          __category: "validation",
         };
       }),
     );
+    const unexpectedRows = (validationSummary?.unexpected_devices ?? []).map((device) => ({
+      System: "Outside register",
+      Asset: device.topic_root || device.topics[0] || "Unexpected publisher",
+      Payload: "Unexpected device",
+      Topic: device.topics.join(", ") || device.topic_root || "Not recorded",
+      Observed: "Yes",
+      Issues: "0",
+      "Raw Payload": "",
+      Result: "Unexpected device",
+      __tone: "warn",
+      __verdict: "",
+      __payloadType: "",
+      __category: "unexpected-devices",
+      __unexpectedId: device.id,
+      __lastSeen: device.last_seen ?? "",
+      __topics: device.topics.join(", "),
+    }));
+    const rows = [...expectedRows, ...unexpectedRows];
     if (rows.length === 0) {
       return null;
     }
     return { columns: ["System", "Asset", "Payload", "Topic", "Observed", "Issues", "Raw Payload", "Result"], rows };
   }, [
     module.route,
-    mergedAssetGroups,
+    resultAssetGroups,
+    validationSummary,
     validationRunQuery.data,
     gatedUdmiVerdict,
     notObservedAssets,
@@ -1191,6 +1336,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setResultsTopicContainsFilter("");
       setResultsSystemFilter("all");
       setResultsObservationFilter("all");
+      setResultsCategoryFilter("all");
       setExpandedResultAssets(new Set());
     }
   }, [hasUdmiLiveResults]);
@@ -1266,7 +1412,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [assetFacts]);
   const facetFilterActive =
     isUdmiValidation &&
-    (resultsSystemFilter !== "all" || resultsObservationFilter !== "all");
+    (resultsSystemFilter !== "all" ||
+      resultsObservationFilter !== "all" ||
+      resultsCategoryFilter !== "all");
   const isResultsFilterActive =
     resultsTextFilter.trim() !== "" ||
     resultsTopicContainsFilter.trim() !== "" ||
@@ -1290,8 +1438,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           if (topicNeedle && !String(row.Topic ?? "").toLocaleLowerCase().includes(topicNeedle)) {
             return false;
           }
+          if (
+            isUdmiValidation &&
+            resultsCategoryFilter !== "all" &&
+            row.__category !== resultsCategoryFilter
+          ) {
+            return false;
+          }
           // Facet filters are a claim about the ASSET, so they apply on the
           // udmi-validation route only (other routes have no asset facts).
+          // Unexpected devices are observed by definition but deliberately have
+          // no register-backed System facet.
+          if (isUdmiValidation && row.__category === "unexpected-devices") {
+            return (
+              resultsSystemFilter === "all" &&
+              resultsObservationFilter !== "not-observed"
+            );
+          }
           return isUdmiValidation
             ? assetMatchesFacetFilter(assetFacts.get(row.Asset), {
                 system: resultsSystemFilter,
@@ -1309,65 +1472,123 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       assetFacts,
       resultsSystemFilter,
       resultsObservationFilter,
+      resultsCategoryFilter,
     ],
   );
-  // The drill-down list mirrors the same facets, so the table and inspector can
-  // never disagree. Text/tone are cell-level, so they are not applied
-  // here (they filter payload-type rows, not whole assets).
+  const currentUdmiScope = useMemo<UdmiReportScopeV1 | null>(() => {
+    if (!isUdmiValidation || !isResultsFilterActive || !activeRun?.runId) {
+      return null;
+    }
+    const seenPayloads = new Set<string>();
+    const selectedPayloads: UdmiReportScopeV1["selected_payloads"] = [];
+    const unexpectedDeviceIds = new Set<string>();
+    for (const { row } of visibleResultRows) {
+      if (row.__category === "unexpected-devices") {
+        if (row.__unexpectedId) {
+          unexpectedDeviceIds.add(row.__unexpectedId);
+        }
+        continue;
+      }
+      const payloadType = row.__payloadType;
+      if (payloadType !== "state" && payloadType !== "metadata" && payloadType !== "pointset") {
+        continue;
+      }
+      if (row.__expected !== "true") {
+        continue;
+      }
+      const key = `${activeRun.runId}\u0000${row.Asset}\u0000${payloadType}`;
+      if (!seenPayloads.has(key)) {
+        seenPayloads.add(key);
+        selectedPayloads.push({
+          source_run_id: activeRun.runId,
+          asset_id: row.Asset,
+          payload_type: payloadType,
+        });
+      }
+    }
+    selectedPayloads.sort((left, right) =>
+      `${left.asset_id}\u0000${left.payload_type}`.localeCompare(
+        `${right.asset_id}\u0000${right.payload_type}`,
+      ),
+    );
+    const verdictValues: UdmiReportScopeV1["filters"]["verdict"][] = [
+      "all",
+      "pass",
+      "pass-notes",
+      "fail",
+      "offline",
+      "none",
+    ];
+    const verdict = verdictValues.includes(
+      resultsToneFilter as UdmiReportScopeV1["filters"]["verdict"],
+    )
+      ? (resultsToneFilter as UdmiReportScopeV1["filters"]["verdict"])
+      : "all";
+    return {
+      schema_version: "1.0",
+      selected_payloads: selectedPayloads,
+      unexpected_device_ids: Array.from(unexpectedDeviceIds).sort(),
+      filters: {
+        text: resultsTextFilter.trim(),
+        verdict,
+        topic_contains: resultsTopicContainsFilter.trim(),
+        system: resultsSystemFilter,
+        observation:
+          resultsObservationFilter === "observed" ||
+          resultsObservationFilter === "not-observed"
+            ? resultsObservationFilter
+            : "all",
+        category: resultsCategoryFilter,
+      },
+    };
+  }, [
+    activeRun?.runId,
+    isResultsFilterActive,
+    isUdmiValidation,
+    resultsCategoryFilter,
+    resultsObservationFilter,
+    resultsSystemFilter,
+    resultsTextFilter,
+    resultsToneFilter,
+    resultsTopicContainsFilter,
+    visibleResultRows,
+  ]);
+  // The drill-down mirrors the exact visible expected payload rows. Text,
+  // verdict, category, topic, system, and observation therefore cannot leave a
+  // hidden payload open in the Inspector.
   const visibleAssetGroups = useMemo(() => {
-    if (!mergedAssetGroups) {
+    if (!resultAssetGroups) {
       return null;
     }
     if (!isUdmiValidation) {
-      return mergedAssetGroups;
+      return resultAssetGroups;
     }
-    const topicNeedle = resultsTopicContainsFilter.trim().toLocaleLowerCase();
-    return mergedAssetGroups.flatMap((group) => {
-      if (!assetMatchesFacetFilter(assetFacts.get(group.assetId), {
-        system: resultsSystemFilter,
-        observation: resultsObservationFilter,
-      })) {
-        return [];
-      }
-      if (!topicNeedle) {
-        return [group];
-      }
-      const matchingTypes = new Set(
-        (validationAssetResultsById.get(group.assetId)?.payload_results ?? [])
-          .filter((payload) => (payload.topic ?? "").toLocaleLowerCase().includes(topicNeedle))
-          .map((payload) => payload.payload_type),
+    if (!isResultsFilterActive) {
+      return resultAssetGroups;
+    }
+    const visiblePayloadKeys = new Set(
+      visibleResultRows
+        .filter(({ row }) => row.__category === "validation")
+        .map(({ row }) => `${row.Asset}\u0000${row.__payloadType}`),
+    );
+    return resultAssetGroups.flatMap((group) => {
+      const payloadTypes = group.payloadTypes.filter((payload) =>
+        visiblePayloadKeys.has(`${group.assetId}\u0000${payload.payloadType}`),
       );
-      const payloadTypes = group.payloadTypes.filter((payload) => matchingTypes.has(payload.payloadType));
-      return payloadTypes.length > 0 ? [{ ...group, payloadTypes }] : [];
+      return payloadTypes.length > 0
+        ? [{ ...group, issues: payloadTypes.flatMap((entry) => entry.issues), payloadTypes }]
+        : [];
     });
   }, [
-    mergedAssetGroups,
+    resultAssetGroups,
     isUdmiValidation,
-    assetFacts,
-    resultsSystemFilter,
-    resultsObservationFilter,
-    resultsTopicContainsFilter,
-    validationAssetResultsById,
+    isResultsFilterActive,
+    visibleResultRows,
   ]);
-  const summaryFiltersActive =
-    isUdmiValidation &&
-    (resultsSystemFilter !== "all" ||
-      resultsObservationFilter !== "all" ||
-      resultsTopicContainsFilter.trim() !== "");
+  const summaryFiltersActive = isUdmiValidation && isResultsFilterActive;
   const displayedValidationSummary = useMemo(
-    () =>
-      filterValidationSummary(validationSummaryDisplay, {
-        observation: resultsObservationFilter,
-        system: resultsSystemFilter,
-        topicContains: resultsTopicContainsFilter,
-      }, assetFacts),
-    [
-      validationSummaryDisplay,
-      resultsObservationFilter,
-      resultsSystemFilter,
-      resultsTopicContainsFilter,
-      assetFacts,
-    ],
+    () => filterValidationSummary(validationSummaryDisplay, currentUdmiScope, assetFacts),
+    [validationSummaryDisplay, currentUdmiScope, assetFacts],
   );
   // The selected row, resolved WITHIN the filtered view so the Inspector can
   // never show a row the table is hiding (ISSUE-4): when the active selection is
@@ -1392,7 +1613,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? (visibleAssetGroups.find((group) => group.assetId === inspectorResult.Asset) ?? null)
       : null;
   const resultDetails = inspectorResult
-    ? buildResultDetailItems(module.route, inspectorResult, usingLiveResults, mergedAssetGroups)
+    ? buildResultDetailItems(module.route, inspectorResult, usingLiveResults, resultAssetGroups)
     : [];
   // Group the visible UDMI rows by asset for the collapsible summary rows
   // (ITEM-7). Render-only over visibleResultRows, so child rows keep their
@@ -1401,6 +1622,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     () => (hasUdmiLiveResults ? groupUdmiRowsByAsset(visibleResultRows) : []),
     [hasUdmiLiveResults, visibleResultRows],
   );
+  const visibleUdmiCounts = useMemo(() => {
+    const expectedAssets = new Set<string>();
+    const unexpectedDevices = new Set<string>();
+    for (const { row } of visibleResultRows) {
+      if (row.__category === "unexpected-devices") {
+        if (row.__unexpectedId) {
+          unexpectedDevices.add(row.__unexpectedId);
+        }
+      } else if (row.__category === "validation") {
+        expectedAssets.add(row.Asset);
+      }
+    }
+    return { expectedAssets: expectedAssets.size, unexpectedDevices: unexpectedDevices.size };
+  }, [visibleResultRows]);
   const toggleResultAsset = useCallback((asset: string) => {
     setExpandedResultAssets((current) => {
       const next = new Set(current);
@@ -1527,8 +1762,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             displayedValidationSummary.asset_metrics.expected,
           ),
           primaryLabel: "overall compliance",
-          secondary: formatMetricCount(displayedValidationSummary.issue_metrics.blocking),
-          secondaryLabel: "blocking issues",
+          secondary: formatMetricCount(
+            displayedValidationSummary.issue_metrics.blocking +
+              displayedValidationSummary.issue_metrics.warning,
+          ),
+          secondaryLabel: "issues found",
         };
       }
       const derived = validationMetrics(module.route, validationRunQuery.data?.result_summary);
@@ -1732,7 +1970,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         : validationRunQuery.data?.job_type === "udmi_validation"
           ? "udmi_validation"
           : "issue_report";
-    reportFromRunMutation.mutate({ reportTitle: title, reportType, runId });
+    reportFromRunMutation.mutate({
+      reportTitle: title,
+      reportType,
+      runId,
+      ...(reportType === "udmi_validation" && currentUdmiScope
+        ? { udmiScope: currentUdmiScope }
+        : {}),
+    });
   };
 
   const handleValidationJsonDownload = () => {
@@ -1811,14 +2056,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
   const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
 
-  // Selecting a live-UDMI results row (row click or its View button) opens the
+  // Selecting a live-UDMI result through its Select/View controls opens the
   // matching asset in the inspector and scrolls to that payload type's issues
   // (ITEM-D), so the inspector — now beside the table — surfaces exactly which
   // issues flagged the row. Guarded to live-UDMI rows: they carry an Issues
   // count and a hidden __payloadType; discovery rows have neither and no
   // inspector payload groups, so this no-ops for them.
   const focusInspectorPayload = (row: Record<string, string>) => {
-    if (row.Issues === undefined) {
+    if (row.Issues === undefined || row.__category === "unexpected-devices") {
       return;
     }
     setExpandedAsset(row.Asset);
@@ -1826,8 +2071,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     // The payload-type-group mounts only once its asset expands, so wait a frame
     // for that re-render before scrolling to the freshly-stamped node.
     requestAnimationFrame(() => {
-      payloadGroupRefs.current.get(key)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      const reducedMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      payloadGroupRefs.current.get(key)?.scrollIntoView({
+        behavior: reducedMotion ? "auto" : "smooth",
+        block: "nearest",
+      });
     });
+  };
+
+  const selectResultEvidence = (row: Record<string, string>, rowIndex: number) => {
+    setSelectedResultIndex(rowIndex);
+    focusInspectorPayload(row);
+  };
+
+  const closeResultDetailDialog = () => {
+    setDetailRow(null);
+    window.requestAnimationFrame(() => detailDialogOpenerRef.current?.focus());
   };
 
   // One results-table data row. Shared by the flat (discovery) render and the
@@ -1840,32 +2101,43 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     // the count is only claimed when the row actually has issues.
     const issueCount = row.Issues === undefined ? 0 : Number(row.Issues);
     const viewLabel = issueCount > 0 ? `View ${issueCount} issue${issueCount === 1 ? "" : "s"}` : "View";
+    const evidenceLabel = [row.Asset, row.__payloadType || row.Payload || row.Topic]
+      .filter(Boolean)
+      .join(" ");
     return (
       <tr
         className={`${row.__tone ? `row-${row.__tone}` : ""}${
           selectedResultIndex === rowIndex ? " row-selected" : ""
         }`.trim() || undefined}
         key={rowIndex}
-        onClick={() => {
-          setSelectedResultIndex(rowIndex);
-          focusInspectorPayload(row);
-        }}
       >
         {tableColumns.map((column) => (
           <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
         ))}
         <td>
-          <button
-            className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
-            onClick={() => {
-              setSelectedResultIndex(rowIndex);
-              setDetailRow(row);
-              focusInspectorPayload(row);
-            }}
-            type="button"
-          >
-            {viewLabel}
-          </button>
+          <div className="result-row-actions">
+            <button
+              aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
+              aria-pressed={selectedResultIndex === rowIndex}
+              className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
+              onClick={() => selectResultEvidence(row, rowIndex)}
+              type="button"
+            >
+              Select evidence
+            </button>
+            <button
+              aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
+              className="secondary-button compact"
+              onClick={(event) => {
+                selectResultEvidence(row, rowIndex);
+                detailDialogOpenerRef.current = event.currentTarget;
+                setDetailRow(row);
+              }}
+              type="button"
+            >
+              {viewLabel}
+            </button>
+          </div>
         </td>
       </tr>
     );
@@ -1873,12 +2145,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   return (
     <div className="app-page">
-      <section className="module-hero" ref={heroRef}>
-        <div>
-          <span className="eyebrow">{module.backendService}</span>
-          <h2>{workspace?.title ?? module.title}</h2>
-          <p>{workspace?.headline ?? module.summary}</p>
-        </div>
+      <section aria-label="Current run summary" className="module-hero" ref={heroRef}>
+        <h2 className="visually-hidden">{workspace?.title ?? module.title}</h2>
         <div className="module-metrics">
           {metricsView ? (
             <>
@@ -1918,7 +2186,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <article className="surface">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Inputs</span>
               <h3>Register Import</h3>
             </div>
           </div>
@@ -2129,7 +2396,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <article className="surface">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Execution</span>
               <h3>Run Controls</h3>
             </div>
           </div>
@@ -2329,12 +2595,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <dt>Issues</dt>
                   <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}</dd>
                 </div>
-                {typeof validationRunQuery.data?.result_summary.blocking_issue_count === "number" && (
-                  <div>
-                    <dt>Blocking issues</dt>
-                    <dd>{formatSummaryValue(validationRunQuery.data.result_summary.blocking_issue_count)}</dd>
-                  </div>
-                )}
                 {captureWindow !== null && (
                   <div>
                     <dt>Capture window</dt>
@@ -2441,7 +2701,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Validation modes</span>
               <h3>Three Checks Operators Can Understand</h3>
             </div>
           </div>
@@ -2462,7 +2721,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Scan settings</span>
               <h3>Port and Protocol Selection</h3>
             </div>
             <button className="secondary-button compact" onClick={addScanPort} type="button">
@@ -2530,7 +2788,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="run">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Live capture</span>
               <h3>Incoming MQTT Payloads</h3>
             </div>
             <div className="inline-actions">
@@ -2680,7 +2937,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Validation inputs</span>
               <h3>Non-Published UDMI Schema Sets</h3>
             </div>
           </div>
@@ -2833,7 +3089,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="setup">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Validation inputs</span>
               <h3>Schedule and Payload Evidence</h3>
             </div>
           </div>
@@ -2993,7 +3248,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="run">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Controlled publish</span>
               <h3>MQTT Config Payload</h3>
             </div>
           </div>
@@ -3019,7 +3273,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="multi-point-editor">
             <div className="surface-heading compact-heading">
               <div>
-                <span className="eyebrow">Additional points</span>
                 <h4>Write Multiple Points in One Config</h4>
               </div>
               <button className="secondary-button compact" onClick={addExtraPublishPoint} type="button">
@@ -3131,7 +3384,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="setup run results">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Reports</span>
               <h3>Generated Reports</h3>
             </div>
             <button
@@ -3302,7 +3554,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               lastRunAt={validationRunQuery.data?.updated_at}
               provisional={!activeRunTerminal}
               summary={displayedValidationSummary}
-              topicFiltered={resultsTopicContainsFilter.trim() !== ""}
             />
           ) : activeRunTerminal && !validationRunQuery.isLoading ? (
             <div className="empty-workspace">
@@ -3323,7 +3574,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <article className="surface">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Results</span>
               <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
             </div>
             <button
@@ -3467,13 +3717,36 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       <option value="not-observed">Not observed this run</option>
                     </select>
                   </label>
+                  <label className="results-filter-facet">
+                    Category
+                    <select
+                      onChange={(event) =>
+                        setResultsCategoryFilter(
+                          event.target.value as UdmiReportScopeV1["filters"]["category"],
+                        )
+                      }
+                      value={resultsCategoryFilter}
+                    >
+                      <option value="all">Expected and unexpected</option>
+                      <option value="validation">Expected validation</option>
+                      <option value="unexpected-devices">Unexpected devices</option>
+                    </select>
+                  </label>
                 </>
               )}
               <span className="results-filter-count">
                 Showing {visibleResultRows.length} of {resultRows.length}{" "}
                 {resultRows.length === 1 ? "row" : "rows"}
                 {hasUdmiLiveResults
-                  ? ` across ${udmiRowGroups.length} ${udmiRowGroups.length === 1 ? "asset" : "assets"}`
+                  ? ` across ${visibleUdmiCounts.expectedAssets} expected ${
+                      visibleUdmiCounts.expectedAssets === 1 ? "asset" : "assets"
+                    }${
+                      visibleUdmiCounts.unexpectedDevices > 0
+                        ? ` plus ${visibleUdmiCounts.unexpectedDevices} unexpected ${
+                            visibleUdmiCounts.unexpectedDevices === 1 ? "device" : "devices"
+                          }`
+                        : ""
+                    }`
                   : ""}
               </span>
               {isResultsFilterActive && (
@@ -3485,6 +3758,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     setResultsToneFilter("all");
                     setResultsSystemFilter("all");
                     setResultsObservationFilter("all");
+                    setResultsCategoryFilter("all");
                   }}
                   type="button"
                 >
@@ -3548,6 +3822,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <tbody>
                     {udmiRowGroups.map((group) => {
                       const isOpen = expandedResultAssets.has(group.asset);
+                      const isUnexpected = group.rows.every(
+                        ({ row }) => row.__category === "unexpected-devices",
+                      );
                       return (
                         <Fragment key={`group-${group.asset}`}>
                           <tr
@@ -3565,8 +3842,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                 </span>
                                 <strong>{group.asset}</strong>
                                 <span>
-                                  {group.rows.length} payload type{group.rows.length === 1 ? "" : "s"} ·{" "}
-                                  {group.issueTotal} issue{group.issueTotal === 1 ? "" : "s"}
+                                  {isUnexpected
+                                    ? "Unexpected device · excluded from compliance"
+                                    : `${group.rows.length} payload type${
+                                        group.rows.length === 1 ? "" : "s"
+                                      } · ${group.issueTotal} issue${
+                                        group.issueTotal === 1 ? "" : "s"
+                                      }`}
                                 </span>
                               </button>
                             </td>
@@ -3585,45 +3867,56 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </article>
 
         {detailRow && (
-          <div
-            className="modal-overlay"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Result detail"
-            onClick={() => setDetailRow(null)}
+          <dialog
+            aria-labelledby="result-detail-heading"
+            className="result-detail-dialog surface"
+            onCancel={(event) => {
+              event.preventDefault();
+              closeResultDetailDialog();
+            }}
+            onClick={(event) => {
+              if (event.target !== event.currentTarget) {
+                return;
+              }
+              const bounds = event.currentTarget.getBoundingClientRect();
+              const clickedBackdrop =
+                event.clientX < bounds.left ||
+                event.clientX > bounds.right ||
+                event.clientY < bounds.top ||
+                event.clientY > bounds.bottom;
+              if (clickedBackdrop) {
+                closeResultDetailDialog();
+              }
+            }}
+            ref={detailDialogRef}
+            tabIndex={-1}
           >
-            <div className="modal-card surface" onClick={(event) => event.stopPropagation()}>
-              <div className="surface-heading">
-                <div>
-                  <span className="eyebrow">Detail</span>
-                  <h3>Result detail</h3>
-                </div>
-                <button
-                  className="secondary-button compact"
-                  onClick={() => setDetailRow(null)}
-                  type="button"
-                >
-                  Close
-                </button>
+            <div className="surface-heading">
+              <div>
+                <h3 id="result-detail-heading">Result detail</h3>
               </div>
-              <div className="detail-list">
-                {buildResultDetailItems(module.route, detailRow, usingLiveResults, mergedAssetGroups).map((item) => (
-                  <div className="detail-row" key={item.label}>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                  </div>
-                ))}
-              </div>
+              <button
+                className="secondary-button compact"
+                onClick={closeResultDetailDialog}
+                type="button"
+              >
+                Close
+              </button>
             </div>
-          </div>
+            <div className="detail-list">
+              {buildResultDetailItems(module.route, detailRow, usingLiveResults, resultAssetGroups).map((item) => (
+                <div className="detail-row" key={item.label}>
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
+                </div>
+              ))}
+            </div>
+          </dialog>
         )}
 
         <aside className="surface inspector">
           <div className="surface-heading">
-            <div>
-              <span className="eyebrow">Inspector</span>
-              <h3>Selected Result Detail</h3>
-            </div>
+            <h3>Inspector</h3>
           </div>
 
           <>
@@ -3636,7 +3929,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 ))}
               </div>
 
-              {mergedAssetGroups ? (
+              {inspectorResult?.__category === "unexpected-devices" ? (
+                <div className="state-panel warning" role="note">
+                  <strong>Observed outside the expected register</strong>
+                  <span>
+                    This publisher is reported separately. It does not enter expected-asset,
+                    compliance, payload, fault, or validation-result totals.
+                  </span>
+                </div>
+              ) : resultAssetGroups ? (
                 <div className="asset-group-list">
                   {payloadViewSource && (
                     <p className="section-copy">
@@ -3710,7 +4011,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                   key={entry.payloadType}
                                   ref={(el) => {
                                     // Register/deregister this payload group so a
-                                    // row click can scroll straight to it (ITEM-D).
+                                    // row control can scroll straight to it (ITEM-D).
                                     if (el) {
                                       payloadGroupRefs.current.set(payloadKey, el);
                                     } else {
@@ -3801,17 +4102,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 )}
               </div>
               )}
-
-              <div className="evidence-list">
-                <h4>Evidence outputs</h4>
-                {activeRun?.kind === "validation" &&
-                  Boolean(validationRunQuery.data?.result_summary.source_fixture) && (
-                    <span>Validation fixture summary</span>
-                  )}
-                {(workspace?.evidence ?? []).map((item) => (
-                  <span key={item}>{item}</span>
-                ))}
-              </div>
             </>
         </aside>
       </section>
@@ -3843,7 +4133,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="results">
           <div className="surface-heading">
             <div>
-              <span className="eyebrow">Reporting</span>
               <h3>Generate Report</h3>
             </div>
           </div>
@@ -3879,7 +4168,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         >
           <form onSubmit={handleReportDialogSubmit}>
             <div className="report-title-dialog-heading">
-              <span className="eyebrow">Report details</span>
               <h3 id="report-title-heading">Name this validation report</h3>
               <p id="report-title-help">
                 Use a title that identifies the site, systems, or capture window. It will appear at
@@ -3989,7 +4277,7 @@ function ReportFromRunControls({
   pending: boolean;
 }) {
   return (
-    <>
+    <div className="report-from-run-controls">
       <label className="report-format-picker">
         Report format
         <select
@@ -4012,7 +4300,7 @@ function ReportFromRunControls({
       >
         {pending ? "Generating..." : "Generate report from this run"}
       </button>
-    </>
+    </div>
   );
 }
 
@@ -4034,7 +4322,10 @@ function readValidationSummary(
   resultSummary: Record<string, unknown> | undefined,
 ): UdmiValidationSummaryV1 | null {
   const candidate = resultSummary?.validation_summary_v1;
-  if (!isRecord(candidate) || candidate.schema_version !== "1.0") {
+  if (
+    !isRecord(candidate) ||
+    (candidate.schema_version !== "1.0" && candidate.schema_version !== "1.1")
+  ) {
     return null;
   }
   const valid =
@@ -4068,8 +4359,112 @@ function readValidationSummary(
 
 function buildValidationSummaryDisplay(
   summary: UdmiValidationSummaryV1 | null,
+  retiredUnexpectedIssueIds: ReadonlySet<string>,
 ): UdmiSummaryDisplay | null {
-  return summary;
+  if (!summary) {
+    return null;
+  }
+  const unexpectedDevices = summary.unexpected_devices ?? [];
+  const retiredFaults = summary.fault_rows.filter((fault) =>
+    retiredUnexpectedIssueIds.has(fault.issue_id),
+  );
+  const retainedFaults = summary.fault_rows.filter(
+    (fault) => !retiredUnexpectedIssueIds.has(fault.issue_id),
+  );
+  const canonicalFaultCategory = (
+    category: string,
+  ): keyof UdmiValidationSummaryV1["fault_metrics"] => {
+    const key = category.trim().toLocaleLowerCase().replace(/[- ]/g, "_");
+    if (key === "payload_formatting" || key === "payload_formatting_issue") {
+      return "payload_formatting_issues";
+    }
+    if (key === "missing_point") return "missing_points";
+    if (key === "point_naming" || key === "point_naming_issue") {
+      return "point_naming_issues";
+    }
+    if (key === "additional_point") return "additional_points";
+    if (key === "stale" || key === "cadence") return "stale_or_cadence";
+    return key === "payload_formatting_issues" ||
+      key === "missing_points" ||
+      key === "point_naming_issues" ||
+      key === "additional_points" ||
+      key === "stale_or_cadence"
+      ? key
+      : "other_issues";
+  };
+  const withoutRetiredFaults = (
+    faultMetrics: UdmiValidationSummaryV1["fault_metrics"],
+    issueMetrics: UdmiValidationSummaryV1["issue_metrics"],
+    faults: UdmiValidationSummaryV1["fault_rows"],
+  ) => {
+    const adjustedFaults = { ...faultMetrics };
+    const adjustedIssues = { ...issueMetrics };
+    for (const fault of faults) {
+      const category = canonicalFaultCategory(fault.category);
+      adjustedFaults[category] = Math.max(0, adjustedFaults[category] - 1);
+      const severity = fault.severity.toLocaleLowerCase();
+      const issueKey = ["critical", "high", "medium", "blocking"].includes(severity)
+        ? "blocking"
+        : "warning";
+      adjustedIssues[issueKey] = Math.max(0, adjustedIssues[issueKey] - 1);
+    }
+    return { fault_metrics: adjustedFaults, issue_metrics: adjustedIssues };
+  };
+  const adjustedOverall = withoutRetiredFaults(
+    summary.fault_metrics,
+    summary.issue_metrics,
+    retiredFaults,
+  );
+  const normalisePayloadMetrics = (
+    metrics: UdmiValidationSummaryV1["payload_metrics"],
+    assets: UdmiValidationSummaryV1["asset_results"],
+  ) => {
+    const expectedRows = assets.flatMap((asset) =>
+      asset.payload_results.filter((payload) => payload.expected),
+    );
+    const receivedRows = expectedRows.filter((payload) => payload.received);
+    const exactRowsRetained =
+      expectedRows.length === metrics.expected && receivedRows.length === metrics.received;
+    const withIssues =
+      summary.schema_version === "1.0"
+        ? exactRowsRetained
+          ? receivedRows.filter((payload) => payload.has_issues).length
+          : Math.min(metrics.with_issues, metrics.received)
+        : metrics.with_issues;
+    const successfullyValidated =
+      summary.schema_version === "1.0"
+        ? Math.min(metrics.successfully_validated, metrics.received)
+        : metrics.successfully_validated;
+    return {
+      ...metrics,
+      not_received: metrics.not_received ?? Math.max(0, metrics.expected - metrics.received),
+      with_issues: withIssues,
+      successfully_validated: successfullyValidated,
+    };
+  };
+  return {
+    ...summary,
+    asset_metrics: {
+      ...summary.asset_metrics,
+      unexpected: summary.asset_metrics.unexpected ?? unexpectedDevices.length,
+    },
+    payload_metrics: normalisePayloadMetrics(summary.payload_metrics, summary.asset_results),
+    system_metrics: summary.system_metrics.map((system) => ({
+      ...system,
+      ...withoutRetiredFaults(
+        system.fault_metrics,
+        system.issue_metrics,
+        retiredFaults.filter((fault) => (fault.system || "Unspecified") === system.system),
+      ),
+      payload_metrics: normalisePayloadMetrics(
+        system.payload_metrics,
+        summary.asset_results.filter((asset) => asset.system === system.system),
+      ),
+    })),
+    ...adjustedOverall,
+    fault_rows: retainedFaults,
+    unexpected_devices: unexpectedDevices,
+  };
 }
 
 function formatMetricCount(value: number): string {
@@ -4090,6 +4485,7 @@ function summaryMetricsForAssets(
   assets: SummaryAssetResult[],
   faults: SummaryFaultRow[],
   scopeIssuesToFaults: boolean,
+  unexpected = 0,
 ) {
   const payloads = assets.flatMap((asset) => asset.payload_results);
   const expectedPayloads = payloads.filter((payload) => payload.expected);
@@ -4126,7 +4522,11 @@ function summaryMetricsForAssets(
     }
   }
   const blocking = scopeIssuesToFaults
-    ? faults.filter((fault) => ["critical", "high", "blocking"].includes(fault.severity.toLocaleLowerCase())).length
+    ? faults.filter((fault) =>
+        ["critical", "high", "medium", "blocking"].includes(
+          fault.severity.toLocaleLowerCase(),
+        ),
+      ).length
     : assets.reduce((total, asset) => total + asset.blocking_issue_count, 0);
   const issueCount = scopeIssuesToFaults
     ? faults.length
@@ -4138,11 +4538,15 @@ function summaryMetricsForAssets(
       not_observed: assets.filter((asset) => !asset.observed).length,
       with_issues: assets.filter((asset) => asset.issue_count > 0).length,
       successfully_validated: assets.filter((asset) => asset.successfully_validated).length,
+      unexpected,
     },
     payload_metrics: {
       expected: expectedPayloads.length,
       received: expectedPayloads.filter((payload) => payload.received).length,
-      with_issues: expectedPayloads.filter((payload) => payload.has_issues).length,
+      not_received: expectedPayloads.filter((payload) => !payload.received).length,
+      with_issues: expectedPayloads.filter(
+        (payload) => payload.received && payload.has_issues,
+      ).length,
       successfully_validated: expectedPayloads.filter((payload) => payload.successfully_validated).length,
     },
     fault_metrics: faultMetrics,
@@ -4155,7 +4559,7 @@ function summaryMetricsForAssets(
 
 function filterValidationSummary(
   summary: UdmiSummaryDisplay | null,
-  filter: { observation: string; system: string; topicContains: string },
+  scope: UdmiReportScopeV1 | null,
   assetFacts: ReadonlyMap<string, AssetFacts>,
 ): UdmiSummaryDisplay | null {
   if (!summary) {
@@ -4171,15 +4575,27 @@ function filterValidationSummary(
       ? { ...asset, observed: facts.observed, system: facts.system }
       : asset;
   });
-  const summaryChanged = reconciledAssets.some((asset, index) => asset !== summary.asset_results[index]);
+  const expectedFaultRows = summary.fault_rows.filter(
+    (fault) => !fault.category.toLocaleLowerCase().includes("unexpected_device"),
+  );
+  const unexpectedDevices = summary.unexpected_devices ?? [];
+  const unexpectedCount = summary.asset_metrics.unexpected ?? unexpectedDevices.length;
+  const summaryChanged =
+    reconciledAssets.some((asset, index) => asset !== summary.asset_results[index]) ||
+    expectedFaultRows.length !== summary.fault_rows.length;
   let reconciledSummary = summary;
   if (summaryChanged) {
-    const overall = summaryMetricsForAssets(reconciledAssets, summary.fault_rows, false);
+    const overall = summaryMetricsForAssets(
+      reconciledAssets,
+      expectedFaultRows,
+      false,
+      unexpectedCount,
+    );
     const systems = Array.from(new Set(reconciledAssets.map((asset) => asset.system || "Unspecified"))).sort();
     const systemMetrics = systems.map((system) => {
       const systemAssets = reconciledAssets.filter((asset) => (asset.system || "Unspecified") === system);
       const systemAssetIds = new Set(systemAssets.map((asset) => asset.asset_id));
-      const systemFaults = summary.fault_rows.filter(
+      const systemFaults = expectedFaultRows.filter(
         (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
       );
       return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, false) };
@@ -4188,45 +4604,133 @@ function filterValidationSummary(
       ...summary,
       ...overall,
       asset_results: reconciledAssets,
+      fault_rows: expectedFaultRows,
       system_metrics: systemMetrics,
     };
   }
-  const topicNeedle = filter.topicContains.trim().toLocaleLowerCase();
-  if (filter.system === "all" && filter.observation === "all" && !topicNeedle) {
+  if (!scope) {
     return reconciledSummary;
   }
 
-  const assets = reconciledSummary.asset_results.flatMap((asset) => {
-    if (filter.system !== "all" && asset.system !== filter.system) {
-      return [];
-    }
-    if (filter.observation === "observed" && !asset.observed) {
-      return [];
-    }
-    if (filter.observation === "not-observed" && asset.observed) {
-      return [];
-    }
-    if (!topicNeedle) {
-      return [asset];
-    }
-    const payloadResults = asset.payload_results.filter((payload) =>
-      (payload.topic ?? "").toLocaleLowerCase().includes(topicNeedle),
-    );
-    return payloadResults.length > 0 ? [{ ...asset, payload_results: payloadResults }] : [];
-  });
-  const assetIds = new Set(assets.map((asset) => asset.asset_id));
-  const payloadKeys = new Set(
-    assets.flatMap((asset) =>
-      asset.payload_results.map((payload) => `${asset.asset_id}\u0000${payload.payload_type}`),
+  const selectedPayloadKeys = new Set(
+    scope.selected_payloads.map(
+      (payload) => `${payload.asset_id}\u0000${payload.payload_type}`,
     ),
   );
+  const selectedAssetIds = new Set(
+    scope.selected_payloads.map((payload) => payload.asset_id),
+  );
+  const selectedPayloadTypesByAsset = new Map<string, Set<string>>();
+  for (const payload of scope.selected_payloads) {
+    const selectedTypes = selectedPayloadTypesByAsset.get(payload.asset_id) ?? new Set<string>();
+    selectedTypes.add(payload.payload_type);
+    selectedPayloadTypesByAsset.set(payload.asset_id, selectedTypes);
+  }
+  const fullySelectedAssetIds = new Set(
+    reconciledSummary.asset_results.flatMap((asset) => {
+      const availableTypes = new Set(
+        asset.payload_results
+          .filter(
+            (payload) =>
+              payload.expected &&
+              (payload.payload_type === "state" ||
+                payload.payload_type === "metadata" ||
+                payload.payload_type === "pointset"),
+          )
+          .map((payload) => payload.payload_type),
+      );
+      const selectedTypes = selectedPayloadTypesByAsset.get(asset.asset_id);
+      return availableTypes.size > 0 &&
+        selectedTypes?.size === availableTypes.size &&
+        Array.from(availableTypes).every((payloadType) => selectedTypes.has(payloadType))
+        ? [asset.asset_id]
+        : [];
+      }),
+  );
+  const availableExpectedPayloadKeys = new Set(
+    reconciledSummary.asset_results.flatMap((asset) =>
+      asset.payload_results
+        .filter((payload) => payload.expected)
+        .map((payload) => `${asset.asset_id}\u0000${payload.payload_type}`),
+    ),
+  );
+  const fullSourceSelected =
+    availableExpectedPayloadKeys.size > 0 &&
+    availableExpectedPayloadKeys.size === selectedPayloadKeys.size &&
+    Array.from(availableExpectedPayloadKeys).every((key) => selectedPayloadKeys.has(key));
+  const selectedAssets = reconciledSummary.asset_results.flatMap((asset) => {
+    const payloadResults = asset.payload_results.filter((payload) =>
+      selectedPayloadKeys.has(`${asset.asset_id}\u0000${payload.payload_type}`),
+    );
+    if (payloadResults.length > 0) {
+      return [{ ...asset, payload_results: payloadResults }];
+    }
+    // Fixture-era summaries can name an asset-level issue row while omitting
+    // payload_results entirely. Retain that selected asset as a compatibility
+    // fallback; current 1.1 snapshots always take the exact payload branch.
+    return asset.payload_results.length === 0 && selectedAssetIds.has(asset.asset_id)
+      ? [asset]
+      : [];
+  });
+  const assetIds = new Set(selectedAssets.map((asset) => asset.asset_id));
   const faultRows = reconciledSummary.fault_rows.filter((fault) => {
-    if (!fault.asset_id || !assetIds.has(fault.asset_id)) {
+    if (!fault.asset_id) {
+      return fullSourceSelected;
+    }
+    if (!assetIds.has(fault.asset_id)) {
       return false;
     }
-    return !topicNeedle || !fault.payload_type || payloadKeys.has(`${fault.asset_id}\u0000${fault.payload_type}`);
+    const payloadType = fault.payload_type?.trim() ?? "";
+    return payloadType
+      ? selectedPayloadKeys.has(`${fault.asset_id}\u0000${payloadType}`)
+      : fullySelectedAssetIds.has(fault.asset_id);
   });
-  const overall = summaryMetricsForAssets(assets, faultRows, Boolean(topicNeedle));
+  const assets = selectedAssets.map((asset) => {
+    const assetFaults = faultRows.filter((fault) => fault.asset_id === asset.asset_id);
+    const expectedPayloads = asset.payload_results.filter((payload) => payload.expected);
+    const receivedPayloads = expectedPayloads.filter((payload) => payload.received);
+    const observedTimes = receivedPayloads
+      .flatMap((payload) => {
+        if (!payload.received_at) return [];
+        const instant = Date.parse(payload.received_at);
+        return Number.isNaN(instant) ? [] : [{ instant, value: payload.received_at }];
+      })
+      .sort((left, right) => right.instant - left.instant);
+    const blockingIssueCount = assetFaults.filter((fault) =>
+      ["critical", "high", "medium", "blocking"].includes(
+        fault.severity.toLocaleLowerCase(),
+      ),
+    ).length;
+    const issueCount = assetFaults.length;
+    return {
+      ...asset,
+      observed: receivedPayloads.length > 0,
+      expected_payloads: expectedPayloads.length,
+      received_payloads: expectedPayloads.filter((payload) => payload.received).length,
+      all_expected_payloads_received:
+        expectedPayloads.length > 0 && expectedPayloads.every((payload) => payload.received),
+      all_received_payloads_successfully_validated:
+        receivedPayloads.length > 0 &&
+        receivedPayloads.every((payload) => payload.successfully_validated),
+      successfully_validated:
+        expectedPayloads.length > 0 &&
+        expectedPayloads.every((payload) => payload.received) &&
+        blockingIssueCount === 0,
+      issue_count: issueCount,
+      blocking_issue_count: blockingIssueCount,
+      last_observed_at: observedTimes[0]?.value ?? null,
+    };
+  });
+  const selectedUnexpectedIds = new Set(scope.unexpected_device_ids);
+  const scopedUnexpectedDevices = unexpectedDevices.filter((device) =>
+    selectedUnexpectedIds.has(device.id),
+  );
+  const overall = summaryMetricsForAssets(
+    assets,
+    faultRows,
+    true,
+    scopedUnexpectedDevices.length,
+  );
   const systems = Array.from(new Set(assets.map((asset) => asset.system || "Unspecified"))).sort();
   const systemMetrics = systems.map((system) => {
     const systemAssets = assets.filter((asset) => (asset.system || "Unspecified") === system);
@@ -4234,7 +4738,7 @@ function filterValidationSummary(
     const systemFaults = faultRows.filter(
       (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
     );
-    return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, Boolean(topicNeedle)) };
+    return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, true) };
   });
   return {
     ...reconciledSummary,
@@ -4242,6 +4746,7 @@ function filterValidationSummary(
     asset_results: assets,
     fault_rows: faultRows,
     system_metrics: systemMetrics,
+    unexpected_devices: scopedUnexpectedDevices,
   };
 }
 
@@ -4265,6 +4770,12 @@ function PayloadMetricGroup({ summary }: { summary: UdmiSummaryDisplay }) {
   const metrics: SummaryMetric[] = [
     { label: "Expected payloads", value: summary.payload_metrics.expected },
     { label: "Received payloads", value: summary.payload_metrics.received },
+    {
+      label: "Not received",
+      value:
+        summary.payload_metrics.not_received ??
+        Math.max(0, summary.payload_metrics.expected - summary.payload_metrics.received),
+    },
     { label: "Payloads with issues", value: summary.payload_metrics.with_issues },
     { label: "Successfully validated", value: summary.payload_metrics.successfully_validated },
   ];
@@ -4310,13 +4821,11 @@ function UdmiSummaryPanel({
   lastRunAt,
   provisional,
   summary,
-  topicFiltered,
 }: {
   filtered: boolean;
   lastRunAt: string | undefined;
   provisional: boolean;
   summary: UdmiSummaryDisplay;
-  topicFiltered: boolean;
 }) {
   const assets: SummaryMetric[] = [
     { label: "Expected assets", value: summary.asset_metrics.expected },
@@ -4324,6 +4833,7 @@ function UdmiSummaryPanel({
     { label: "Not observed", value: summary.asset_metrics.not_observed },
     { label: "Assets with issues", value: summary.asset_metrics.with_issues },
     { label: "Successfully validated", value: summary.asset_metrics.successfully_validated },
+    { label: "Unexpected devices", value: summary.asset_metrics.unexpected ?? 0 },
   ];
   const faults: SummaryMetric[] = [
     { label: "Payload formatting", value: summary.fault_metrics.payload_formatting_issues },
@@ -4341,13 +4851,11 @@ function UdmiSummaryPanel({
           <h3 id="udmi-summary-heading">
             {provisional ? "Provisional validation summary" : "Validation summary"}
           </h3>
-          {topicFiltered ? (
+          {filtered ? (
             <p className="section-copy">
-              Asset counts show the selected assets. Asset issues and compliance remain whole-asset;
-              payload and fault metrics follow the Topic contains filter.
+              Metrics, details, and generated reports reflect the exact rows retained by every
+              active result filter.
             </p>
-          ) : filtered ? (
-            <p className="section-copy">Metrics reflect the active System and observation filters.</p>
           ) : null}
         </div>
         <dl className="udmi-summary-run-meta">
@@ -4369,9 +4877,12 @@ function UdmiSummaryPanel({
             <dd>{lastRunAt ? formatAbsoluteTime(lastRunAt) : "Not recorded"}</dd>
           </div>
           <div>
-            <dt>Blocking / warning</dt>
+            <dt>Issues</dt>
             <dd>
-              {formatMetricCount(summary.issue_metrics.blocking)} / {formatMetricCount(summary.issue_metrics.warning)}
+              {formatMetricCount(
+                summary.issue_metrics.blocking + summary.issue_metrics.warning,
+              )}{" "}
+              <span>({formatMetricCount(summary.issue_metrics.warning)} warnings)</span>
             </dd>
           </div>
         </dl>
@@ -4384,8 +4895,23 @@ function UdmiSummaryPanel({
       </div>
 
       <p className="udmi-metric-basis">
-        <strong>Unexpected devices: Not measured.</strong> Validation subscribes to expected register
-        topics; run MQTT discovery to measure publishers that are absent from the register.
+        The Observed assets metric counts expected register assets with at least one retained expected payload.
+        Unexpected devices are reported separately and never enter expected, observed, compliance,
+        payload, fault, or validation-result totals.{" "}
+        {summary.unexpected_devices_measured === true ? (
+          <strong>
+            Unexpected-device measurement was available
+            {summary.unexpected_devices_measurement_scope
+              ? ` for ${summary.unexpected_devices_measurement_scope}`
+              : " for this run"}
+            .
+          </strong>
+        ) : (
+          <strong>
+            Unexpected-device measurement was unavailable for this run; the displayed 0 does not
+            prove that no unexpected publishers exist.
+          </strong>
+        )}
       </p>
 
       <section className="udmi-system-summary" aria-labelledby="udmi-system-summary-heading">
@@ -4425,8 +4951,9 @@ function UdmiSummaryPanel({
                       {formatMetricCount(system.asset_metrics.expected)}
                     </td>
                     <td>
-                      {formatMetricCount(system.issue_metrics.blocking)} blocking,{" "}
-                      {formatMetricCount(system.issue_metrics.warning)} warning
+                      {formatMetricCount(
+                        system.issue_metrics.blocking + system.issue_metrics.warning,
+                      )} issues ({formatMetricCount(system.issue_metrics.warning)} warnings)
                     </td>
                   </tr>
                 ))}
@@ -4726,7 +5253,7 @@ function AlignedDiffCell({ line, flagged }: { line: AlignedRow["expected"]; flag
 // the two sides are aligned LINE-FOR-LINE inside ONE scroll container (so they
 // scroll together), JSON-syntax-coloured, with the presence diff (amber =
 // expected-only key, red = observed-only key) and an honest red highlight on rows
-// whose point name the engine actually flagged in its validation issues. VALUES
+// whose exact evidence path the engine flagged (or the UI conservatively derived). VALUES
 // are never diffed — the expected side is a template of sentinels — so a healthy
 // payload is never painted red. When nothing was observed there is no comparison
 // to make (an observation-shaped claim would be dishonest), so it falls back to a
@@ -4742,18 +5269,33 @@ function PayloadComparePanels({
   observedPresent: boolean;
   issues: IssueRow[];
 }) {
-  // Red rows come ONLY from the engine's flagged point names (name-based,
-  // best-effort): an issue with no point_name highlights no row, and topic /
-  // cadence / schema-level issues stay the authority of the issue cards above.
-  const flaggedPoints = new Set<string>();
+  // Red rows come only from an exact evidence path. New issues may carry that
+  // pointer directly; older unit issues derive conservative `units` candidates
+  // from match_basis + point_name so the parent point row stays unhighlighted.
+  const flaggedPaths = new Set<string>();
   for (const issue of issues) {
-    if (issue.pointName) {
-      flaggedPoints.add(issue.pointName);
+    const exactPath = normaliseEvidencePath(issue.evidencePath);
+    if (exactPath) {
+      flaggedPaths.add(exactPath);
+      continue;
+    }
+    if (!issue.pointName) {
+      continue;
+    }
+    const point = issue.pointName.replace(/~/g, "~0").replace(/\//g, "~1");
+    const suffix = issue.matchBasis?.toLocaleLowerCase().includes("unit") ? "/units" : "";
+    for (const prefix of [
+      "/pointset/points",
+      "/points",
+      "/metadata/pointset/points",
+      "/metadata/points",
+    ]) {
+      flaggedPaths.add(`${prefix}/${point}${suffix}`);
     }
   }
   const aligned =
     observedPresent && isPlainObject(expected) && isPlainObject(observed)
-      ? alignPayloadDiff(expected, observed, flaggedPoints)
+      ? alignPayloadDiff(expected, observed, flaggedPaths)
       : null;
 
   if (!aligned) {
@@ -4805,12 +5347,29 @@ function PayloadComparePanels({
       )}
       <p className="section-copy payload-diff-legend">
         Highlights mark keys present on only one side (amber = expected only, red = observed only).
-        {hasFlagged ? " Rows in red are points flagged by the validation issues above." : ""} Values are
+        {hasFlagged ? " Rows in red match exact validation evidence paths." : ""} Values are
         not compared here — expected values are template sentinels; see the issues above for value
         checks.
       </p>
     </>
   );
+}
+
+function normaliseEvidencePath(path: string | null | undefined): string | null {
+  const trimmed = path?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.startsWith("/")) {
+    return trimmed;
+  }
+  const withoutRoot = trimmed.replace(/^\$\.?/, "");
+  const segments = withoutRoot.split(".").filter(Boolean);
+  return segments.length > 0
+    ? `/${segments
+        .map((segment) => segment.replace(/~/g, "~0").replace(/\//g, "~1"))
+        .join("/")}`
+    : null;
 }
 
 function JsonTree({ value }: { value: unknown }) {
@@ -4871,6 +5430,8 @@ function toIssueRow(issue: ValidationIssueRecord): IssueRow {
     expectedObserved,
     suggestedAction: issue.suggested_action ?? null,
     pointName: issue.point_name ?? null,
+    matchBasis: issue.match_basis ?? null,
+    evidencePath: issue.evidence_path ?? null,
   };
 }
 
@@ -4968,12 +5529,7 @@ function renderCell(
     return (
       <button
         className="secondary-button compact"
-        onClick={(event) => {
-          // Copy sits inside the results row; without this the click also fires
-          // the row's focusInspectorPayload, collapsing/scrolling the inspector.
-          event.stopPropagation();
-          onCopyPayload(row[column], row.Asset ?? row.Topic ?? "Selected");
-        }}
+        onClick={() => onCopyPayload(row[column], row.Asset ?? row.Topic ?? "Selected")}
         type="button"
       >
         Copy payload
@@ -5250,6 +5806,19 @@ function buildResultDetailItems(
 
   if (route === "udmi-validation") {
     if (live) {
+      if (row.__category === "unexpected-devices") {
+        return [
+          { label: "Publisher", value: row.Asset ?? "Unknown publisher" },
+          { label: "Device ID", value: row.__unexpectedId ?? "Not recorded" },
+          { label: "Topic root", value: row.Topic ?? "Not recorded" },
+          { label: "Observed topics", value: row.__topics || row.Topic || "Not recorded" },
+          {
+            label: "Last seen",
+            value: row.__lastSeen ? formatAbsoluteTime(row.__lastSeen) : "Not recorded",
+          },
+          { label: "Category", value: "Unexpected device (outside expected register)" },
+        ];
+      }
       // The row only carries formatted strings; the actual issue text lives in
       // the merged groups. Rows were built as Asset=assetId and
       // Payload=`UDMI ${payloadType}`, so both joins are exact-match safe.

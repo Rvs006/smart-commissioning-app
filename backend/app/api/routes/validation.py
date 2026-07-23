@@ -124,6 +124,7 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
     units = [u.strip() for u in str(row.get("Expected units", "")).split(",")]
     fields = {
         "asset_id": row.get("Asset ID") or row.get("Asset name"),
+        "project_site": row.get("Project/site"),
         "system": row.get("System"),
         "manufacturer": row.get("Make"),
         "model": row.get("Model"),

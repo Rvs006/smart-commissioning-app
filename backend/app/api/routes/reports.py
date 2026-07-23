@@ -7,14 +7,15 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 from smart_commissioning_core.db.repositories import DiscoveryRepository
+from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
-from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary
+from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary, RunRecord
 from app.services.report_pdf import PdfDocument
 from app.services.reports_integrity import INTEGRITY_KEY, build_integrity_metadata
 from app.services.run_service import (
@@ -195,23 +196,47 @@ def _generated_at(run: object) -> str:
     existing = summary.get("report_generated_at")
     if isinstance(existing, str) and existing:
         return existing
-    generated_at = datetime.now(UTC).isoformat()
-    service.update_result_summary(run.run_id, {"report_generated_at": generated_at})
-    # Reflect the persisted value on the in-memory run so this request's artifact
-    # matches what future regenerations will produce.
+    candidate = datetime.now(UTC).isoformat()
+    generated_at = service.initialize_report_summary_value(
+        run.run_id,
+        "report_generated_at",
+        candidate,
+    )
+    if not isinstance(generated_at, str) or not generated_at:
+        raise RuntimeError("Stored report generation timestamp is invalid.")
+    # Reflect the winning persisted value on this request's in-memory run. A
+    # concurrent first download may have initialized it before this request.
     if isinstance(run.result_summary, dict):
         run.result_summary["report_generated_at"] = generated_at
     return generated_at
 
 
 def _persist_integrity(run: object, artifact: bytes) -> dict[str, object]:
-    """Compute + persist SHA-256 + Ed25519 signature for the artifact bytes.
+    """Persist integrity once, then verify without rewriting signed metadata."""
 
-    Stored under result_summary["integrity"]. Recomputed every download so a
-    regenerated (byte-identical) artifact re-confirms the recorded hash.
-    """
-    metadata = build_integrity_metadata(artifact)
-    service.update_result_summary(run.run_id, {INTEGRITY_KEY: metadata})
+    artifact_hash = sha256_bytes(artifact)
+
+    def validated(value: object) -> dict[str, object]:
+        if not isinstance(value, dict):
+            raise RuntimeError("Stored report integrity metadata is invalid.")
+        stored_hash = value.get("hash")
+        if not isinstance(stored_hash, str) or not stored_hash:
+            raise RuntimeError("Stored report integrity metadata has no artifact hash.")
+        if stored_hash != artifact_hash:
+            raise RuntimeError(
+                "Regenerated report bytes do not match the stored integrity record."
+            )
+        return dict(value)
+
+    summary = run.result_summary if isinstance(run.result_summary, dict) else {}
+    existing = summary.get(INTEGRITY_KEY)
+    if existing is not None:
+        return validated(existing)
+
+    candidate = build_integrity_metadata(artifact)
+    metadata = validated(
+        service.initialize_report_summary_value(run.run_id, INTEGRITY_KEY, candidate)
+    )
     if isinstance(run.result_summary, dict):
         run.result_summary[INTEGRITY_KEY] = metadata
     return metadata
@@ -279,6 +304,13 @@ def _report_rows(
     udmi_data: dict[str, object] | None = None,
 ) -> list[tuple[str, str]]:
     parameters = run.parameters
+    if udmi_data is not None:
+        return [
+            ("Project", str(udmi_data.get("project_label") or "Not recorded")),
+            ("Site", str(udmi_data.get("site_label") or "Not recorded")),
+            ("Report ID", str(run.run_id)),
+            ("Generated", _generated_at(run)),
+        ]
     rows = [
         ("Report title", _report_title(run)),
         ("Report type", str(parameters.get("report_type", "evidence_pack"))),
@@ -293,8 +325,6 @@ def _report_rows(
         ),
         ("Generated", _generated_at(run)),
     ]
-    if udmi_data is not None:
-        rows.insert(6, ("Validation scope", str(udmi_data["scope_summary"])))
     return rows
 
 
@@ -316,7 +346,14 @@ def _is_udmi_report(run: object) -> bool:
 def _udmi_report_data(run: object) -> dict[str, object] | None:
     if not _is_udmi_report(run):
         return None
-    return build_udmi_report_model(_source_runs(run))
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    if "udmi_report_snapshot" in parameters:
+        snapshot = parameters.get("udmi_report_snapshot")
+        return dict(snapshot) if isinstance(snapshot, dict) else None
+    return build_udmi_report_model(
+        _source_runs(run),
+        parameters.get("udmi_scope"),
+    )
 
 
 def _display_timestamp(value: object) -> str:
@@ -485,7 +522,16 @@ def _source_runs(run: object) -> list[object]:
     Order-preserving dedupe: a run id scoped twice must contribute one Summary
     row and one set of findings, not doubled device/blocking totals.
     """
-    source_ids = run.parameters.get("source_run_ids", [])
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    raw_snapshots = parameters.get("source_run_snapshots")
+    if isinstance(raw_snapshots, list):
+        return [
+            RunRecord.model_validate(snapshot)
+            for snapshot in raw_snapshots
+            if isinstance(snapshot, dict)
+        ]
+
+    source_ids = parameters.get("source_run_ids", [])
     if not isinstance(source_ids, list):
         return []
     sources: list[object] = []
@@ -921,14 +967,14 @@ _UDMI_SYSTEM_PAYLOAD_COLUMNS = (
     "System",
     "Expected Payloads",
     "Received Payloads",
+    "Not Received Payloads",
     "Payloads With Issues",
     "Successfully Validated Payloads",
-    "Blocking Issues",
-    "Warning Issues",
+    "Issues",
+    "Warnings",
 )
 _UDMI_SYSTEM_FAULT_COLUMNS = ("System",) + tuple(label for _key, label in FAULT_METRIC_LABELS)
 _UDMI_ASSET_COLUMNS = (
-    "Source Run",
     "Asset ID",
     "System",
     "Observed",
@@ -937,7 +983,6 @@ _UDMI_ASSET_COLUMNS = (
     "Evidence Timestamp",
 )
 _UDMI_FAULT_MATRIX_COLUMNS = (
-    "Source Run",
     "Asset ID",
     "System",
     "Payload Formatting",
@@ -948,21 +993,67 @@ _UDMI_FAULT_MATRIX_COLUMNS = (
     "Other",
 )
 _UDMI_FAULT_DETAIL_COLUMNS = (
-    "Source Run",
     "Issue ID",
     "Asset ID",
     "System",
     "Payload",
     "Category",
-    "Severity",
     "Point",
     "Expected",
     "Observed",
     "Suggested Action",
     "Description",
-    "Evidence URI",
 )
 _UDMI_CATEGORY_LABELS = dict(FAULT_METRIC_LABELS)
+
+
+def _content_weights(
+    columns: tuple[str, ...],
+    rows: list[dict[str, str]],
+    *,
+    minimum: int = 7,
+    maximum: int = 48,
+) -> tuple[float, ...]:
+    """Size table columns from retained content while bounding extreme prose."""
+
+    return tuple(
+        float(
+            max(
+                minimum,
+                min(
+                    maximum,
+                    max(
+                        [len(column), *(len(str(row.get(column, ""))) for row in rows)],
+                    ),
+                ),
+            )
+        )
+        for column in columns
+    )
+
+
+def _docx_content_widths(
+    columns: tuple[str, ...],
+    rows: list[dict[str, str]],
+    *,
+    total: int = 15120,
+) -> tuple[int, ...]:
+    weights = _content_weights(columns, rows)
+    weight_total = sum(weights) or 1.0
+    widths = [max(480, round(total * weight / weight_total)) for weight in weights]
+    widths[-1] += total - sum(widths)
+    return tuple(widths)
+
+
+def _xlsx_content_widths(
+    columns: tuple[str, ...],
+    rows: list[dict[str, str]],
+) -> dict[str, int]:
+    weights = _content_weights(columns, rows, minimum=10, maximum=64)
+    return {
+        get_column_letter(index): int(weight) + 2
+        for index, weight in enumerate(weights, start=1)
+    }
 
 
 def _yes_no(value: object) -> str:
@@ -993,7 +1084,7 @@ def _payload_correctness(metrics: dict[str, object]) -> tuple[str, str]:
 def _udmi_metric_rows(
     metrics: dict[str, int], labels: tuple[tuple[str, str], ...]
 ) -> list[dict[str, str]]:
-    return [{"Metric": label, "Value": str(metrics[key])} for key, label in labels]
+    return [{"Metric": label, "Value": str(metrics.get(key, 0))} for key, label in labels]
 
 
 def _udmi_supporting_metric_rows(
@@ -1008,7 +1099,6 @@ def _udmi_supporting_metric_rows(
                 "Metric": "Overall Compliance",
                 "Value": _completion(data["asset_metrics"]),
             },
-            {"Metric": "Unexpected Devices", "Value": "Not measured"},
             {"Metric": "Payloads Correct %", "Value": payloads_correct},
             {"Metric": "Payloads Incorrect %", "Value": payloads_incorrect},
             {
@@ -1061,7 +1151,6 @@ def _udmi_asset_rows(data: dict[str, object]) -> list[dict[str, str]]:
         asset = raw if isinstance(raw, dict) else {}
         rows.append(
             {
-                "Source Run": str(asset.get("source_run_id", "")),
                 "Asset ID": str(asset.get("asset_id", "")),
                 "System": str(asset.get("system", "Unspecified")),
                 "Observed": _yes_no(asset.get("observed")),
@@ -1085,7 +1174,6 @@ def _udmi_fault_matrix_rows(data: dict[str, object]) -> list[dict[str, str]]:
         item = raw if isinstance(raw, dict) else {}
         rows.append(
             {
-                "Source Run": str(item.get("source_run_id", "")),
                 "Asset ID": str(item.get("asset_id", "")),
                 "System": str(item.get("system", "Unspecified")),
                 "Payload Formatting": _yes_no(item.get("payload_formatting_issues")),
@@ -1106,19 +1194,63 @@ def _udmi_fault_detail_rows(data: dict[str, object]) -> list[dict[str, str]]:
         category = str(fault.get("category", "other_issues"))
         rows.append(
             {
-                "Source Run": str(fault.get("source_run_id", "")),
                 "Issue ID": str(fault.get("issue_id", "")),
-                "Asset ID": str(fault.get("asset_id", "")),
+                "Asset ID": str(fault.get("asset_id") or "Run-wide"),
                 "System": str(fault.get("system", "Unspecified")),
                 "Payload": str(fault.get("payload_type", "")),
                 "Category": _UDMI_CATEGORY_LABELS.get(category, "Other Issues"),
-                "Severity": str(fault.get("severity", "")),
                 "Point": str(fault.get("point_name") or ""),
                 "Expected": str(fault.get("expected_value") or ""),
                 "Observed": str(fault.get("observed_value") or ""),
                 "Suggested Action": str(fault.get("suggested_action") or ""),
                 "Description": str(fault.get("description") or ""),
-                "Evidence URI": str(fault.get("raw_evidence_uri") or ""),
+            }
+        )
+    return rows
+
+
+def _udmi_fault_json_rows(data: dict[str, object]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for raw in data["fault_rows"]:
+        fault = raw if isinstance(raw, dict) else {}
+        rows.append(
+            {
+                "issue_id": str(fault.get("issue_id", "")),
+                "asset_id": fault.get("asset_id"),
+                "system": str(fault.get("system", "Unspecified")),
+                "payload_type": str(fault.get("payload_type", "")),
+                "category": str(fault.get("category", "other_issues")),
+                "point_name": fault.get("point_name"),
+                "expected_value": fault.get("expected_value"),
+                "observed_value": fault.get("observed_value"),
+                "suggested_action": fault.get("suggested_action"),
+                "description": str(fault.get("description", "")),
+            }
+        )
+    return rows
+
+
+def _udmi_audit_finding_rows(data: dict[str, object]) -> list[dict[str, object]]:
+    """Scoped machine-audit findings, retaining provenance omitted from tables."""
+
+    rows: list[dict[str, object]] = []
+    for raw in data["fault_rows"]:
+        fault = raw if isinstance(raw, dict) else {}
+        rows.append(
+            {
+                "source_run_id": str(fault.get("source_run_id", "")),
+                "issue_id": str(fault.get("issue_id", "")),
+                "asset_id": fault.get("asset_id"),
+                "system": str(fault.get("system", "Unspecified")),
+                "payload_type": str(fault.get("payload_type", "")),
+                "category": str(fault.get("category", "other_issues")),
+                "severity": str(fault.get("severity", "")),
+                "point_name": fault.get("point_name"),
+                "expected_value": fault.get("expected_value"),
+                "observed_value": fault.get("observed_value"),
+                "suggested_action": fault.get("suggested_action"),
+                "description": str(fault.get("description", "")),
+                "raw_evidence_uri": fault.get("raw_evidence_uri"),
             }
         )
     return rows
@@ -1130,6 +1262,13 @@ _XLSX_POSITIVE_FILL = PatternFill("solid", fgColor="E2F0D9")
 _XLSX_CAUTION_FILL = PatternFill("solid", fgColor="FFF2CC")
 _XLSX_NEGATIVE_FILL = PatternFill("solid", fgColor="FCE4D6")
 _XLSX_WHITE_FONT = Font(color="FFFFFF", bold=True)
+_XLSX_GRID_SIDE = Side(style="thin", color="B0C1C9")
+_XLSX_GRID_BORDER = Border(
+    left=_XLSX_GRID_SIDE,
+    right=_XLSX_GRID_SIDE,
+    top=_XLSX_GRID_SIDE,
+    bottom=_XLSX_GRID_SIDE,
+)
 _XML_ILLEGAL_CHAR_RE = re.compile(
     r"[\x00-\x08\x0B\x0C\x0E-\x1F\uD800-\uDFFF\uFFFE\uFFFF]"
 )
@@ -1183,8 +1322,38 @@ def _style_xlsx_header(sheet: object, row_number: int = 1) -> None:
             continue
         cell.fill = _XLSX_DARK_FILL
         cell.font = _XLSX_WHITE_FONT
-        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = _XLSX_GRID_BORDER
     sheet.row_dimensions[row_number].height = 30
+
+
+def _style_xlsx_table(
+    sheet: object,
+    *,
+    min_row: int = 1,
+    max_row: int | None = None,
+    min_col: int = 1,
+    max_col: int | None = None,
+) -> None:
+    final_row = max_row if max_row is not None else sheet.max_row
+    final_col = max_col if max_col is not None else sheet.max_column
+    for row_number in range(min_row, final_row + 1):
+        estimated_lines = 1
+        for column_number in range(min_col, final_col + 1):
+            cell = sheet.cell(row=row_number, column=column_number)
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
+            cell.border = _XLSX_GRID_BORDER
+            width = sheet.column_dimensions[get_column_letter(column_number)].width or 10
+            value_length = len(str(cell.value or ""))
+            estimated_lines = max(
+                estimated_lines,
+                max(1, (value_length + max(int(width), 1) - 1) // max(int(width), 1)),
+            )
+        sheet.row_dimensions[row_number].height = min(150, max(20, estimated_lines * 15))
 
 
 def _style_xlsx_statuses(sheet: object) -> None:
@@ -1195,7 +1364,11 @@ def _style_xlsx_statuses(sheet: object) -> None:
             continue
         for row in range(2, sheet.max_row + 1):
             cell = sheet.cell(row=row, column=column)
-            cell.alignment = Alignment(horizontal="center")
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
             cell.fill = _XLSX_POSITIVE_FILL if cell.value == "Yes" else _XLSX_CAUTION_FILL
     for heading in (
         "Payload Formatting",
@@ -1210,7 +1383,11 @@ def _style_xlsx_statuses(sheet: object) -> None:
             continue
         for row in range(2, sheet.max_row + 1):
             cell = sheet.cell(row=row, column=column)
-            cell.alignment = Alignment(horizontal="center")
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
             cell.fill = _XLSX_NEGATIVE_FILL if cell.value == "Yes" else _XLSX_POSITIVE_FILL
 
 
@@ -1227,9 +1404,18 @@ def _append_xlsx_summary_section(
     title_cell.fill = _XLSX_ACCENT_FILL
     title_cell.font = _XLSX_WHITE_FONT
     _append_xlsx_row(sheet, ["Metric", "Value"])
-    _style_xlsx_header(sheet, sheet.max_row)
+    header_row = sheet.max_row
+    _style_xlsx_header(sheet, header_row)
     for row in rows:
         _append_xlsx_row(sheet, [row["Metric"], row["Value"]])
+    _style_xlsx_table(
+        sheet,
+        min_row=header_row,
+        max_row=sheet.max_row,
+        min_col=1,
+        max_col=2,
+    )
+    _style_xlsx_header(sheet, header_row)
 
 
 def _build_udmi_xlsx_report(run: object, data: dict[str, object]) -> bytes:
@@ -1238,13 +1424,32 @@ def _build_udmi_xlsx_report(run: object, data: dict[str, object]) -> bytes:
     workbook.properties.modified = _ARTIFACT_PROPERTIES_EPOCH
     title = _report_title(run)
 
-    executive = workbook.active
+    definition_rows = [
+        {
+            "Metric": str(definition["metric"]),
+            "Definition": str(definition["definition"]),
+        }
+        for definition in data["metric_definitions"]
+    ]
+    definitions = workbook.active
+    definitions.title = _UDMI_DEFINITIONS_TITLE
+    _append_xlsx_row(definitions, ["Metric", "Definition"])
+    for row in definition_rows:
+        _append_xlsx_row(definitions, [row["Metric"], row["Definition"]])
+    _configure_xlsx_sheet(
+        definitions,
+        widths=_xlsx_content_widths(("Metric", "Definition"), definition_rows),
+    )
+    _style_xlsx_table(definitions)
+    _style_xlsx_header(definitions)
+
+    executive = workbook.create_sheet(_UDMI_EXECUTIVE_TITLE)
     executive.title = _UDMI_EXECUTIVE_TITLE
     _append_xlsx_row(executive, [title])
     executive.merge_cells("A1:B1")
     executive["A1"].fill = _XLSX_DARK_FILL
     executive["A1"].font = Font(color="FFFFFF", bold=True, size=18)
-    executive["A1"].alignment = Alignment(vertical="center")
+    executive["A1"].alignment = Alignment(horizontal="center", vertical="center")
     executive.row_dimensions[1].height = 34
     for label, value in _report_rows(run, udmi_data=data):
         _append_xlsx_row(executive, [label, value])
@@ -1302,76 +1507,55 @@ def _build_udmi_xlsx_report(run: object, data: dict[str, object]) -> bytes:
         system = asset_row["System"]
         combined = {**asset_row, **payload_by_system[system], **fault_by_system[system]}
         _append_xlsx_row(systems, [combined[column] for column in system_columns])
-    _style_xlsx_header(systems)
     _configure_xlsx_sheet(
         systems,
-        widths={
-            "A": 18,
-            **{get_column_letter(index): 18 for index in range(2, len(system_columns) + 1)},
-        },
+        widths=_xlsx_content_widths(system_columns, [
+            {column: str(combined[column]) for column in system_columns}
+            for asset_row in system_assets
+            for system in [asset_row["System"]]
+            for combined in [{**asset_row, **payload_by_system[system], **fault_by_system[system]}]
+        ]),
     )
+    _style_xlsx_table(systems)
+    _style_xlsx_header(systems)
 
     asset_rows = _udmi_asset_rows(data)
     assets = workbook.create_sheet(_UDMI_ASSET_TITLE)
     _append_xlsx_row(assets, list(_UDMI_ASSET_COLUMNS))
     for row in asset_rows:
         _append_xlsx_row(assets, [row[column] for column in _UDMI_ASSET_COLUMNS])
-    _style_xlsx_header(assets)
-    _style_xlsx_statuses(assets)
     _configure_xlsx_sheet(
         assets,
-        widths={"A": 26, "B": 26, "C": 18, "D": 12, "E": 20, "F": 20, "G": 24},
+        widths=_xlsx_content_widths(_UDMI_ASSET_COLUMNS, asset_rows),
     )
+    _style_xlsx_table(assets)
+    _style_xlsx_header(assets)
+    _style_xlsx_statuses(assets)
 
     matrix_rows = _udmi_fault_matrix_rows(data)
     matrix = workbook.create_sheet(_UDMI_FAULT_MATRIX_TITLE)
     _append_xlsx_row(matrix, list(_UDMI_FAULT_MATRIX_COLUMNS))
     for row in matrix_rows:
         _append_xlsx_row(matrix, [row[column] for column in _UDMI_FAULT_MATRIX_COLUMNS])
-    _style_xlsx_header(matrix)
-    _style_xlsx_statuses(matrix)
     _configure_xlsx_sheet(
         matrix,
-        widths={"A": 26, "B": 26, "C": 18, **{get_column_letter(i): 18 for i in range(4, 10)}},
+        widths=_xlsx_content_widths(_UDMI_FAULT_MATRIX_COLUMNS, matrix_rows),
     )
+    _style_xlsx_table(matrix)
+    _style_xlsx_header(matrix)
+    _style_xlsx_statuses(matrix)
 
     detail_rows = _udmi_fault_detail_rows(data)
     details = workbook.create_sheet(_UDMI_FAULT_DETAIL_TITLE)
     _append_xlsx_row(details, list(_UDMI_FAULT_DETAIL_COLUMNS))
     for row in detail_rows:
         _append_xlsx_row(details, [row[column] for column in _UDMI_FAULT_DETAIL_COLUMNS])
-    _style_xlsx_header(details)
     _configure_xlsx_sheet(
         details,
-        widths={
-            "A": 26,
-            "B": 22,
-            "C": 26,
-            "D": 18,
-            "E": 16,
-            "F": 24,
-            "G": 12,
-            "H": 26,
-            "I": 32,
-            "J": 32,
-            "K": 48,
-            "L": 70,
-            "M": 42,
-        },
+        widths=_xlsx_content_widths(_UDMI_FAULT_DETAIL_COLUMNS, detail_rows),
     )
-    for row in details.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-    definitions = workbook.create_sheet(_UDMI_DEFINITIONS_TITLE)
-    _append_xlsx_row(definitions, ["Metric", "Definition"])
-    for definition in data["metric_definitions"]:
-        _append_xlsx_row(definitions, [definition["metric"], definition["definition"]])
-    _style_xlsx_header(definitions)
-    _configure_xlsx_sheet(definitions, widths={"A": 34, "B": 110})
-    for row in definitions.iter_rows(min_row=2):
-        for cell in row:
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    _style_xlsx_table(details)
+    _style_xlsx_header(details)
 
     _apply_xlsx_branding(workbook, str(run.run_id), title)
     buffer = BytesIO()
@@ -1487,10 +1671,21 @@ def _build_xlsx_report(run: object) -> bytes:
     return buffer.getvalue()
 
 
-def _docx_paragraph(text: str, *, bold: bool = False) -> str:
+def _docx_paragraph(
+    text: str,
+    *,
+    bold: bool = False,
+    alignment: str | None = None,
+) -> str:
     run_properties = "<w:rPr><w:b/></w:rPr>" if bold else ""
+    paragraph_properties = (
+        f'<w:pPr><w:jc w:val="{alignment}"/></w:pPr>' if alignment else ""
+    )
     safe_text = _sanitize_report_text(text)
-    return f'<w:p><w:r>{run_properties}<w:t xml:space="preserve">{escape(safe_text)}</w:t></w:r></w:p>'
+    return (
+        f'<w:p>{paragraph_properties}<w:r>{run_properties}'
+        f'<w:t xml:space="preserve">{escape(safe_text)}</w:t></w:r></w:p>'
+    )
 
 
 # Single hairline borders so the hand-rolled tables read as tables in Word.
@@ -1505,12 +1700,18 @@ def _docx_table(
     rows: list[dict[str, str]],
     *,
     widths: tuple[int, ...] | None = None,
+    center_cells: bool = False,
 ) -> str:
     effective_widths = widths if widths is not None and len(widths) == len(columns) else None
 
     def cell(text: str, *, bold: bool = False, width: int | None = None) -> str:
-        cell_properties = f'<w:tcPr><w:tcW w:w="{width}" w:type="dxa"/></w:tcPr>' if width else ""
-        return f"<w:tc>{cell_properties}{_docx_paragraph(text, bold=bold)}</w:tc>"
+        width_property = f'<w:tcW w:w="{width}" w:type="dxa"/>' if width else ""
+        cell_properties = f"<w:tcPr>{width_property}<w:vAlign w:val=\"center\"/></w:tcPr>"
+        return (
+            f"<w:tc>{cell_properties}"
+            f"{_docx_paragraph(text, bold=bold, alignment='center' if center_cells else None)}"
+            "</w:tc>"
+        )
 
     grid = "".join(
         f'<w:gridCol w:w="{effective_widths[index]}"/>' if effective_widths else "<w:gridCol/>"
@@ -1689,7 +1890,24 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
     if data["scope_complete"] is not True:
         blocks.append(_docx_paragraph(_UDMI_INCOMPLETE_SCOPE_TITLE, bold=True))
         blocks.append(_docx_paragraph(str(data["scope_summary"]), bold=True))
-    blocks.append(_docx_paragraph(_UDMI_EXECUTIVE_TITLE, bold=True))
+    definition_rows = [
+        {
+            "Metric": str(definition["metric"]),
+            "Definition": str(definition["definition"]),
+        }
+        for definition in data["metric_definitions"]
+    ]
+    definition_columns = ("Metric", "Definition")
+    blocks.append(_docx_paragraph(_UDMI_DEFINITIONS_TITLE, bold=True))
+    blocks.append(
+        _docx_table(
+            definition_columns,
+            definition_rows,
+            widths=_docx_content_widths(definition_columns, definition_rows),
+            center_cells=True,
+        )
+    )
+    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_EXECUTIVE_TITLE, bold=True)])
 
     for section_title, labels, key in (
         ("Asset Level Metrics", ASSET_METRIC_LABELS, "asset_metrics"),
@@ -1698,13 +1916,24 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
     ):
         blocks.append(_docx_paragraph(section_title, bold=True))
         rows = _udmi_metric_rows(data[key], labels)
-        blocks.append(_docx_table(("Metric", "Value"), rows, widths=(4200, 10200)))
+        blocks.append(
+            _docx_table(
+                ("Metric", "Value"),
+                rows,
+                widths=_docx_content_widths(("Metric", "Value"), rows),
+                center_cells=True,
+            )
+        )
     blocks.append(_docx_paragraph("Supporting Metrics", bold=True))
     blocks.append(
         _docx_table(
             ("Metric", "Value"),
             _udmi_supporting_metric_rows(run, data),
-            widths=(4200, 10200),
+            widths=_docx_content_widths(
+                ("Metric", "Value"),
+                _udmi_supporting_metric_rows(run, data),
+            ),
+            center_cells=True,
         )
     )
     for note in data["notes"]:
@@ -1718,7 +1947,14 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
         ("Fault Metrics by System", _UDMI_SYSTEM_FAULT_COLUMNS, system_faults),
     ):
         blocks.append(_docx_paragraph(section_title, bold=True))
-        blocks.append(_docx_table(columns, rows))
+        blocks.append(
+            _docx_table(
+                columns,
+                rows,
+                widths=_docx_content_widths(columns, rows),
+                center_cells=True,
+            )
+        )
 
     asset_rows = _udmi_asset_rows(data)
     blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_ASSET_TITLE, bold=True)])
@@ -1727,7 +1963,8 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
             _docx_table(
                 _UDMI_ASSET_COLUMNS,
                 asset_rows,
-                widths=(3000, 2700, 1800, 1100, 2100, 2100, 2200),
+                widths=_docx_content_widths(_UDMI_ASSET_COLUMNS, asset_rows),
+                center_cells=True,
             )
         )
     else:
@@ -1736,45 +1973,31 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
     matrix_rows = _udmi_fault_matrix_rows(data)
     blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_FAULT_MATRIX_TITLE, bold=True)])
     if matrix_rows:
-        blocks.append(_docx_table(_UDMI_FAULT_MATRIX_COLUMNS, matrix_rows))
+        blocks.append(
+            _docx_table(
+                _UDMI_FAULT_MATRIX_COLUMNS,
+                matrix_rows,
+                widths=_docx_content_widths(_UDMI_FAULT_MATRIX_COLUMNS, matrix_rows),
+                center_cells=True,
+            )
+        )
     else:
         blocks.append(_docx_paragraph("No faults were retained for the selected runs."))
 
     detail_rows = _udmi_fault_detail_rows(data)
     blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_FAULT_DETAIL_TITLE, bold=True)])
     if detail_rows:
-        identity_columns = (
-            "Source Run",
-            "Issue ID",
-            "Asset ID",
-            "System",
-            "Payload",
-            "Category",
-            "Severity",
-            "Point",
-        )
-        blocks.append(_docx_table(identity_columns, detail_rows))
-        for row in detail_rows:
-            blocks.append(
-                _docx_paragraph(
-                    " | ".join(
-                        value
-                        for value in (row["Issue ID"], row["Asset ID"], row["Point"])
-                        if value
-                    ),
-                    bold=True,
-                )
+        blocks.append(
+            _docx_table(
+                _UDMI_FAULT_DETAIL_COLUMNS,
+                detail_rows,
+                widths=_docx_content_widths(_UDMI_FAULT_DETAIL_COLUMNS, detail_rows),
+                center_cells=True,
             )
-            for field in ("Expected", "Observed", "Suggested Action", "Description", "Evidence URI"):
-                if row[field]:
-                    blocks.append(_docx_paragraph(f"{field}: {row[field]}"))
+        )
     else:
         blocks.append(_docx_paragraph("No faults were retained for the selected runs."))
 
-    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_DEFINITIONS_TITLE, bold=True)])
-    for definition in data["metric_definitions"]:
-        blocks.append(_docx_paragraph(str(definition["metric"]), bold=True))
-        blocks.append(_docx_paragraph(str(definition["definition"])))
     return _assemble_docx(run, blocks, document_title=title, landscape=True)
 
 
@@ -1838,9 +2061,15 @@ def _build_zip_report(run: object) -> bytes:
             "summary.json",
             json.dumps(dict(_report_rows(run, udmi_data=udmi)), indent=2),
         )
-        # The actual findings from the scoped source runs (deterministically
-        # ordered so the artifact stays byte-reproducible).
-        archive.writestr("findings.json", json.dumps(_source_run_findings(run), indent=2))
+        # UDMI findings come from the exact retained report model, including an
+        # optional selected-payload scope. Other report types retain the generic
+        # source-run projection.
+        findings = (
+            _udmi_audit_finding_rows(udmi)
+            if udmi is not None
+            else _source_run_findings(run)
+        )
+        archive.writestr("findings.json", json.dumps(findings, indent=2))
         # Parity with the document formats: the validation sections ship as
         # their own JSON members when the source runs include validation runs.
         if udmi is not None:
@@ -1867,6 +2096,13 @@ def _build_zip_report(run: object) -> bytes:
                         "payloads_correct": payloads_correct,
                         "payloads_incorrect": payloads_incorrect,
                         "system_metrics": udmi["system_metrics"],
+                        "unexpected_devices": udmi["unexpected_devices"],
+                        "unexpected_devices_measured": udmi["unexpected_devices_measured"],
+                        "unexpected_devices_measurement_scope": udmi[
+                            "unexpected_devices_measurement_scope"
+                        ],
+                        "report_scope": udmi["report_scope"],
+                        "filter_provenance": udmi["filter_provenance"],
                         "notes": udmi["notes"],
                     },
                     indent=2,
@@ -1897,7 +2133,7 @@ def _build_zip_report(run: object) -> bytes:
                 json.dumps(
                     {
                         "schema_version": udmi["schema_version"],
-                        "rows": udmi["fault_rows"],
+                        "rows": _udmi_fault_json_rows(udmi),
                     },
                     indent=2,
                 ),
@@ -1988,22 +2224,7 @@ _PDF_INVENTORY_WEIGHTS = {
 }
 
 _PDF_UDMI_METRIC_WEIGHTS = (3.3, 1.0, 3.3, 1.0)
-_PDF_UDMI_SYSTEM_ASSET_WEIGHTS = (68, 72, 68, 74, 78, 92, 84, 76)
-_PDF_UDMI_SYSTEM_PAYLOAD_WEIGHTS = (78, 80, 78, 80, 96, 70, 70)
-_PDF_UDMI_SYSTEM_FAULT_WEIGHTS = (84, 94, 76, 82, 82, 82, 64)
-_PDF_UDMI_ASSET_WEIGHTS = (100, 100, 70, 45, 92, 92, 100)
-_PDF_UDMI_MATRIX_WEIGHTS = (92, 88, 62, 72, 64, 64, 68, 64, 48)
-_PDF_UDMI_DETAIL_COLUMNS = (
-    "Source Run",
-    "Issue ID",
-    "Asset ID",
-    "System",
-    "Payload",
-    "Category",
-    "Severity",
-    "Point",
-)
-_PDF_UDMI_DETAIL_WEIGHTS = (90, 72, 78, 58, 54, 88, 48, 78)
+_PDF_UDMI_DETAIL_COLUMNS = _UDMI_FAULT_DETAIL_COLUMNS
 
 
 def _pdf_metric_pairs(rows: list[dict[str, str]]) -> list[list[str]]:
@@ -2030,6 +2251,25 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
     if data["scope_complete"] is not True:
         document.add_heading(_UDMI_INCOMPLETE_SCOPE_TITLE)
         document.add_paragraph(str(data["scope_summary"]), bold=True)
+    definition_rows = [
+        {
+            "Metric": str(definition["metric"]),
+            "Definition": str(definition["definition"]),
+        }
+        for definition in data["metric_definitions"]
+    ]
+    definition_columns = ("Metric", "Definition")
+    document.add_heading(_UDMI_DEFINITIONS_TITLE, level=1)
+    document.add_table(
+        definition_columns,
+        [[row[column] for column in definition_columns] for row in definition_rows],
+        widths=_content_weights(definition_columns, definition_rows),
+        size=8,
+        wrap_cells=True,
+        center_cells=True,
+        draw_grid=True,
+    )
+    document.add_page_break()
     document.add_heading(_UDMI_EXECUTIVE_TITLE)
 
     for section_title, labels, key in (
@@ -2044,6 +2284,9 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
             _pdf_metric_pairs(rows),
             widths=_PDF_UDMI_METRIC_WEIGHTS,
             size=9,
+            wrap_cells=True,
+            center_cells=True,
+            draw_grid=True,
         )
     supporting = _udmi_supporting_metric_rows(run, data)
     document.add_heading("Supporting Metrics")
@@ -2052,6 +2295,9 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
         _pdf_metric_pairs(supporting),
         widths=_PDF_UDMI_METRIC_WEIGHTS,
         size=9,
+        wrap_cells=True,
+        center_cells=True,
+        draw_grid=True,
     )
     for note in data["notes"]:
         document.add_paragraph(f"Note: {note}")
@@ -2059,24 +2305,21 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
     system_assets, system_payloads, system_faults = _udmi_system_tables(data)
     document.add_page_break()
     document.add_heading(_UDMI_SYSTEM_TITLE, level=1)
-    for section_title, columns, rows, weights in (
+    for section_title, columns, rows in (
         (
             "Asset Metrics by System",
             _UDMI_SYSTEM_ASSET_COLUMNS,
             system_assets,
-            _PDF_UDMI_SYSTEM_ASSET_WEIGHTS,
         ),
         (
             "Payload and Issue Metrics by System",
             _UDMI_SYSTEM_PAYLOAD_COLUMNS,
             system_payloads,
-            _PDF_UDMI_SYSTEM_PAYLOAD_WEIGHTS,
         ),
         (
             "Fault Metrics by System",
             _UDMI_SYSTEM_FAULT_COLUMNS,
             system_faults,
-            _PDF_UDMI_SYSTEM_FAULT_WEIGHTS,
         ),
     ):
         document.add_heading(section_title)
@@ -2084,8 +2327,11 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
             document.add_table(
                 columns,
                 [[row[column] for column in columns] for row in rows],
-                widths=weights,
+                widths=_content_weights(columns, rows),
                 size=8,
+                wrap_cells=True,
+                center_cells=True,
+                draw_grid=True,
             )
         else:
             document.add_paragraph("No per-system metrics were retained for the selected runs.")
@@ -2097,8 +2343,11 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
         document.add_table(
             _UDMI_ASSET_COLUMNS,
             [[row[column] for column in _UDMI_ASSET_COLUMNS] for row in asset_rows],
-            widths=_PDF_UDMI_ASSET_WEIGHTS,
+            widths=_content_weights(_UDMI_ASSET_COLUMNS, asset_rows),
             size=8,
+            wrap_cells=True,
+            center_cells=True,
+            draw_grid=True,
         )
     else:
         document.add_paragraph("No asset results were retained for the selected runs.")
@@ -2110,8 +2359,11 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
         document.add_table(
             _UDMI_FAULT_MATRIX_COLUMNS,
             [[row[column] for column in _UDMI_FAULT_MATRIX_COLUMNS] for row in matrix_rows],
-            widths=_PDF_UDMI_MATRIX_WEIGHTS,
+            widths=_content_weights(_UDMI_FAULT_MATRIX_COLUMNS, matrix_rows),
             size=7.5,
+            wrap_cells=True,
+            center_cells=True,
+            draw_grid=True,
         )
     else:
         document.add_paragraph("No faults were retained for the selected runs.")
@@ -2123,33 +2375,15 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
         document.add_table(
             _PDF_UDMI_DETAIL_COLUMNS,
             [[row[column] for column in _PDF_UDMI_DETAIL_COLUMNS] for row in detail_rows],
-            widths=_PDF_UDMI_DETAIL_WEIGHTS,
-            size=8,
+            widths=_content_weights(_PDF_UDMI_DETAIL_COLUMNS, detail_rows),
+            size=7,
+            wrap_cells=True,
+            center_cells=True,
+            draw_grid=True,
         )
-        for row in detail_rows:
-            identity = " | ".join(
-                value for value in (row["Issue ID"], row["Asset ID"], row["Point"]) if value
-            )
-            document.add_paragraph(
-                identity or row["Source Run"],
-                bold=True,
-                keep_with_next=95,
-            )
-            for field in ("Expected", "Observed", "Suggested Action", "Description", "Evidence URI"):
-                if row[field]:
-                    document.add_paragraph(f"{field}: {row[field]}")
     else:
         document.add_paragraph("No faults were retained for the selected runs.")
 
-    document.add_page_break()
-    document.add_heading(_UDMI_DEFINITIONS_TITLE, level=1)
-    for definition in data["metric_definitions"]:
-        document.add_paragraph(
-            str(definition["metric"]),
-            bold=True,
-            keep_with_next=20,
-        )
-        document.add_paragraph(str(definition["definition"]))
     return document.render()
 
 

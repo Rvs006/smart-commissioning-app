@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from typing import Any
 
-VALIDATION_SUMMARY_SCHEMA_VERSION = "1.0"
+VALIDATION_SUMMARY_SCHEMA_VERSION = "1.1"
 UNSPECIFIED_SYSTEM = "Unspecified"
 
 _PAYLOAD_TYPES = ("state", "metadata", "pointset")
@@ -48,6 +49,35 @@ def _dict_value(value: object) -> dict[str, Any]:
 def _system_name(value: object) -> str:
     text = str(value or "").strip()
     return text or UNSPECIFIED_SYSTEM
+
+
+def _unexpected_devices(parameters: dict[str, object]) -> list[dict[str, object]]:
+    """Return a stable, report-safe projection of measured unregistered publishers."""
+
+    raw_devices = parameters.get("unexpected_devices")
+    if not isinstance(raw_devices, list):
+        return []
+    devices: dict[str, dict[str, object]] = {}
+    for raw in raw_devices:
+        if not isinstance(raw, dict):
+            continue
+        device_id = str(raw.get("id") or "").strip()
+        if not device_id:
+            continue
+        topics = raw.get("topics")
+        device: dict[str, object] = {
+            "id": device_id,
+            "topic_root": str(raw.get("topic_root") or "").strip(),
+            "topics": sorted(
+                {str(topic).strip() for topic in topics if str(topic).strip()},
+                key=str.casefold,
+            )
+            if isinstance(topics, list)
+            else [],
+            "last_seen": str(raw.get("last_seen") or "").strip() or None,
+        }
+        devices.setdefault(device_id, device)
+    return [devices[key] for key in sorted(devices, key=str.casefold)]
 
 
 def _payload_type_from_topic(value: object) -> str | None:
@@ -170,13 +200,17 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
     for message in messages if isinstance(messages, list) else []:
         if not isinstance(message, dict):
             continue
-        payload_type = _payload_type_from_topic(message.get("topic"))
-        if payload_type is None:
+        message_payload_type = _payload_type_from_topic(message.get("topic"))
+        if message_payload_type is None:
             continue
-        observations[payload_type]["received"] = True
-        observations[payload_type]["topic"] = str(message.get("topic") or "") or None
+        observations[message_payload_type]["received"] = True
+        observations[message_payload_type]["topic"] = (
+            str(message.get("topic") or "") or None
+        )
         if message.get("received_at"):
-            observations[payload_type]["received_at"] = str(message["received_at"])
+            observations[message_payload_type]["received_at"] = str(
+                message["received_at"]
+            )
     return observations
 
 
@@ -209,6 +243,7 @@ def _empty_asset_metrics() -> dict[str, int]:
         "not_observed": 0,
         "with_issues": 0,
         "successfully_validated": 0,
+        "unexpected": 0,
     }
 
 
@@ -216,6 +251,7 @@ def _empty_payload_metrics() -> dict[str, int]:
     return {
         "expected": 0,
         "received": 0,
+        "not_received": 0,
         "with_issues": 0,
         "successfully_validated": 0,
     }
@@ -223,6 +259,29 @@ def _empty_payload_metrics() -> dict[str, int]:
 
 def _empty_fault_metrics() -> dict[str, int]:
     return {category: 0 for category in _FAULT_CATEGORIES}
+
+
+def _latest_observed_at(payloads: Iterable[dict[str, object]]) -> str | None:
+    raw_values = [
+        str(payload["received_at"])
+        for payload in payloads
+        if payload.get("received_at")
+    ]
+    parsed_values: list[tuple[datetime, str]] = []
+    for raw in raw_values:
+        candidate = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            continue
+        parsed_values.append((parsed.astimezone(UTC), raw))
+    if parsed_values:
+        return max(parsed_values, key=lambda item: item[0])[1]
+    # Older retained evidence may contain a non-RFC3339 token. Preserve a
+    # deterministic value instead of discarding the only observation marker.
+    return max(raw_values, default=None)
 
 
 def _fault_row(issue: object, system_by_asset: dict[str, str]) -> dict[str, object]:
@@ -251,7 +310,16 @@ def build_validation_summary_v1(
     fallback_observed_asset_ids: Iterable[object] = (),
 ) -> dict[str, object]:
     """Build the persisted version-1 UDMI validation result projection."""
-    issue_list = list(issues)
+    # Older fixture imports represented unregistered publishers as validation
+    # issues. They are now a separate measured inventory and must not influence
+    # validation, fault, system, or compliance metrics even when an old caller
+    # still supplies one of those records.
+    issue_list = [
+        issue
+        for issue in issues
+        if str(_issue_value(issue, "issue_type") or "").casefold()
+        != "unexpected_device"
+    ]
     sources = _asset_sources(
         parameters,
         fallback_expected_asset_ids,
@@ -299,21 +367,21 @@ def build_validation_summary_v1(
             )
 
         expected_payloads = sum(1 for payload in payload_results if payload["expected"])
-        received_payloads = sum(1 for payload in payload_results if payload["received"])
+        expected_received_results = [
+            payload
+            for payload in payload_results
+            if payload["expected"] and payload["received"]
+        ]
+        received_payloads = len(expected_received_results)
         observed = synthetic_observed if synthetic else received_payloads > 0
         all_expected_received = expected_payloads > 0 and all(
             bool(payload["received"])
             for payload in payload_results
             if payload["expected"]
         )
-        received_results = [payload for payload in payload_results if payload["received"]]
-        all_received_validated = bool(received_results) and all(
-            bool(payload["successfully_validated"]) for payload in received_results
-        )
-        observed_times = sorted(
-            str(payload["received_at"])
-            for payload in payload_results
-            if payload["received_at"]
+        all_received_validated = bool(expected_received_results) and all(
+            bool(payload["successfully_validated"])
+            for payload in expected_received_results
         )
         asset_results.append(
             {
@@ -327,7 +395,7 @@ def build_validation_summary_v1(
                 "successfully_validated": all_expected_received and asset_blocking == 0,
                 "issue_count": len(asset_issues),
                 "blocking_issue_count": asset_blocking,
-                "last_observed_at": observed_times[-1] if observed_times else None,
+                "last_observed_at": _latest_observed_at(expected_received_results),
                 "payload_results": payload_results,
             }
         )
@@ -337,21 +405,29 @@ def build_validation_summary_v1(
         metrics["expected"] = len(rows)
         metrics["observed"] = sum(bool(row["observed"]) for row in rows)
         metrics["not_observed"] = metrics["expected"] - metrics["observed"]
-        metrics["with_issues"] = sum(int(row["issue_count"]) > 0 for row in rows)
+        metrics["with_issues"] = sum(bool(row["issue_count"]) for row in rows)
         metrics["successfully_validated"] = sum(bool(row["successfully_validated"]) for row in rows)
         return metrics
 
     def aggregate_payloads(rows: list[dict[str, object]]) -> dict[str, int]:
-        payloads = [
-            payload
-            for row in rows
-            for payload in row["payload_results"]  # type: ignore[union-attr]
-            if isinstance(payload, dict) and payload["expected"]
-        ]
+        payloads: list[dict[str, object]] = []
+        for row in rows:
+            raw_payloads = row.get("payload_results")
+            if not isinstance(raw_payloads, list):
+                continue
+            payloads.extend(
+                payload
+                for payload in raw_payloads
+                if isinstance(payload, dict) and payload.get("expected") is True
+            )
         metrics = _empty_payload_metrics()
         metrics["expected"] = len(payloads)
         metrics["received"] = sum(bool(payload["received"]) for payload in payloads)
-        metrics["with_issues"] = sum(bool(payload["has_issues"]) for payload in payloads)
+        metrics["not_received"] = metrics["expected"] - metrics["received"]
+        metrics["with_issues"] = sum(
+            bool(payload["received"]) and bool(payload["has_issues"])
+            for payload in payloads
+        )
         metrics["successfully_validated"] = sum(
             bool(payload["successfully_validated"]) for payload in payloads
         )
@@ -364,7 +440,7 @@ def build_validation_summary_v1(
             metrics[category] += 1
         return metrics
 
-    def aggregate_issues(rows: list[dict[str, object]]) -> dict[str, int]:
+    def aggregate_issues(rows: list[object]) -> dict[str, int]:
         blocking = sum(1 for row in rows if _is_blocking(row))
         return {"blocking": blocking, "warning": len(rows) - blocking}
 
@@ -387,13 +463,21 @@ def build_validation_summary_v1(
             }
         )
 
+    unexpected_devices = _unexpected_devices(parameters)
+    asset_metrics = aggregate_assets(asset_results)
+    asset_metrics["unexpected"] = len(unexpected_devices)
     return {
         "schema_version": VALIDATION_SUMMARY_SCHEMA_VERSION,
-        "asset_metrics": aggregate_assets(asset_results),
+        "asset_metrics": asset_metrics,
         "payload_metrics": aggregate_payloads(asset_results),
         "fault_metrics": aggregate_faults(fault_rows),
         "issue_metrics": aggregate_issues(issue_list),
         "system_metrics": system_metrics,
         "asset_results": asset_results,
         "fault_rows": fault_rows,
+        "unexpected_devices": unexpected_devices,
+        "unexpected_devices_measured": parameters.get("unexpected_devices_measured") is True,
+        "unexpected_devices_measurement_scope": (
+            str(parameters.get("unexpected_devices_measurement_scope") or "").strip() or None
+        ),
     }

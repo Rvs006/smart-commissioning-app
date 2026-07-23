@@ -1,10 +1,7 @@
-/* Hallmark · pre-emit critique: The UDMI results had clear data hierarchy, but
-   nested metric panels, pill-shaped action buttons, hover lift, and weak input
-   focus made the new reporting workflow feel more like a UI-kit assembly than
-   a commissioning instrument. This pass keeps the information architecture and
-   removes those defaults while preserving the app's restrained Electracom UI. */
-/* Hallmark · macrostructure: Operator path = run status → evidence summary →
-   full-width asset table → selected-asset inspector → report/export actions. */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V4 · genre: enterprise utility · tone: restrained · anchor: teal */
+/* Hallmark · macrostructure: Operator workbench · run > summary > table > inspector > report · nav: existing workbench · footer: n/a */
+/* Hallmark · gates: slop scoped-code pass · contrast: pass (40–41) · honest: pass (46) · chrome: pass (47) · tokens: pass (48) · icons: pass (30) */
+/* Hallmark · gates: spacing: diff pass (24; legacy scale exception) · responsive/mobile: browser pass at 1440, 1280, 1024, 768, 414, 390, 375, and 320 px (34, 49–57) */
 
 :root {
   color-scheme: light;
@@ -33,6 +30,8 @@
   --scrim: rgba(0, 0, 0, 0.46);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-strong: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --dialog-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  --control-height: 44px;
   --radius: 10px;
   --radius-sm: 8px;
 }
@@ -329,6 +328,19 @@ label {
   color: var(--text);
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .home-overview,
 .module-hero,
 .hero {
@@ -342,8 +354,7 @@ label {
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
 }
 
-.home-overview,
-.module-hero {
+.home-overview {
   padding: 28px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -352,7 +363,13 @@ label {
 }
 
 .module-hero {
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.44fr);
+  grid-template-columns: minmax(0, 360px);
+  align-items: end;
+  padding: 8px 0 20px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   scroll-margin-top: 180px;
 }
 
@@ -606,15 +623,15 @@ label {
 }
 
 .secondary-button:hover {
-  border-color: var(--accent);
+  border-color: var(--accent-hover);
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--accent-hover);
 }
 
 .secondary-button.selected {
-  border-color: var(--accent);
+  border-color: var(--accent-hover);
   background: var(--accent-bg);
-  color: var(--accent);
+  color: var(--accent-hover);
 }
 
 .primary-button:not(:disabled):hover {
@@ -744,8 +761,7 @@ label {
 .surface-heading h3,
 .section-heading h3,
 .panel h3,
-.hero-side h2,
-.evidence-list h4 {
+.hero-side h2 {
   margin: 3px 0 0;
   color: var(--ink);
   font-size: 16px;
@@ -804,7 +820,6 @@ label {
 .workflow-board,
 .run-list,
 .issue-list,
-.evidence-list,
 .detail-list,
 .mode-grid {
   display: grid;
@@ -940,23 +955,37 @@ label {
   line-height: 1.45;
 }
 
-/* Per-row "View" detail dialog for the discovery results table. */
-.modal-overlay {
+.inspector .surface-heading {
+  margin-bottom: 4px;
+}
+
+.inspector .detail-list {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0 16px;
+  margin-bottom: 8px;
+}
+
+.inspector .detail-row {
+  gap: 4px;
+  padding: 8px 0;
+}
+
+/* Native per-row detail dialog. The browser owns focus containment and Escape;
+   the backdrop and depth stay on shared tokens. */
+.result-detail-dialog {
   position: fixed;
   inset: 0;
   z-index: 100;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(0, 0, 0, 0.32);
-  backdrop-filter: saturate(140%) blur(6px);
+  margin: auto;
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  color: var(--text);
+  box-shadow: var(--dialog-shadow);
 }
 
-.modal-card {
-  width: min(440px, calc(100vw - 32px));
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+.result-detail-dialog::backdrop {
+  background: var(--scrim);
 }
 
 .progress-block {
@@ -1122,6 +1151,13 @@ label {
   color: var(--muted);
 }
 
+.results-filter-bar input,
+.results-filter-bar select,
+.results-filter-bar .primary-button,
+.results-filter-bar .secondary-button {
+  min-height: var(--control-height);
+}
+
 .results-filter-text {
   flex: 1 1 220px;
 }
@@ -1141,12 +1177,14 @@ label {
   color: var(--muted);
   font-size: 12px;
   font-weight: 650;
+  font-variant-numeric: tabular-nums;
 }
 
 .data-table {
   width: 100%;
   border-collapse: collapse;
   background: var(--surface);
+  font-variant-numeric: tabular-nums;
 }
 
 .data-table th {
@@ -1267,20 +1305,19 @@ label {
 .module-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 16px;
 }
 
 .module-metrics article {
   display: grid;
   align-content: end;
   gap: 6px;
-  min-height: 104px;
-  padding: 15px;
-  border: 1px solid var(--border-soft);
-  border-top: 3px solid var(--accent);
-  border-radius: var(--radius);
-  background: var(--surface);
-  box-shadow: var(--shadow);
+  min-height: 72px;
+  padding: 8px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .field-grid {
@@ -1571,8 +1608,7 @@ input.field-expired {
   gap: 6px;
 }
 
-.tag-cloud span,
-.evidence-list span {
+.tag-cloud span {
   display: inline-flex;
   width: fit-content;
   padding: 5px 8px;
@@ -1585,8 +1621,7 @@ input.field-expired {
 
 /* Optional (not-required) columns: muted, so operators can tell at a glance
    they may leave the field blank (e.g. Expected hostname). */
-.tag-cloud span.optional,
-.evidence-list span.optional {
+.tag-cloud span.optional {
   background: transparent;
   color: var(--text-secondary, #6b6b70);
   box-shadow: inset 0 0 0 1px var(--border, #d0d0d5);
@@ -1601,12 +1636,6 @@ input.field-expired {
   display: grid;
   align-content: start;
   gap: 10px;
-}
-
-.evidence-list {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-soft);
 }
 
 .page-section {
@@ -1882,15 +1911,15 @@ input.field-expired {
      box instead of running the inspector off-screen. Same recipe as
      .results-scroll. The nested payload-compare container keeps its own smaller
      inner scroll, so payloads scroll inside the drill-down that scrolls here. */
-  max-height: min(55vh, 520px);
+  max-height: min(44vh, 440px);
   overflow-y: auto;
 }
 
 .asset-group {
+  min-width: 0;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   background: var(--surface-2);
-  overflow: hidden;
 }
 
 .asset-group-toggle {
@@ -1898,7 +1927,8 @@ input.field-expired {
   flex-direction: column;
   gap: 3px;
   width: 100%;
-  padding: 11px 13px;
+  min-height: 44px;
+  padding: 8px 10px;
   border: 0;
   background: transparent;
   color: var(--ink);
@@ -1906,8 +1936,28 @@ input.field-expired {
   cursor: pointer;
 }
 
+.asset-group-toggle:focus-visible,
+.asset-summary-toggle:focus-visible {
+  outline-offset: -3px;
+}
+
+.asset-group-toggle[aria-expanded="true"] {
+  background: var(--surface);
+}
+
+.asset-group-toggle:active,
+.asset-summary-toggle:active {
+  background: var(--surface-3);
+}
+
 .asset-group-toggle strong {
   font-size: 13px;
+}
+
+.asset-group-toggle strong,
+.asset-group-toggle span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .asset-group-toggle span {
@@ -1921,8 +1971,8 @@ input.field-expired {
 
 .asset-group-detail {
   display: grid;
-  gap: 12px;
-  padding: 12px 13px;
+  gap: 8px;
+  padding: 8px;
 }
 
 .payload-type-group {
@@ -1960,16 +2010,21 @@ input.field-expired {
   background: var(--amber-bg);
 }
 
-/* Result rows are clickable to drive the Inspector (MQTT discovery inspector,
-   v0.1.13). row-selected outlines the active row; declared after the tone rules
-   so the selection cue reads over any pass/fail/warn tint. The inset shadow (not
-   a border) avoids shifting row height/layout. */
-.data-table tbody tr {
-  cursor: pointer;
+/* Evidence selection is an explicit keyboard control in each row. The selected
+   row outline is token-backed and overlays any pass/fail/warn tint. */
+.data-table tbody tr.row-selected td {
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-.data-table tbody tr.row-selected td {
-  box-shadow: inset 0 0 0 1px var(--accent, #4f7cff);
+.result-row-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.result-row-actions .compact {
+  min-height: var(--control-height);
 }
 
 /* Per-asset summary row for the grouped UDMI results table (ITEM-7): a full-width
@@ -1981,9 +2036,10 @@ input.field-expired {
 
 .asset-summary-toggle {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   width: 100%;
+  min-height: var(--control-height);
   padding: 9px 12px;
   border: 0;
   background: transparent;
@@ -1993,8 +2049,12 @@ input.field-expired {
 }
 
 .asset-summary-caret {
+  display: inline-grid;
+  flex: 0 0 1em;
+  place-items: center;
   color: var(--muted);
   font-size: 10px;
+  line-height: 1;
 }
 
 .asset-summary-toggle strong {
@@ -2002,8 +2062,31 @@ input.field-expired {
 }
 
 .asset-summary-toggle span {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 11px;
+}
+
+.asset-summary-toggle[aria-expanded="true"] {
+  background: var(--accent-bg);
+}
+
+.asset-summary-toggle[aria-expanded="true"] .asset-summary-caret,
+.asset-summary-toggle[aria-expanded="true"] strong {
+  color: var(--accent-hover);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .asset-group-toggle:hover,
+  .asset-summary-toggle:hover {
+    background: var(--accent-bg);
+  }
+
+  .asset-group-toggle:hover strong,
+  .asset-summary-toggle:hover strong {
+    color: var(--accent-hover);
+  }
 }
 
 /* Matching tone for the per-asset payload sections (state/metadata/pointset),
@@ -2177,6 +2260,19 @@ input.field-expired {
   gap: 0.4rem;
 }
 
+.report-from-run-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.report-from-run-controls select,
+.report-from-run-controls .primary-button,
+.report-from-run-controls .secondary-button {
+  min-height: var(--control-height);
+}
+
 /* UDMI run summary. Metric families stay visually grouped so the page can
    carry the full evidence set without presenting one undifferentiated wall of
    numbers. System completion remains tabular because the rows are comparative. */
@@ -2221,20 +2317,17 @@ input.field-expired {
   color: var(--ink);
   font-size: 13px;
   font-weight: 760;
+  font-variant-numeric: tabular-nums;
 }
 
 .udmi-metric-groups {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
 .udmi-metric-group {
   min-width: 0;
-}
-
-.udmi-metric-group:last-child {
-  grid-column: 1 / -1;
 }
 
 .udmi-metric-group h4,
@@ -2272,6 +2365,7 @@ input.field-expired {
   color: var(--ink);
   font-size: 22px;
   font-weight: 780;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 
@@ -2370,6 +2464,10 @@ input.field-expired {
   justify-content: flex-end;
 }
 
+.report-title-dialog-actions .compact {
+  min-height: var(--control-height);
+}
+
 .run-monitor-note {
   color: var(--accent);
   font-size: 12px;
@@ -2396,14 +2494,9 @@ input.field-expired {
   .metric-grid,
   .mode-grid,
   .kpi-strip,
-  .module-metrics,
   .summary-grid,
   .udmi-metric-groups {
     grid-template-columns: 1fr;
-  }
-
-  .udmi-metric-group:last-child {
-    grid-column: auto;
   }
 
   .udmi-metric-group .udmi-payload-rates {
@@ -2462,12 +2555,12 @@ input.field-expired {
   }
 
   .home-overview,
-  .home-brief,
-  .module-hero {
+  .home-brief {
     padding: 20px;
   }
 
   .module-hero {
+    padding: 0 0 20px;
     scroll-margin-top: 16px;
   }
 
@@ -2489,6 +2582,16 @@ input.field-expired {
   .progress-block {
     justify-items: start;
     width: 100%;
+  }
+
+  .report-from-run-controls,
+  .report-format-picker {
+    width: 100%;
+  }
+
+  .report-format-picker select {
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .primary-button,

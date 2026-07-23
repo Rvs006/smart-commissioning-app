@@ -58,6 +58,8 @@ include-package-data = true
 [tool.setuptools.package-data]
 smart_commissioning_core = [
   "fixtures/*.json",
+  "schemas/dbo/LICENSE",
+  "schemas/dbo/UPSTREAM.md",
   "schemas/udmi/LICENSE",
   "schemas/udmi/UPSTREAM.md",
   "schemas/udmi/1.5.2/*.json",

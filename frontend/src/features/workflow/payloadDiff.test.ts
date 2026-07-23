@@ -178,11 +178,11 @@ describe("alignPayloadDiff — parse-back invariant (ITEM-8)", () => {
     expect(observedOnly).not.toContain('"supply"');
   });
 
-  it("flags the first row of a key named in flaggedKeys (both sides)", () => {
+  it("flags the first row at an exact JSON Pointer path (both sides)", () => {
     const rows = alignPayloadDiff(
       { points: { supply: 1 } },
       { points: { supply: 2 } },
-      new Set(["supply"]),
+      new Set(["/points/supply"]),
     );
     const flagged = rows.filter((row) => row.flagged);
     expect(flagged).toHaveLength(1);
@@ -190,7 +190,7 @@ describe("alignPayloadDiff — parse-back invariant (ITEM-8)", () => {
     expect(flagged[0].observed?.text).toContain('"supply"');
   });
 
-  it("never flags a structural key that collides with a point name (only points-level keys)", () => {
+  it("never flags a structural key that collides with an exact point path", () => {
     // "version"/"timestamp" are top-level structural keys of every pointset
     // template. A device that also publishes a point literally named "version"
     // gets that point flagged — but the top-level "version" row must stay clean,
@@ -198,7 +198,7 @@ describe("alignPayloadDiff — parse-back invariant (ITEM-8)", () => {
     const rows = alignPayloadDiff(
       { version: "1.5.2", points: { version: { present_value: null } } },
       { version: "1.5.2", points: { version: { present_value: 3 } } },
-      new Set(["version"]),
+      new Set(["/points/version"]),
     );
     const flagged = rows.filter((row) => row.flagged);
     // Exactly one flagged row — the point under "points", not the top-level key.
@@ -209,6 +209,21 @@ describe("alignPayloadDiff — parse-back invariant (ITEM-8)", () => {
     expect(flagged[0].expected?.text).not.toContain('"1.5.2"');
     const topLevelVersion = rows.find((row) => row.expected?.text.includes('"1.5.2"'));
     expect(topLevelVersion?.flagged).toBe(false);
+  });
+
+  it("flags only the units line for an exact unit-mismatch path", () => {
+    const rows = alignPayloadDiff(
+      { pointset: { points: { supply: { present_value: null, units: "C" } } } },
+      { pointset: { points: { supply: { present_value: 21, units: "F" } } } },
+      new Set(["/pointset/points/supply/units"]),
+    );
+    const flagged = rows.filter((row) => row.flagged);
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].expected?.text).toContain('"units"');
+    expect(flagged[0].observed?.text).toContain('"units"');
+    expect(
+      rows.find((row) => row.expected?.text.includes('"supply"'))?.flagged,
+    ).toBe(false);
   });
 });
 

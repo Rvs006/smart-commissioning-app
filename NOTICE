@@ -44,6 +44,12 @@ UDMI 1.5.2 schemas  - Apache-2.0 License                 - https://github.com/fa
   events/pointset; upstream license ships at
   core/smart_commissioning_core/schemas/udmi/LICENSE.
 
+Google Digital Buildings unit vocabulary
+                    - Apache-2.0 License                 - https://github.com/google/digitalbuildings
+  Unit names derived from the pinned ontology unit resource, normalized for
+  deterministic offline comparison. Upstream metadata and license ship at
+  core/smart_commissioning_core/schemas/dbo/.
+
 Optional extra (smart-commissioning-core[bacnet], NOT installed by default):
 
 bacpypes3          - MIT License                        - https://github.com/JoelBender/BACpypes3

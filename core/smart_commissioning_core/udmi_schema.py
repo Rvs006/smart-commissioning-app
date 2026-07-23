@@ -52,7 +52,8 @@ _POINT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)*$")
 # (Z or +hh:mm). fromisoformat alone is too lax — it accepts date-only and
 # space-separated forms — so shape-check first, then parse for validity.
 _RFC3339_PATTERN = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$"
+    r"^\d{4}-\d{2}-\d{2}(?P<separator>[Tt])\d{2}:\d{2}:\d{2}"
+    r"(?P<fraction>\.\d+)?(?P<zone>[Zz]|[+-]\d{2}:\d{2})$"
 )
 
 
@@ -70,7 +71,7 @@ _FORMAT_CHECKER = FormatChecker()
 _FORMAT_CHECKER.checks("date-time")(_is_rfc3339_datetime)
 
 # Required top-level fields per payload type, keyed by declared UDMI version.
-_RULES_1_5_2 = {
+_RULES_1_5_2: dict[str, tuple[str, ...]] = {
     "state": ("timestamp", "version", "system"),
     "metadata": ("timestamp", "version", "system"),
     "pointset": ("timestamp", "version", "points"),
@@ -180,6 +181,23 @@ def nonpub_version_key(version: str) -> str:
     return _normalise_version(version).casefold()
 
 
+def structural_version_available(
+    version: str,
+    uploaded_schemas: Mapping[str, Mapping[str, dict]] | None = None,
+) -> bool:
+    """Whether ``version`` has an authoritative schema available for a shadow check.
+
+    The payload reviewer uses this when a payload omits ``version`` but the
+    register supplies one. Only a pinned published version, or an uploaded
+    non-published set with the same label, may authorize validation of that
+    otherwise-unversioned document.
+    """
+    if is_nonpub_version(version):
+        return nonpub_version_key(version) in (uploaded_schemas or {})
+    normalised = _normalise_version(version)
+    return normalised in STRUCTURAL_RULESETS and normalised in _SCHEMA_ROOTS
+
+
 def structural_issues(
     payload_type: str,
     payload: dict,
@@ -220,7 +238,16 @@ def structural_issues(
                     ),
                 )
             ]
-        return _uploaded_schema_findings(payload_type, payload, version, schema_set)
+        uploaded_findings = _uploaded_schema_findings(payload_type, payload, version, schema_set)
+        uploaded_findings.extend(
+            _timestamp_style_findings(
+                payload_type,
+                payload,
+                schemas=schema_set,
+                root_name=NONPUB_SCHEMA_ROOTS[payload_type],
+            )
+        )
+        return uploaded_findings
     ruleset = STRUCTURAL_RULESETS.get(_normalise_version(version))
     if ruleset is None:
         return [
@@ -271,6 +298,15 @@ def structural_issues(
         )
 
     findings.extend(_timestamp_findings(payload_type, payload))
+    schemas, _registry = _canonical_schema_bundle(_normalise_version(version))
+    findings.extend(
+        _timestamp_style_findings(
+            payload_type,
+            payload,
+            schemas=schemas,
+            root_name=_SCHEMA_ROOTS[_normalise_version(version)][payload_type],
+        )
+    )
     if payload_type in ("state", "metadata"):
         findings.extend(_object_field_findings(payload_type, payload, "system"))
         findings.extend(_double_nested_system_findings(payload_type, payload))
@@ -547,6 +583,199 @@ def _timestamp_findings(payload_type: str, payload: dict) -> list[StructuralFind
             suggested_action="Fix the publisher's timestamp format.",
         )
     ]
+
+
+def _timestamp_style_findings(
+    payload_type: str,
+    payload: dict,
+    *,
+    schemas: Mapping[str, dict],
+    root_name: str,
+) -> list[StructuralFinding]:
+    """One finding when schema-declared timestamps use mixed lexical styles.
+
+    Timezone values are deliberately excluded from the style signature. Thus
+    summer ``+01:00`` and winter ``+00:00`` are one signed-offset style, while
+    ``Z`` versus ``+00:00`` remains a lexical notation difference. Invalid
+    timestamps are left to the existing RFC 3339 findings and do not create a
+    second consistency complaint.
+    """
+    root_schema = schemas.get(root_name)
+    if not isinstance(root_schema, dict):
+        return []
+    timestamp_values = _schema_date_time_values(
+        _canonical_payload(payload_type, payload), root_schema, schemas
+    )
+    valid_values = [
+        (path, value, _timestamp_style(value))
+        for path, value in timestamp_values
+        if isinstance(value, str) and _is_rfc3339_datetime(value)
+    ]
+    if len(valid_values) < 2:
+        return []
+    styles = {style for _path, _value, style in valid_values}
+    if len(styles) < 2:
+        return []
+
+    ordered = sorted(valid_values, key=lambda item: item[0])
+    expected_style = ordered[0][2]
+    evidence = "; ".join(
+        f"{path} uses {_describe_timestamp_style(style)}"
+        for path, _value, style in ordered[:12]
+    )
+    if len(ordered) > 12:
+        evidence += f"; and {len(ordered) - 12} more timestamp field(s)"
+    return [
+        StructuralFinding(
+            description=(
+                "Inconsistent timestamp formats in the payload. "
+                f"The {payload_type} document mixes lexical styles: {evidence}."
+            ),
+            severity="medium",
+            expected_value=_describe_timestamp_style(expected_style),
+            observed_value=evidence,
+            suggested_action=(
+                "Use one T/Z casing, fractional-second precision, and Z-versus-offset "
+                "notation throughout this payload while preserving each timestamp's "
+                "correct timezone offset."
+            ),
+        )
+    ]
+
+
+def _timestamp_style(value: str) -> tuple[str, int, str]:
+    match = _RFC3339_PATTERN.match(value)
+    if match is None:  # callers filter invalid values; keep this helper total
+        return ("invalid", -1, "invalid")
+    fraction = match.group("fraction") or ""
+    zone = match.group("zone")
+    zone_style = zone if zone in {"Z", "z"} else "signed offset"
+    return (match.group("separator"), max(0, len(fraction) - 1), zone_style)
+
+
+def _describe_timestamp_style(style: tuple[str, int, str]) -> str:
+    separator, precision, zone_style = style
+    fraction = "no fractional seconds" if precision == 0 else f"{precision} fractional digit(s)"
+    return f"'{separator}' separator, {fraction}, {zone_style} notation"
+
+
+def _schema_date_time_values(
+    instance: object,
+    schema: Mapping[str, object],
+    schemas: Mapping[str, dict],
+) -> list[tuple[str, object]]:
+    """Collect values whose resolved Draft 7 schema declares ``date-time``."""
+    found: dict[tuple[str, ...], object] = {}
+    visited: set[tuple[int, int, int, tuple[str, ...]]] = set()
+
+    def walk(
+        value: object,
+        current: Mapping[str, object],
+        path: tuple[str, ...],
+        document: Mapping[str, object],
+    ) -> None:
+        marker = (id(value), id(current), id(document), path)
+        if marker in visited:
+            return
+        visited.add(marker)
+
+        ref = current.get("$ref")
+        if isinstance(ref, str):
+            resolved = _resolve_schema_ref(
+                ref,
+                schemas,
+                current_document=document,
+            )
+            if resolved is not None:
+                resolved_schema, resolved_document = resolved
+                walk(value, resolved_schema, path, resolved_document)
+            return
+
+        if current.get("format") == "date-time":
+            found[path] = value
+            return
+
+        for combiner in ("allOf", "anyOf", "oneOf"):
+            branches = current.get(combiner)
+            if isinstance(branches, list):
+                for branch in branches:
+                    if isinstance(branch, dict):
+                        walk(value, branch, path, document)
+
+        if isinstance(value, dict):
+            properties = current.get("properties")
+            property_schemas = properties if isinstance(properties, dict) else {}
+            pattern_properties = current.get("patternProperties")
+            pattern_schemas = pattern_properties if isinstance(pattern_properties, dict) else {}
+            for key, child in value.items():
+                key_text = str(key)
+                matched = False
+                child_schema = property_schemas.get(key_text)
+                if isinstance(child_schema, dict):
+                    walk(child, child_schema, (*path, key_text), document)
+                    matched = True
+                for pattern, pattern_schema in pattern_schemas.items():
+                    if isinstance(pattern_schema, dict) and re.search(str(pattern), key_text):
+                        walk(child, pattern_schema, (*path, key_text), document)
+                        matched = True
+                additional = current.get("additionalProperties")
+                if not matched and isinstance(additional, dict):
+                    walk(child, additional, (*path, key_text), document)
+        elif isinstance(value, list):
+            item_schema = current.get("items")
+            if isinstance(item_schema, dict):
+                for index, child in enumerate(value):
+                    walk(child, item_schema, (*path, str(index)), document)
+
+    walk(instance, schema, (), schema)
+    return [(".".join(path) or "payload root", value) for path, value in found.items()]
+
+
+def _resolve_schema_ref(
+    ref: str,
+    schemas: Mapping[str, dict],
+    *,
+    current_document: Mapping[str, object],
+) -> tuple[Mapping[str, object], Mapping[str, object]] | None:
+    """Resolve local and vendored/uploaded Draft 7 file references.
+
+    The returned document is the base for any same-document reference nested
+    inside the resolved schema. This matters when a ``file:`` reference enters
+    another schema whose definitions use ``#/...`` references of their own.
+    """
+    document: Mapping[str, object]
+    target: object
+    if ref.startswith("#"):
+        document = current_document
+        target = current_document
+        fragment = ref.removeprefix("#")
+    elif ref.startswith("file:"):
+        file_part, separator, fragment = ref.removeprefix("file:").partition("#")
+        if file_part:
+            external_document = schemas.get(file_part)
+            if not isinstance(external_document, dict):
+                return None
+            document = external_document
+        else:
+            document = current_document
+        target = document
+        if not separator:
+            fragment = ""
+    else:
+        return None
+    if not fragment:
+        return (document, document)
+    if not fragment.startswith("/"):
+        return None
+    for raw_part in fragment.lstrip("/").split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if isinstance(target, dict) and part in target:
+            target = target[part]
+        elif isinstance(target, list) and part.isdigit() and int(part) < len(target):
+            target = target[int(part)]
+        else:
+            return None
+    return (target, document) if isinstance(target, dict) else None
 
 
 def _object_field_findings(payload_type: str, payload: dict, field: str) -> list[StructuralFinding]:

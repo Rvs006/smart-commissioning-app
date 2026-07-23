@@ -291,6 +291,24 @@ class _PageBuilder:
             ).encode("ascii")
         )
 
+    def line(
+        self,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        *,
+        color: tuple[float, float, float] = _BRAND_DARK,
+        width: float = 0.5,
+    ) -> None:
+        self.pages[-1].append(
+            (
+                f"q {_num(color[0])} {_num(color[1])} {_num(color[2])} RG "
+                f"{_num(width)} w {_num(x0)} {_num(y0)} m "
+                f"{_num(x1)} {_num(y1)} l S Q\n"
+            ).encode("ascii")
+        )
+
 
 class PdfDocument:
     """Deterministic PDF composer: headings, paragraphs, and simple tables.
@@ -357,6 +375,9 @@ class PdfDocument:
         *,
         widths: Sequence[float] | None = None,
         size: float = _BODY_SIZE,
+        wrap_cells: bool = False,
+        center_cells: bool = False,
+        draw_grid: bool = False,
     ) -> None:
         """Fixed-column table; ``widths`` are relative weights (default: equal).
 
@@ -372,7 +393,18 @@ class PdfDocument:
         weights = tuple(float(weight) for weight in widths) if widths else ()
         if len(weights) != len(header_cells):
             weights = (1.0,) * len(header_cells)
-        self._items.append(("table", header_cells, body_rows, weights, float(size)))
+        self._items.append(
+            (
+                "table",
+                header_cells,
+                body_rows,
+                weights,
+                float(size),
+                bool(wrap_cells),
+                bool(center_cells),
+                bool(draw_grid),
+            )
+        )
 
     def render(self) -> bytes:
         has_header = self._header_left is not None or self._header_right is not None
@@ -401,8 +433,17 @@ class PdfDocument:
                     color,
                 )
             else:
-                _, headers, rows, weights, size = item
-                self._layout_table(builder, headers, rows, weights, float(size))  # type: ignore[arg-type]
+                _, headers, rows, weights, size, wrap_cells, center_cells, draw_grid = item
+                self._layout_table(
+                    builder,
+                    headers,
+                    rows,
+                    weights,
+                    float(size),
+                    wrap_cells=bool(wrap_cells),
+                    center_cells=bool(center_cells),
+                    draw_grid=bool(draw_grid),
+                )  # type: ignore[arg-type]
         if has_header:
             self._append_headers(builder.pages)
         self._append_footers(builder.pages)
@@ -438,7 +479,22 @@ class PdfDocument:
         rows: tuple[tuple[str, ...], ...],
         weights: tuple[float, ...],
         size: float,
+        *,
+        wrap_cells: bool,
+        center_cells: bool,
+        draw_grid: bool,
     ) -> None:
+        if wrap_cells:
+            self._layout_wrapped_table(
+                builder,
+                headers,
+                rows,
+                weights,
+                size,
+                center_cells=center_cells,
+                draw_grid=draw_grid,
+            )
+            return
         row_height = size + 5.0
         total_weight = sum(weights) or float(len(weights))
         column_widths = [self._content_width * weight / total_weight for weight in weights]
@@ -494,6 +550,164 @@ class PdfDocument:
                 emit_header()
             emit_cells(row, False, fill=_BRAND_MIST if row_index % 2 else None)
         builder.rule(_MARGIN, builder.y - 3, _MARGIN + self._content_width)
+        builder.y -= 10.0
+
+    def _layout_wrapped_table(
+        self,
+        builder: _PageBuilder,
+        headers: tuple[str, ...],
+        rows: tuple[tuple[str, ...], ...],
+        weights: tuple[float, ...],
+        size: float,
+        *,
+        center_cells: bool,
+        draw_grid: bool,
+    ) -> None:
+        """Lay out complete, variable-height table cells without truncation."""
+
+        total_weight = sum(weights) or float(len(weights))
+        column_widths = [self._content_width * weight / total_weight for weight in weights]
+        x_positions: list[float] = []
+        x = float(_MARGIN)
+        for width in column_widths:
+            x_positions.append(x)
+            x += width
+        boundaries = x_positions + [_MARGIN + self._content_width]
+        line_height = size * 1.25
+        vertical_padding = 3.0
+
+        def wrap_row(cells: Sequence[str], *, bold: bool) -> list[list[str]]:
+            return [
+                _wrap(cell, size, bold, max(width - 2 * _CELL_PADDING, 1.0))
+                for width, cell in zip(column_widths, cells, strict=False)
+            ]
+
+        def row_height(lines: Sequence[Sequence[str]]) -> float:
+            return max((len(cell_lines) for cell_lines in lines), default=1) * line_height + (
+                2 * vertical_padding
+            )
+
+        def emit_grid(top: float, bottom: float) -> None:
+            if not draw_grid:
+                return
+            grid_color = (176 / 255, 193 / 255, 201 / 255)
+            builder.line(
+                boundaries[0],
+                top,
+                boundaries[-1],
+                top,
+                color=grid_color,
+                width=0.35,
+            )
+            builder.line(
+                boundaries[0],
+                bottom,
+                boundaries[-1],
+                bottom,
+                color=grid_color,
+                width=0.35,
+            )
+            for boundary in boundaries:
+                builder.line(
+                    boundary,
+                    top,
+                    boundary,
+                    bottom,
+                    color=grid_color,
+                    width=0.35,
+                )
+
+        def emit_lines(
+            lines: Sequence[Sequence[str]],
+            *,
+            bold: bool,
+            fill: tuple[float, float, float] | None,
+            text_color: tuple[float, float, float],
+        ) -> None:
+            height = row_height(lines)
+            top = builder.y
+            bottom = top - height
+            if fill is not None:
+                builder.fill_rect(_MARGIN, bottom, self._content_width, height, fill)
+            for cell_x, width, cell_lines in zip(
+                x_positions,
+                column_widths,
+                lines,
+                strict=False,
+            ):
+                text_span = size + max(len(cell_lines) - 1, 0) * line_height
+                baseline = bottom + (height - text_span) / 2 + max(
+                    len(cell_lines) - 1,
+                    0,
+                ) * line_height
+                for line in cell_lines:
+                    text_x = cell_x + _CELL_PADDING
+                    if center_cells:
+                        text_x = cell_x + max(
+                            (width - _text_width(line, size, bold)) / 2,
+                            _CELL_PADDING,
+                        )
+                    builder.text(
+                        text_x,
+                        baseline,
+                        line,
+                        size,
+                        bold,
+                        color=text_color,
+                    )
+                    baseline -= line_height
+            emit_grid(top, bottom)
+            builder.y = bottom
+
+        header_lines = wrap_row(headers, bold=True)
+        header_height = row_height(header_lines)
+
+        def emit_header() -> None:
+            emit_lines(
+                header_lines,
+                bold=True,
+                fill=_BRAND_DARK,
+                text_color=(1.0, 1.0, 1.0),
+            )
+
+        builder.ensure(header_height + line_height + 2 * vertical_padding + 6)
+        emit_header()
+        for row_index, row in enumerate(rows):
+            remaining = wrap_row(row, bold=False)
+            first_chunk = True
+            while any(cell_lines for cell_lines in remaining):
+                available_height = builder.y - builder.bottom_limit - 6
+                maximum_lines = int(
+                    max(available_height - 2 * vertical_padding, 0) // line_height
+                )
+                if maximum_lines < 1:
+                    builder.new_page()
+                    emit_header()
+                    continue
+                chunk = [cell_lines[:maximum_lines] for cell_lines in remaining]
+                chunk_height = row_height(chunk)
+                if not builder.fits(chunk_height + 6):
+                    builder.new_page()
+                    emit_header()
+                    continue
+                emit_lines(
+                    chunk,
+                    bold=False,
+                    fill=_BRAND_MIST if row_index % 2 else None,
+                    text_color=_INK,
+                )
+                remaining = [cell_lines[maximum_lines:] for cell_lines in remaining]
+                if any(cell_lines for cell_lines in remaining):
+                    builder.new_page()
+                    emit_header()
+                first_chunk = False
+            if first_chunk:
+                emit_lines(
+                    [[""] for _header in headers],
+                    bold=False,
+                    fill=_BRAND_MIST if row_index % 2 else None,
+                    text_color=_INK,
+                )
         builder.y -= 10.0
 
     def _append_headers(self, pages: list[list[bytes]]) -> None:

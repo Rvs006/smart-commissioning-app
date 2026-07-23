@@ -100,7 +100,7 @@ class UdmiResultsTests(unittest.TestCase):
 
         summary = build_validation_summary_v1(parameters, issues)
 
-        self.assertEqual(summary["schema_version"], "1.0")
+        self.assertEqual(summary["schema_version"], "1.1")
         self.assertEqual(
             summary["asset_metrics"],
             {
@@ -109,6 +109,7 @@ class UdmiResultsTests(unittest.TestCase):
                 "not_observed": 1,
                 "with_issues": 2,
                 "successfully_validated": 0,
+                "unexpected": 0,
             },
         )
         self.assertEqual(
@@ -116,7 +117,8 @@ class UdmiResultsTests(unittest.TestCase):
             {
                 "expected": 5,
                 "received": 3,
-                "with_issues": 4,
+                "not_received": 2,
+                "with_issues": 3,
                 "successfully_validated": 1,
             },
         )
@@ -176,6 +178,7 @@ class UdmiResultsTests(unittest.TestCase):
             {
                 "expected": 1,
                 "received": 1,
+                "not_received": 0,
                 "with_issues": 0,
                 "successfully_validated": 1,
             },
@@ -184,6 +187,123 @@ class UdmiResultsTests(unittest.TestCase):
         unexpected = next(row for row in payloads if row["payload_type"] == "metadata")
         self.assertFalse(unexpected["expected"])
         self.assertTrue(unexpected["received"])
+
+    def test_only_received_expected_payloads_make_a_registered_asset_observed(self) -> None:
+        summary = build_validation_summary_v1(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A-1", "system": "BMS"},
+                        "state_topic": "site/a-1/state",
+                        "metadata_payload": {"timestamp": "2026-07-23T10:00:00Z"},
+                        "metadata_payload_received_at": "2026-07-23T10:00:01Z",
+                    }
+                ]
+            },
+            [],
+        )
+
+        asset = summary["asset_results"][0]
+        self.assertFalse(asset["observed"])
+        self.assertEqual(asset["expected_payloads"], 1)
+        self.assertEqual(asset["received_payloads"], 0)
+        self.assertFalse(asset["all_received_payloads_successfully_validated"])
+        self.assertIsNone(asset["last_observed_at"])
+        self.assertEqual(summary["asset_metrics"]["observed"], 0)
+        self.assertEqual(summary["asset_metrics"]["not_observed"], 1)
+        self.assertEqual(summary["payload_metrics"]["received"], 0)
+        self.assertEqual(
+            [
+                (row["payload_type"], row["expected"], row["received"])
+                for row in asset["payload_results"]
+            ],
+            [("state", True, False), ("metadata", False, True)],
+        )
+
+    def test_last_observed_at_uses_the_latest_rfc3339_instant(self) -> None:
+        summary = build_validation_summary_v1(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A-1", "system": "BMS"},
+                        "state_topic": "site/a-1/state",
+                        "metadata_topic": "site/a-1/metadata",
+                        "state_payload": {"timestamp": "2026-07-23T10:00:00+01:00"},
+                        "state_payload_received_at": "2026-07-23T10:00:00+01:00",
+                        "metadata_payload": {"timestamp": "2026-07-23T09:30:00Z"},
+                        "metadata_payload_received_at": "2026-07-23T09:30:00Z",
+                    }
+                ]
+            },
+            [],
+        )
+
+        self.assertEqual(
+            summary["asset_results"][0]["last_observed_at"],
+            "2026-07-23T09:30:00Z",
+        )
+
+    def test_unexpected_devices_are_separate_versioned_supporting_evidence(self) -> None:
+        summary = build_validation_summary_v1(
+            {
+                "unexpected_devices": [
+                    {
+                        "id": "rogue-2",
+                        "topic_root": "site/rogue-2",
+                        "topics": ["site/rogue-2/state"],
+                        "last_seen": "2026-07-23T10:00:00+00:00",
+                    },
+                    {
+                        "id": "rogue-1",
+                        "topic_root": "site/rogue-1",
+                        "topics": ["site/rogue-1/state"],
+                        "last_seen": "2026-07-23T09:00:00+00:00",
+                    },
+                ],
+                "unexpected_devices_measured": True,
+                "unexpected_devices_measurement_scope": "site/#",
+            },
+            [],
+        )
+        self.assertEqual(summary["schema_version"], "1.1")
+        self.assertEqual(summary["asset_metrics"]["expected"], 0)
+        self.assertEqual(summary["asset_metrics"]["unexpected"], 2)
+        self.assertEqual(
+            [row["id"] for row in summary["unexpected_devices"]],
+            ["rogue-1", "rogue-2"],
+        )
+        self.assertTrue(summary["unexpected_devices_measured"])
+        self.assertEqual(summary["unexpected_devices_measurement_scope"], "site/#")
+
+    def test_legacy_unexpected_issue_cannot_enter_validation_metrics(self) -> None:
+        summary = build_validation_summary_v1(
+            {
+                "unexpected_devices": [
+                    {
+                        "id": "rogue-1",
+                        "topic_root": "site/rogue-1",
+                        "topics": ["site/rogue-1/state"],
+                        "last_seen": "2026-07-23T09:00:00+00:00",
+                    }
+                ],
+                "unexpected_devices_measured": True,
+                "unexpected_devices_measurement_scope": "site/#",
+            },
+            [
+                _issue(
+                    "UDMI-UNEXPECTED-0001",
+                    "rogue-1",
+                    "unexpected_device",
+                    "high",
+                    "Legacy unexpected publisher finding.",
+                )
+            ],
+        )
+
+        self.assertEqual(summary["asset_metrics"]["unexpected"], 1)
+        self.assertEqual(summary["fault_rows"], [])
+        self.assertEqual(summary["issue_metrics"], {"blocking": 0, "warning": 0})
+        self.assertTrue(all(value == 0 for value in summary["fault_metrics"].values()))
 
     def test_point_fault_categories_are_distinct(self) -> None:
         misnamed = _issue(

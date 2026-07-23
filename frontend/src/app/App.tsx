@@ -152,7 +152,6 @@ export function App() {
       <section className="workspace-shell">
         <header className="page-titlebar">
           <div>
-            <span className="eyebrow">Smart Commissioning</span>
             <h1>{pageTitle}</h1>
             <p>{pageSubtitle}</p>
           </div>

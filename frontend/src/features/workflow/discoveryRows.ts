@@ -667,14 +667,14 @@ export function validationMetrics(
     const stamped = num("payload_conformance_percent");
     const seen = num("publishing_seen") ?? 0;
     const conformance = stamped ?? (expected > 0 ? Math.round((seen / expected) * 100) : 0);
-    // blocking_issue_count is critical+high+medium; the legacy issue_count is
-    // ALL issues, so it must not be labelled "blocking".
-    const blocking = num("blocking_issue_count");
+    // Prefer the total issue count. Older runs expose only the severity-derived
+    // blocking count, but the operator-facing label stays neutral: "issues".
+    const issueCount = num("issue_count") ?? num("blocking_issue_count") ?? 0;
     return {
       primary: `${conformance}%`,
       primaryLabel: "payload conformance",
-      secondary: String(blocking ?? num("issue_count") ?? 0),
-      secondaryLabel: blocking === undefined ? "issues found" : "blocking issues",
+      secondary: String(issueCount),
+      secondaryLabel: "issues found",
     };
   }
 
