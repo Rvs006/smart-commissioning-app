@@ -258,6 +258,15 @@ class MessageMetadataTests(unittest.TestCase):
         # gets qos=0 without passing it, so appending the field breaks nothing.
         message = MqttMessage(topic="t", payload=b"{}")
         self.assertEqual(message.qos, 0)
+
+    def test_non_finite_json_constants_are_rejected(self) -> None:
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                message = MqttMessage(
+                    topic="site/asset/state",
+                    payload=b'{"reading":' + constant + b"}",
+                )
+                self.assertIsNone(message.json_payload())
         self.assertFalse(message.retained)
 
 

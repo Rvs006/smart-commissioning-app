@@ -207,7 +207,103 @@ export type UdmiPayloadType = {
 
 export type UdmiAssetPayloadView = {
   asset_id: string;
+  // Register column B. New validation runs always stamp this; older runs omit
+  // it, so consumers must fall back to "Unspecified" rather than guessing from
+  // the asset id.
+  system?: string | null;
   payload_types: UdmiPayloadType[];
+};
+
+export type UdmiAssetMetrics = {
+  expected: number;
+  observed: number;
+  not_observed: number;
+  with_issues: number;
+  successfully_validated: number;
+};
+
+export type UdmiPayloadMetrics = {
+  expected: number;
+  received: number;
+  with_issues: number;
+  successfully_validated: number;
+};
+
+export type UdmiFaultMetrics = {
+  payload_formatting_issues: number;
+  missing_points: number;
+  point_naming_issues: number;
+  additional_points: number;
+  stale_or_cadence: number;
+  other_issues: number;
+};
+
+export type UdmiIssueMetrics = {
+  blocking: number;
+  warning: number;
+};
+
+export type UdmiSystemMetrics = {
+  system: string;
+  asset_metrics: UdmiAssetMetrics;
+  payload_metrics: UdmiPayloadMetrics;
+  fault_metrics: UdmiFaultMetrics;
+  issue_metrics: UdmiIssueMetrics;
+};
+
+export type UdmiAssetPayloadResult = {
+  payload_type: string;
+  expected: boolean;
+  received: boolean;
+  has_issues: boolean;
+  blocking_issue_count: number;
+  successfully_validated: boolean;
+  topic: string | null;
+  received_at: string | null;
+};
+
+export type UdmiAssetResult = {
+  asset_id: string;
+  system: string;
+  observed: boolean;
+  expected_payloads: number;
+  received_payloads: number;
+  all_expected_payloads_received: boolean;
+  all_received_payloads_successfully_validated: boolean;
+  successfully_validated: boolean;
+  issue_count: number;
+  blocking_issue_count: number;
+  last_observed_at: string | null;
+  payload_results: UdmiAssetPayloadResult[];
+};
+
+export type UdmiFaultRow = {
+  issue_id: string;
+  asset_id: string | null;
+  system: string;
+  payload_type: string | null;
+  category: string;
+  severity: string;
+  description: string;
+  point_name: string | null;
+  expected_value: string | null;
+  observed_value: string | null;
+  suggested_action: string | null;
+  raw_evidence_uri: string | null;
+};
+
+// Versioned metric contract shared by the results UI and report exporters.
+// It is nested under RunRecord.result_summary.validation_summary_v1. Keeping
+// the outer result_summary open preserves old run snapshots and other job types.
+export type UdmiValidationSummaryV1 = {
+  schema_version: "1.0";
+  asset_metrics: UdmiAssetMetrics;
+  payload_metrics: UdmiPayloadMetrics;
+  fault_metrics: UdmiFaultMetrics;
+  issue_metrics: UdmiIssueMetrics;
+  system_metrics: UdmiSystemMetrics[];
+  asset_results: UdmiAssetResult[];
+  fault_rows: UdmiFaultRow[];
 };
 
 export type ValidationIssuesResponse = {
@@ -244,6 +340,7 @@ export type ReportSummary = {
   // query payload, carries neither.
   created_at: string;
   source_run_ids: string[];
+  report_title?: string | null;
 };
 
 export type ReportListResponse = {
@@ -884,6 +981,10 @@ export function getReportDownloadPath(reportId: string): string {
   return `/reports/${encodeURIComponent(reportId)}/download`;
 }
 
+export function getValidationJsonExportPath(runId: string): string {
+  return `/validation/runs/${encodeURIComponent(runId)}/export.json`;
+}
+
 // Bundle multiple reports into one zip. One gesture, one fetch, one download —
 // so the browser's per-gesture download throttle never drops files (mqatcqb3).
 // The ids POST in a JSON body (built at the call site) rather than a query
@@ -1002,6 +1103,7 @@ export function createReport(input: {
   reportType: ReportType;
   format?: ReportFormat;
   sourceRunIds?: string[];
+  reportTitle?: string;
 }): Promise<ReportSummary> {
   return request<ReportSummary>("/reports", {
     body: JSON.stringify({
@@ -1010,6 +1112,7 @@ export function createReport(input: {
       report_type: input.reportType,
       site_id: "demo-site",
       source_run_ids: input.sourceRunIds ?? [],
+      ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",

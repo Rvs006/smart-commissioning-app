@@ -41,6 +41,10 @@ REPORT_FORMAT_EXTENSIONS = {
     "zip": "zip",
 }
 
+_DEFAULT_REPORT_TITLE = "Smart Commissioning Report"
+_DEFAULT_UDMI_REPORT_TITLE = "UDMI Validation Report"
+_TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
 # Operator-facing message stamped on a run the startup sweep found fossilized at
 # "running" (see RunService.sweep_interrupted_runs). Credential-free and generic
 # by design (this text can reach the UI).
@@ -145,6 +149,36 @@ class RunService:
         )
 
     def create_report_run(self, request: ReportRequest) -> tuple[RunRecord, ReportSummary]:
+        # A report must never silently change scope because a source id is bad or
+        # belongs to another project/site. Empty source lists remain valid for a
+        # metadata-only report.
+        for source_run_id in request.source_run_ids:
+            try:
+                source = self.get_run(source_run_id)
+            except FileNotFoundError as error:
+                raise ValueError(f"Source run '{source_run_id}' was not found.") from error
+            if source.project_id != request.project_id or source.site_id != request.site_id:
+                raise ValueError(
+                    f"Source run '{source_run_id}' does not belong to project "
+                    f"'{request.project_id}' and site '{request.site_id}'."
+                )
+            if request.report_type == "udmi_validation":
+                if source.job_type != "udmi_validation":
+                    raise ValueError(
+                        f"Source run '{source_run_id}' must be a UDMI validation run; "
+                        f"found job type '{source.job_type}'."
+                    )
+                if source.status not in _TERMINAL_RUN_STATUSES:
+                    raise ValueError(
+                        f"Source run '{source_run_id}' is not terminal "
+                        f"(status '{source.status}'). Wait for it to succeed, fail, or be cancelled."
+                    )
+
+        report_title = request.report_title or (
+            _DEFAULT_UDMI_REPORT_TITLE
+            if request.report_type == "udmi_validation"
+            else _DEFAULT_REPORT_TITLE
+        )
         run = self._create_run(
             project_id=request.project_id,
             site_id=request.site_id,
@@ -153,6 +187,7 @@ class RunService:
                 "output_format": request.output_format,
                 "report_type": request.report_type,
                 "source_run_ids": request.source_run_ids,
+                "report_title": report_title,
             },
         )
         # Reports are NOT processed by a worker actor: the artifact is built
@@ -179,6 +214,7 @@ class RunService:
             # GET of the same report.
             created_at=run.created_at,
             source_run_ids=list(request.source_run_ids),
+            report_title=report_title,
         )
         return run, report
 

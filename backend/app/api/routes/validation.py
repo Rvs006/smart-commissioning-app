@@ -13,7 +13,7 @@ see :mod:`smart_commissioning_core.mqtt_config_publish` and the ``rollback``
 endpoint below.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from smart_commissioning_core.db.repositories import (
     DiscoveryRepository,
     ImportRepository,
@@ -58,6 +58,7 @@ from app.services.register_topics import (
 )
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import VALIDATION_JOB_TYPES, RunService
+from app.services.validation_export import stable_validation_export_bytes, validation_export_filename
 
 router = APIRouter()
 service = RunService()
@@ -123,6 +124,7 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
     units = [u.strip() for u in str(row.get("Expected units", "")).split(",")]
     fields = {
         "asset_id": row.get("Asset ID") or row.get("Asset name"),
+        "system": row.get("System"),
         "manufacturer": row.get("Make"),
         "model": row.get("Model"),
         "serial": row.get("Serial number"),
@@ -495,6 +497,26 @@ def list_validation_runs() -> RunListResponse:
 @router.get("/runs/{run_id}", response_model=RunRecord, dependencies=[Depends(require_viewer)])
 def get_validation_run(run_id: str) -> RunRecord:
     return _load_validation_run(run_id)
+
+
+@router.get("/runs/{run_id}/export.json", dependencies=[Depends(require_viewer)])
+def export_udmi_validation_run(run_id: str) -> Response:
+    """Download one stored UDMI validation snapshot as versioned JSON evidence."""
+    run = _load_validation_run(run_id)
+    if run.job_type != "udmi_validation":
+        raise HTTPException(status_code=404, detail=f"UDMI validation run '{run_id}' was not found.")
+    if run.status not in {"succeeded", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Raw validation JSON is available after the run reaches a terminal status.",
+        )
+    return Response(
+        content=stable_validation_export_bytes(run),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{validation_export_filename(run)}"'
+        },
+    )
 
 
 @router.get(

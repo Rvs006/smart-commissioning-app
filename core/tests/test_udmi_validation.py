@@ -9,6 +9,7 @@ skipped structural check is never presented as a pass.
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from smart_commissioning_core import mqtt_transport, udmi_schema
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS
@@ -1536,6 +1537,18 @@ class RecordingCapture:
         return self.messages
 
 
+class ProgressRecordingCapture(RecordingCapture):
+    """Capture fake that mirrors the transport's per-message callback."""
+
+    def __call__(self, _settings: object, **kwargs: object) -> list[MqttMessage]:
+        self.calls.append(kwargs)
+        on_message = kwargs.get("on_message")
+        for message in self.messages:
+            if callable(on_message):
+                on_message(message)
+        return self.messages
+
+
 def _msg(topic: str, payload: bytes = b'{"timestamp":"2026-07-09T10:00:00Z"}') -> MqttMessage:
     return MqttMessage(topic=topic, payload=payload)
 
@@ -1877,6 +1890,8 @@ class _FakeRunStore:
         self.cancel = cancel
         self.status_calls: list[dict] = []
         self.summaries: list[dict] = []
+        self.issue_snapshots: list[list] = []
+        self.current_summary: dict = {}
         if not cancellable:
             # Hide the cancel API entirely: the processor must then pass no
             # cancel_check and the engine bounds indefinite captures itself.
@@ -1888,10 +1903,15 @@ class _FakeRunStore:
         return record
 
     def update_result_summary(self, run_id: str, summary: dict, merge: bool = True) -> None:
-        self.summaries.append(summary)
+        if merge:
+            self.current_summary.update(summary)
+        else:
+            self.current_summary = dict(summary)
+        self.summaries.append(dict(self.current_summary))
 
     def replace_issues(self, run_id: str, issues: list) -> None:
         self.issues = issues
+        self.issue_snapshots.append(list(issues))
 
     def is_cancel_requested(self, run_id: str) -> bool:
         return self.cancel
@@ -1901,6 +1921,130 @@ _PROCESSOR_PARAMS = {**_BROKER, **_TOPICS, "capture_seconds": 0}
 
 
 class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
+    def test_live_messages_persist_provisional_results_before_terminal(self) -> None:
+        store = _FakeRunStore()
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 1,
+            "assets": [
+                {
+                    "expected_schedule": {"asset_id": "A1", "system": "BMS"},
+                    "state_topic": "site/a1/state",
+                    "metadata_topic": "site/a1/metadata",
+                },
+                {
+                    "expected_schedule": {"asset_id": "A2", "system": "Lighting"},
+                    "state_topic": "site/a2/state",
+                },
+            ],
+        }
+
+        record = process_udmi_validation_run(
+            "run-progress",
+            parameters,
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=ProgressRecordingCapture([_msg("site/a1/state")]),
+        )
+
+        provisional = [summary for summary in store.summaries if summary.get("provisional") is True]
+        self.assertEqual(len(provisional), 1)
+        snapshot = provisional[0]
+        self.assertEqual(snapshot["broker_status_detail"], "live_capture_in_progress")
+        self.assertEqual(snapshot["message_count"], 1)
+        self.assertEqual(snapshot["publishing_seen"], 1)
+        self.assertEqual(snapshot["not_publishing_devices"], [])
+        self.assertEqual(snapshot["validation_summary_v1"]["asset_metrics"]["observed"], 1)
+        self.assertEqual(snapshot["validation_summary_v1"]["payload_metrics"]["received"], 1)
+        self.assertEqual(snapshot["payload_views"][0]["system"], "BMS")
+        # Silence is not a fault until the window closes. A2 can still publish.
+        self.assertFalse(
+            any(issue.issue_type == "not_publishing" for issue in store.issue_snapshots[0])
+        )
+
+        self.assertEqual(record["status"], "succeeded")
+        self.assertFalse(store.summaries[-1]["provisional"])
+        self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
+        self.assertTrue(
+            any(call.get("stage") == "capturing_live_mqtt" for call in store.status_calls)
+        )
+
+    def test_progress_persistence_is_throttled_but_terminal_write_is_not(self) -> None:
+        store = _FakeRunStore()
+        capture = ProgressRecordingCapture(
+            [
+                _msg("a/b/state", b'{"n":1}'),
+                _msg("a/b/state", b'{"n":2}'),
+                _msg("a/b/state", b'{"n":3}'),
+            ]
+        )
+
+        with patch(
+            "smart_commissioning_core.udmi_run_processor.time.monotonic",
+            side_effect=[0.0, 0.2, 1.2],
+        ):
+            record = process_udmi_validation_run(
+                "run-throttle",
+                {**_BROKER, "capture_seconds": 1, "state_topic": "a/b/state"},
+                run_store=store,
+                execution_mode="dramatiq_worker",
+                live_capture=capture,
+            )
+
+        provisional = [summary for summary in store.summaries if summary.get("provisional") is True]
+        self.assertEqual([summary["message_count"] for summary in provisional], [1, 3])
+        self.assertEqual(record["status"], "succeeded")
+        self.assertFalse(store.summaries[-1]["provisional"])
+
+    def test_progress_persistence_failure_does_not_abort_capture(self) -> None:
+        class FailingProgressStore(_FakeRunStore):
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                if summary.get("provisional") is True:
+                    raise OSError("database unavailable secret=do-not-log")
+                super().update_result_summary(run_id, summary, merge)
+
+        store = FailingProgressStore()
+        with self.assertLogs(
+            "smart_commissioning_core.udmi_run_processor", level="WARNING"
+        ) as logs:
+            record = process_udmi_validation_run(
+                "run-progress-store-failure",
+                {**_BROKER, "capture_seconds": 1, "state_topic": "a/b/state"},
+                run_store=store,
+                execution_mode="dramatiq_worker",
+                live_capture=ProgressRecordingCapture([_msg("a/b/state")]),
+            )
+
+        self.assertEqual(record["status"], "succeeded")
+        self.assertFalse(store.summaries[-1]["provisional"])
+        self.assertEqual(store.summaries[-1]["message_count"], 1)
+        self.assertIn("OSError", logs.output[0])
+        self.assertNotIn("do-not-log", logs.output[0])
+
+    def test_outer_validation_failure_preserves_last_partial_snapshot(self) -> None:
+        store = _FakeRunStore()
+
+        def fail_after_message(_settings: object, **kwargs: object) -> list[MqttMessage]:
+            on_message = kwargs["on_message"]
+            on_message(_msg("a/b/state"))
+            raise RuntimeError("unexpected validator failure")
+
+        record = process_udmi_validation_run(
+            "run-fail-after-progress",
+            {**_BROKER, "capture_seconds": 1, "state_topic": "a/b/state"},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=fail_after_message,
+        )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertTrue(store.current_summary["provisional"])
+        self.assertEqual(store.current_summary["message_count"], 1)
+        self.assertEqual(store.current_summary["execution_mode"], "dramatiq_worker")
+        self.assertEqual(store.current_summary["payload_views"][0]["asset_id"], "UDMI asset")
+
     def test_worker_mode_honours_indefinite_and_wires_cancel(self) -> None:
         store = _FakeRunStore()
         capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))

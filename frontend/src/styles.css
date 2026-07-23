@@ -1,3 +1,11 @@
+/* Hallmark · pre-emit critique: The UDMI results had clear data hierarchy, but
+   nested metric panels, pill-shaped action buttons, hover lift, and weak input
+   focus made the new reporting workflow feel more like a UI-kit assembly than
+   a commissioning instrument. This pass keeps the information architecture and
+   removes those defaults while preserving the app's restrained Electracom UI. */
+/* Hallmark · macrostructure: Operator path = run status → evidence summary →
+   full-width asset table → selected-asset inspector → report/export actions. */
+
 :root {
   color-scheme: light;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
@@ -22,6 +30,7 @@
   --purple: #8944ab;
   --purple-bg: rgba(175, 82, 222, 0.08);
   --code: #1e1e2e;
+  --scrim: rgba(0, 0, 0, 0.46);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-strong: 0 1px 4px rgba(0, 0, 0, 0.06);
   --radius: 10px;
@@ -34,7 +43,7 @@
 
 html {
   min-height: 100%;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 body {
@@ -43,7 +52,7 @@ body {
   background: var(--bg);
   color: var(--ink);
   font-size: 13px;
-  overflow-x: hidden;
+  overflow-x: clip;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -78,10 +87,8 @@ select {
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--ink);
-  outline: none;
   transition:
     border-color 150ms ease,
-    box-shadow 150ms ease,
     background 150ms ease;
 }
 
@@ -96,22 +103,23 @@ input[type="file"]::file-selector-button {
   margin-right: 9px;
   padding: 5px 10px;
   border: 1px solid var(--border);
-  border-radius: 980px;
+  border-radius: var(--radius-sm);
   background: var(--surface-2);
   color: var(--text);
   font: inherit;
   font-weight: 650;
 }
 
-input:focus,
-select:focus {
+input:focus-visible,
+select:focus-visible {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 button:focus-visible,
 a:focus-visible {
-  outline: 3px solid var(--accent-bg);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -128,7 +136,7 @@ label {
   min-height: 100vh;
   background: transparent;
   color: var(--ink);
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .app-header {
@@ -300,7 +308,7 @@ label {
   max-width: 1180px;
   margin: 0 auto;
   padding: 24px 24px 60px;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .app-page,
@@ -345,6 +353,7 @@ label {
 
 .module-hero {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.44fr);
+  scroll-margin-top: 180px;
 }
 
 .module-hero > div:first-child {
@@ -466,14 +475,12 @@ label {
   background: var(--surface-2);
   transition:
     border-color 150ms ease,
-    background 150ms ease,
-    transform 150ms ease;
+    background 150ms ease;
 }
 
 .brief-step:hover {
   border-color: var(--accent);
   background: var(--accent-bg);
-  transform: translateY(-1px);
 }
 
 .brief-step b {
@@ -574,16 +581,16 @@ label {
   min-height: 34px;
   padding: 8px 15px;
   border: 1px solid var(--border);
-  border-radius: 980px;
+  border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
   transition:
     background 150ms ease,
     border-color 150ms ease,
-    color 150ms ease,
-    transform 150ms ease;
+    color 150ms ease;
 }
 
 .primary-button {
@@ -596,11 +603,6 @@ label {
   border-color: var(--border);
   background: var(--surface-3);
   color: var(--muted);
-}
-
-.secondary-button:hover,
-.primary-button:not(:disabled):hover {
-  transform: translateY(-1px);
 }
 
 .secondary-button:hover {
@@ -703,15 +705,6 @@ label {
 .list-grid,
 .operations-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-/* Results view (ITEM-D): the table takes the wide first column and the inspector
-   sits BESIDE it as a narrower second column. Declared after .two-col so it wins
-   the equal-specificity tie on the shared `two-col wide-left` element; the
-   <=980px media query below (which lists .two-col) collapses it back to one
-   stacked column on narrow screens. */
-.wide-left {
-  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr);
 }
 
 .home-main-grid,
@@ -1079,7 +1072,7 @@ label {
 
 .data-table-wrap {
   max-width: 100%;
-  /* Safety valve only: body sets overflow-x:hidden, so an ultra-wide table with
+  /* Safety valve only: body clips page-level overflow, so an ultra-wide table with
      no scroller here would be clipped and unreachable. After the min-width and
      cell-nowrap removals below, content wraps into page flow and this should
      not engage at desktop widths. Do NOT add a max-height to the BASE class —
@@ -1131,6 +1124,15 @@ label {
 
 .results-filter-text {
   flex: 1 1 220px;
+}
+
+.secondary-button:active,
+.primary-button:not(:disabled):active {
+  filter: brightness(0.96);
+}
+
+.results-topic-filter {
+  flex-basis: 190px;
 }
 
 .results-filter-count {
@@ -2175,6 +2177,199 @@ input.field-expired {
   gap: 0.4rem;
 }
 
+/* UDMI run summary. Metric families stay visually grouped so the page can
+   carry the full evidence set without presenting one undifferentiated wall of
+   numbers. System completion remains tabular because the rows are comparative. */
+.udmi-summary-shell {
+  display: grid;
+  gap: 12px;
+}
+
+.udmi-summary {
+  display: grid;
+  gap: 16px;
+}
+
+.udmi-summary-heading {
+  margin-bottom: 0;
+}
+
+.udmi-summary-run-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 16px;
+  margin: 0;
+}
+
+.udmi-summary-run-meta div {
+  display: grid;
+  gap: 4px;
+}
+
+.udmi-summary-run-meta dt,
+.udmi-summary-run-meta dd {
+  margin: 0;
+}
+
+.udmi-summary-run-meta dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.udmi-summary-run-meta dd {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.udmi-metric-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.udmi-metric-group {
+  min-width: 0;
+}
+
+.udmi-metric-group:last-child {
+  grid-column: 1 / -1;
+}
+
+.udmi-metric-group h4,
+.udmi-system-summary h4 {
+  margin: 0 0 10px;
+  color: var(--ink);
+  font-size: 14px;
+}
+
+.udmi-metric-group dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px 16px;
+  margin: 0;
+}
+
+.udmi-metric-group dl div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.udmi-metric-group dt,
+.udmi-metric-group dd {
+  margin: 0;
+}
+
+.udmi-metric-group dt {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.udmi-metric-group dd {
+  color: var(--ink);
+  font-size: 22px;
+  font-weight: 780;
+  line-height: 1;
+}
+
+.udmi-metric-group .udmi-payload-rates {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 16px;
+}
+
+.udmi-payload-rates small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.udmi-metric-basis {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.udmi-system-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.udmi-system-summary h4 {
+  margin-bottom: 4px;
+}
+
+.udmi-system-summary p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.udmi-system-summary .data-table-wrap {
+  box-shadow: none;
+}
+
+/* Native modal for the report title. The solid surface avoids fragile glass
+   effects while keeping the browser's focus containment and Escape behaviour. */
+.report-title-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.report-title-dialog::backdrop {
+  background: var(--scrim);
+}
+
+.report-title-dialog form {
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+}
+
+.report-title-dialog-heading {
+  display: grid;
+  gap: 6px;
+}
+
+.report-title-dialog-heading h3,
+.report-title-dialog-heading p {
+  margin: 0;
+}
+
+.report-title-dialog-heading p {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.report-title-dialog label {
+  display: grid;
+  gap: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.report-title-dialog input {
+  width: 100%;
+}
+
+.report-title-dialog small {
+  color: var(--muted);
+  text-align: right;
+}
+
+.report-title-dialog-actions {
+  justify-content: flex-end;
+}
+
 .run-monitor-note {
   color: var(--accent);
   font-size: 12px;
@@ -2202,14 +2397,33 @@ input.field-expired {
   .mode-grid,
   .kpi-strip,
   .module-metrics,
-  .summary-grid {
+  .summary-grid,
+  .udmi-metric-groups {
     grid-template-columns: 1fr;
+  }
+
+  .udmi-metric-group:last-child {
+    grid-column: auto;
+  }
+
+  .udmi-metric-group .udmi-payload-rates {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (min-width: 1080px) {
+  .module-hero {
+    scroll-margin-top: 132px;
   }
 }
 
 @media (max-width: 720px) {
   body {
     font-size: 12px;
+  }
+
+  .app-header {
+    position: static;
   }
 
   .app-brand-bar {
@@ -2253,6 +2467,10 @@ input.field-expired {
     padding: 20px;
   }
 
+  .module-hero {
+    scroll-margin-top: 16px;
+  }
+
   .surface-heading,
   .section-heading,
   .readiness-row,
@@ -2261,6 +2479,10 @@ input.field-expired {
   .run-monitor-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .udmi-summary-run-meta {
+    grid-template-columns: 1fr;
   }
 
   .section-heading label,

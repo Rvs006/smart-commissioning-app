@@ -36,10 +36,33 @@ class ReportListProjectionTests(ApiTestCase):
 
     # -- helpers ---------------------------------------------------------------
 
+    def _seed_source_runs(self, count: int) -> list[str]:
+        from app.schemas.jobs import JobCreateRequest
+        from app.services.run_service import RunService
+
+        service = RunService()
+        ids: list[str] = []
+        for _index in range(count):
+            run = service.create_job_run(
+                JobCreateRequest(
+                    project_id="demo-project",
+                    site_id="demo-site",
+                    job_type="udmi_validation",
+                    parameters={},
+                ),
+                expected_job_type="udmi_validation",
+            )
+            service.update_run_status(
+                run.run_id,
+                status="succeeded",
+                stage="done",
+                progress_percent=100,
+            )
+            ids.append(run.run_id)
+        return ids
+
     def _create_report(self, source_run_ids: list[str]) -> dict:
-        """POST a report. Report creation does not validate that the source runs
-        exist (verified in create_report_run), so these ids need no seeded runs
-        -- the projection under test copies them through verbatim."""
+        """POST a report scoped to source runs that exist in this project/site."""
         response = self.client.post(
             "/api/v1/reports",
             json={
@@ -66,9 +89,10 @@ class ReportListProjectionTests(ApiTestCase):
     # -- tests -----------------------------------------------------------------
 
     def test_create_report_returns_created_at_and_source_run_ids(self) -> None:
-        body = self._create_report(["run-a", "run-b"])
+        source_ids = self._seed_source_runs(2)
+        body = self._create_report(source_ids)
 
-        self.assertEqual(body["source_run_ids"], ["run-a", "run-b"])
+        self.assertEqual(body["source_run_ids"], source_ids)
         # Parseable ISO 8601 (what the frontend's Date.parse consumes).
         self.assertIsInstance(
             datetime.fromisoformat(body["created_at"]),
@@ -76,7 +100,7 @@ class ReportListProjectionTests(ApiTestCase):
         )
 
     def test_list_projection_matches_the_creation_projection(self) -> None:
-        created = self._create_report(["run-a", "run-b"])
+        created = self._create_report(self._seed_source_runs(2))
 
         listed = self._find(self._list_reports(), created["report_id"])
 
@@ -86,14 +110,15 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertEqual(listed["source_run_ids"], created["source_run_ids"])
 
     def test_single_get_projection_matches_the_creation_projection(self) -> None:
-        created = self._create_report(["run-a"])
+        source_ids = self._seed_source_runs(1)
+        created = self._create_report(source_ids)
 
         response = self.client.get(f"/api/v1/reports/{created['report_id']}")
         self.assertEqual(response.status_code, 200, response.text)
         body = response.json()
 
         self.assertEqual(body["created_at"], created["created_at"])
-        self.assertEqual(body["source_run_ids"], ["run-a"])
+        self.assertEqual(body["source_run_ids"], source_ids)
 
     def test_report_with_no_source_runs_lists_an_empty_list(self) -> None:
         created = self._create_report([])
@@ -106,12 +131,14 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertTrue(listed["created_at"])
 
     def test_order_of_source_run_ids_is_preserved(self) -> None:
-        created = self._create_report(["run-z", "run-a", "run-m"])
+        source_ids = self._seed_source_runs(3)
+        requested_order = [source_ids[2], source_ids[0], source_ids[1]]
+        created = self._create_report(requested_order)
 
         listed = self._find(self._list_reports(), created["report_id"])
 
         # Scoping order is the operator's; the projection must not sort it.
-        self.assertEqual(listed["source_run_ids"], ["run-z", "run-a", "run-m"])
+        self.assertEqual(listed["source_run_ids"], requested_order)
 
 
 if __name__ == "__main__":

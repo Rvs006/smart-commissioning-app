@@ -96,9 +96,15 @@ class MqttMessage:
     qos: int = 0
 
     def json_payload(self) -> object | None:
+        def reject_non_finite(value: str) -> object:
+            raise ValueError(f"Non-standard JSON constant: {value}")
+
         try:
-            return json.loads(self.payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            return json.loads(
+                self.payload.decode("utf-8"),
+                parse_constant=reject_non_finite,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
             return None
 
 
