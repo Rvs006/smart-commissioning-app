@@ -2794,6 +2794,11 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(table).getByRole("button", { name: /EM-OBSERVED/ })).toBeInTheDocument();
     expect(within(table).queryByRole("button", { name: /EM-SILENT/ })).not.toBeInTheDocument();
     expect(screen.getByText(/across 1 asset\b/i)).toBeInTheDocument();
+    const summaryPanel = screen.getByRole("heading", { name: "Validation summary" }).closest(".udmi-summary") as HTMLElement;
+    const expectedAssets = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
+    const observedAssets = within(summaryPanel).getByText("Observed assets").closest("div") as HTMLElement;
+    expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
+    expect(within(observedAssets).getByText("1")).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "SEC" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "BMS" })).toBeInTheDocument();
   });

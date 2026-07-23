@@ -4206,11 +4206,12 @@ function filterValidationSummary(
     if (filter.observation === "not-observed" && asset.observed) {
       return [];
     }
-    const payloadResults = topicNeedle
-      ? asset.payload_results.filter((payload) =>
-          (payload.topic ?? "").toLocaleLowerCase().includes(topicNeedle),
-        )
-      : asset.payload_results;
+    if (!topicNeedle) {
+      return [asset];
+    }
+    const payloadResults = asset.payload_results.filter((payload) =>
+      (payload.topic ?? "").toLocaleLowerCase().includes(topicNeedle),
+    );
     return payloadResults.length > 0 ? [{ ...asset, payload_results: payloadResults }] : [];
   });
   const assetIds = new Set(assets.map((asset) => asset.asset_id));
