@@ -2565,9 +2565,9 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // EM-1 is the first (selected) asset, so it auto-expands (2 child rows).
     // AHU-9 is collapsed until clicked.
-    expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(2);
+    expect(await screen.findAllByRole("button", { name: "View" })).toHaveLength(2);
     fireEvent.click(within(table).getByRole("button", { name: /AHU-9/ }));
-    expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(3);
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(3));
 
     // Clicking a child row's View selects it (opens the detail modal for AHU-9).
     fireEvent.click(screen.getAllByRole("button", { name: "View" })[2]);
