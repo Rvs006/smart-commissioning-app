@@ -2501,9 +2501,11 @@ input.field-expired {
   }
 
   .review-feedback {
-    right: 10px;
-    bottom: 10px;
-    width: calc(100vw - 20px);
+    position: static;
+    right: auto;
+    bottom: auto;
+    width: auto;
+    margin: 0 10px calc(10px + env(safe-area-inset-bottom));
   }
 
   .review-feedback-panel {
