@@ -9,6 +9,8 @@ result, a portable raw record, and a consistent set of commissioning reports.
   per-system metrics alongside a full expected-payload table and inspector.
 - System, observation, and topic-contains filters make large retained runs
   practical to review. Topic matching is partial and case-insensitive.
+- Fixture and historical runs without payload views use their versioned summary
+  for observation and system filters, while direct payload evidence still wins.
 - Raw validation evidence can be downloaded as deterministic, versioned JSON.
   The export records its limitations: it contains the latest retained payload
   per expected payload type, rather than a complete MQTT message stream.

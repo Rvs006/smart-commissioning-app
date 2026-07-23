@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { UdmiAssetPayloadView } from "../../api/client";
+import type { UdmiAssetPayloadView, UdmiAssetResult } from "../../api/client";
 import {
   assetMatchesFacetFilter,
   buildAssetFacts,
@@ -215,6 +215,23 @@ describe("asset facet filters (ITEM-10)", () => {
     return { assetId, system, issues: [], payloadTypes: [payloadType(observedPresent)] };
   }
 
+  function summaryAsset(assetId: string, system: string, observed: boolean): UdmiAssetResult {
+    return {
+      asset_id: assetId,
+      system,
+      observed,
+      expected_payloads: 1,
+      received_payloads: observed ? 1 : 0,
+      all_expected_payloads_received: observed,
+      all_received_payloads_successfully_validated: observed,
+      successfully_validated: observed,
+      issue_count: 0,
+      blocking_issue_count: 0,
+      last_observed_at: observed ? "2026-07-23T01:00:00Z" : null,
+      payload_results: [],
+    };
+  }
+
   it("builds register-backed system and observation facts", () => {
     const facts = buildAssetFacts([
       group("EM-1", "BMS", true),
@@ -222,6 +239,32 @@ describe("asset facet filters (ITEM-10)", () => {
     ]);
     expect(facts.get("EM-1")).toEqual({ system: "BMS", observed: true });
     expect(facts.get("EM-2")).toEqual({ system: "Lighting", observed: false });
+  });
+
+  it("falls back to the stable summary when historical runs have no payload views", () => {
+    const issueOnlyGroup: MergedAssetGroup = {
+      assetId: "EM-1",
+      system: "Unspecified",
+      issues: [issue("issue-1", "EM-1")],
+      payloadTypes: [{ ...payloadType(false), hasPayloadView: false }],
+    };
+
+    const facts = buildAssetFacts(
+      [issueOnlyGroup],
+      [summaryAsset("EM-1", "SEC", true), summaryAsset("CLEAN-1", "BMS", false)],
+    );
+
+    expect(facts.get("EM-1")).toEqual({ system: "SEC", observed: true });
+    expect(facts.get("CLEAN-1")).toEqual({ system: "BMS", observed: false });
+  });
+
+  it("lets direct payload evidence override a conflicting summary fallback", () => {
+    const facts = buildAssetFacts(
+      [group("EM-1", "Unspecified", false)],
+      [summaryAsset("EM-1", "BMS", true)],
+    );
+
+    expect(facts.get("EM-1")).toEqual({ system: "BMS", observed: false });
   });
 
   it("matches by system and observed/not-observed status", () => {

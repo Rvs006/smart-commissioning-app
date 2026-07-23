@@ -48,6 +48,7 @@ import {
   moduleWorkspaces,
   udmiVerdictForIssues,
   udmiVerdictTone,
+  type AssetFacts,
   type IssueRow,
   type MergedAssetGroup,
   type UdmiVerdict,
@@ -1253,8 +1254,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // run snapshot; no asset-id heuristic or connection-state inference is used.
   const isUdmiValidation = module.route === "udmi-validation";
   const assetFacts = useMemo(
-    () => buildAssetFacts(mergedAssetGroups ?? []),
-    [mergedAssetGroups],
+    () => buildAssetFacts(mergedAssetGroups ?? [], validationSummary?.asset_results ?? []),
+    [mergedAssetGroups, validationSummary],
   );
   const systemOptions = useMemo(() => {
     const systems = new Set<string>();
@@ -1359,12 +1360,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         observation: resultsObservationFilter,
         system: resultsSystemFilter,
         topicContains: resultsTopicContainsFilter,
-      }),
+      }, assetFacts),
     [
       validationSummaryDisplay,
       resultsObservationFilter,
       resultsSystemFilter,
       resultsTopicContainsFilter,
+      assetFacts,
     ],
   );
   // The selected row, resolved WITHIN the filtered view so the Inspector can
@@ -4154,16 +4156,47 @@ function summaryMetricsForAssets(
 function filterValidationSummary(
   summary: UdmiSummaryDisplay | null,
   filter: { observation: string; system: string; topicContains: string },
+  assetFacts: ReadonlyMap<string, AssetFacts>,
 ): UdmiSummaryDisplay | null {
   if (!summary) {
     return null;
   }
+
+  // Direct payload views are the strongest evidence for observation/system.
+  // Reconcile the persisted summary before filtering so the cards, system table,
+  // results rows, and inspector cannot report different answers for one facet.
+  const reconciledAssets = summary.asset_results.map((asset) => {
+    const facts = assetFacts.get(asset.asset_id);
+    return facts && (facts.observed !== asset.observed || facts.system !== asset.system)
+      ? { ...asset, observed: facts.observed, system: facts.system }
+      : asset;
+  });
+  const summaryChanged = reconciledAssets.some((asset, index) => asset !== summary.asset_results[index]);
+  let reconciledSummary = summary;
+  if (summaryChanged) {
+    const overall = summaryMetricsForAssets(reconciledAssets, summary.fault_rows, false);
+    const systems = Array.from(new Set(reconciledAssets.map((asset) => asset.system || "Unspecified"))).sort();
+    const systemMetrics = systems.map((system) => {
+      const systemAssets = reconciledAssets.filter((asset) => (asset.system || "Unspecified") === system);
+      const systemAssetIds = new Set(systemAssets.map((asset) => asset.asset_id));
+      const systemFaults = summary.fault_rows.filter(
+        (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
+      );
+      return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, false) };
+    });
+    reconciledSummary = {
+      ...summary,
+      ...overall,
+      asset_results: reconciledAssets,
+      system_metrics: systemMetrics,
+    };
+  }
   const topicNeedle = filter.topicContains.trim().toLocaleLowerCase();
   if (filter.system === "all" && filter.observation === "all" && !topicNeedle) {
-    return summary;
+    return reconciledSummary;
   }
 
-  const assets = summary.asset_results.flatMap((asset) => {
+  const assets = reconciledSummary.asset_results.flatMap((asset) => {
     if (filter.system !== "all" && asset.system !== filter.system) {
       return [];
     }
@@ -4186,7 +4219,7 @@ function filterValidationSummary(
       asset.payload_results.map((payload) => `${asset.asset_id}\u0000${payload.payload_type}`),
     ),
   );
-  const faultRows = summary.fault_rows.filter((fault) => {
+  const faultRows = reconciledSummary.fault_rows.filter((fault) => {
     if (!fault.asset_id || !assetIds.has(fault.asset_id)) {
       return false;
     }
@@ -4203,7 +4236,7 @@ function filterValidationSummary(
     return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, Boolean(topicNeedle)) };
   });
   return {
-    ...summary,
+    ...reconciledSummary,
     ...overall,
     asset_results: assets,
     fault_rows: faultRows,

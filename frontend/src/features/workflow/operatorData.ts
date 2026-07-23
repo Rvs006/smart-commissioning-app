@@ -11,7 +11,11 @@
 // before them — were dead data shipped in the bundle and are deleted;
 // operatorData.test.ts pins that the fields stay gone.
 
-import type { UdmiAssetPayloadView, ValidationIssueRecord } from "../../api/client";
+import type {
+  UdmiAssetPayloadView,
+  UdmiAssetResult,
+  ValidationIssueRecord,
+} from "../../api/client";
 
 export type HealthState = "ready" | "warning" | "failed" | "running" | "queued";
 
@@ -289,12 +293,34 @@ export type AssetFacts = {
   observed: boolean;
 };
 
-export function buildAssetFacts(groups: MergedAssetGroup[]): Map<string, AssetFacts> {
+export function buildAssetFacts(
+  groups: MergedAssetGroup[],
+  summaryAssets: readonly UdmiAssetResult[] = [],
+): Map<string, AssetFacts> {
   const facts = new Map<string, AssetFacts>();
+
+  // The versioned summary is persisted for fixture and historical runs that do
+  // not carry payload_views. Seed from it so their observation and register
+  // system facets remain usable, including for clean assets with no issue row.
+  for (const asset of summaryAssets) {
+    facts.set(asset.asset_id, {
+      system: asset.system?.trim() || "Unspecified",
+      observed: asset.observed,
+    });
+  }
+
   for (const group of groups) {
-    const observed = group.payloadTypes.some((entry) => entry.observedPresent);
+    const summaryFact = facts.get(group.assetId);
+    const hasPayloadEvidence = group.payloadTypes.some((entry) => entry.hasPayloadView);
+    const observed = hasPayloadEvidence
+      ? group.payloadTypes.some((entry) => entry.hasPayloadView && entry.observedPresent)
+      : (summaryFact?.observed ?? false);
+    const groupSystem = group.system?.trim();
     facts.set(group.assetId, {
-      system: group.system || "Unspecified",
+      system:
+        groupSystem && groupSystem !== "Unspecified"
+          ? groupSystem
+          : (summaryFact?.system ?? "Unspecified"),
       observed,
     });
   }

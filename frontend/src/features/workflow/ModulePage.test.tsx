@@ -2576,6 +2576,39 @@ describe("ModulePage UDMI workbench live results", () => {
   });
 
   it("filters the results and inspector by observed/not-observed state (ITEM-10)", async () => {
+    const zeroFaults = {
+      payload_formatting_issues: 0,
+      missing_points: 0,
+      point_naming_issues: 0,
+      additional_points: 0,
+      stale_or_cadence: 0,
+      other_issues: 0,
+    };
+    const summaryAsset = (assetId: string, summaryObserved: boolean, received: boolean) => ({
+      asset_id: assetId,
+      system: "Legacy",
+      observed: summaryObserved,
+      expected_payloads: 1,
+      received_payloads: received ? 1 : 0,
+      all_expected_payloads_received: received,
+      all_received_payloads_successfully_validated: received,
+      successfully_validated: false,
+      issue_count: 0,
+      blocking_issue_count: 0,
+      last_observed_at: received ? "2026-07-23T01:00:00Z" : null,
+      payload_results: [
+        {
+          payload_type: "pointset",
+          expected: true,
+          received,
+          has_issues: false,
+          blocking_issue_count: 0,
+          successfully_validated: received,
+          topic: `${assetId}/pointset`,
+          received_at: received ? "2026-07-23T01:00:00Z" : null,
+        },
+      ],
+    });
     const run = {
       ...udmiTerminalRun,
       result_summary: {
@@ -2586,6 +2619,7 @@ describe("ModulePage UDMI workbench live results", () => {
         payload_views: [
           {
             asset_id: "EM-1",
+            system: "BMS",
             payload_types: [
               {
                 payload_type: "pointset",
@@ -2597,11 +2631,35 @@ describe("ModulePage UDMI workbench live results", () => {
           },
           {
             asset_id: "EM-2",
+            system: "Lighting",
             payload_types: [
               { payload_type: "pointset", expected: { version: "1.5.2", points: {} }, observed: null, observed_present: false },
             ],
           },
         ],
+        validation_summary_v1: {
+          schema_version: "1.0",
+          asset_metrics: {
+            expected: 2,
+            observed: 1,
+            not_observed: 1,
+            with_issues: 0,
+            successfully_validated: 0,
+          },
+          payload_metrics: {
+            expected: 2,
+            received: 1,
+            with_issues: 0,
+            successfully_validated: 1,
+          },
+          fault_metrics: zeroFaults,
+          issue_metrics: { blocking: 0, warning: 0 },
+          system_metrics: [],
+          // Deliberately stale observation/system facts. Direct payload views
+          // above must reconcile both the table and summary-card filters.
+          asset_results: [summaryAsset("EM-1", false, true), summaryAsset("EM-2", true, false)],
+          fault_rows: [],
+        },
       },
     };
     stubTwoAssetUdmi(run, { run_id: "run-udmi-1", issues: [] });
@@ -2612,7 +2670,7 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(runButton);
     expect(await screen.findByText(/across 2 assets/i)).toBeInTheDocument();
 
-    const table = screen.getByRole("table");
+    const table = document.querySelector(".results-scroll table") as HTMLTableElement;
     expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
 
     // Observation = not observed hides EM-1 and keeps only the silent EM-2.
@@ -2620,6 +2678,124 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(table).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
     expect(within(table).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
     expect(screen.getByText(/across 1 asset\b/i)).toBeInTheDocument();
+    const summaryPanel = screen.getByRole("heading", { name: "Validation summary" }).closest(".udmi-summary") as HTMLElement;
+    const expectedAssets = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
+    const observedAssets = within(summaryPanel).getByText("Observed assets").closest("div") as HTMLElement;
+    expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
+    expect(within(observedAssets).getByText("0")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "BMS" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Lighting" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Legacy" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "all" } });
+    fireEvent.change(screen.getByLabelText("System"), { target: { value: "BMS" } });
+    expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
+    expect(within(observedAssets).getByText("1")).toBeInTheDocument();
+  });
+
+  it("uses the stable summary for observation filters when a fixture run has no payload views", async () => {
+    const zeroFaults = {
+      payload_formatting_issues: 0,
+      missing_points: 0,
+      point_naming_issues: 0,
+      additional_points: 0,
+      stale_or_cadence: 0,
+      other_issues: 0,
+    };
+    const assetResult = (assetId: string, system: string, observed: boolean) => ({
+      asset_id: assetId,
+      system,
+      observed,
+      expected_payloads: 1,
+      received_payloads: observed ? 1 : 0,
+      all_expected_payloads_received: observed,
+      all_received_payloads_successfully_validated: observed,
+      successfully_validated: false,
+      issue_count: 1,
+      blocking_issue_count: 0,
+      last_observed_at: observed ? "2026-07-23T01:00:00Z" : null,
+      payload_results: [],
+    });
+    const fixtureRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        payload_views: null,
+        validation_summary_v1: {
+          schema_version: "1.0",
+          asset_metrics: {
+            expected: 2,
+            observed: 1,
+            not_observed: 1,
+            with_issues: 2,
+            successfully_validated: 0,
+          },
+          payload_metrics: {
+            expected: 2,
+            received: 1,
+            with_issues: 2,
+            successfully_validated: 0,
+          },
+          fault_metrics: { ...zeroFaults, other_issues: 2 },
+          issue_metrics: { blocking: 0, warning: 2 },
+          system_metrics: [],
+          asset_results: [
+            assetResult("EM-OBSERVED", "SEC", true),
+            assetResult("EM-SILENT", "BMS", false),
+          ],
+          fault_rows: [],
+        },
+      },
+    };
+    const fixtureIssues = {
+      run_id: "run-udmi-1",
+      issues: [
+        {
+          issue_id: "fixture-observed",
+          asset_id: "EM-OBSERVED",
+          issue_type: "pointset_validation",
+          severity: "medium",
+          description: "Observed fixture payload needs review.",
+          point_name: null,
+          expected_value: null,
+          observed_value: null,
+          suggested_action: null,
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+        {
+          issue_id: "fixture-silent",
+          asset_id: "EM-SILENT",
+          issue_type: "not_publishing",
+          severity: "medium",
+          description: "No fixture payload was observed.",
+          point_name: null,
+          expected_value: null,
+          observed_value: null,
+          suggested_action: null,
+          status_detail: null,
+          raw_evidence_uri: null,
+        },
+      ],
+    };
+
+    stubTwoAssetUdmi(fixtureRun, fixtureIssues);
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText(/across 2 assets/i)).toBeInTheDocument();
+
+    const table = screen.getByRole("table");
+    fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "observed" } });
+    expect(within(table).getByRole("button", { name: /EM-OBSERVED/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: /EM-SILENT/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/across 1 asset\b/i)).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "SEC" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "BMS" })).toBeInTheDocument();
   });
 
   it("shows versioned metrics and filters the table and inspector by a partial topic", async () => {
