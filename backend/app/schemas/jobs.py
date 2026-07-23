@@ -2,7 +2,14 @@ import unicodedata
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 # ValidationIssueRecord moved to the shared core package; imported here so existing
 # `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
@@ -185,6 +192,98 @@ class ImportBatchResponse(BaseModel):
     status: Literal["accepted", "rejected", "partial"]
 
 
+def _bounded_plain_text(value: str, *, label: str) -> str:
+    """Trim one report-scope identifier and reject non-printing code points."""
+
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{label} must not be blank.")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cs"}
+        or ord(character) in {0xFFFE, 0xFFFF}
+        for character in text
+    ):
+        raise ValueError(f"{label} must not contain control or invalid Unicode characters.")
+    return text
+
+
+class UdmiReportSelectedPayload(BaseModel):
+    """One exact expected asset/payload row retained in a filtered UDMI report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_run_id: str = Field(min_length=1, max_length=128)
+    asset_id: str = Field(min_length=1, max_length=512)
+    payload_type: Literal["state", "metadata", "pointset"]
+
+    @field_validator("source_run_id", "asset_id")
+    @classmethod
+    def validate_identifier(cls, value: str, info: object) -> str:
+        field_name = getattr(info, "field_name", "identifier")
+        label = "Source run ID" if field_name == "source_run_id" else "Asset ID"
+        return _bounded_plain_text(value, label=label)
+
+
+class UdmiReportFilterProvenance(BaseModel):
+    """Human-readable filter labels; selected_payloads remains authoritative."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(default="", max_length=512)
+    verdict: Literal["all", "pass", "pass-notes", "fail", "offline", "none"] = "all"
+    topic_contains: str = Field(default="", max_length=512)
+    system: str = Field(default="all", max_length=256)
+    observation: Literal["all", "observed", "not-observed"] = "all"
+    category: Literal["all", "validation", "unexpected-devices"] = "all"
+
+    @field_validator("text", "topic_contains", "system")
+    @classmethod
+    def validate_text(cls, value: str, info: object) -> str:
+        text = value.strip()
+        if any(
+            unicodedata.category(character) in {"Cc", "Cs"}
+            or ord(character) in {0xFFFE, 0xFFFF}
+            for character in text
+        ):
+            field_name = getattr(info, "field_name", "filter")
+            raise ValueError(f"Filter {field_name} contains invalid characters.")
+        return text
+
+
+class UdmiReportScope(BaseModel):
+    """Immutable filtered-view selection captured when a report is requested."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1.0"] = "1.0"
+    selected_payloads: list[UdmiReportSelectedPayload] = Field(
+        default_factory=list,
+        max_length=10_000,
+    )
+    unexpected_device_ids: list[str] = Field(default_factory=list, max_length=10_000)
+    filters: UdmiReportFilterProvenance = Field(default_factory=UdmiReportFilterProvenance)
+
+    @field_validator("unexpected_device_ids")
+    @classmethod
+    def validate_unexpected_device_ids(cls, values: list[str]) -> list[str]:
+        return [
+            _bounded_plain_text(value, label="Unexpected device ID")
+            for value in values
+        ]
+
+    @model_validator(mode="after")
+    def selected_payloads_are_unique(self) -> "UdmiReportScope":
+        keys = [
+            (row.source_run_id, row.asset_id, row.payload_type)
+            for row in self.selected_payloads
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError("UDMI report scope contains a duplicate selected payload.")
+        if len(self.unexpected_device_ids) != len(set(self.unexpected_device_ids)):
+            raise ValueError("UDMI report scope contains a duplicate unexpected device ID.")
+        return self
+
+
 class ReportRequest(BaseModel):
     project_id: str
     site_id: str
@@ -200,6 +299,17 @@ class ReportRequest(BaseModel):
     output_format: ReportFormat = "zip"
     source_run_ids: list[str] = Field(default_factory=list)
     report_title: str | None = None
+    udmi_scope: UdmiReportScope | None = None
+
+    @model_validator(mode="after")
+    def validate_udmi_scope_compatibility(self) -> "ReportRequest":
+        if self.udmi_scope is None:
+            return self
+        if self.report_type != "udmi_validation":
+            raise ValueError("udmi_scope is only valid for a UDMI validation report.")
+        if not self.source_run_ids:
+            raise ValueError("A filtered UDMI report requires at least one source run.")
+        return self
 
     @field_validator("report_title")
     @classmethod

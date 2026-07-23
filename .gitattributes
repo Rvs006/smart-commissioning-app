@@ -1,0 +1,2 @@
+# Keep the pinned third-party license byte-identical on Windows checkouts.
+core/smart_commissioning_core/schemas/dbo/LICENSE text eol=lf

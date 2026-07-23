@@ -33,9 +33,13 @@ export type IssueRow = {
   // "Expected X, observed Y", already formatted (empty -> "empty") — ITEM-9.
   expectedObserved?: string;
   suggestedAction?: string | null;
-  // The engine's point_name, when the issue is point-scoped. Drives the honest
-  // red-row highlight in the expected/observed payload compare (ITEM-8).
+  // The engine's point_name, when the issue is point-scoped. Combined with
+  // matching provenance below to derive conservative legacy evidence paths.
   pointName?: string | null;
+  // Matching provenance used to keep a unit mismatch pinned to the exact
+  // `units` line instead of tinting the whole point object.
+  matchBasis?: string | null;
+  evidencePath?: string | null;
 };
 
 // Groups validation issues by asset, then by derived payload type (mq9m4bnv).

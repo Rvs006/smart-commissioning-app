@@ -309,10 +309,59 @@ describe("UDMI reporting API functions", () => {
     });
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(JSON.parse(String(init?.body))).toMatchObject({
+    const body = JSON.parse(String(init?.body));
+    expect(body).toMatchObject({
       report_title: "Demo Campus Smart Validation",
       report_type: "udmi_validation",
       source_run_ids: ["run-1"],
+    });
+    expect(body).not.toHaveProperty("udmi_scope");
+  });
+
+  it("serialises an exact filtered UDMI scope with unexpected IDs kept separate", async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({
+        report_id: "report-2",
+        report_type: "udmi_validation",
+        output_format: "pdf",
+        status: "queued",
+        created_at: "2026-06-11T09:00:00Z",
+        source_run_ids: ["run-1"],
+      }),
+    );
+
+    await createReport({
+      format: "pdf",
+      reportType: "udmi_validation",
+      sourceRunIds: ["run-1"],
+      udmiScope: {
+        schema_version: "1.0",
+        selected_payloads: [],
+        unexpected_device_ids: ["unexpected-7"],
+        filters: {
+          text: "publisher-7",
+          verdict: "all",
+          topic_contains: "HV/SEC",
+          system: "all",
+          observation: "observed",
+          category: "unexpected-devices",
+        },
+      },
+    });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body)).udmi_scope).toEqual({
+      schema_version: "1.0",
+      selected_payloads: [],
+      unexpected_device_ids: ["unexpected-7"],
+      filters: {
+        text: "publisher-7",
+        verdict: "all",
+        topic_contains: "HV/SEC",
+        system: "all",
+        observation: "observed",
+        category: "unexpected-devices",
+      },
     });
   });
 });

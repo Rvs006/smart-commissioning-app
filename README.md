@@ -6,7 +6,7 @@
 
 ![CI](https://github.com/Rvs006/smart-commissioning-app/actions/workflows/ci.yml/badge.svg)
 ![status](https://img.shields.io/badge/status-pre--production%20(pending%20on--site%20validation)-orange)
-![version](https://img.shields.io/badge/version-0.1.14-blue)
+![latest release](https://img.shields.io/github/v/release/Rvs006/smart-commissioning-app?display_name=tag)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![node](https://img.shields.io/badge/node-22-green)
 
@@ -34,7 +34,7 @@ executable. In Windows, right-click `SmartCommissioningApp.exe` → **Properties
 **Details** to see the product name, file description, and version. These should
 match the version on the GitHub release page you downloaded.
 
-For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#field-mqttudmi-field-check-v011-or-later) after startup. The **latest release** link above is the single supported download location.
+For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#mqttudmi-field-check-v0124-or-later) after startup. The **latest release** link above is the single supported download location; confirm that its tag and bundled `README_FIRST.txt` both name v0.1.24 or later before using this checklist.
 
 > ⚠️ **Windows SmartScreen may warn** — this is an internal unsigned build. Choose
 > **More info → Run anyway**, only if you got the zip from the project owner or the releases page
@@ -293,13 +293,15 @@ Smart Commissioning Tool Specification.pdf
 
 ### Project status & roadmap
 
-> **Repo status - last verified 2026-07-16:** v0.1.11 through v0.1.14 are released,
-> each with a workflow-built, boot-smoked portable bundle attached (exe SHA-256
-> pinned in the release notes). CI, Windows Compatibility, and Windows Portable
-> Bundle are all green on `main`. Placeholder/demo content is fully purged as of
-> v0.1.14. Live IP/BACnet/MQTT hardware validation remains Phase 5 work — first
-> hardware contact is the 2026-07-20 lab session
-> ([docs/lab-day-2026-07-20-runbook.md](docs/lab-day-2026-07-20-runbook.md));
+> **Repo status - reviewed 2026-07-23:** GitHub Releases is authoritative for
+> publication state. Use v0.1.24 only after its matching tag, workflow-built and
+> boot-smoked portable bundle, and release-body SHA-256 values are present. Check
+> the live workflow badges rather than inferring CI status from this source file.
+> Public fixtures use neutral demo identities. The July field review covers the
+> Results view and generated UDMI reports; live MQTT broker capture remains
+> untested pending the on-site checklist. Real BACnet hardware, hosted scale, and
+> hub validation also remain Phase 5 work. See the
+> [lab runbook](docs/lab-day-2026-07-20-runbook.md);
 > remaining production-gating items are tracked in
 > [issue #4](https://github.com/Rvs006/smart-commissioning-app/issues/4).
 

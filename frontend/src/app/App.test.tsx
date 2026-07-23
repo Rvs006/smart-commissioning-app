@@ -234,6 +234,8 @@ describe("App shell", () => {
     expect(
       screen.getByRole("heading", { name: "Commissioning evidence workspace for site teams" }),
     ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Highest-priority issue" })).toBeInTheDocument();
+    expect(screen.queryByText("Blocking Finding")).not.toBeInTheDocument();
 
     // Rows render from the API payload, not from removed demo constants.
     expect(await screen.findByText("IP discovery")).toBeInTheDocument();

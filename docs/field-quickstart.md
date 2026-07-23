@@ -60,13 +60,15 @@ them and chooses which adapter to scan from.
 time each started/finished, its type, status, and how long it took. Sort or
 filter it, and hit **Export CSV** for the whole list — no digging through files.
 
-## field engineer MQTT/UDMI field check (v0.1.1 or later)
+## MQTT/UDMI field check (v0.1.24 or later)
 
-1. Download the zip from the repository's [latest GitHub release](https://github.com/Rvs006/smart-commissioning-app/releases/latest), extract it, and start `SmartCommissioningApp.exe`.
+1. Download the zip from the repository's [latest GitHub release](https://github.com/Rvs006/smart-commissioning-app/releases/latest). Continue only when the release tag and the bundled `README_FIRST.txt` both name v0.1.24 or later; a version string in source does not prove that a release was published. Extract it, then start `SmartCommissioningApp.exe`.
 2. Import the three-asset MQTT register with the scoped wildcard filters (for example, `demo-site/DEMO-1000001/#`). In **Configuration**, set the broker, port, TLS, and credentials; save.
 3. Run **MQTT Discovery** and confirm it displays the broker's concrete topics and payloads.
-4. Run **UDMI Workbench** against that same broker with **Run time = 120 seconds**. It should wait for state, metadata, and pointset evidence for each imported asset, then show expected-versus-observed results.
-5. If it fails, copy/export the run's `subscribed_topics`, `captured_topics`, and `broker_status_detail`, plus the matching broker-log interval. Do not include broker credentials in the export or message.
+4. Run **UDMI Workbench** against that same broker with **Run time = 120 seconds**. A bounded run keeps listening for the full window when it has a safe register-derived scope, then shows expected payloads and any separate unexpected publishers.
+5. Apply one Results filter, note the Asset, Payload, and Fault totals, and generate a PDF. The PDF must use the same filtered totals and its Report ID must match the generated report run.
+6. Check that **Observed Assets** contains registered assets only. Any unregistered publisher belongs in **Unexpected devices** and must not appear in the Fault Matrix or validation-detail table.
+7. If capture fails, copy/export the run's `subscribed_topics`, `captured_topics`, `broker_status_detail`, and unexpected-measurement status, plus the matching broker-log interval. Do not include broker credentials in the export or message.
 
 This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
 

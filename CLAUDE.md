@@ -70,62 +70,32 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-22 — **v0.1.11 through v0.1.20
-  are released**. v0.1.20 bundles the two 2026-07-21 on-site-day fix sets
-  (PRs #90 + #91): the BACnet field HANG is fixed (root cause = directed-
-  probe lane re-entering the shared concurrency throttle → deterministic
-  deadlock with >=16 silent register rows; de-nested; every network read now
-  has an asyncio.wait_for so a segmentation-abort/no-reply can't hang the
-  run — Codex P1 caught the missing read timeouts), Stop bites mid-device,
-  honest mid-run progress, MQTT capture window no longer truncated to ~5s
-  (likely the field "lots didn't publish" skepticism), worker Interrupt
-  handling, plus a UDMI timezone crash fix (an offset-less timestamp no
-  longer sinks the whole run), BST/whole-hour clock-mislabel diagnosis (new
-  UDMI-TS pointset_timestamp category, still reports the fault), payload-
-  issues inspector-beside-table + click-scrolls-to-issues UX, and a
-  hardcoded site-name scrubbed to demo-site (tree residue = 0; git-history
-  rewrite DECIDED-NO 2026-07-22, tree-scrub-only). 26+ bugs fixed via
-  multi-agent workflows across the two days; every PR Codex-reviewed.
-  Two Wireshark captures from the field engineer were decisive in root-
-  causing the hang. Earlier releases: v0.1.19 (PR #89) closes round 2 of the field
-  review: empty units/present_value flagged as real high-severity issues
-  (empty != absent; per-payload legality; 0/false never flag) and Reports
-  "Export selected" bundling multiple reports into one zip via
-  POST /reports/export (Codex P2: ids in a validated JSON body, never the
-  request line). Recorded, no change: the fast2/phase2-style typo pair sits
-  below the 0.8 misname threshold — field decision "leave it".
-  Earlier same day: **v0.1.18** (`main`, CI green, workflow-built boot-smoked portable
-  bundles attached; exe SHA-256 lives in each Release's notes, deliberately
-  not in repo files; v0.1.18 is cut from this commit and publishes
-  immediately after it). v0.1.18 (PR #88) is the 2026-07-20 live field
-  review of v0.1.17: inline runs backgrounded on the portable exe
-  (INLINE_RUN_ASYNC; startup sweep reclaims "queued" strays too), Stop run
-  on every tool (keeps partial data, still reports; live runs re-attach
-  after refresh, Execute disabled while a session-started run is active),
-  blank Run time = run until all assets/topics seen or stopped (240s inline
-  ceiling gone; 49h actor / 48h backstop stand), engineer-gated
-  export/import WITH secrets (plain text — explicit field decision,
-  encryption later), Root Topic field REMOVED (blank filter = `#`),
-  duplicate templates card removed, asset-grouped results,
-  synchronized/aligned payload compare with JSON colouring and
-  engine-flagged highlighting, bounded scroll containers, inspector filters
-  (type / seen / online-offline). Codex reviewed the PR; both findings
-  (stale-cache rehydration pinning an old run; 1h-vs-49h doc claim) were
-  verified and fixed in-branch. Field verdicts on v0.1.17: results
-  scroll/filters + already-imported note GREEN, password affordance
-  accepted as-is. Parked: fetching unpinned UDMI schema versions (pinned
-  1.5.2 by field decision; a legacy-projects check may revive it) and
-  encryption for the secrets export.
-  **A BBMD is optional per site** (`docs/protocol-conformance.md` §3);
-  `docs/lab-day-2026-07-20-runbook.md` is two-path (flat no-BBMD primary,
-  field-proven; BBMD still first-contact — the BBMD-in-the-lab question is
-  STILL unanswered; 2026-07-20 exercised MQTT/UDMI only). Open field loops:
-  a 10-minute broker capture (operator skepticism that "not published" rows
-  were wrong) and the BACnet pre-flight card (full design in session
-  memory, not repo docs) which waits on the BACnet lab learnings. The
-  punchlist's §4 deferred items and §5 open field engineer decisions remain the live
-  backlog, alongside GitHub issue #4 (production gates). Update or
-  supersede this block when the state changes.
+- **Current handoff**: status as of 2026-07-23. **Verify v0.1.24 publication on
+  GitHub.** Call it released only after the matching tag, workflow-built portable
+  bundle, and release-body digests exist and are verified. The v0.1.24 source
+  applies the July UDMI report review: the Results table,
+  headline metrics, Inspector, and generated report share one server-validated
+  payload selection; an active zero-match filter stays empty. Unexpected MQTT
+  publishers are measured only inside a safe register-derived scope and remain
+  outside expected, observed, compliance, Fault Matrix, and issue totals.
+  Payloads With Issues counts received expected payloads only; Not Received is
+  separate. Validation uses a pinned Google Digital Buildings unit vocabulary,
+  keeps ppm and ppb distinct, checks timestamp notation without rejecting
+  seasonal offsets, and continues required-field checks when the register
+  supplies the supported version. The nested validation summary is schema 1.1;
+  stored 1.0 summaries remain readable. Their Payloads With Issues count is
+  recomputed from complete retained rows, or capped at Received for compact
+  summaries. UDMI reports created on v0.1.24 freeze either the derived model or
+  the redacted records needed by pre-contract renderers, so later downloads
+  cannot drift if source records change. Pre-upgrade report jobs retain the
+  legacy rebuild-from-source fallback.
+  Human-readable PDF, DOCX, and XLSX outputs omit Source Run, Severity, and
+  Evidence URI; scoped `findings.json` retains audit provenance. The supplied
+  field review covers the Results view and generated UDMI reports. Live MQTT
+  transport, real BACnet hardware, hosted scale, and hub validation remain open
+  under GitHub issue #4. A BBMD remains optional per site; see
+  `docs/protocol-conformance.md`. UDMI 1.5.2 stays pinned. Secrets export is an
+  explicit engineer-only plaintext workflow; encryption remains deferred.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational

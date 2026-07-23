@@ -368,10 +368,10 @@ describe("expectedPortsOk", () => {
 });
 
 describe("validationMetrics", () => {
-  it("prefers the engine-stamped conformance score and blocking issue count", () => {
+  it("prefers the engine-stamped conformance score and total issue count", () => {
     // publishing_seen/expected_devices would read 100%; the stamped 91 (already
-    // floor'd and clamped server-side) must win, and blocking_issue_count (2)
-    // must drive the secondary metric instead of the all-issues count (5).
+    // floor'd and clamped server-side) must win, and the all-issues count (5)
+    // drives the neutral operator-facing issue metric.
     const metrics = validationMetrics("udmi-validation", {
       expected_devices: 35,
       publishing_seen: 35,
@@ -382,8 +382,8 @@ describe("validationMetrics", () => {
     expect(metrics).toEqual({
       primary: "91%",
       primaryLabel: "payload conformance",
-      secondary: "2",
-      secondaryLabel: "blocking issues",
+      secondary: "5",
+      secondaryLabel: "issues found",
     });
   });
 

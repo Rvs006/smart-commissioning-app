@@ -188,6 +188,10 @@ export type ValidationIssueRecord = {
   expected_value?: string | null;
   observed_value?: string | null;
   match_basis?: string | null;
+  // Exact JSON Pointer into the compared payload when the validation engine
+  // can identify one. Older runs omit it; consumers may derive a conservative
+  // path from match_basis + point_name instead.
+  evidence_path?: string | null;
   suggested_action?: string | null;
   raw_evidence_uri?: string | null;
   status_detail?: string | null;
@@ -220,11 +224,22 @@ export type UdmiAssetMetrics = {
   not_observed: number;
   with_issues: number;
   successfully_validated: number;
+  // Added to the 1.0 snapshot contract after initial release. Optional keeps
+  // stored pre-upgrade runs readable; the UI normalises an absent value to 0.
+  unexpected?: number;
+};
+
+export type UdmiUnexpectedDevice = {
+  id: string;
+  topic_root: string;
+  topics: string[];
+  last_seen: string | null;
 };
 
 export type UdmiPayloadMetrics = {
   expected: number;
   received: number;
+  not_received?: number;
   with_issues: number;
   successfully_validated: number;
 };
@@ -296,7 +311,7 @@ export type UdmiFaultRow = {
 // It is nested under RunRecord.result_summary.validation_summary_v1. Keeping
 // the outer result_summary open preserves old run snapshots and other job types.
 export type UdmiValidationSummaryV1 = {
-  schema_version: "1.0";
+  schema_version: "1.0" | "1.1";
   asset_metrics: UdmiAssetMetrics;
   payload_metrics: UdmiPayloadMetrics;
   fault_metrics: UdmiFaultMetrics;
@@ -304,6 +319,28 @@ export type UdmiValidationSummaryV1 = {
   system_metrics: UdmiSystemMetrics[];
   asset_results: UdmiAssetResult[];
   fault_rows: UdmiFaultRow[];
+  // Older snapshots pre-date unexpected-device measurement.
+  unexpected_devices?: UdmiUnexpectedDevice[];
+  unexpected_devices_measured?: boolean;
+  unexpected_devices_measurement_scope?: string | null;
+};
+
+export type UdmiReportScopeV1 = {
+  schema_version: "1.0";
+  selected_payloads: Array<{
+    source_run_id: string;
+    asset_id: string;
+    payload_type: "state" | "metadata" | "pointset";
+  }>;
+  unexpected_device_ids: string[];
+  filters: {
+    text: string;
+    verdict: "all" | "pass" | "pass-notes" | "fail" | "offline" | "none";
+    topic_contains: string;
+    system: string;
+    observation: "all" | "observed" | "not-observed";
+    category: "all" | "validation" | "unexpected-devices";
+  };
 };
 
 export type ValidationIssuesResponse = {
@@ -1104,6 +1141,7 @@ export function createReport(input: {
   format?: ReportFormat;
   sourceRunIds?: string[];
   reportTitle?: string;
+  udmiScope?: UdmiReportScopeV1;
 }): Promise<ReportSummary> {
   return request<ReportSummary>("/reports", {
     body: JSON.stringify({
@@ -1113,6 +1151,7 @@ export function createReport(input: {
       site_id: "demo-site",
       source_run_ids: input.sourceRunIds ?? [],
       ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
+      ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",

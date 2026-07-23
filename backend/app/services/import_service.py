@@ -12,6 +12,7 @@ from secrets import token_hex
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from smart_commissioning_core.db.repositories import ImportRepository
+from smart_commissioning_core.dbo_units import KNOWN_CANONICAL_UNITS, canonical_unit
 from smart_commissioning_core.engines.comparison_common import parse_tolerance
 from sqlalchemy.engine import Engine
 
@@ -25,20 +26,11 @@ from app.schemas.imports import (
     ImportType,
 )
 
-ALLOWED_UNITS = {
-    "",
-    "degrees-celsius",
-    "percent",
-    "percent-relative-humidity",
-    "parts-per-million",
-    "minutes",
-    "seconds",
-    "no-units",
-    "pa",
-    "cfm",
-    "kwh",
-    "kw",
-}
+# Back-compatible export for callers that inspect the profile vocabulary. Row
+# validation itself uses ``canonical_unit`` so DBO underscore/hyphen forms and
+# field shorthand (ppb, ppm, kWh, cfm, Pa) share one deterministic rule with
+# the UDMI validator.
+ALLOWED_UNITS = frozenset({"", *KNOWN_CANONICAL_UNITS})
 
 
 @dataclass(frozen=True)
@@ -143,8 +135,9 @@ def _validate_tolerance(row: dict[str, str], row_number: int, field: str) -> lis
 
 
 def _validate_units(row: dict[str, str], row_number: int, field: str) -> list[ImportErrorRecord]:
-    value = row.get(field, "").strip().casefold()
-    if value in ALLOWED_UNITS:
+    value = row.get(field, "").strip()
+    canonical = canonical_unit(value)
+    if canonical is None or canonical in KNOWN_CANONICAL_UNITS:
         return []
     return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_unit", message=f"{field} is not a recognized unit.")]
 
@@ -292,6 +285,32 @@ def _validate_mqtt_point_unit_pairs(row: dict[str, str], row_number: int) -> lis
             code="unit_without_point",
             message=(
                 "Expected units has an entry without a corresponding Expected point."
+            ),
+        )
+    ]
+
+
+def _validate_mqtt_units(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    """Validate each populated comma-separated unit slot against pinned DBO."""
+    invalid_units: list[str] = []
+    for value in row.get("Expected units", "").split(","):
+        unit = value.strip()
+        if not unit:
+            continue
+        canonical = canonical_unit(unit)
+        if canonical not in KNOWN_CANONICAL_UNITS and unit not in invalid_units:
+            invalid_units.append(unit)
+    if not invalid_units:
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="Expected units",
+            code="invalid_unit",
+            message=(
+                "Expected units contains unrecognized unit value(s): "
+                + ", ".join(invalid_units)
+                + "."
             ),
         )
     ]
@@ -505,6 +524,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
             _field_check("Expected topic", _validate_mqtt_asset_topic),
             _field_check("Expected reporting interval", _validate_positive_numeric),
             _validate_payload_type,
+            _validate_mqtt_units,
             _validate_mqtt_point_unit_pairs,
         ),
     ),

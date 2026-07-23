@@ -8,6 +8,10 @@ import json
 import unittest
 import xml.etree.ElementTree as ElementTree
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from threading import Barrier, current_thread
+from unittest import mock
 
 from harness import ApiTestCase
 from openpyxl import load_workbook
@@ -167,6 +171,234 @@ _V1_SUMMARY = {
 }
 
 
+def _expected_detail_columns() -> tuple[str, ...]:
+    return (
+        "Issue ID",
+        "Asset ID",
+        "System",
+        "Payload",
+        "Category",
+        "Point",
+        "Expected",
+        "Observed",
+        "Suggested Action",
+        "Description",
+    )
+
+
+_SCOPABLE_SUMMARY = {
+    "schema_version": "1.1",
+    "asset_metrics": {
+        "expected": 2,
+        "observed": 2,
+        "not_observed": 0,
+        "with_issues": 2,
+        "successfully_validated": 1,
+        "unexpected": 1,
+    },
+    "payload_metrics": {
+        "expected": 5,
+        "received": 4,
+        "not_received": 1,
+        "with_issues": 2,
+        "successfully_validated": 3,
+    },
+    "fault_metrics": {
+        "payload_formatting_issues": 0,
+        "missing_points": 1,
+        "point_naming_issues": 1,
+        "additional_points": 1,
+        "stale_or_cadence": 0,
+        "other_issues": 2,
+    },
+    "issue_metrics": {"blocking": 4, "warning": 1},
+    "system_metrics": [
+        {
+            "system": "BMS",
+            **_metric_groups(
+                assets=(1, 1, 0, 1, 0),
+                payloads=(3, 2, 1, 1),
+                faults=(0, 1, 1, 0, 0, 1),
+                issues=(3, 0),
+            ),
+        },
+        {
+            "system": "LTG",
+            **_metric_groups(
+                assets=(1, 1, 0, 1, 1),
+                payloads=(2, 2, 1, 2),
+                faults=(0, 0, 0, 1, 0, 0),
+                issues=(0, 1),
+            ),
+        },
+    ],
+    "asset_results": [
+        {
+            "asset_id": "A-1",
+            "system": "BMS",
+            "observed": True,
+            "expected_payloads": 3,
+            "received_payloads": 2,
+            "all_expected_payloads_received": False,
+            "all_received_payloads_successfully_validated": False,
+            "successfully_validated": False,
+            "issue_count": 3,
+            "blocking_issue_count": 3,
+            "last_observed_at": "2026-07-23T10:02:00+00:00",
+            "payload_results": [
+                {
+                    "payload_type": "state",
+                    "expected": True,
+                    "received": True,
+                    "has_issues": False,
+                    "blocking_issue_count": 0,
+                    "successfully_validated": True,
+                    "topic": "site/a-1/state",
+                    "received_at": "2026-07-23T10:00:00+00:00",
+                },
+                {
+                    "payload_type": "metadata",
+                    "expected": True,
+                    "received": False,
+                    "has_issues": True,
+                    "blocking_issue_count": 1,
+                    "successfully_validated": False,
+                    "topic": "site/a-1/metadata",
+                    "received_at": None,
+                },
+                {
+                    "payload_type": "pointset",
+                    "expected": True,
+                    "received": True,
+                    "has_issues": True,
+                    "blocking_issue_count": 1,
+                    "successfully_validated": False,
+                    "topic": "site/a-1/pointset",
+                    "received_at": "2026-07-23T10:02:00+00:00",
+                },
+            ],
+        },
+        {
+            "asset_id": "B-1",
+            "system": "LTG",
+            "observed": True,
+            "expected_payloads": 2,
+            "received_payloads": 2,
+            "all_expected_payloads_received": True,
+            "all_received_payloads_successfully_validated": True,
+            "successfully_validated": True,
+            "issue_count": 1,
+            "blocking_issue_count": 0,
+            "last_observed_at": "2026-07-23T10:03:00+00:00",
+            "payload_results": [
+                {
+                    "payload_type": "state",
+                    "expected": True,
+                    "received": True,
+                    "has_issues": True,
+                    "blocking_issue_count": 0,
+                    "successfully_validated": True,
+                    "topic": "site/b-1/state",
+                    "received_at": "2026-07-23T10:01:00+00:00",
+                },
+                {
+                    "payload_type": "pointset",
+                    "expected": True,
+                    "received": True,
+                    "has_issues": False,
+                    "blocking_issue_count": 0,
+                    "successfully_validated": True,
+                    "topic": "site/b-1/pointset",
+                    "received_at": "2026-07-23T10:03:00+00:00",
+                },
+            ],
+        },
+    ],
+    "fault_rows": [
+        {
+            "issue_id": "a-metadata-missing",
+            "asset_id": "A-1",
+            "system": "BMS",
+            "payload_type": "metadata",
+            "category": "missing_points",
+            "severity": "high",
+            "description": "Metadata was not received.",
+            "point_name": "manufacturer",
+            "expected_value": "Acme",
+            "observed_value": None,
+            "suggested_action": "Publish metadata.",
+            "raw_evidence_uri": "evidence://metadata",
+        },
+        {
+            "issue_id": "a-point-name",
+            "asset_id": "A-1",
+            "system": "BMS",
+            "payload_type": "pointset",
+            "category": "point_naming_issues",
+            "severity": "high",
+            "description": "Point name differs from the register.",
+            "point_name": "zone_temp",
+            "expected_value": "zone_air_temperature_sensor",
+            "observed_value": "zone_temp",
+            "suggested_action": "Rename the point.",
+            "raw_evidence_uri": "evidence://point",
+        },
+        {
+            "issue_id": "a-asset-wide",
+            "asset_id": "A-1",
+            "system": "BMS",
+            "payload_type": None,
+            "category": "other_issues",
+            "severity": "high",
+            "description": "Asset-wide finding.",
+            "point_name": None,
+            "expected_value": None,
+            "observed_value": None,
+            "suggested_action": "Review the asset.",
+            "raw_evidence_uri": "evidence://asset",
+        },
+        {
+            "issue_id": "run-wide",
+            "asset_id": None,
+            "system": "Unspecified",
+            "payload_type": None,
+            "category": "other_issues",
+            "severity": "high",
+            "description": "Run-wide broker finding.",
+            "point_name": None,
+            "expected_value": None,
+            "observed_value": None,
+            "suggested_action": "Review broker evidence.",
+            "raw_evidence_uri": "evidence://run",
+        },
+        {
+            "issue_id": "b-state-note",
+            "asset_id": "B-1",
+            "system": "LTG",
+            "payload_type": "state",
+            "category": "additional_points",
+            "severity": "low",
+            "description": "State carries an extra field.",
+            "point_name": "extra",
+            "expected_value": None,
+            "observed_value": "present",
+            "suggested_action": "Review the field.",
+            "raw_evidence_uri": "evidence://state",
+        },
+    ],
+    "unexpected_devices": [
+        {
+            "id": "rogue-1",
+            "topic_root": "site/rogue-1",
+            "topics": ["site/rogue-1/state"],
+            "last_seen": "2026-07-23T10:04:00+00:00",
+        }
+    ],
+    "unexpected_devices_measured": True,
+    "unexpected_devices_measurement_scope": "site/#",
+}
+
+
 class UdmiV1ReportTests(ApiTestCase):
     env = _ENV_OVERRIDES
     client_headers = {"X-API-Key": _API_KEY}
@@ -177,7 +409,6 @@ class UdmiV1ReportTests(ApiTestCase):
         import shutil
         import tempfile
         from pathlib import Path
-        from unittest import mock
 
         cls._temp_runtime = tempfile.mkdtemp(prefix="sct-reports-udmi-v1-")
         atexit.register(shutil.rmtree, cls._temp_runtime, ignore_errors=True)
@@ -202,6 +433,8 @@ class UdmiV1ReportTests(ApiTestCase):
         job_type: str = "udmi_validation",
         status: str = "succeeded",
         summary: dict | None = _V1_SUMMARY,
+        parameters: dict | None = None,
+        issues: list[dict] | None = None,
     ) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
@@ -212,7 +445,7 @@ class UdmiV1ReportTests(ApiTestCase):
                 project_id=project_id,
                 site_id=site_id,
                 job_type=job_type,
-                parameters={},
+                parameters=parameters or {},
             ),
             expected_job_type=job_type,
         )
@@ -225,6 +458,8 @@ class UdmiV1ReportTests(ApiTestCase):
             )
         if summary is not None:
             service.update_result_summary(run.run_id, {"validation_summary_v1": summary})
+        if issues is not None:
+            service.replace_issues(run.run_id, issues)
         return run.run_id
 
     def _create_report(
@@ -234,6 +469,7 @@ class UdmiV1ReportTests(ApiTestCase):
         *,
         title: str | None = "  Site & <A> Validation  ",
         report_type: str = "udmi_validation",
+        udmi_scope: dict | None = None,
     ) -> dict:
         payload: dict[str, object] = {
             "project_id": "demo-project",
@@ -244,6 +480,8 @@ class UdmiV1ReportTests(ApiTestCase):
         }
         if title is not None:
             payload["report_title"] = title
+        if udmi_scope is not None:
+            payload["udmi_scope"] = udmi_scope
         response = self.client.post("/api/v1/reports", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
@@ -343,6 +581,688 @@ class UdmiV1ReportTests(ApiTestCase):
                 self.assertIn("is not terminal", response.json()["detail"])
                 self.assertIn(status, response.json()["detail"])
 
+    def test_malformed_current_contract_fails_but_absent_legacy_contract_exports(self) -> None:
+        malformed = {"schema_version": "1.1", "asset_metrics": {"expected": 1}}
+        unknown = copy.deepcopy(_SCOPABLE_SUMMARY)
+        unknown["schema_version"] = "2.0"
+
+        for summary in (malformed, unknown):
+            with self.subTest(schema_version=summary["schema_version"]):
+                source_id = self._seed_run(summary=summary)
+                response = self.client.post(
+                    "/api/v1/reports",
+                    json={
+                        "project_id": "demo-project",
+                        "site_id": "demo-site",
+                        "report_type": "udmi_validation",
+                        "output_format": "zip",
+                        "source_run_ids": [source_id],
+                    },
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("malformed or unsupported", response.json()["detail"])
+
+        malformed_nested: list[tuple[str, dict]] = []
+        bad_system = copy.deepcopy(_SCOPABLE_SUMMARY)
+        bad_system["system_metrics"] = [None]
+        malformed_nested.append(("system", bad_system))
+        bad_asset = copy.deepcopy(_SCOPABLE_SUMMARY)
+        bad_asset["asset_results"] = [None]
+        malformed_nested.append(("asset", bad_asset))
+        bad_fault = copy.deepcopy(_SCOPABLE_SUMMARY)
+        bad_fault["fault_rows"] = [None]
+        malformed_nested.append(("fault", bad_fault))
+        bad_payload = copy.deepcopy(_SCOPABLE_SUMMARY)
+        bad_payload["asset_results"][0]["payload_results"] = [
+            {"payload_type": "state"}
+        ]
+        malformed_nested.append(("payload", bad_payload))
+
+        for label, summary in malformed_nested:
+            with self.subTest(nested=label):
+                source_id = self._seed_run(summary=summary)
+                response = self.client.post(
+                    "/api/v1/reports",
+                    json={
+                        "project_id": "demo-project",
+                        "site_id": "demo-site",
+                        "report_type": "udmi_validation",
+                        "output_format": "zip",
+                        "source_run_ids": [source_id],
+                    },
+                )
+                self.assertEqual(response.status_code, 422, response.text)
+                self.assertIn("malformed", response.json()["detail"])
+
+        legacy_source = self._seed_run(summary=None)
+        legacy_report = self._create_report("zip", [legacy_source])
+        with zipfile.ZipFile(io.BytesIO(self._download(legacy_report["report_id"]).content)) as archive:
+            self.assertIn("validation_summary.json", archive.namelist())
+            self.assertNotIn("asset_validation_schedule.json", archive.namelist())
+            legacy_summary = json.loads(archive.read("validation_summary.json"))
+        self.assertIn("columns", legacy_summary)
+        self.assertNotIn("schema_version", legacy_summary)
+
+    def test_filtered_scope_is_exact_recomputed_and_persisted_canonically(self) -> None:
+        source_id = self._seed_run(
+            summary=copy.deepcopy(_SCOPABLE_SUMMARY),
+            parameters={
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A-1", "project_site": "Site A"}},
+                    {"expected_schedule": {"asset_id": "B-1", "project_site": "Site B"}},
+                ]
+            },
+        )
+        scope = {
+            "schema_version": "1.0",
+            "selected_payloads": [
+                {
+                    "source_run_id": source_id,
+                    "asset_id": "A-1",
+                    "payload_type": "pointset",
+                },
+                {
+                    "source_run_id": source_id,
+                    "asset_id": "A-1",
+                    "payload_type": "metadata",
+                },
+            ],
+            "unexpected_device_ids": [],
+            "filters": {
+                "text": "provenance label only",
+                "verdict": "fail",
+                "topic_contains": "a-1",
+                "system": "BMS",
+                "observation": "all",
+                "category": "validation",
+            },
+        }
+        report = self._create_report("zip", [source_id], udmi_scope=scope)
+
+        from app.services.run_service import RunService
+
+        stored = RunService().get_run(report["report_id"])
+        selected = stored.parameters["udmi_scope"]["selected_payloads"]
+        self.assertEqual(
+            [row["payload_type"] for row in selected],
+            ["metadata", "pointset"],
+        )
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            header = json.loads(archive.read("summary.json"))
+            summary = json.loads(archive.read("validation_summary.json"))
+            schedule = json.loads(archive.read("asset_validation_schedule.json"))
+            matrix = json.loads(archive.read("fault_matrix.json"))
+            details = json.loads(archive.read("fault_details.json"))
+            findings = json.loads(archive.read("findings.json"))
+
+        self.assertEqual(header["Project"], "Site A")
+        self.assertEqual(header["Site"], "Site A")
+        self.assertEqual(set(header), {"Project", "Site", "Report ID", "Generated"})
+        self.assertEqual(
+            summary["asset_metrics"],
+            {
+                "expected": 1,
+                "observed": 1,
+                "not_observed": 0,
+                "with_issues": 1,
+                "successfully_validated": 0,
+                "unexpected": 0,
+            },
+        )
+        self.assertEqual(
+            summary["payload_metrics"],
+            {
+                "expected": 2,
+                "received": 1,
+                "not_received": 1,
+                "with_issues": 1,
+                "successfully_validated": 0,
+            },
+        )
+        self.assertEqual(summary["issue_metrics"], {"blocking": 2, "warning": 0})
+        self.assertEqual(summary["filter_provenance"]["text"], "provenance label only")
+        self.assertEqual([row["asset_id"] for row in schedule["rows"]], ["A-1"])
+        self.assertEqual(
+            [row["payload_type"] for row in schedule["rows"][0]["payload_results"]],
+            ["metadata", "pointset"],
+        )
+        self.assertEqual(len(matrix["rows"]), 1)
+        self.assertTrue(matrix["rows"][0]["missing_points"])
+        self.assertTrue(matrix["rows"][0]["point_naming_issues"])
+        self.assertFalse(matrix["rows"][0]["other_issues"])
+        self.assertEqual(
+            {row["issue_id"] for row in details["rows"]},
+            {"a-metadata-missing", "a-point-name"},
+        )
+        self.assertEqual(
+            {row["issue_id"] for row in findings},
+            {row["issue_id"] for row in details["rows"]},
+        )
+        self.assertTrue(
+            all(
+                "source_run_id" not in row
+                and "severity" not in row
+                and "raw_evidence_uri" not in row
+                for row in details["rows"]
+            )
+        )
+        self.assertTrue(
+            all(
+                row["source_run_id"] == source_id
+                and row["severity"]
+                and row["raw_evidence_uri"]
+                for row in findings
+            )
+        )
+
+    def test_empty_filtered_scope_is_valid_and_yields_empty_report(self) -> None:
+        source_id = self._seed_run(summary=copy.deepcopy(_SCOPABLE_SUMMARY))
+        report = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "schema_version": "1.0",
+                "selected_payloads": [],
+                "unexpected_device_ids": [],
+                "filters": {},
+            },
+        )
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            header = json.loads(archive.read("summary.json"))
+            summary = json.loads(archive.read("validation_summary.json"))
+            schedule = json.loads(archive.read("asset_validation_schedule.json"))
+            matrix = json.loads(archive.read("fault_matrix.json"))
+            findings = json.loads(archive.read("findings.json"))
+        self.assertEqual(header["Project"], "Not recorded")
+        self.assertEqual(header["Site"], "Not recorded")
+        self.assertEqual(summary["asset_metrics"]["expected"], 0)
+        self.assertEqual(summary["payload_metrics"]["expected"], 0)
+        self.assertEqual(summary["payload_metrics"]["not_received"], 0)
+        self.assertEqual(schedule["rows"], [])
+        self.assertEqual(matrix["rows"], [])
+        self.assertEqual(findings, [])
+
+    def test_full_expected_asset_scope_ignores_nonexpected_payload_evidence(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        asset = next(row for row in summary["asset_results"] if row["asset_id"] == "A-1")
+        state = next(
+            row for row in asset["payload_results"] if row["payload_type"] == "state"
+        )
+        asset["payload_results"] = [
+            state,
+            {
+                "payload_type": "metadata",
+                "expected": False,
+                "received": True,
+                "has_issues": False,
+                "blocking_issue_count": 0,
+                "successfully_validated": True,
+                "topic": "site/a-1/metadata",
+                "received_at": "2026-07-23T10:01:00+00:00",
+            },
+        ]
+        asset["expected_payloads"] = 1
+        asset["received_payloads"] = 1
+        asset["all_expected_payloads_received"] = True
+        asset["all_received_payloads_successfully_validated"] = True
+        asset["successfully_validated"] = False
+        asset["issue_count"] = 1
+        asset["blocking_issue_count"] = 1
+        summary["asset_results"] = [asset]
+        summary["fault_rows"] = [
+            next(row for row in summary["fault_rows"] if row["issue_id"] == "a-asset-wide")
+        ]
+        summary["unexpected_devices"] = []
+        summary["asset_metrics"]["unexpected"] = 0
+
+        source_id = self._seed_run(summary=summary)
+        report = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "schema_version": "1.0",
+                "selected_payloads": [
+                    {
+                        "source_run_id": source_id,
+                        "asset_id": "A-1",
+                        "payload_type": "state",
+                    }
+                ],
+                "unexpected_device_ids": [],
+                "filters": {},
+            },
+        )
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            rendered = json.loads(archive.read("validation_summary.json"))
+            details = json.loads(archive.read("fault_details.json"))
+
+        self.assertEqual(rendered["asset_metrics"]["expected"], 1)
+        self.assertEqual(rendered["asset_metrics"]["successfully_validated"], 0)
+        self.assertEqual(rendered["payload_metrics"]["expected"], 1)
+        self.assertEqual(rendered["issue_metrics"]["blocking"], 1)
+        self.assertEqual(
+            [row["issue_id"] for row in details["rows"]],
+            ["a-asset-wide"],
+        )
+
+    def test_filtered_scope_rejects_unknown_legacy_and_ambiguous_references(self) -> None:
+        source_id = self._seed_run(summary=copy.deepcopy(_SCOPABLE_SUMMARY))
+
+        def request(scope: dict, sources: list[str] | None = None, report_type: str = "udmi_validation"):
+            return self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": report_type,
+                    "source_run_ids": sources if sources is not None else [source_id],
+                    "udmi_scope": scope,
+                },
+            )
+
+        unknown = request(
+            {
+                "selected_payloads": [
+                    {
+                        "source_run_id": "another-run",
+                        "asset_id": "A-1",
+                        "payload_type": "state",
+                    }
+                ]
+            }
+        )
+        self.assertEqual(unknown.status_code, 422)
+        self.assertIn("not present", unknown.json()["detail"])
+
+        non_expected_summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        b_asset = next(
+            asset
+            for asset in non_expected_summary["asset_results"]
+            if asset["asset_id"] == "B-1"
+        )
+        b_asset["payload_results"].append(
+            {
+                "payload_type": "metadata",
+                "expected": False,
+                "received": True,
+                "has_issues": False,
+                "blocking_issue_count": 0,
+                "successfully_validated": True,
+                "topic": "site/b-1/metadata",
+                "received_at": "2026-07-23T10:03:30+00:00",
+            }
+        )
+        non_expected_id = self._seed_run(summary=non_expected_summary)
+        non_expected = request(
+            {
+                "selected_payloads": [
+                    {
+                        "source_run_id": non_expected_id,
+                        "asset_id": "B-1",
+                        "payload_type": "metadata",
+                    }
+                ]
+            },
+            sources=[non_expected_id],
+        )
+        self.assertEqual(non_expected.status_code, 422)
+        self.assertIn("expected payloads only", non_expected.json()["detail"])
+
+        legacy = copy.deepcopy(_V1_SUMMARY)
+        for asset in legacy["asset_results"]:
+            asset.pop("payload_results", None)
+        legacy_id = self._seed_run(summary=legacy)
+        legacy_response = request(
+            {"selected_payloads": []},
+            sources=[legacy_id],
+        )
+        self.assertEqual(legacy_response.status_code, 422)
+        self.assertIn("predates exact payload filtering", legacy_response.json()["detail"])
+
+        no_source = request({"selected_payloads": []}, sources=[])
+        self.assertEqual(no_source.status_code, 422)
+        wrong_type = request(
+            {"selected_payloads": []},
+            sources=[source_id],
+            report_type="evidence_pack",
+        )
+        self.assertEqual(wrong_type.status_code, 422)
+
+        second_id = self._seed_run(summary=copy.deepcopy(_SCOPABLE_SUMMARY))
+        ambiguous = request(
+            {
+                "selected_payloads": [],
+                "unexpected_device_ids": ["rogue-1"],
+            },
+            sources=[source_id, second_id],
+        )
+        self.assertEqual(ambiguous.status_code, 422)
+        self.assertIn("uniquely", ambiguous.json()["detail"])
+
+    def test_unexpected_device_selection_only_affects_unexpected_metric(self) -> None:
+        source_id = self._seed_run(summary=copy.deepcopy(_SCOPABLE_SUMMARY))
+        report = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "selected_payloads": [],
+                "unexpected_device_ids": ["rogue-1"],
+            },
+        )
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            summary = json.loads(archive.read("validation_summary.json"))
+            schedule = json.loads(archive.read("asset_validation_schedule.json"))
+            matrix = json.loads(archive.read("fault_matrix.json"))
+            details = json.loads(archive.read("fault_details.json"))
+        self.assertEqual(summary["asset_metrics"]["unexpected"], 1)
+        self.assertEqual(summary["asset_metrics"]["expected"], 0)
+        self.assertEqual(summary["payload_metrics"]["expected"], 0)
+        self.assertEqual([row["id"] for row in summary["unexpected_devices"]], ["rogue-1"])
+        self.assertEqual(schedule["rows"], [])
+        self.assertEqual(matrix["rows"], [])
+        self.assertEqual(details["rows"], [])
+
+    def test_schema_1_payload_issue_counts_include_received_payloads_only(self) -> None:
+        summary = {
+            "schema_version": "1.0",
+            **_metric_groups(
+                assets=(1, 0, 1, 1, 0),
+                payloads=(1, 0, 1, 0),
+                faults=(0, 0, 0, 0, 0, 1),
+                issues=(1, 0),
+            ),
+            "system_metrics": [
+                {
+                    "system": "BMS",
+                    **_metric_groups(
+                        assets=(1, 0, 1, 1, 0),
+                        payloads=(1, 0, 1, 0),
+                        faults=(0, 0, 0, 0, 0, 1),
+                        issues=(1, 0),
+                    ),
+                }
+            ],
+            "asset_results": [
+                {
+                    "asset_id": "A-1",
+                    "system": "BMS",
+                    "observed": False,
+                    "expected_payloads": 1,
+                    "received_payloads": 0,
+                    "all_expected_payloads_received": False,
+                    "all_received_payloads_successfully_validated": False,
+                    "successfully_validated": False,
+                    "issue_count": 1,
+                    "blocking_issue_count": 1,
+                    "last_observed_at": None,
+                    "payload_results": [
+                        {
+                            "payload_type": "state",
+                            "expected": True,
+                            "received": False,
+                            "has_issues": True,
+                            "blocking_issue_count": 1,
+                            "successfully_validated": False,
+                            "topic": "site/a-1/state",
+                            "received_at": None,
+                        }
+                    ],
+                }
+            ],
+            "fault_rows": [
+                {
+                    "issue_id": "state-not-received",
+                    "asset_id": "A-1",
+                    "system": "BMS",
+                    "payload_type": "state",
+                    "category": "other_issues",
+                    "severity": "high",
+                    "description": "State was not received.",
+                }
+            ],
+        }
+        source_id = self._seed_run(summary=summary)
+        report = self._create_report("zip", [source_id])
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            rendered = json.loads(archive.read("validation_summary.json"))
+
+        self.assertEqual(
+            rendered["payload_metrics"],
+            {
+                "expected": 1,
+                "received": 0,
+                "not_received": 1,
+                "with_issues": 0,
+                "successfully_validated": 0,
+            },
+        )
+        self.assertEqual(rendered["system_metrics"][0]["payload_metrics"]["with_issues"], 0)
+        self.assertEqual(rendered["system_metrics"][0]["payload_metrics"]["not_received"], 1)
+
+    def test_retired_unexpected_fault_is_removed_from_old_persisted_summary(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        summary["fault_metrics"]["other_issues"] += 1
+        summary["issue_metrics"]["blocking"] += 1
+        summary["fault_rows"].append(
+            {
+                "issue_id": "legacy-unexpected",
+                "asset_id": "rogue-legacy",
+                "system": "Unspecified",
+                "payload_type": None,
+                "category": "other_issues",
+                "severity": "high",
+                "description": "Legacy unexpected publisher finding.",
+            }
+        )
+        source_id = self._seed_run(
+            summary=summary,
+            issues=[
+                {
+                    "issue_id": "legacy-unexpected",
+                    "asset_id": "rogue-legacy",
+                    "issue_type": "unexpected_device",
+                    "severity": "high",
+                    "description": "Legacy unexpected publisher finding.",
+                }
+            ],
+        )
+        report = self._create_report("zip", [source_id])
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            rendered = json.loads(archive.read("validation_summary.json"))
+            details = json.loads(archive.read("fault_details.json"))
+
+        self.assertEqual(rendered["asset_metrics"]["unexpected"], 1)
+        self.assertEqual(rendered["fault_metrics"]["other_issues"], 2)
+        self.assertEqual(rendered["issue_metrics"]["blocking"], 4)
+        self.assertNotIn(
+            "legacy-unexpected",
+            {row["issue_id"] for row in details["rows"]},
+        )
+
+    def test_report_snapshot_survives_source_mutation_and_integrity_is_stable(self) -> None:
+        source_id = self._seed_run(
+            summary=copy.deepcopy(_SCOPABLE_SUMMARY),
+            parameters={
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A-1", "project_site": "Site A"}},
+                    {"expected_schedule": {"asset_id": "B-1", "project_site": "Site A"}},
+                ]
+            },
+        )
+        report = self._create_report("zip", [source_id])
+
+        from app.services.reports_integrity import INTEGRITY_KEY
+        from app.services.run_service import RunService
+
+        service = RunService()
+        stored_before_download = service.get_run(report["report_id"])
+        self.assertIsInstance(
+            stored_before_download.parameters.get("udmi_report_snapshot"),
+            dict,
+        )
+        self.assertIn("report_generated_at", stored_before_download.result_summary)
+        self.assertNotIn(INTEGRITY_KEY, stored_before_download.result_summary)
+
+        service.update_result_summary(
+            source_id,
+            {"validation_summary_v1": copy.deepcopy(_V1_SUMMARY)},
+        )
+        first = self._download(report["report_id"]).content
+        with zipfile.ZipFile(io.BytesIO(first)) as archive:
+            header = json.loads(archive.read("summary.json"))
+            rendered = json.loads(archive.read("validation_summary.json"))
+        self.assertEqual(header["Project"], "Site A")
+        self.assertEqual(rendered["asset_metrics"]["expected"], 2)
+
+        integrity_after_first = dict(
+            service.get_run(report["report_id"]).result_summary[INTEGRITY_KEY]
+        )
+        service.update_result_summary(
+            source_id,
+            {"validation_summary_v1": copy.deepcopy(_SCOPABLE_SUMMARY)},
+        )
+        second = self._download(report["report_id"]).content
+        integrity_after_second = dict(
+            service.get_run(report["report_id"]).result_summary[INTEGRITY_KEY]
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(integrity_after_first, integrity_after_second)
+
+    def test_legacy_first_download_initialization_is_atomic(self) -> None:
+        from app.api.routes import reports as reports_module
+        from app.services.reports_integrity import INTEGRITY_KEY
+        from app.services.run_service import RunService
+        from smart_commissioning_core.integrity import sha256_bytes
+
+        report = self._create_report("zip", [], report_type="evidence_pack")
+        service = RunService()
+        # Emulate a report persisted before report_generated_at and integrity
+        # were initialized during report creation.
+        service.update_result_summary(report["report_id"], {}, merge=False)
+        run_a = service.get_run(report["report_id"])
+        run_b = service.get_run(report["report_id"])
+
+        timestamp_barrier = Barrier(2)
+        timestamp_base = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+
+        class ConcurrentClock:
+            @classmethod
+            def now(cls, _timezone: object) -> datetime:
+                timestamp_barrier.wait(timeout=10)
+                offset = 0 if current_thread().name.endswith("_0") else 1
+                return timestamp_base + timedelta(seconds=offset)
+
+        with (
+            mock.patch.object(reports_module, "datetime", ConcurrentClock),
+            ThreadPoolExecutor(max_workers=2, thread_name_prefix="report-timestamp") as executor,
+        ):
+            timestamps = [
+                future.result(timeout=10)
+                for future in (
+                    executor.submit(reports_module._generated_at, run_a),
+                    executor.submit(reports_module._generated_at, run_b),
+                )
+            ]
+
+        self.assertEqual(timestamps[0], timestamps[1])
+        artifact_a, _ = reports_module._build_report_artifact(run_a, "zip")
+        artifact_b, _ = reports_module._build_report_artifact(run_b, "zip")
+        self.assertEqual(artifact_a, artifact_b)
+
+        integrity_barrier = Barrier(2)
+
+        def concurrent_metadata(artifact: bytes) -> dict[str, object]:
+            integrity_barrier.wait(timeout=10)
+            return {
+                "algorithm": "sha256",
+                "hash": sha256_bytes(artifact),
+                "signature_algorithm": "ed25519",
+                "signature": None,
+                "public_key_pem": None,
+                "public_key_fingerprint": None,
+                "signed_at": current_thread().name,
+            }
+
+        with (
+            mock.patch.object(
+                reports_module,
+                "build_integrity_metadata",
+                side_effect=concurrent_metadata,
+            ),
+            ThreadPoolExecutor(max_workers=2, thread_name_prefix="report-integrity") as executor,
+        ):
+            metadata = [
+                future.result(timeout=10)
+                for future in (
+                    executor.submit(reports_module._persist_integrity, run_a, artifact_a),
+                    executor.submit(reports_module._persist_integrity, run_b, artifact_b),
+                )
+            ]
+
+        self.assertEqual(metadata[0], metadata[1])
+        fresh = service.get_run(report["report_id"])
+        rebuilt, _ = reports_module._build_report_artifact(fresh, "zip")
+        self.assertEqual(fresh.result_summary[INTEGRITY_KEY], metadata[0])
+        self.assertEqual(fresh.result_summary[INTEGRITY_KEY]["hash"], sha256_bytes(rebuilt))
+        self.assertEqual(self._download(report["report_id"]).content, rebuilt)
+
+    def test_same_asset_id_in_two_sources_does_not_cross_contaminate_scope(self) -> None:
+        first_summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        second_summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        template = {
+            "asset_id": "A-1",
+            "system": "BMS",
+            "payload_type": "state",
+            "category": "other_issues",
+            "severity": "low",
+            "point_name": None,
+            "expected_value": None,
+            "observed_value": None,
+            "suggested_action": "Review state evidence.",
+            "raw_evidence_uri": "evidence://state-scope",
+        }
+        first_summary["fault_rows"].append(
+            {**template, "issue_id": "first-state", "description": "First source."}
+        )
+        second_summary["fault_rows"].append(
+            {**template, "issue_id": "second-state", "description": "Second source."}
+        )
+        first_id = self._seed_run(summary=first_summary)
+        second_id = self._seed_run(summary=second_summary)
+        report = self._create_report(
+            "zip",
+            [first_id, second_id],
+            udmi_scope={
+                "selected_payloads": [
+                    {
+                        "source_run_id": second_id,
+                        "asset_id": "A-1",
+                        "payload_type": "state",
+                    }
+                ]
+            },
+        )
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            findings = json.loads(archive.read("findings.json"))
+            summary = json.loads(archive.read("validation_summary.json"))
+        self.assertEqual([row["issue_id"] for row in findings], ["second-state"])
+        self.assertEqual(findings[0]["source_run_id"], second_id)
+        self.assertEqual(summary["asset_metrics"]["expected"], 1)
+
+    def test_run_wide_fault_never_creates_a_fault_matrix_asset(self) -> None:
+        source_id = self._seed_run(summary=copy.deepcopy(_SCOPABLE_SUMMARY))
+        report = self._create_report("zip", [source_id])
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            matrix = json.loads(archive.read("fault_matrix.json"))
+            details = json.loads(archive.read("fault_details.json"))
+        self.assertEqual({row["asset_id"] for row in matrix["rows"]}, {"A-1", "B-1"})
+        self.assertIn(None, {row["asset_id"] for row in details["rows"]})
+
     def test_failed_and_cancelled_sources_are_prominent_in_every_renderer(self) -> None:
         failed = self._seed_run(status="failed")
         cancelled = self._seed_run(status="cancelled", summary=None)
@@ -355,8 +1275,10 @@ class UdmiV1ReportTests(ApiTestCase):
                     with zipfile.ZipFile(io.BytesIO(content)) as archive:
                         report_summary = json.loads(archive.read("summary.json"))
                         validation = json.loads(archive.read("validation_summary.json"))
-                    self.assertEqual(report_summary["Status"], "succeeded")
-                    self.assertIn("INCOMPLETE", report_summary["Validation scope"])
+                    self.assertEqual(
+                        set(report_summary),
+                        {"Project", "Site", "Report ID", "Generated"},
+                    )
                     self.assertEqual(validation["report_job_status"], "succeeded")
                     self.assertFalse(validation["scope_complete"])
                     self.assertEqual(validation["scope_status"], "incomplete")
@@ -367,13 +1289,13 @@ class UdmiV1ReportTests(ApiTestCase):
                 elif output_format == "pdf":
                     self.assertIn(b"Validation Scope Incomplete", content)
                     self.assertIn(b"INCOMPLETE", content)
-                    self.assertIn(b"Status: succeeded", content)
+                    self.assertNotIn(b"Status: succeeded", content)
                 elif output_format == "docx":
                     with zipfile.ZipFile(io.BytesIO(content)) as archive:
                         document = archive.read("word/document.xml")
                     self.assertIn(b"Validation Scope Incomplete", document)
                     self.assertIn(b"INCOMPLETE", document)
-                    self.assertIn(b"Status: succeeded", document)
+                    self.assertNotIn(b"Status: succeeded", document)
                 else:
                     workbook = load_workbook(io.BytesIO(content))
                     executive = workbook["Executive Summary"]
@@ -381,9 +1303,9 @@ class UdmiV1ReportTests(ApiTestCase):
                         executive.cell(row, 1).value: executive.cell(row, 2).value
                         for row in range(2, executive.max_row + 1)
                     }
-                    self.assertEqual(metadata["Status"], "succeeded")
-                    self.assertIn("INCOMPLETE", metadata["Validation scope"])
                     self.assertIn("INCOMPLETE", metadata["Validation Scope Incomplete"])
+                    self.assertNotIn("Status", metadata)
+                    self.assertNotIn("Validation scope", metadata)
 
     def test_zip_contains_versioned_summary_schedule_and_fault_sections(self) -> None:
         source_id = self._seed_run()
@@ -411,7 +1333,14 @@ class UdmiV1ReportTests(ApiTestCase):
 
         self.assertEqual(summary["schema_version"], "1.0")
         self.assertEqual(summary["report_title"], "Site & <A> Validation")
-        self.assertEqual(summary["asset_metrics"], _TOTALS["asset_metrics"])
+        self.assertEqual(
+            summary["asset_metrics"],
+            {**_TOTALS["asset_metrics"], "unexpected": 0},
+        )
+        self.assertEqual(
+            summary["payload_metrics"],
+            {**_TOTALS["payload_metrics"], "not_received": 2},
+        )
         self.assertEqual(summary["overall_compliance"], "1/3 (33%)")
         self.assertEqual(summary["payloads_correct"], "4/7 (57%)")
         self.assertEqual(summary["payloads_incorrect"], "3/7 (43%)")
@@ -463,6 +1392,9 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertNotIn(b"freshness", first.lower())
         self.assertNotIn(b"Online", first)
         self.assertNotIn(b"Offline", first)
+        self.assertLess(first.find(b"Metric Definitions"), first.find(b"Executive Summary"))
+        self.assertNotIn(b"Output format:", first)
+        self.assertNotIn(b"Source runs:", first)
 
         from app.services.report_pdf import PdfDocument
 
@@ -495,6 +1427,89 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertIn(b"Payloads Incorrect %", document)
         self.assertIn(b"3/7 (43%)", document)
         self.assertNotIn(b"freshness", document.lower())
+        self.assertLess(document.find(b"Metric Definitions"), document.find(b"Executive Summary"))
+        self.assertNotIn(b">Source Run<", document)
+        self.assertNotIn(b">Severity<", document)
+        self.assertNotIn(b">Evidence URI<", document)
+        self.assertIn(b'<w:jc w:val="center"/>', document)
+        self.assertIn(b'<w:vAlign w:val="center"/>', document)
+        self.assertIn(b"<w:insideH", document)
+        self.assertIn(b"<w:insideV", document)
+
+    def test_register_project_site_drives_all_udmi_report_headers(self) -> None:
+        source_id = self._seed_run(
+            summary=copy.deepcopy(_SCOPABLE_SUMMARY),
+            parameters={
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A-1", "project_site": "Site A"}}
+                ]
+            },
+        )
+        for output_format in ("zip", "pdf", "docx", "xlsx"):
+            with self.subTest(output_format=output_format):
+                report = self._create_report(output_format, [source_id])
+                content = self._download(report["report_id"]).content
+                if output_format == "zip":
+                    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                        metadata = json.loads(archive.read("summary.json"))
+                    self.assertEqual(metadata["Project"], "Site A")
+                    self.assertEqual(metadata["Site"], "Site A")
+                    self.assertEqual(set(metadata), {"Project", "Site", "Report ID", "Generated"})
+                elif output_format == "pdf":
+                    self.assertIn(b"Project: Site A", content)
+                    self.assertIn(b"Site: Site A", content)
+                    self.assertNotIn(b"Project: demo-project", content)
+                elif output_format == "docx":
+                    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                        document = archive.read("word/document.xml")
+                    self.assertIn(b"Project: Site A", document)
+                    self.assertIn(b"Site: Site A", document)
+                    self.assertNotIn(b"Project: demo-project", document)
+                else:
+                    workbook = load_workbook(io.BytesIO(content))
+                    executive = workbook["Executive Summary"]
+                    metadata = {
+                        executive.cell(row, 1).value: executive.cell(row, 2).value
+                        for row in range(2, 7)
+                    }
+                    self.assertEqual(metadata["Project"], "Site A")
+                    self.assertEqual(metadata["Site"], "Site A")
+                    self.assertNotIn("Output format", metadata)
+
+    def test_long_fault_detail_is_complete_wrapped_centered_and_gridded(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        long_description = "LONG_START " + ("measured commissioning detail " * 80) + "LONG_END"
+        summary["fault_rows"][1]["description"] = long_description
+        source_id = self._seed_run(summary=summary)
+
+        pdf_report = self._create_report("pdf", [source_id], title="Detail Test")
+        pdf_content = self._download(pdf_report["report_id"]).content
+        self.assertIn(b"LONG_START", pdf_content)
+        self.assertIn(b"LONG_END", pdf_content)
+        self.assertNotIn(b"\x85", pdf_content)
+        self.assertNotIn(b"(Source Run)", pdf_content)
+        self.assertNotIn(b"(Evidence URI)", pdf_content)
+
+        docx_report = self._create_report("docx", [source_id], title="Detail Test")
+        with zipfile.ZipFile(io.BytesIO(self._download(docx_report["report_id"]).content)) as archive:
+            document = archive.read("word/document.xml")
+        self.assertIn(long_description.encode("ascii"), document)
+
+        xlsx_report = self._create_report("xlsx", [source_id], title="Detail Test")
+        workbook = load_workbook(io.BytesIO(self._download(xlsx_report["report_id"]).content))
+        details = workbook["Faults in Detail"]
+        headers = [cell.value for cell in details[1]]
+        self.assertEqual(headers, list(_expected_detail_columns()))
+        description_column = headers.index("Description") + 1
+        description_cell = next(
+            details.cell(row, description_column)
+            for row in range(2, details.max_row + 1)
+            if details.cell(row, description_column).value == long_description
+        )
+        self.assertTrue(description_cell.alignment.wrap_text)
+        self.assertEqual(description_cell.alignment.horizontal, "center")
+        self.assertEqual(description_cell.alignment.vertical, "center")
+        self.assertEqual(description_cell.border.left.style, "thin")
 
     def test_xlsx_print_layout_filters_styles_and_asset_verdict(self) -> None:
         source_id = self._seed_run()
@@ -506,12 +1521,12 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(
             workbook.sheetnames,
             [
+                "Metric Definitions",
                 "Executive Summary",
                 "Metrics by System",
                 "Asset Validation Schedule",
                 "Fault Matrix",
                 "Faults in Detail",
-                "Metric Definitions",
             ],
         )
         for sheet in workbook.worksheets:

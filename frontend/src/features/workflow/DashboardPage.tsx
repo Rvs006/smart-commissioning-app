@@ -347,7 +347,7 @@ export function DashboardPage() {
           <div className="surface-heading">
             <div>
               <span className="eyebrow">Priority</span>
-              <h3>Blocking Finding</h3>
+              <h3>Highest-priority issue</h3>
             </div>
           </div>
           <div className="issue-list">
@@ -376,11 +376,11 @@ export function DashboardPage() {
               })()
             ) : (
               <div className="empty-workspace">
-                <strong>No blocking findings</strong>
+                <strong>No issues found</strong>
                 <span>
                   {latestTerminalValidationRunId
                     ? "The latest validation run reported no issues."
-                    : "Run a validation to surface blocking findings here."}
+                    : "Run a validation to surface issues here."}
                 </span>
               </div>
             )}

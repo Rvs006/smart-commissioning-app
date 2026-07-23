@@ -5,6 +5,71 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.24] - 2026-07-23
+
+### Added
+
+- **Filtered UDMI reports now preserve the exact current view.** Every Results
+  filter updates the headline metrics, Inspector, retained payload rows, and a
+  server-validated report selection. An active filter with zero matches creates
+  a valid zero-row report rather than reverting to the full run.
+- **Unexpected publishers have a separate measured category.** A bounded,
+  register-derived MQTT scope produces a numeric count and filter without
+  adding unregistered publishers to expected assets, observed assets,
+  compliance, the Fault Matrix, or validation findings. Observational wildcard
+  traffic has its own retained-topic budget, so it cannot consume the cap
+  reserved for expected validation payloads.
+- **Timestamp style consistency is checked within each payload.** Valid
+  seasonal offsets remain accepted, while mixed fractional precision or mixed
+  `Z` and signed-offset notation produces one focused formatting issue.
+
+### Fixed
+
+- **Missing payload versions no longer hide other required-field findings.** A
+  supported expected version from the register supplies schema authority for
+  validation while the original missing-version issue and raw evidence remain
+  unchanged.
+- **Valid DBO units no longer produce false findings.** Import and validation
+  share a pinned Google Digital Buildings unit vocabulary, including
+  `parts_per_billion` and `ppb`. Unit findings now mark the exact `units` field.
+- **GUI and report metrics use the same immutable rows.** Received payloads with
+  issues are separated from expected payloads that were not received, and
+  register-scoped asset totals stay stable when an unexpected publisher is
+  observed.
+- **UDMI report tables retain complete text.** PDF, DOCX, and XLSX use wrapped,
+  expanding cells, repeated PDF headers, centered data, and visible column
+  separators. Synthetic run-level assets can no longer enter the Fault Matrix.
+
+### Changed
+
+- **Report identity comes from operator evidence.** Project and Site are read
+  from the imported register, the generated Report ID replaces Source Runs, and
+  Metric Definitions now precedes Executive Summary.
+- **The results screen is tighter and clearer.** Asset, Payload, and Fault
+  metrics align in three tonal groups, the Inspector uses less space, Evidence
+  Outputs is removed, and user-facing copy says Issues instead of Blocking.
+- **The nested validation summary advances to schema 1.1.** The JSON evidence
+  envelope stays at 1.0. Stored 1.0 summaries remain readable. Report generation
+  recomputes Payloads With Issues from complete retained rows; compact summaries
+  without those rows are conservatively capped at Received.
+
+### Security
+
+- **Filtered report selections are checked against terminal source evidence.**
+  The server rejects unknown, duplicate, cross-source, and unsupported scoped
+  rows and recomputes every count instead of accepting client totals.
+- **Portable releases are pinned to the workflow commit.** The publisher rejects
+  PR or non-dispatch runs, targets the successful bundle run's exact SHA, and
+  fails unless the resolved tag, remote main, release notes, and artifact hashes
+  agree.
+- **UDMI reports created on v0.1.24 freeze their evidence at report creation.**
+  The server stores the derived report model, or the redacted source records
+  needed by a pre-contract renderer, with the report run. It pins the generated
+  timestamp and verifies existing integrity metadata without rewriting it on
+  later downloads. Report jobs created before the upgrade are not retroactively
+  snapshotted and keep the legacy rebuild-from-source fallback; create a new
+  report after upgrading when a frozen snapshot is required.
+
 ## [0.1.23] - 2026-07-23
 
 ### Added

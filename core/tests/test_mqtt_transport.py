@@ -584,6 +584,33 @@ class SubscribeAndCaptureCompletionTests(unittest.TestCase):
 
         self.assertEqual(messages, [first, first, first])
 
+    def test_secondary_topics_cannot_consume_the_primary_budget(self) -> None:
+        unexpected = [
+            MqttMessage(topic="site/noisy/state", payload=b"{}"),
+            MqttMessage(topic="site/noisy/metadata", payload=b"{}"),
+            MqttMessage(topic="site/noisy/events/pointset", payload=b"{}"),
+        ]
+        first = MqttMessage(topic="site/a1/state", payload=b"{}")
+        second = MqttMessage(topic="site/a2/state", payload=b"{}")
+        fake = _FakeCaptureClient([*unexpected, first, second])
+
+        def expected_complete(messages: list[MqttMessage]) -> bool:
+            topics = {message.topic for message in messages}
+            return first.topic in topics and second.topic in topics
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            messages = mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=["site/#"],
+                timeout_seconds=None,
+                max_messages=2,
+                stop_when=expected_complete,
+                primary_topics=[first.topic, second.topic],
+                secondary_max_messages=2,
+            )
+
+        self.assertEqual(messages, [unexpected[0], unexpected[1], first, second])
+
 
 class RetainLatestTests(unittest.TestCase):
     """retain_latest decouples the per-topic retention (which today only the

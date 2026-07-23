@@ -1,14 +1,23 @@
+import hashlib
 import json
 import math
 import re
-from collections.abc import Callable
+from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
-from smart_commissioning_core.engines.comparison_common import make_issue, normalise_unit
+from smart_commissioning_core.dbo_units import (
+    KNOWN_CANONICAL_UNITS,
+    KNOWN_UNIT_NAMES,
+    NUMERIC_CANONICAL_UNITS,
+    NUMERIC_UNIT_NAMES,
+    canonical_unit,
+)
+from smart_commissioning_core.engines.comparison_common import make_issue
 from smart_commissioning_core.mqtt_settings import (
     INDEFINITE_BACKSTOP_SECONDS,
     _broker_error_status,
@@ -32,6 +41,7 @@ from smart_commissioning_core.udmi_schema import (
     is_nonpub_version,
     nonpub_version_key,
     structural_issues,
+    structural_version_available,
     versions_match,
 )
 
@@ -50,41 +60,11 @@ ALLOWED_FIXTURE_DIRS = (
     _REPO_ROOT / "device_udmi_payload_validation",
 )
 
-NUMERIC_UDMI_UNITS = {
-    "amperes",
-    "degrees_celsius",
-    "hertz",
-    "kilowatt_hours",
-    "kilovolt_amperes",
-    "kilovolt_amperes_reactive",
-    "kilowatts",
-    "parts_per_million",
-    "percent",
-    "volts",
-}
-KNOWN_UDMI_UNITS = NUMERIC_UDMI_UNITS | {"no_units", "boolean", "enum"}
-
-# Register shorthand -> canonical UDMI unit (hyphenated, normalise_unit form),
-# so a register that says "kwh" matches a metadata payload that says
-# "kilowatt_hours" instead of tripping a false mismatch/unknown-unit issue.
-_UNIT_ALIASES = {
-    "kwh": "kilowatt-hours",
-    "kw": "kilowatts",
-    "kva": "kilovolt-amperes",
-    "kvar": "kilovolt-amperes-reactive",
-    "a": "amperes",
-    "amp": "amperes",
-    "amps": "amperes",
-    "v": "volts",
-    "hz": "hertz",
-    "ppm": "parts-per-million",
-    "%": "percent",
-    "degc": "degrees-celsius",
-    "deg-c": "degrees-celsius",
-    "celsius": "degrees-celsius",
-}
-_KNOWN_CANONICAL_UNITS = {unit.replace("_", "-") for unit in KNOWN_UDMI_UNITS}
-_NUMERIC_CANONICAL_UNITS = {unit.replace("_", "-") for unit in NUMERIC_UDMI_UNITS}
+# Back-compatible public names now sourced from the pinned, shared DBO module.
+NUMERIC_UDMI_UNITS = NUMERIC_UNIT_NAMES
+KNOWN_UDMI_UNITS = KNOWN_UNIT_NAMES
+_KNOWN_CANONICAL_UNITS = KNOWN_CANONICAL_UNITS
+_NUMERIC_CANONICAL_UNITS = NUMERIC_CANONICAL_UNITS
 
 # Structural / version issues are attributed to the payload they were found in.
 _PAYLOAD_ISSUE_TYPES = {
@@ -102,15 +82,7 @@ def _canonical_unit(value: object) -> str | None:
     expects e.g. kilowatt-hours still gets a mismatch against it. Only a
     missing/blank value reads as None (no comparison possible).
     """
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    normalised = normalise_unit(text)
-    if normalised is None:
-        return "no-units"
-    return _UNIT_ALIASES.get(normalised, normalised)
+    return canonical_unit(value)
 
 
 def _is_blank_value(value: object) -> bool:
@@ -157,8 +129,9 @@ def validate_udmi_full_report(
         cancel_check=cancel_check,
         progress_callback=progress_callback,
     )
-    if capture_summary["issue"] is not None:
-        capture_issues.append(capture_summary["issue"])
+    capture_issue = capture_summary["issue"]
+    if isinstance(capture_issue, ValidationIssueRecord):
+        capture_issues.append(capture_issue)
 
     if _uses_direct_payload_inputs(parameters):
         full_report = _inline_full_report(parameters)
@@ -179,6 +152,7 @@ def validate_udmi_full_report(
         issues.append(register_rejection)
     issues.extend(_register_duplicate_id_issues(parameters, issues))
     issues.extend(_review_all_payload_issues(parameters or {}, issues))
+    issues = _unique_udmi_issue_ids(issues)
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
     latest_payload = _latest_payload_timestamp(parameters or {})
@@ -219,6 +193,14 @@ def validate_udmi_full_report(
         "capture_window_seconds": capture_summary.get("capture_window_seconds"),
         "captured_topics": capture_summary["captured_topics"],
         "subscribed_topics": capture_summary.get("subscribed_topics", []),
+        "unexpected_device_count": len(_unexpected_devices(parameters)),
+        "unexpected_devices": _unexpected_devices(parameters),
+        "unexpected_devices_measured": bool(
+            parameters.get("unexpected_devices_measured")
+        ),
+        "unexpected_devices_measurement_scope": parameters.get(
+            "unexpected_devices_measurement_scope"
+        ),
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
             captured_topics=capture_summary["captured_topics"],
@@ -277,8 +259,8 @@ _BLOCKING_SEVERITIES = frozenset({"critical", "high", "medium"})
 
 
 def _conformance_fields(
-    expected_devices: list[object],
-    not_publishing: list[object],
+    expected_devices: Sequence[object],
+    not_publishing: Sequence[object],
     issues: list[ValidationIssueRecord],
 ) -> dict[str, object]:
     """Score fields fed by validation outcomes, not publishing liveness.
@@ -362,16 +344,13 @@ def _normalise_issues(full_report: dict[str, Any]) -> list[ValidationIssueRecord
             )
         )
 
-    for asset_id in _dict_value(full_report, "DevicesNotExpected"):
-        issues.append(
-            _issue(
-                issues,
-                asset_id=asset_id,
-                issue_type="unexpected_device",
-                severity="medium",
-                description=f"Device {asset_id} published but was not present in the expected asset list.",
-            )
-        )
+    # ``DevicesNotExpected`` was represented as a validation issue by early
+    # fixture imports. Unexpected publishers are supporting measurement
+    # evidence, not faults against the registered validation schedule, so they
+    # must never enter issue/fault metrics. Current live runs persist them under
+    # ``unexpected_devices`` instead (with topics, last-seen and measurement
+    # completeness); legacy fixture keys are deliberately not promoted to an
+    # issue here.
 
     for asset_id, messages in _dict_value(full_report, "DevicePayloadErrors").items():
         for message in _messages(messages):
@@ -461,9 +440,8 @@ _IDENTITY_CHECKS: tuple[tuple[str, Callable[[dict, dict], object], str, str, str
      "Metadata site does not match the asset register.",
      "Confirm the site in the schedule and the UDMI metadata location.",
      ("site",), "system.location.site"),
-    # Devices legitimately publish the room under location.section OR
-    # location.room (both exist in the UDMI system model), so the register's
-    # Room column matches either: the getter returns ALL present candidates and
+    # New templates use location.room. Devices that already publish the value
+    # under location.section remain compatible: the getter returns all present candidates and
     # the check passes when ANY equals the register value — a device carrying
     # both fields (section = building subdivision, room = the register's room)
     # must not read as a mismatch against section alone.
@@ -478,7 +456,7 @@ _IDENTITY_CHECKS: tuple[tuple[str, Callable[[dict, dict], object], str, str, str
      "metadata_validation", "low",
      "Metadata room/section does not match the asset register.",
      "Confirm the room/section in the schedule and the UDMI metadata location.",
-     ("section", "room"), "system.location.section (or system.location.room)"),
+     ("section", "room"), "system.location.room (or legacy system.location.section)"),
 )
 
 
@@ -726,6 +704,35 @@ def _review_payload_issues(
                         raw_evidence_uri=raw_evidence_uri,
                     )
                 )
+                # The payload omitted its authority, but the imported register
+                # can still authorize required-field checks when its expected
+                # version is pinned locally (or supplied as an uploaded nonpub
+                # set). Validate a copy so the original evidence remains an
+                # honest unversioned payload and the missing-version issue stays.
+                if structural_version_available(expected_version, uploaded_schemas):
+                    shadow_version = (
+                        nonpub_version_key(expected_version)
+                        if is_nonpub_version(expected_version)
+                        else expected_version
+                    )
+                    shadow_payload = {**payload, "version": shadow_version}
+                    for finding in structural_issues(
+                        payload_type, shadow_payload, uploaded_schemas
+                    ):
+                        issues.append(
+                            _issue(
+                                issues,
+                                asset_id=asset_id,
+                                issue_type=issue_type,
+                                severity=finding.severity,
+                                description=finding.description,
+                                point_name=finding.point_name,
+                                expected_value=finding.expected_value,
+                                observed_value=finding.observed_value,
+                                suggested_action=finding.suggested_action,
+                                raw_evidence_uri=raw_evidence_uri,
+                            )
+                        )
             continue
         if expected_version and not versions_match(expected_version, payload_version):
             issues.append(
@@ -758,6 +765,54 @@ def _review_payload_issues(
                     expected_value=finding.expected_value,
                     observed_value=finding.observed_value,
                     suggested_action=finding.suggested_action,
+                    raw_evidence_uri=raw_evidence_uri,
+                )
+            )
+
+    # ``location`` is optional in canonical UDMI 1.5.2, but it becomes a
+    # register-policy requirement when Site or Room was imported. Report the
+    # missing container separately from canonical ``system`` and from leaf
+    # identity mismatches so the operator can fix the hierarchy in one move.
+    metadata_present = "metadata_payload" in parameters
+    expected_location_fields = [
+        field for field in ("site", "room") if expected.get(field)
+    ]
+    if metadata_present and expected_location_fields:
+        system_value = metadata_payload.get("system")
+        location_value = (
+            system_value.get("location") if isinstance(system_value, dict) else None
+        )
+        if not isinstance(location_value, dict):
+            if "system" not in metadata_payload:
+                observed_location = "system missing"
+            elif not isinstance(system_value, dict):
+                observed_location = f"system is {type(system_value).__name__}"
+            elif "location" not in system_value:
+                observed_location = "location missing"
+            elif location_value is None:
+                observed_location = "location null"
+            else:
+                observed_location = f"location is {type(location_value).__name__}"
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type="metadata_validation",
+                    severity="high",
+                    description=(
+                        "Expected metadata system.location is missing or is not an object; "
+                        "the asset register supplies "
+                        f"{', '.join(expected_location_fields)}."
+                    ),
+                    expected_value=(
+                        "system.location object containing "
+                        + ", ".join(expected_location_fields)
+                    ),
+                    observed_value=observed_location,
+                    suggested_action=(
+                        "Publish location under metadata.system.location, with Site in "
+                        "location.site and Room in location.room."
+                    ),
                     raw_evidence_uri=raw_evidence_uri,
                 )
             )
@@ -875,6 +930,7 @@ def _review_payload_issues(
                     point_name=str(point_name),
                     expected_value=str(expected_unit),
                     observed_value="missing",
+                    match_basis="units",
                     suggested_action="Add the expected units to the device metadata point definition.",
                     raw_evidence_uri=raw_evidence_uri,
                 )
@@ -891,6 +947,7 @@ def _review_payload_issues(
                     point_name=str(point_name),
                     expected_value=str(expected_unit),
                     observed_value=str(metadata_unit),
+                    match_basis="units",
                     suggested_action="Correct the device metadata units or the register's Expected units.",
                     raw_evidence_uri=raw_evidence_uri,
                 )
@@ -904,11 +961,15 @@ def _review_payload_issues(
                     asset_id=asset_id,
                     issue_type="metadata_validation",
                     severity="high",
-                    description=f"Metadata unit '{unit_to_check}' for {point_name} is not a supported UDMI unit.",
+                    description=f"Metadata unit '{unit_to_check}' for {point_name} is not a recognized DBO unit.",
                     point_name=str(point_name),
-                    expected_value="known UDMI unit",
+                    expected_value="recognized DBO unit",
                     observed_value=str(unit_to_check),
-                    suggested_action="Use a valid UDMI unit such as degrees_celsius or parts_per_million.",
+                    match_basis="units",
+                    suggested_action=(
+                        "Correct the unit spelling or add the intended unit to the pinned "
+                        "Digital Buildings Ontology vocabulary after review."
+                    ),
                     raw_evidence_uri=raw_evidence_uri,
                 )
             )
@@ -990,6 +1051,7 @@ def _review_payload_issues(
                     point_name=str(empty_point),
                     expected_value=expected_value,
                     observed_value="null" if value is None else f'"{value}"',
+                    match_basis="units" if field == "units" else None,
                     suggested_action=suggested_action,
                     raw_evidence_uri=raw_evidence_uri,
                 )
@@ -1306,7 +1368,7 @@ def _ordered_valid_payload_topics(messages: list[MqttMessage]) -> list[str]:
     return list(dict.fromkeys(message.topic for message in _valid_payload_messages(messages)))
 
 
-def _missing_topics_issue(*, asset_id: str, missing: list[list[str]], got_any: bool) -> ValidationIssueRecord:
+def _missing_topics_issue(*, asset_id: str | None, missing: list[list[str]], got_any: bool) -> ValidationIssueRecord:
     """Real not_publishing issue naming WHICH expected topics never reported."""
     topics_text = ", ".join(group[0] for group in missing)
     if got_any:
@@ -1325,7 +1387,7 @@ def _missing_topics_issue(*, asset_id: str, missing: list[list[str]], got_any: b
     )
 
 
-def _capture_error_issue(*, asset_id: str, status_detail: str) -> ValidationIssueRecord:
+def _capture_error_issue(*, asset_id: str | None, status_detail: str) -> ValidationIssueRecord:
     return _issue(
         [],
         asset_id=asset_id,
@@ -1338,7 +1400,7 @@ def _capture_error_issue(*, asset_id: str, status_detail: str) -> ValidationIssu
 
 def _invalid_payload_issue(
     *,
-    asset_id: str,
+    asset_id: str | None,
     messages: list[MqttMessage],
     missing: list[list[str]],
 ) -> ValidationIssueRecord:
@@ -1372,19 +1434,50 @@ def _serialise_capture_message(message: MqttMessage) -> dict[str, object]:
 
 def _route_capture_messages_to_assets(
     entries: list[dict],
-    per_entry_topics: list[list[str]],
+    per_entry_subscribed_topics: list[list[str]],
+    per_entry_validation_topics: list[list[str]],
     messages: list[MqttMessage],
     *,
     observed_at: str,
 ) -> None:
     """Route the latest live evidence into every matching register asset."""
-    for entry, entry_topics in zip(entries, per_entry_topics, strict=True):
+    for entry, subscribed_topics, validation_topics in zip(
+        entries,
+        per_entry_subscribed_topics,
+        per_entry_validation_topics,
+        strict=True,
+    ):
         entry["capture_observed_at"] = observed_at
-        entry["subscribed_topics"] = list(entry_topics)
+        entry["subscribed_topics"] = list(subscribed_topics)
+        publisher_root = _entry_publisher_root(entry, subscribed_topics)
+        diagnostic_messages = [
+            message
+            for message in messages
+            if any(
+                _topic_matches_filter(message.topic, topic)
+                for topic in subscribed_topics
+            )
+            and (
+                any(
+                    _topic_matches_filter(message.topic, topic)
+                    for topic in validation_topics
+                )
+                or (
+                    publisher_root is not None
+                    and _topic_within_publisher_root(message.topic, publisher_root)
+                )
+            )
+        ]
+        entry["observed_topics"] = list(
+            dict.fromkeys(message.topic for message in diagnostic_messages)
+        )
         entry_messages = [
             message
             for message in messages
-            if any(_topic_matches_filter(message.topic, topic) for topic in entry_topics)
+            if any(
+                _topic_matches_filter(message.topic, topic)
+                for topic in validation_topics
+            )
         ]
         entry["messages"] = [_serialise_capture_message(message) for message in entry_messages]
         _route_latest_payloads(entry, entry_messages)
@@ -1403,7 +1496,7 @@ def _progressive_invalid_payload_issues(
         issues.append(
             _issue(
                 issues,
-                asset_id="UDMI assets",
+                asset_id=None,
                 issue_type="payload_error",
                 severity="critical",
                 description=f"MQTT message on {topic} is not a valid JSON object.",
@@ -1442,18 +1535,21 @@ def _build_progressive_result(
     issues.extend(_register_duplicate_id_issues(parameters, issues))
     issues.extend(_review_all_payload_issues(parameters, issues))
     issues.extend(_progressive_invalid_payload_issues(messages, issues))
+    issues = _unique_udmi_issue_ids(issues)
 
     expected_devices = _list_value(full_report, "DeviceList")
     payload_views = _build_payload_views(parameters)
-    observed_asset_ids = [
-        str(view.get("asset_id"))
-        for view in payload_views
+    observed_asset_ids = []
+    for view in payload_views:
+        payload_types = view.get("payload_types")
+        if not isinstance(payload_types, list):
+            continue
         if any(
             bool(payload.get("observed_present"))
-            for payload in view.get("payload_types", [])
+            for payload in payload_types
             if isinstance(payload, dict)
-        )
-    ]
+        ):
+            observed_asset_ids.append(str(view.get("asset_id")))
     captured_topics = _ordered_valid_payload_topics(messages)
     conformance = _conformance_fields(expected_devices, [], issues)
     result_summary: dict[str, object] = {
@@ -1476,6 +1572,14 @@ def _build_progressive_result(
         "capture_window_seconds": capture_window_seconds,
         "captured_topics": captured_topics,
         "subscribed_topics": list(subscribed_topics),
+        "unexpected_device_count": len(_unexpected_devices(parameters)),
+        "unexpected_devices": _unexpected_devices(parameters),
+        "unexpected_devices_measured": bool(
+            parameters.get("unexpected_devices_measured")
+        ),
+        "unexpected_devices_measurement_scope": parameters.get(
+            "unexpected_devices_measurement_scope"
+        ),
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
             captured_topics=captured_topics,
@@ -1697,7 +1801,7 @@ def _capture_live_payloads_per_asset(
             "captured_topics": [],
             "issue": _issue(
                 [],
-                asset_id="UDMI assets",
+                asset_id=None,
                 issue_type="payload_error",
                 severity="high",
                 description="Live MQTT capture is not available in this execution context.",
@@ -1707,11 +1811,40 @@ def _capture_live_payloads_per_asset(
 
     entries = [entry for entry in assets if isinstance(entry, dict)]
     per_entry_topics = [_capture_topics(entry) for entry in entries]
+    expected_publisher_roots = [
+        _entry_publisher_root(entry, entry_topics)
+        for entry, entry_topics in zip(entries, per_entry_topics, strict=True)
+    ]
+    measurement_scope = _unexpected_measurement_scope(expected_publisher_roots)
+    per_entry_validation_topics = [
+        _capture_validation_topics(entry, entry_topics, publisher_root)
+        for entry, entry_topics, publisher_root in zip(
+            entries,
+            per_entry_topics,
+            expected_publisher_roots,
+            strict=True,
+        )
+    ]
+    parameters["unexpected_devices"] = []
+    parameters["unexpected_devices_measured"] = False
+    parameters["unexpected_devices_measurement_scope"] = measurement_scope
     topics: list[str] = []
     for entry_topics in per_entry_topics:
         for topic in entry_topics:
             if topic not in topics:
                 topics.append(topic)
+    validation_topics = list(
+        dict.fromkeys(
+            topic
+            for entry_topics in per_entry_validation_topics
+            for topic in entry_topics
+        )
+    )
+    if measurement_scope and measurement_scope not in topics:
+        # The measurement subscription is observational only. It never enters
+        # ``groups`` below, so an absent unexpected publisher cannot block an
+        # expected-device capture from completing.
+        topics.append(measurement_scope)
     if not topics:
         return {
             "attempted": True,
@@ -1719,7 +1852,7 @@ def _capture_live_payloads_per_asset(
             "captured_topics": [],
             "issue": _issue(
                 [],
-                asset_id="UDMI assets",
+                asset_id=None,
                 issue_type="payload_error",
                 severity="high",
                 description="Live UDMI validation requires at least one state, metadata, or pointset topic.",
@@ -1728,18 +1861,25 @@ def _capture_live_payloads_per_asset(
         }
 
     groups: list[list[str]] = []
-    for entry_topics in per_entry_topics:
+    for entry_topics in per_entry_validation_topics:
         groups.extend(_capture_topic_groups(entry_topics))
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
+    max_messages = parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES)
+    unexpected_max_messages = parse_int(
+        parameters.get("unexpected_max_messages"),
+        default=max_messages,
+    )
     parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
+    capture_cancelled = False
     latest_progress_messages: dict[str, MqttMessage] = {}
+    latest_progress_validation_messages: dict[str, MqttMessage] = {}
     latest_progress_messages_by_entry: list[dict[str, MqttMessage]] = [
         {} for _ in entries
     ]
     exact_topic_routes: dict[str, set[int]] = {}
     wildcard_topic_routes: list[tuple[int, str]] = []
-    for entry_index, entry_topics in enumerate(per_entry_topics):
+    for entry_index, entry_topics in enumerate(per_entry_validation_topics):
         for topic_filter in entry_topics:
             if "+" in topic_filter or "#" in topic_filter:
                 wildcard_topic_routes.append((entry_index, topic_filter))
@@ -1747,11 +1887,42 @@ def _capture_live_payloads_per_asset(
                 exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
     progress_message_count = 0
 
+    def matches_validation_topic(message: MqttMessage) -> bool:
+        return any(
+            _topic_matches_filter(message.topic, topic_filter)
+            for topic_filter in validation_topics
+        )
+
+    def capture_cancel_check() -> bool:
+        """Latch cancellation observed by the capture loop.
+
+        ``subscribe_and_capture`` returns partial messages normally when its
+        cancellation callback becomes true. Remember that termination reason
+        here so a cancelled partial window cannot be reported as a completed
+        unexpected-publisher measurement.
+        """
+        nonlocal capture_cancelled
+        if not capture_cancelled and cancel_check is not None:
+            capture_cancelled = bool(cancel_check())
+        return capture_cancelled
+
     def on_message(message: MqttMessage) -> None:
         nonlocal progress_message_count
-        progress_message_count += 1
         latest_progress_messages[message.topic] = message
         progress_messages = list(latest_progress_messages.values())
+        if matches_validation_topic(message):
+            progress_message_count += 1
+            latest_progress_validation_messages[message.topic] = message
+        progress_validation_messages = list(
+            latest_progress_validation_messages.values()
+        )
+        _measure_unexpected_publishers(
+            parameters,
+            progress_messages,
+            expected_publisher_roots,
+            measurement_scope,
+            measured=False,
+        )
         matching_entries = set(exact_topic_routes.get(message.topic, ()))
         for entry_index, topic_filter in wildcard_topic_routes:
             if _topic_matches_filter(message.topic, topic_filter):
@@ -1776,7 +1947,7 @@ def _capture_live_payloads_per_asset(
             progress_callback(
                 lambda: _build_progressive_result(
                     parameters,
-                    progress_messages,
+                    progress_validation_messages,
                     capture_mode=capture_mode,
                     capture_window_seconds=timeout_seconds,
                     subscribed_topics=topics,
@@ -1785,18 +1956,44 @@ def _capture_live_payloads_per_asset(
             )
 
     try:
-        messages = live_capture(
-            build_mqtt_connection_settings(parameters),
-            topics=topics,
+        expected_complete = _capture_stop_when(groups)
+        # A bounded observation with a safe sibling scope needs the whole
+        # configured window; stopping when expected publishers arrive would
+        # systematically miss later unexpected siblings. Indefinite captures
+        # retain their established expected-complete stop behavior.
+        stop_when = (
+            (lambda _messages: False)
+            if measurement_scope and capture_mode != "indefinite"
+            else expected_complete
+        )
+        capture_options: dict[str, object] = {
+            "topics": topics,
             # timeout_seconds stays None in the summary (capture_mode "indefinite");
             # the transport gets the 48h backstop so an indefinite capture still
             # ends with its data rather than hanging on a never-publishing device.
-            timeout_seconds=timeout_seconds if timeout_seconds is not None else INDEFINITE_BACKSTOP_SECONDS,
-            max_messages=parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES),
-            qos=parse_int(parameters.get("qos"), default=0),
-            cancel_check=cancel_check,
-            stop_when=_capture_stop_when(groups),
-            on_message=on_message,
+            "timeout_seconds": (
+                timeout_seconds
+                if timeout_seconds is not None
+                else INDEFINITE_BACKSTOP_SECONDS
+            ),
+            "max_messages": max_messages,
+            "qos": parse_int(parameters.get("qos"), default=0),
+            "cancel_check": (
+                capture_cancel_check if cancel_check is not None else None
+            ),
+            "stop_when": stop_when,
+            "on_message": on_message,
+        }
+        if validation_topics:
+            # Reserve the configured cap for the concrete expected payload
+            # filters. Register wildcards and other observation-only traffic
+            # get a separate bounded budget, so neither sibling publishers nor
+            # unrelated topics beneath an expected root can consume a slot.
+            capture_options["primary_topics"] = validation_topics
+            capture_options["secondary_max_messages"] = unexpected_max_messages
+        messages = live_capture(
+            build_mqtt_connection_settings(parameters),
+            **capture_options,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
@@ -1810,22 +2007,51 @@ def _capture_live_payloads_per_asset(
             "capture_mode": capture_mode,
             "capture_window_seconds": timeout_seconds,
             "captured_topics": [],
-            "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=broker_status_detail),
+            "issue": _capture_error_issue(asset_id=None, status_detail=broker_status_detail),
         }
 
     capture_observed_at = datetime.now(UTC).isoformat()
+
+    expected_messages = [
+        message
+        for message in messages
+        if matches_validation_topic(message)
+    ]
+    expected_topic_count = len({message.topic for message in expected_messages})
+    observation_topic_count = len(
+        {
+            message.topic
+            for message in messages
+            if not matches_validation_topic(message)
+        }
+    )
 
     # Route every message back to each entry whose subscribed topics match it,
     # mirroring the single-asset routing (last payload per slot wins).
     _route_capture_messages_to_assets(
         entries,
         per_entry_topics,
+        per_entry_validation_topics,
         messages,
         observed_at=capture_observed_at,
     )
+    _measure_unexpected_publishers(
+        parameters,
+        messages,
+        expected_publisher_roots,
+        measurement_scope,
+        measured=(
+            capture_error_status is None
+            and not capture_cancelled
+            and expected_topic_count < max_messages
+            and observation_topic_count < unexpected_max_messages
+        ),
+    )
 
-    valid_messages = _valid_payload_messages(messages)
-    valid_topics = _ordered_valid_payload_topics(messages)
+    # Measurement-only wildcard traffic must never become a validation issue.
+    # It is retained solely for the separate unexpected-device summary above.
+    valid_messages = _valid_payload_messages(expected_messages)
+    valid_topics = _ordered_valid_payload_topics(expected_messages)
     missing = _unseen_groups(groups, {message.topic for message in valid_messages})
     if capture_error_status:
         return {
@@ -1835,7 +2061,7 @@ def _capture_live_payloads_per_asset(
             "capture_window_seconds": timeout_seconds,
             "captured_topics": valid_topics,
             "subscribed_topics": list(topics),
-            "issue": _capture_error_issue(asset_id="UDMI assets", status_detail=capture_error_status),
+            "issue": _capture_error_issue(asset_id=None, status_detail=capture_error_status),
         }
     return {
         "attempted": True,
@@ -1850,13 +2076,13 @@ def _capture_live_payloads_per_asset(
         if valid_messages and not missing
         else (
             _invalid_payload_issue(
-                asset_id="UDMI assets",
-                messages=messages,
+                asset_id=None,
+                messages=expected_messages,
                 missing=missing,
             )
-            if len(valid_messages) != len(messages)
+            if len(valid_messages) != len(expected_messages)
             else _missing_topics_issue(
-                asset_id="UDMI assets",
+                asset_id=None,
                 missing=missing,
                 got_any=bool(valid_messages),
             )
@@ -1886,6 +2112,186 @@ def _capture_topics(parameters: dict[str, object]) -> list[str]:
     return unique
 
 
+def _capture_validation_topics(
+    parameters: dict[str, object],
+    subscribed_topics: list[str],
+    publisher_root: str | None,
+) -> list[str]:
+    """Payload filters that may affect validation for one register asset.
+
+    ``register_topic_filter`` remains in the broker subscription for evidence,
+    but it is deliberately excluded here because a broad parent wildcard can
+    also match siblings or unrelated device topics. The backend normally
+    derives concrete payload siblings from every register wildcard. The root
+    fallback keeps hand-built inputs safe when those concrete fields are absent.
+    """
+    candidates = [
+        _string(parameters.get("state_topic")),
+        _string(parameters.get("metadata_topic")),
+        _string(parameters.get("pointset_topic")),
+    ]
+    extra = parameters.get("extra_capture_topics")
+    if isinstance(extra, list):
+        candidates.extend(_string(topic) for topic in extra)
+    validation_topics = [
+        topic for topic in candidates if topic and _payload_key_for_topic(topic)
+    ]
+    if not validation_topics and publisher_root:
+        validation_topics = [
+            f"{publisher_root}/state",
+            f"{publisher_root}/metadata",
+            f"{publisher_root}/events/pointset",
+            f"{publisher_root}/event/pointset",
+        ]
+    if not validation_topics:
+        validation_topics = list(subscribed_topics)
+    return list(dict.fromkeys(validation_topics))
+
+
+def _entry_publisher_root(entry: dict, entry_topics: list[str]) -> str | None:
+    """One literal publisher root for an expected asset, when safely derivable."""
+    primary_topics = [
+        _string(entry.get("state_topic")),
+        _string(entry.get("metadata_topic")),
+        _string(entry.get("pointset_topic")),
+    ]
+    extra = entry.get("extra_capture_topics")
+    if isinstance(extra, list):
+        primary_topics.extend(_string(topic) for topic in extra)
+    candidates = [
+        root
+        for topic in primary_topics
+        if topic
+        if (root := _publisher_root_from_filter(topic)) is not None
+    ]
+    if not candidates:
+        register_filter = _string(entry.get("register_topic_filter"))
+        if register_filter:
+            root = _publisher_root_from_filter(register_filter)
+            return root
+        candidates = [
+            root
+            for topic in entry_topics
+            if (root := _publisher_root_from_filter(topic)) is not None
+        ]
+    unique = list(dict.fromkeys(candidates))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _publisher_root_from_filter(topic_filter: str) -> str | None:
+    """Literal device root from one expected topic/filter, rejecting ambiguity."""
+    text = topic_filter.strip().strip("/")
+    if not text:
+        return None
+    wildcard_root = text.endswith("/#")
+    if wildcard_root:
+        text = text[:-2]
+    elif "+" in text or "#" in text:
+        return None
+    if not wildcard_root:
+        for suffix in ("/events/pointset", "/event/pointset", "/metadata", "/state", "/pointset"):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)]
+                break
+        else:
+            if "/" not in text:
+                return None
+            text = text.rsplit("/", 1)[0]
+    parts = text.split("/")
+    if not parts or any(not part or part in {"+", "#"} for part in parts):
+        return None
+    return "/".join(parts)
+
+
+def _topic_within_publisher_root(topic: str, publisher_root: str) -> bool:
+    """Whether a concrete broker topic belongs to one literal publisher root."""
+    concrete = topic.strip().strip("/")
+    root = publisher_root.strip().strip("/")
+    return bool(root and (concrete == root or concrete.startswith(f"{root}/")))
+
+
+def _unexpected_measurement_scope(expected_roots: list[str | None]) -> str | None:
+    """A strict common parent filter, never an unbounded bare ``#``."""
+    if not expected_roots or any(root is None for root in expected_roots):
+        return None
+    roots = [str(root) for root in expected_roots]
+    split_roots = [root.split("/") for root in roots]
+    common: list[str] = []
+    for parts in zip(*split_roots, strict=False):
+        if len(set(parts)) != 1:
+            break
+        common.append(parts[0])
+    # The scope must be a PARENT of every expected publisher. When all roots
+    # are identical (including the one-asset case), step up one level to make
+    # sibling discovery possible.
+    if common and any(len(common) >= len(parts) for parts in split_roots):
+        common.pop()
+    if not common or any(part in {"", "+", "#"} for part in common):
+        return None
+    return "/".join(common) + "/#"
+
+
+def _measure_unexpected_publishers(
+    parameters: dict[str, object],
+    messages: list[MqttMessage],
+    expected_roots: list[str | None],
+    measurement_scope: str | None,
+    *,
+    measured: bool,
+) -> None:
+    """Persist a deterministic, deduplicated inventory of unexpected siblings."""
+    parameters["unexpected_devices_measured"] = bool(measurement_scope and measured)
+    parameters["unexpected_devices_measurement_scope"] = measurement_scope
+    if not measurement_scope:
+        parameters["unexpected_devices"] = []
+        return
+    literal_expected_roots = [root for root in expected_roots if root]
+    grouped: dict[str, list[MqttMessage]] = defaultdict(list)
+    for message in messages:
+        if not _topic_matches_filter(message.topic, measurement_scope):
+            continue
+        if any(_topic_belongs_to_root(message.topic, root) for root in literal_expected_roots):
+            continue
+        grouped[_publisher_root_from_message_topic(message.topic)].append(message)
+
+    unexpected: list[dict[str, object]] = []
+    for topic_root in sorted(grouped):
+        publisher_messages = grouped[topic_root]
+        latest = max(publisher_messages, key=lambda message: message.received_at.timestamp())
+        unexpected.append(
+            {
+                "id": "unexpected-"
+                + hashlib.sha256(topic_root.encode("utf-8")).hexdigest()[:12],
+                "topic_root": topic_root,
+                "topics": sorted({message.topic for message in publisher_messages}),
+                "last_seen": latest.received_at.isoformat(),
+            }
+        )
+    parameters["unexpected_devices"] = unexpected
+
+
+def _topic_belongs_to_root(topic: str, root: str) -> bool:
+    return topic == root or topic.startswith(root + "/")
+
+
+def _publisher_root_from_message_topic(topic: str) -> str:
+    text = topic.strip().strip("/")
+    for marker in ("/events/", "/event/"):
+        if marker in text:
+            return text.split(marker, 1)[0]
+    for suffix in ("/metadata", "/state", "/pointset", "/config"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text.rsplit("/", 1)[0] if "/" in text else text
+
+
+def _unexpected_devices(parameters: dict[str, object]) -> list[dict[str, object]]:
+    value = parameters.get("unexpected_devices")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
 def _payload_key_for_topic(topic: str) -> str | None:
     if topic.endswith("/state"):
         return "state_payload"
@@ -1904,9 +2310,12 @@ def _uses_direct_payload_inputs(parameters: dict[str, object]) -> bool:
 
 
 def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
+    device_list: list[str] = []
+    not_publishing: list[str] = []
+    capture_details: dict[str, str] = {}
     report: dict[str, object] = {
-        "DeviceList": [],
-        "DevicesNotPublishing": [],
+        "DeviceList": device_list,
+        "DevicesNotPublishing": not_publishing,
         "DevicesNotExpected": {},
         "DevicePayloadErrors": {},
         "DevicePointsetErrors": {},
@@ -1915,7 +2324,7 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
         "DevicesStateValid": [],
         # asset_id -> one-line capture diagnostic for a not-publishing asset
         # (subscribed topics vs what actually arrived), appended to its issue.
-        "DeviceCaptureDetails": {},
+        "DeviceCaptureDetails": capture_details,
     }
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
@@ -1929,7 +2338,7 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
                 continue
             expected = _dict_or_empty(entry.get("expected_schedule"))
             asset_id = str(expected.get("asset_id") or "UDMI asset")
-            report["DeviceList"].append(asset_id)  # type: ignore[union-attr]
+            device_list.append(asset_id)
             # An empty JSON object is still an observed payload (albeit one that
             # will fail structural validation), so presence cannot use bool({}).
             has_payload = any(
@@ -1937,10 +2346,10 @@ def _inline_full_report(parameters: dict[str, object]) -> dict[str, object]:
                 for key in ("state_payload", "metadata_payload", "pointset_payload")
             )
             if capture_attempted and not has_payload:
-                report["DevicesNotPublishing"].append(asset_id)  # type: ignore[union-attr]
+                not_publishing.append(asset_id)
                 detail = _asset_capture_detail(entry)
                 if detail:
-                    report["DeviceCaptureDetails"][asset_id] = detail  # type: ignore[index]
+                    capture_details[asset_id] = detail
         return report
     expected = _dict_or_empty(parameters.get("expected_schedule"))
     asset_id = str(expected.get("asset_id") or "UDMI asset") if expected else "UDMI asset"
@@ -2040,24 +2449,30 @@ def _asset_capture_detail(entry: dict) -> str:
     if not subscribed:
         return ""
     raw_messages = entry.get("messages")
-    observed = list(
+    validation_observed = list(
         dict.fromkeys(
             str(message.get("topic"))
             for message in (raw_messages if isinstance(raw_messages, list) else [])
             if isinstance(message, dict) and message.get("topic")
         )
     )
-    if observed:
-        slot_topics = [topic for topic in observed if _payload_key_for_topic(topic)]
-        if slot_topics:
-            return (
-                f"Messages arrived on {', '.join(slot_topics)} but their payloads "
-                "were not JSON objects."
-            )
+    raw_observed_topics = entry.get("observed_topics")
+    if isinstance(raw_observed_topics, list):
+        observed = list(dict.fromkeys(str(topic) for topic in raw_observed_topics if str(topic)))
+    else:
+        # Backward-compatible fallback for persisted/imported runs produced
+        # before diagnostic observations were kept separate from validation.
+        observed = list(validation_observed)
+    if validation_observed:
         return (
-            f"Messages arrived on {', '.join(observed)} but none is a recognised UDMI "
-            "payload topic (ending /state, /metadata, or /pointset); check the "
-            "register's Expected topic against the device's actual topics."
+            f"Messages arrived on {', '.join(validation_observed)} but their payloads "
+            "were not JSON objects."
+        )
+    if observed:
+        return (
+            f"Messages arrived on {', '.join(observed)} but none matches this asset's "
+            "expected state, metadata, or pointset topic; check the register's Expected "
+            "topics against the device's actual topics."
         )
     return (
         f"Nothing arrived on the subscribed topics ({', '.join(subscribed)}) during the "
@@ -2069,13 +2484,14 @@ def _asset_capture_detail(entry: dict) -> str:
 def _issue(
     issues: list[ValidationIssueRecord],
     *,
-    asset_id: str,
+    asset_id: str | None,
     issue_type: str,
     severity: str,
     description: str,
     point_name: str | None = None,
     expected_value: str | None = None,
     observed_value: str | None = None,
+    match_basis: str | None = None,
     suggested_action: str | None = None,
     raw_evidence_uri: str | None = None,
 ) -> ValidationIssueRecord:
@@ -2099,9 +2515,46 @@ def _issue(
         point_name=point_name,
         expected_value=expected_value,
         observed_value=observed_value,
+        match_basis=match_basis,
         suggested_action=suggested_action,
         raw_evidence_uri=raw_evidence_uri,
     )
+
+
+def _unique_udmi_issue_ids(
+    issues: list[ValidationIssueRecord],
+) -> list[ValidationIssueRecord]:
+    """Deterministically renumber every UDMI prefix in the final issue order.
+
+    Some capture helpers are deliberately usable in isolation and therefore
+    create ``...-0001`` against an empty list. Once those records are combined
+    with fixture and structural findings, this final pass prevents duplicate
+    primary identifiers without changing categories or issue order.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    unique: list[ValidationIssueRecord] = []
+    used: set[str] = set()
+    for issue in issues:
+        match = re.match(r"^(UDMI-[A-Z]+)-\d+$", issue.issue_id)
+        if match is None:
+            candidate = issue.issue_id
+            if candidate in used:
+                suffix = 2
+                while f"{candidate}-{suffix}" in used:
+                    suffix += 1
+                candidate = f"{candidate}-{suffix}"
+        else:
+            prefix = match.group(1)
+            counts[prefix] += 1
+            candidate = f"{prefix}-{counts[prefix]:04d}"
+            while candidate in used:
+                counts[prefix] += 1
+                candidate = f"{prefix}-{counts[prefix]:04d}"
+        used.add(candidate)
+        unique.append(
+            issue if candidate == issue.issue_id else issue.model_copy(update={"issue_id": candidate})
+        )
+    return unique
 
 
 def _list_value(full_report: dict[str, Any], key: str) -> list[str]:
@@ -2138,6 +2591,9 @@ def _template_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+_ROOM_FIELD_PATTERN = re.compile(r"^[-_a-zA-Z0-9]+$")
+
+
 # Canonical UDMI 1.5.2 patterns for the register-supplied metadata identity
 # fields (mirrors the vendored schemas/udmi/1.5.2/model_system.json). The
 # expected template embeds the register value only when it fits the canonical
@@ -2148,7 +2604,7 @@ def _template_timestamp() -> str:
 _METADATA_REGISTER_FIELDS: dict[str, tuple[str, str, re.Pattern[str], str]] = {
     # register key -> (register label, UDMI metadata path, pattern, placeholder)
     "site": ("Site", "system.location.site", re.compile(r"^[A-Z]{2}-[A-Z]{3,4}-[A-Z0-9]{2,9}$"), "ZZ-TEST-000"),
-    "room": ("Room", "system.location.section", re.compile(r"^[A-Z0-9-]+$"), "UNSPECIFIED"),
+    "room": ("Room", "system.location.room", _ROOM_FIELD_PATTERN, "UNSPECIFIED"),
     "guid": ("GUID", "system.physical_tag.asset.guid", re.compile(r"^[a-z]+://[-0-9a-zA-Z_$]+$"), "placeholder://asset"),
     "asset_id": ("Asset ID", "system.physical_tag.asset.name", re.compile(r"^[A-Z]{2,6}-[1-9][0-9]*$"), "ASSET-1"),
 }
@@ -2161,26 +2617,12 @@ def _template_metadata_value(expected: dict[str, Any], register_key: str) -> str
     return value if pattern.match(value) else placeholder
 
 
-# model_system.json location.room — laxer than section (mixed case, underscores),
-# so a free-text-ish register Room like "2-09_Meter_Room" is still canonical UDMI.
-_ROOM_FIELD_PATTERN = re.compile(r"^[-_a-zA-Z0-9]+$")
-
-
 def _template_location(expected: dict[str, Any]) -> dict[str, str]:
-    """The template's system.location: site plus the register Room where it fits.
-
-    The Room value lands in ``section`` when it fits the strict section pattern,
-    in ``room`` when it fits only the laxer room pattern (real devices publish
-    either field), and as the section placeholder otherwise.
-    """
-    location = {"site": _template_metadata_value(expected, "site")}
-    room_value = str(expected.get("room") or "")
-    section_pattern = _METADATA_REGISTER_FIELDS["room"][2]
-    if room_value and not section_pattern.match(room_value) and _ROOM_FIELD_PATTERN.match(room_value):
-        location["room"] = room_value
-    else:
-        location["section"] = _template_metadata_value(expected, "room")
-    return location
+    """The template's system.location, using the register's Room as ``room``."""
+    return {
+        "site": _template_metadata_value(expected, "site"),
+        "room": _template_metadata_value(expected, "room"),
+    }
 
 
 def _register_canonical_notes(
@@ -2205,15 +2647,6 @@ def _register_canonical_notes(
         value = str(raw)
         if pattern.match(value):
             continue
-        if register_key == "room" and _ROOM_FIELD_PATTERN.match(value):
-            # Not canonical as location.section, but perfectly canonical as
-            # location.room — the template embeds it there, nothing to report.
-            continue
-        room_alternative = (
-            f" or as system.location.room ({_ROOM_FIELD_PATTERN.pattern})"
-            if register_key == "room"
-            else ""
-        )
         notes.append(
             _issue(
                 [*issues, *notes],
@@ -2222,7 +2655,7 @@ def _register_canonical_notes(
                 severity="low",
                 description=(
                     f"Register {label} '{value}' cannot appear in canonical UDMI metadata "
-                    f"({path} must match {pattern.pattern}{room_alternative}); the expected "
+                    f"({path} must match {pattern.pattern}); the expected "
                     f"template shows the placeholder '{placeholder}' instead."
                 ),
                 expected_value=pattern.pattern,

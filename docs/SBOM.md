@@ -90,6 +90,16 @@ Common transitive dependencies (`anyio`, `sniffio`, `idna`, `certifi`,
 PSF-2.0, or MPL-2.0 (`certifi`). The full list with versions is in the
 generated table.
 
+## Vendored data
+
+- The canonical UDMI 1.5.2 schema closure is Apache-2.0 licensed. Its source
+  pin and full license are stored under
+  `core/smart_commissioning_core/schemas/udmi/`.
+- The Google Digital Buildings unit names used for offline register and payload
+  checks are derived from the Apache-2.0 licensed ontology resource at the
+  commit recorded under `core/smart_commissioning_core/schemas/dbo/`. The
+  adjacent license is included in the Python package and Windows bundle.
+
 ## License risk assessment
 
 The allowlist used by the CI gate is permissive + weak-copyleft:

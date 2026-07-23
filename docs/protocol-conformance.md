@@ -36,21 +36,26 @@ Validated features (each exercised by unit tests with inline/fixture payloads):
 
 | UDMI feature | What is checked | Status |
 | --- | --- | --- |
-| Schema version match | register `Expected schema version` vs each payload's top-level `version`; missing payload version flagged; mismatch is a critical issue and blocks structural checks against the wrong schema. | Tested |
+| Schema version match | register `Expected schema version` vs each payload's top-level `version`; a missing payload version is flagged, while a supported register version still supplies enough authority to check the remaining required fields without changing the raw payload; a declared mismatch is critical and blocks structural checks against the wrong schema. | Tested |
 | Canonical schema checks (per declared version, 1.5.2 pinned) | complete offline validation through the official recursive state, metadata, and events/pointset schema closure: nested required fields, types, RFC 3339 formats, patterns, enums, numeric limits, and additional-property rules. Focused checks retain clearer point-name/shape messages where useful. | Tested |
 | `state` payload | manufacturer (`system.hardware.make`) and model (`system.hardware.model`) match the asset register; offline/error states. | Tested (inline payloads) |
 | `metadata` payload | asset GUID (`system.physical_tag.asset.guid`) matches the register; point units sourced from `metadata.pointset.points`; expected points must be defined in the metadata pointset (missing/extra flagged). | Tested |
 | `pointset` payload | expected points present; unexpected points flagged; `present_value` is numeric for numeric units. | Tested |
-| Units | the register's expected unit must be present in metadata and **match** it after normalisation (case, `-`/`_`, and shorthand aliases such as `kwh` → `kilowatt_hours`); imported point/unit lists must pair one-to-one; the unit must also be a known UDMI unit (`degrees_celsius`, `parts_per_million`, `percent`, `volts`, `amperes`, `hertz`, `kilowatts`, `kilowatt_hours`, `kilovolt_amperes`, `kilovolt_amperes_reactive`, plus `no_units`/`boolean`/`enum`); numeric units require numeric values. | Tested |
+| Timestamp notation | every schema-declared date-time remains subject to RFC 3339 validation; `Z`, `+00:00`, and `+01:00` are accepted; valid date-times inside one payload are also compared for lexical consistency in separator case, fractional precision, and timezone notation family. Seasonal signed-offset values are not required to be equal. | Tested |
+| Units | the register's expected unit must be present in metadata and **match** it after normalisation (case, `-`/`_`, and explicit shorthand aliases such as `ppb` to `parts_per_billion`); import and validation share the vendored Google Digital Buildings unit vocabulary pinned under `core/smart_commissioning_core/schemas/dbo`; `parts_per_billion` and `parts_per_million` remain different units; numeric units require numeric values. | Tested |
 | Schedule / expected-asset input | a supplied expected schedule (`expected_schedule` with `asset_id`, `manufacturer`, `model`, `guid`, `udmi_version`, `units`) drives the per-point checks; the backend fills it from the imported `mqtt_register` (including `Expected schema version` and wildcard `Expected topic` expansion, plus the legacy `…/event/pointset` capture alias). | Tested |
 | Silent / not-publishing device | devices in `DevicesNotPublishing`, and (live) an empty **or partial** capture window, raise `not_publishing` — a partial capture names each expected topic that never reported. A completed capture window with silent or partially-reporting devices is terminal `succeeded` (stage `udmi_validation_complete_with_silent_devices`) so the operator lands on Results with each silent device red as not publishing; only transport/configuration failures (`broker_unreachable`/`tls_error`/`authentication_error`/`broker_timeout`/`live_capture_unavailable`/`missing_capture_topics`) are terminal `failed` — an unreached broker can never claim a validation. Operator cancellation remains terminal `cancelled` and keeps partial evidence. | Tested (fixture/inline); live capture is live-untested |
+| Unexpected publisher measurement | register-driven live validation derives a non-global parent topic scope from expected publisher roots when that can be done safely; a bounded run observes the full configured window and counts publishers in that scope which match no expected asset. Observational wildcard topics use a separate retained-topic budget, so their traffic cannot consume the cap reserved for expected validation payloads. The count stays separate from expected, observed, compliance, and validation-issue totals. If no safe scope exists, the result states that measurement was unavailable instead of subscribing to bare `#`. | Tested with fake capture; live capture is live-untested |
 | Missing vs unexpected points | expected-but-absent points and received-but-unexpected points are classified separately. | Tested |
 | Full-report fixture mode | normalizes a `full_report.json` (DeviceList, PayloadErrors, PointsetErrors, StateErrors, ...) into issues. | Tested (packaged fixture) |
 
 Issue taxonomy emitted (`ValidationIssueRecord`, prefixes): `UDMI-NP`
-(not_publishing), `UDMI-UN` (unexpected_device), `UDMI-PL` (payload_error),
-`UDMI-PS` (pointset_validation), `UDMI-TS` (pointset_timestamp), `UDMI-ST`
-(state_validation), `UDMI-MD` (metadata_validation).
+(not_publishing), `UDMI-PL` (payload_error), `UDMI-PS`
+(pointset_validation), `UDMI-TS` (pointset_timestamp), `UDMI-ST`
+(state_validation), `UDMI-MD` (metadata_validation). `UDMI-UN`
+(unexpected_device) is a retired legacy prefix and is not emitted by the current
+validation path; unexpected publishers are stored only as separate measurement
+evidence.
 
 **Live capture** (subscribing to a device's `…/state`, `…/metadata`,
 `…/pointset` topics, or a broader `#` / `prefix/#` filter on a live broker) is

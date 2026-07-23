@@ -83,5 +83,46 @@ class NumericValidationTests(unittest.TestCase):
         self.assertEqual([("BACnet device instance", "invalid_numeric")], errors)
 
 
+class UnitVocabularyTests(unittest.TestCase):
+    def _errors(self, unit: str) -> list[tuple[str, str]]:
+        row = dict(EXAMPLE_ROWS["bacnet_points"])
+        row["Expected units"] = unit
+        return [
+            (error.field, error.code)
+            for error in PROFILES["bacnet_points"].validate_row(row, row_number=2)
+        ]
+
+    def test_dbo_ppb_forms_are_accepted(self) -> None:
+        for unit in ("parts_per_billion", "parts-per-billion", "ppb", "PPB"):
+            with self.subTest(unit=unit):
+                self.assertEqual(self._errors(unit), [])
+
+    def test_unrecognized_unit_is_rejected(self) -> None:
+        self.assertEqual(
+            self._errors("parts-per-trillion-ish"),
+            [("Expected units", "invalid_unit")],
+        )
+
+    def _mqtt_errors(self, units: str) -> list[tuple[str, str]]:
+        row = dict(EXAMPLE_ROWS["mqtt_register"])
+        row["Expected points"] = "co2_sensor, humidity_sensor, status"
+        row["Expected units"] = units
+        return [
+            (error.field, error.code)
+            for error in PROFILES["mqtt_register"].validate_row(row, row_number=2)
+        ]
+
+    def test_mqtt_register_accepts_ppb_and_empty_unit_slots(self) -> None:
+        for units in ("ppb", "parts_per_billion", "ppb,,no_units"):
+            with self.subTest(units=units):
+                self.assertEqual(self._mqtt_errors(units), [])
+
+    def test_mqtt_register_rejects_unrecognized_unit_slots(self) -> None:
+        self.assertEqual(
+            self._mqtt_errors("ppb, parts-per-trillion-ish"),
+            [("Expected units", "invalid_unit")],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

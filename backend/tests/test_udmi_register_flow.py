@@ -98,6 +98,7 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(len(assets), 1)
         entry = assets[0]
         self.assertEqual(entry["expected_schedule"]["asset_id"], "EM-1")
+        self.assertEqual(entry["expected_schedule"]["project_site"], "Site A")
         self.assertEqual(entry["expected_schedule"]["system"], "BMS")
         self.assertEqual(entry["expected_schedule"]["points"], ["energy_sensor", "status_flag", "power_sensor"])
         self.assertEqual(entry["expected_schedule"]["units"], {"energy_sensor": "kwh", "power_sensor": "kw"})
@@ -109,7 +110,7 @@ class UdmiRegisterFlowTests(ApiTestCase):
         # Real inline validation, never the packaged sample fixture.
         self.assertEqual(run["result_summary"]["source"], "schedule_payload_inputs")
         validation_summary = run["result_summary"]["validation_summary_v1"]
-        self.assertEqual(validation_summary["schema_version"], "1.0")
+        self.assertEqual(validation_summary["schema_version"], "1.1")
         self.assertEqual(validation_summary["asset_metrics"]["expected"], 1)
         self.assertEqual(validation_summary["system_metrics"][0]["system"], "BMS")
         self.assertEqual(validation_summary["asset_results"][0]["system"], "BMS")

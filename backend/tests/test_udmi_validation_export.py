@@ -1,5 +1,6 @@
 """Focused API coverage for the versioned UDMI validation JSON export."""
 
+import copy
 import json
 import uuid
 from pathlib import Path
@@ -15,6 +16,16 @@ _ENV_OVERRIDES = {
     "API_KEY": _SHARED_KEY,
 }
 _REDACTED = "********"
+
+
+def _export_schema() -> dict:
+    schema_path = (
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "schemas"
+        / "udmi-validation-export-v1.schema.json"
+    )
+    return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
 class UdmiValidationExportApiTests(ApiTestCase):
@@ -177,6 +188,10 @@ class UdmiValidationExportApiTests(ApiTestCase):
 
         body = json.loads(first.content)
         self.assertEqual(body["schema_version"], "1.0")
+        self.assertEqual(
+            body["result_summary"]["validation_summary_v1"]["schema_version"],
+            "1.1",
+        )
         self.assertEqual(body["exported_at"], body["run"]["updated_at"])
         raw_result = body["result_summary"]["raw_result"]
         self.assertEqual(raw_result["password"], _REDACTED)
@@ -204,15 +219,61 @@ class UdmiValidationExportApiTests(ApiTestCase):
         ):
             self.assertNotIn(secret, first.text)
 
-        schema_path = (
-            Path(__file__).resolve().parents[2]
-            / "docs"
-            / "schemas"
-            / "udmi-validation-export-v1.schema.json"
-        )
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        schema = _export_schema()
         Draft202012Validator.check_schema(schema)
         Draft202012Validator(schema).validate(body)
+
+    def test_schema_requires_v11_additions_and_accepts_legacy_v10(self) -> None:
+        schema = _export_schema()
+        summary_schema = {
+            "$schema": schema["$schema"],
+            "$ref": "#/$defs/validationSummary",
+            "$defs": schema["$defs"],
+        }
+        validator = Draft202012Validator(summary_schema)
+        summary = build_validation_summary_v1(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "AHU-1", "system": "BMS"},
+                        "state_topic": "demo-site/AHU-1/state",
+                        "state_payload": {"timestamp": "2026-07-20T10:00:00Z"},
+                    }
+                ]
+            },
+            [],
+        )
+        validator.validate(summary)
+
+        legacy = copy.deepcopy(summary)
+        legacy["schema_version"] = "1.0"
+        legacy["asset_metrics"].pop("unexpected")
+        legacy["payload_metrics"].pop("not_received")
+        legacy.pop("unexpected_devices")
+        legacy.pop("unexpected_devices_measured")
+        legacy.pop("unexpected_devices_measurement_scope")
+        for system in legacy["system_metrics"]:
+            system["asset_metrics"].pop("unexpected")
+            system["payload_metrics"].pop("not_received")
+        validator.validate(legacy)
+
+        missing_cases = (
+            ("top-level unexpected count", ("asset_metrics", "unexpected")),
+            ("top-level not-received count", ("payload_metrics", "not_received")),
+            ("unexpected device rows", ("unexpected_devices",)),
+            ("unexpected measurement flag", ("unexpected_devices_measured",)),
+            ("unexpected measurement scope", ("unexpected_devices_measurement_scope",)),
+            ("system unexpected count", ("system_metrics", 0, "asset_metrics", "unexpected")),
+            ("system not-received count", ("system_metrics", 0, "payload_metrics", "not_received")),
+        )
+        for label, path in missing_cases:
+            with self.subTest(label=label):
+                invalid = copy.deepcopy(summary)
+                parent = invalid
+                for segment in path[:-1]:
+                    parent = parent[segment]
+                parent.pop(path[-1])
+                self.assertTrue(list(validator.iter_errors(invalid)), label)
 
     def test_partial_terminal_and_legacy_runs_remain_exportable(self) -> None:
         legacy_summary = {"expected_devices": 2, "publishing_seen": 1, "issue_count": 0}

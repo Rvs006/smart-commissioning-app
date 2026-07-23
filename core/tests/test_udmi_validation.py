@@ -8,6 +8,7 @@ skipped structural check is never presented as a pass.
 
 import json
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,8 +27,10 @@ from smart_commissioning_core.udmi_schema import (
 from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
     DEFAULT_MAX_MESSAGES,
+    UdmiValidationResult,
     _capture_topics,
     _conformance_fields,
+    _normalise_issues,
     _pointset_freshness_issue,
     validate_udmi_full_report,
 )
@@ -88,6 +91,19 @@ def _pointset(**overrides: object) -> dict:
     return payload
 
 
+class LegacyUnexpectedPublisherTests(unittest.TestCase):
+    def test_devices_not_expected_is_supporting_evidence_not_an_issue(self) -> None:
+        issues = _normalise_issues(
+            {
+                "DevicesNotExpected": {
+                    "rogue-1": ["Publisher was absent from the expected register."]
+                }
+            }
+        )
+
+        self.assertEqual(issues, [])
+
+
 class SchemaVersionMatchTests(unittest.TestCase):
     def test_conformant_payload_set_yields_no_issues(self) -> None:
         issues = _issues(
@@ -126,6 +142,32 @@ class SchemaVersionMatchTests(unittest.TestCase):
         flagged = [issue for issue in issues if "does not declare a UDMI version" in issue.description]
         self.assertEqual(len(flagged), 1)
         self.assertEqual(flagged[0].severity, "high")
+
+    def test_missing_version_uses_supported_register_version_for_required_fields(self) -> None:
+        cases = (
+            ("state_payload", {}, ("'timestamp'", "'system'")),
+            ("metadata_payload", {}, ("'timestamp'", "'system'")),
+            ("pointset_payload", {"points": {}}, ("'timestamp'",)),
+        )
+        for parameter, payload, required_fields in cases:
+            with self.subTest(parameter=parameter):
+                issues = _issues({"expected_schedule": _schedule(), parameter: payload})
+                descriptions = " ".join(issue.description for issue in issues)
+                self.assertIn("does not declare a UDMI version", descriptions)
+                for required_field in required_fields:
+                    self.assertIn(f"Required field {required_field} is missing", descriptions)
+                if parameter == "pointset_payload":
+                    self.assertNotIn("Required field 'points' is missing", descriptions)
+
+    def test_missing_version_does_not_guess_an_unpinned_register_schema(self) -> None:
+        descriptions = _descriptions(
+            {
+                "expected_schedule": _schedule(udmi_version="1.4.1"),
+                "state_payload": {},
+            }
+        )
+        self.assertIn("does not declare a UDMI version", descriptions)
+        self.assertNotIn("Required field", descriptions)
 
     def test_unknown_declared_version_reports_skipped_structural_checks(self) -> None:
         descriptions = _descriptions(
@@ -248,6 +290,48 @@ class NonPubSchemaTests(unittest.TestCase):
         self.assertIn("site_code", violating[0].description)
         self.assertIn("uploaded 'nonpub.1' schema set", violating[0].suggested_action)
 
+    def test_same_document_ref_timestamps_participate_in_style_check(self) -> None:
+        state_schema = {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "required": ["version", "timestamp", "nested"],
+            "properties": {
+                "version": {"type": "string"},
+                "timestamp": {"type": "string", "format": "date-time"},
+                "nested": {"$ref": "#/definitions/nested"},
+            },
+            "definitions": {
+                "nested": {
+                    "type": "object",
+                    "required": ["when"],
+                    "properties": {
+                        "when": {"type": "string", "format": "date-time"},
+                    },
+                }
+            },
+        }
+        payload = {
+            "version": "nonpub.localref",
+            "timestamp": "2026-07-23T11:15:01.000Z",
+            "nested": {"when": "2026-07-23T11:15:01Z"},
+        }
+
+        findings = [
+            finding
+            for finding in structural_issues(
+                "state",
+                payload,
+                {"nonpub.localref": _nonpub_set(state_schema)},
+            )
+            if finding.description.startswith(
+                "Inconsistent timestamp formats in the payload."
+            )
+        ]
+
+        self.assertEqual(len(findings), 1)
+        self.assertIn("nested.when", findings[0].description)
+        self.assertIn("timestamp", findings[0].description)
+
     def test_focused_152_checks_do_not_run_for_nonpub_payloads(self) -> None:
         # No timestamp, no system: fails 1.5.2's focused checks, but the
         # operator's schema does not require them — must be a clean pass.
@@ -352,6 +436,36 @@ class NonPubSchemaTests(unittest.TestCase):
         )
         site_code = [issue for issue in issues if "site_code" in issue.description]
         self.assertEqual(len(site_code), 1, [issue.description for issue in issues])
+
+    def test_missing_version_shadow_uses_case_normalized_nonpub_label(self) -> None:
+        schema = {
+            "type": "object",
+            "required": ["version", "site_code"],
+            "properties": {
+                "version": {"const": "nonpub.1"},
+                "site_code": {"type": "string"},
+            },
+        }
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(
+                    udmi_version="NonPub.1",
+                    units={},
+                ),
+                "state_payload": {"site_code": "GB-LON"},
+                "nonpub_schema_sets": {"nonpub.1": _nonpub_set(schema)},
+            }
+        )
+        descriptions = [issue.description for issue in issues]
+
+        self.assertEqual(
+            sum("does not declare a UDMI version" in text for text in descriptions),
+            1,
+        )
+        self.assertFalse(
+            any("Field 'version' violates" in text for text in descriptions),
+            descriptions,
+        )
 
     def test_register_driven_assets_use_run_level_uploaded_sets(self) -> None:
         # Run creation embeds nonpub_schema_sets at the TOP level of the run
@@ -624,6 +738,117 @@ class StructuralCheckTests(unittest.TestCase):
             ),
         )
 
+    def test_mixed_fractional_precision_is_reported_once_per_document(self) -> None:
+        state = _state(timestamp="2026-07-23T11:15:01.697+01:00")
+        state["system"]["last_config"] = "2026-07-23T11:14:01+01:00"
+        findings = [
+            finding
+            for finding in structural_issues("state", state)
+            if finding.description.startswith(
+                "Inconsistent timestamp formats in the payload."
+            )
+        ]
+        self.assertEqual(len(findings), 1)
+        self.assertIn("system.last_config", findings[0].description)
+        self.assertIn("timestamp", findings[0].description)
+
+    def test_seasonal_signed_offsets_are_one_lexical_style(self) -> None:
+        state = _state(timestamp="2026-07-23T11:15:01.697+01:00")
+        state["system"]["last_config"] = "2026-01-23T10:15:01.697+00:00"
+        descriptions = " ".join(
+            finding.description for finding in structural_issues("state", state)
+        )
+        self.assertNotIn("Inconsistent timestamp formats in the payload.", descriptions)
+
+    def test_z_and_numeric_offset_are_lexically_inconsistent_not_invalid(self) -> None:
+        state = _state(timestamp="2026-07-23T10:15:01.697Z")
+        state["system"]["last_config"] = "2026-07-23T10:14:01.697+00:00"
+        descriptions = " ".join(
+            finding.description for finding in structural_issues("state", state)
+        )
+        self.assertIn("Inconsistent timestamp formats in the payload.", descriptions)
+        self.assertNotIn("not an RFC 3339 date-time string", descriptions)
+
+    def test_invalid_nested_timestamp_does_not_add_consistency_noise(self) -> None:
+        state = _state()
+        state["system"]["last_config"] = "yesterday"
+        descriptions = [
+            finding.description for finding in structural_issues("state", state)
+        ]
+        self.assertTrue(any("not an RFC 3339 date-time string" in text for text in descriptions))
+        self.assertFalse(
+            any(text.startswith("Inconsistent timestamp formats in the payload.") for text in descriptions)
+        )
+
+    def test_nested_metadata_cloud_timestamp_participates_in_style_check(self) -> None:
+        metadata = _metadata(
+            timestamp="2026-07-23T10:15:01.000Z",
+            cloud={"timestamp": "2026-07-23T10:15:01Z"},
+        )
+        descriptions = " ".join(
+            finding.description for finding in structural_issues("metadata", metadata)
+        )
+        self.assertIn("Inconsistent timestamp formats in the payload.", descriptions)
+        self.assertIn("cloud.timestamp", descriptions)
+
+    def test_explicit_offsets_are_valid_across_all_payload_types(self) -> None:
+        for offset in ("+00:00", "+01:00"):
+            state = _state(timestamp=f"2026-07-23T10:00:00{offset}")
+            state["system"]["last_config"] = f"2026-07-23T09:59:00{offset}"
+            payloads = (
+                ("state", state),
+                ("metadata", _metadata(timestamp=f"2026-07-23T10:00:00{offset}")),
+                ("pointset", _pointset(timestamp=f"2026-07-23T10:00:00{offset}")),
+            )
+            for payload_type, payload in payloads:
+                with self.subTest(offset=offset, payload_type=payload_type):
+                    descriptions = " ".join(
+                        finding.description
+                        for finding in structural_issues(payload_type, payload)
+                    )
+                    self.assertNotIn("not an RFC 3339 date-time string", descriptions)
+
+
+class MetadataHierarchyPolicyTests(unittest.TestCase):
+    def test_missing_system_and_location_are_separate_findings(self) -> None:
+        metadata = _metadata()
+        del metadata["system"]
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(site="ZZ-DEMO-01", room="ROOM-1"),
+                "metadata_payload": metadata,
+            }
+        )
+        descriptions = [issue.description for issue in issues]
+        self.assertTrue(any("Required field 'system' is missing" in text for text in descriptions))
+        self.assertEqual(
+            sum(text.startswith("Expected metadata system.location") for text in descriptions),
+            1,
+        )
+
+    def test_present_empty_system_still_reports_missing_location_container(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(site="ZZ-DEMO-01"),
+                "metadata_payload": _metadata(system={}),
+            }
+        )
+        location = [
+            issue for issue in issues if issue.description.startswith("Expected metadata system.location")
+        ]
+        self.assertEqual(len(location), 1)
+        self.assertEqual(location[0].observed_value, "location missing")
+        self.assertNotIn(
+            "Required field 'system' is missing",
+            " ".join(issue.description for issue in issues),
+        )
+
+    def test_location_policy_is_not_invented_without_register_site_or_room(self) -> None:
+        descriptions = _descriptions(
+            {"expected_schedule": _schedule(), "metadata_payload": _metadata(system={})}
+        )
+        self.assertNotIn("Expected metadata system.location", descriptions)
+
     def test_required_field_present_but_null_is_flagged(self) -> None:
         issues = _issues(
             {
@@ -689,6 +914,7 @@ class UnitMatchTests(unittest.TestCase):
         self.assertEqual(len(mismatches), 1)
         self.assertEqual(mismatches[0].expected_value, "volts")
         self.assertEqual(mismatches[0].observed_value, "amperes")
+        self.assertEqual(mismatches[0].match_basis, "units")
 
     def test_unit_aliases_and_separators_do_not_trip_false_mismatches(self) -> None:
         descriptions = _descriptions(
@@ -701,7 +927,7 @@ class UnitMatchTests(unittest.TestCase):
             }
         )
         self.assertNotIn("does not match the expected register unit", descriptions)
-        self.assertNotIn("not a supported UDMI unit", descriptions)
+        self.assertNotIn("not a recognized DBO unit", descriptions)
 
     def test_unknown_units_are_still_flagged(self) -> None:
         descriptions = _descriptions(
@@ -709,7 +935,55 @@ class UnitMatchTests(unittest.TestCase):
                 "expected_schedule": _schedule(units={"temp_sensor": "dagrees_celsius"}),
             }
         )
-        self.assertIn("not a supported UDMI unit", descriptions)
+        self.assertIn("not a recognized DBO unit", descriptions)
+
+    def test_parts_per_billion_is_a_known_numeric_dbo_unit(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(units={"co2_sensor": "ppb"}),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"co2_sensor": {"units": "parts_per_billion"}}}
+                ),
+                "pointset_payload": _pointset(
+                    points={"co2_sensor": {"present_value": 625.0}}
+                ),
+            }
+        )
+        descriptions = " ".join(issue.description for issue in issues)
+        self.assertNotIn("does not match the expected register unit", descriptions)
+        self.assertNotIn("not a recognized DBO unit", descriptions)
+
+    def test_ppb_value_must_be_numeric(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(units={"co2_sensor": "parts_per_billion"}),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"co2_sensor": {"units": "ppb"}}}
+                ),
+                "pointset_payload": _pointset(
+                    points={"co2_sensor": {"present_value": "625"}}
+                ),
+            }
+        )
+        numeric = [issue for issue in issues if "should be numeric" in issue.description]
+        self.assertEqual(len(numeric), 1)
+
+    def test_ppb_and_ppm_remain_different_units(self) -> None:
+        issues = _issues(
+            {
+                "expected_schedule": _schedule(units={"co2_sensor": "ppb"}),
+                "metadata_payload": _metadata(
+                    pointset={"points": {"co2_sensor": {"units": "ppm"}}}
+                ),
+            }
+        )
+        mismatches = [
+            issue
+            for issue in issues
+            if "does not match the expected register unit" in issue.description
+        ]
+        self.assertEqual(len(mismatches), 1)
+        self.assertEqual(mismatches[0].match_basis, "units")
 
     def test_expected_metadata_unit_must_be_present(self) -> None:
         issues = _issues(
@@ -725,6 +999,7 @@ class UnitMatchTests(unittest.TestCase):
         self.assertEqual(len(missing), 1)
         self.assertEqual(missing[0].expected_value, "amperes")
         self.assertEqual(missing[0].observed_value, "missing")
+        self.assertEqual(missing[0].match_basis, "units")
         # An ABSENT units key is the "does not declare units" case only — the
         # present-but-empty message must NOT also fire.
         self.assertNotIn(
@@ -1043,7 +1318,7 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(expected_by_type["state"]["system"]["hardware"], {"make": "Schneider", "model": "PM5121"})
         self.assertEqual(expected_by_type["state"]["system"]["software"], {"firmware": "1.2.3"})
         self.assertEqual(expected_by_type["metadata"]["system"]["physical_tag"]["asset"], {"guid": "ifc://changeMe0123", "name": "DEMO-1000001"})
-        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "ZZ-DEMO-01", "section": "DEMO-ROOM-01"})
+        self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "ZZ-DEMO-01", "room": "DEMO-ROOM-01"})
         self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
         self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": None}})
 
@@ -1203,7 +1478,7 @@ class MetadataPointCoverageTests(unittest.TestCase):
         )
         self.assertEqual(structural_issues("metadata", expected_metadata), [])
         self.assertEqual(expected_metadata["system"]["physical_tag"]["asset"]["name"], "ASSET-1")
-        self.assertEqual(expected_metadata["system"]["location"]["section"], "UNSPECIFIED")
+        self.assertEqual(expected_metadata["system"]["location"]["room"], "UNSPECIFIED")
 
     def test_expected_template_tolerates_malformed_point_constraints(self) -> None:
         result = validate_udmi_full_report({"expected_schedule": _schedule(points=42)})
@@ -1684,6 +1959,20 @@ class CaptureRunTimeTests(unittest.TestCase):
         self.assertIn("a/b/events/pointset", missing_issues[0].description)
         self.assertNotIn("a/b/state", missing_issues[0].description)
 
+    def test_final_udmi_issue_ids_are_unique_after_capture_aggregation(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                **_TOPICS,
+                "capture_seconds": 1,
+                "expected_schedule": _schedule(),
+            },
+            live_capture=RecordingCapture([]),
+            cancel_check=lambda: False,
+        )
+        ids = [issue.issue_id for issue in result.issues]
+        self.assertEqual(len(ids), len(set(ids)))
+
 
 class SharedMultiAssetCaptureTests(unittest.TestCase):
     def test_one_shared_capture_routes_payloads_to_each_asset(self) -> None:
@@ -1705,12 +1994,20 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         }
         result = validate_udmi_full_report(parameters, live_capture=capture, cancel_check=lambda: False)
         self.assertEqual(len(capture.calls), 1)
-        self.assertEqual(capture.calls[0]["topics"], ["site/a1/state", "site/a2/state"])
-        self.assertEqual(result.result_summary["subscribed_topics"], ["site/a1/state", "site/a2/state"])
+        self.assertEqual(
+            capture.calls[0]["topics"],
+            ["site/a1/state", "site/a2/state", "site/#"],
+        )
+        self.assertEqual(
+            result.result_summary["subscribed_topics"],
+            ["site/a1/state", "site/a2/state", "site/#"],
+        )
         entries = result.result_summary["payload_views"]
         self.assertEqual([view["asset_id"] for view in entries], ["A1", "A2"])
         self.assertEqual(result.result_summary["broker_status_detail"], "live_payloads_captured")
         self.assertEqual(result.result_summary["message_count"], 3)
+        self.assertTrue(result.result_summary["unexpected_devices_measured"])
+        self.assertEqual(result.result_summary["unexpected_device_count"], 0)
         # Messages routed back per entry: A2 saw both publishes, last one wins.
         asset_entries = parameters["assets"]
         self.assertEqual(len(asset_entries[0]["messages"]), 1)
@@ -1756,6 +2053,213 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         self.assertEqual(result.result_summary["broker_status_detail"], "live_capture_timeout")
         missing_issues = [issue for issue in result.issues if issue.issue_type == "not_publishing"]
         self.assertTrue(any("site/a2/state" in issue.description for issue in missing_issues))
+        self.assertNotIn("UDMI assets", {issue.asset_id for issue in result.issues})
+
+    def test_unsafe_disjoint_roots_disable_unexpected_publisher_measurement(self) -> None:
+        capture = RecordingCapture([_msg("site/a1/state"), _msg("other/a2/state")])
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "other/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(capture.calls[0]["topics"], ["site/a1/state", "other/a2/state"])
+        self.assertFalse(result.result_summary["unexpected_devices_measured"])
+        self.assertIsNone(result.result_summary["unexpected_devices_measurement_scope"])
+        self.assertEqual(result.result_summary["unexpected_devices"], [])
+        self.assertTrue(capture.calls[0]["stop_when"](capture.messages))
+
+    def test_unexpected_sibling_is_deduplicated_without_becoming_an_issue(self) -> None:
+        early = datetime(2026, 7, 23, 10, 0, tzinfo=UTC)
+        late = datetime(2026, 7, 23, 10, 5, tzinfo=UTC)
+        messages = [
+            _msg("site/a1/state"),
+            _msg("site/a2/state"),
+            MqttMessage("site/a3/state", b"{}", received_at=early),
+            MqttMessage("site/a3/state", b"{}", received_at=late),
+            MqttMessage("site/a3/metadata", b"{}", received_at=late),
+        ]
+        capture = RecordingCapture(messages)
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(result.result_summary["unexpected_devices_measurement_scope"], "site/#")
+        self.assertEqual(result.result_summary["unexpected_device_count"], 1)
+        unexpected = result.result_summary["unexpected_devices"][0]
+        self.assertRegex(unexpected["id"], r"^unexpected-[0-9a-f]{12}$")
+        self.assertEqual(unexpected["topic_root"], "site/a3")
+        self.assertEqual(
+            unexpected["topics"],
+            ["site/a3/metadata", "site/a3/state"],
+        )
+        self.assertEqual(unexpected["last_seen"], late.isoformat())
+        self.assertEqual(result.result_summary["expected_devices"], 2)
+        self.assertFalse(
+            [issue for issue in result.issues if issue.issue_type == "unexpected_device"]
+        )
+
+    def test_bounded_measurement_does_not_stop_when_expected_publishers_complete(self) -> None:
+        capture = RecordingCapture([_msg("site/a1/state"), _msg("site/a2/state")])
+        validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 10,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        call = capture.calls[0]
+        self.assertEqual(call["timeout_seconds"], 10.0)
+        self.assertFalse(call["stop_when"](capture.messages))
+
+    def test_observation_cap_is_separate_and_marks_measurement_as_partial(self) -> None:
+        capture = RecordingCapture(
+            [
+                _msg("site/a1/state"),
+                _msg("site/a3/state"),
+                _msg("site/a3/metadata"),
+            ]
+        )
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 10,
+                "max_messages": 2,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(capture.calls[0]["max_messages"], 2)
+        self.assertEqual(
+            capture.calls[0]["primary_topics"],
+            ["site/a1/state", "site/a2/state"],
+        )
+        self.assertEqual(capture.calls[0]["secondary_max_messages"], 2)
+        self.assertFalse(result.result_summary["unexpected_devices_measured"])
+        self.assertEqual(result.result_summary["unexpected_device_count"], 1)
+        self.assertNotIn("UDMI assets", {issue.asset_id for issue in result.issues})
+
+    def test_invalid_unexpected_payload_does_not_create_a_validation_issue(self) -> None:
+        capture = ProgressRecordingCapture(
+            [
+                _msg("site/a1/state", b'{"source":"a1"}'),
+                _msg("site/a2/state", b'{"source":"a2"}'),
+                _msg("site/a3/state", b"not-json"),
+            ]
+        )
+        assets = [
+            {
+                "expected_schedule": {"asset_id": "A1"},
+                "state_topic": "site/a1/state",
+                "register_topic_filter": "site/#",
+            },
+            {
+                "expected_schedule": {"asset_id": "A2"},
+                "state_topic": "site/a2/state",
+                "register_topic_filter": "site/#",
+            },
+        ]
+        provisional_results: list[UdmiValidationResult] = []
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": assets,
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+            progress_callback=lambda build: provisional_results.append(build()),
+        )
+
+        self.assertEqual(result.result_summary["unexpected_device_count"], 1)
+        self.assertEqual(
+            capture.calls[0]["primary_topics"],
+            ["site/a1/state", "site/a2/state"],
+        )
+        self.assertEqual(
+            [[message["topic"] for message in asset["messages"]] for asset in assets],
+            [["site/a1/state"], ["site/a2/state"]],
+        )
+        self.assertEqual(
+            [asset["observed_topics"] for asset in assets],
+            [["site/a1/state"], ["site/a2/state"]],
+        )
+        self.assertFalse(
+            [
+                issue
+                for issue in result.issues
+                if issue.asset_id is None and issue.issue_type == "payload_error"
+            ]
+        )
+        self.assertTrue(provisional_results)
+        self.assertFalse(
+            [
+                issue
+                for snapshot in provisional_results
+                for issue in snapshot.issues
+                if issue.asset_id is None and issue.issue_type == "payload_error"
+            ]
+        )
+
+    def test_bounded_cancel_keeps_partial_unexpected_rows_but_not_measured(self) -> None:
+        messages = [_msg("site/a1/state"), _msg("site/a3/state")]
+        cancel_state = {"requested": False}
+        calls: list[dict] = []
+
+        def cancelling_capture(_settings: object, **kwargs: object) -> list[MqttMessage]:
+            calls.append(kwargs)
+            # Model the real transport after it has accepted these messages:
+            # the next loop check observes cancellation and returns the partial
+            # list normally rather than raising an interruption exception.
+            cancel_state["requested"] = True
+            capture_cancel_check = kwargs["cancel_check"]
+            self.assertTrue(callable(capture_cancel_check))
+            self.assertTrue(capture_cancel_check())
+            return messages
+
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 10,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=cancelling_capture,
+            cancel_check=lambda: cancel_state["requested"],
+        )
+
+        self.assertEqual(calls[0]["topics"], ["site/a1/state", "site/a2/state", "site/#"])
+        self.assertFalse(result.result_summary["unexpected_devices_measured"])
+        self.assertEqual(result.result_summary["unexpected_device_count"], 1)
+        self.assertEqual(
+            result.result_summary["unexpected_devices"][0]["topic_root"],
+            "site/a3",
+        )
 
     def test_not_publishing_issue_names_subscribed_and_observed_topics(self) -> None:
         # On-site 2026-07-13: a device visible in MQTT Explorer was reported
@@ -1777,7 +2281,7 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
                     {
                         "expected_schedule": {"asset_id": "A2"},
                         "state_topic": "site/a2/state",
-                        "register_topic_filter": "site/a2/#",
+                        "register_topic_filter": "site/#",
                     },
                     {"expected_schedule": {"asset_id": "A3"}, "state_topic": "site/a3/state"},
                 ],
@@ -1792,9 +2296,37 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         }
         self.assertEqual(set(by_asset), {"A2", "A3"})
         self.assertIn("site/a2/events/system", by_asset["A2"])
-        self.assertIn("none is a recognised UDMI payload topic", by_asset["A2"])
+        self.assertIn("none matches this asset's expected", by_asset["A2"])
         self.assertIn("Nothing arrived on the subscribed topics", by_asset["A3"])
         self.assertIn("site/a3/state", by_asset["A3"])
+
+    def test_valid_json_on_unknown_same_device_topic_is_a_topic_mismatch(self) -> None:
+        capture = RecordingCapture(
+            [_msg("site/a2/wrong/state", b'{"source":"a2"}')]
+        )
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 1,
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A2"},
+                        "state_topic": "site/a2/state",
+                        "register_topic_filter": "site/#",
+                    }
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        issue = next(
+            issue
+            for issue in result.issues
+            if issue.issue_type == "not_publishing" and issue.asset_id == "A2"
+        )
+        self.assertIn("site/a2/wrong/state", issue.description)
+        self.assertIn("none matches this asset's expected", issue.description)
+        self.assertNotIn("were not JSON objects", issue.description)
 
     def test_register_wildcard_is_subscribed_alongside_derived_topics(self) -> None:
         capture = RecordingCapture([_msg("site/a1/state")])
