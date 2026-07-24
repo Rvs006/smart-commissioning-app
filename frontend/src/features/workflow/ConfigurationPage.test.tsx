@@ -253,9 +253,9 @@ describe("ConfigurationPage", () => {
     renderPage();
 
     // MQTT Settings is expanded by default, so the password field is present.
-    const passwordLabel = (await screen.findByText("MQTT Password")).closest("label");
-    expect(passwordLabel).not.toBeNull();
-    const input = within(passwordLabel as HTMLElement).getByDisplayValue("********") as HTMLInputElement;
+    const input = (await screen.findByLabelText("MQTT Password")) as HTMLInputElement;
+    const passwordField = input.closest(".field-control");
+    expect(passwordField).not.toBeNull();
     // The adjacent indicator must not pollute the input's accessible name.
     expect(input).toHaveAccessibleName("MQTT Password");
 
@@ -265,10 +265,10 @@ describe("ConfigurationPage", () => {
     // indicator and a hint explaining how to replace it are shown, and the input
     // stays masked so the sentinel can never render as text.
     expect(input.type).toBe("password");
-    expect((passwordLabel as HTMLElement).querySelector(".secret-stored-note")).not.toBeNull();
-    expect(within(passwordLabel as HTMLElement).getByText(/never displayed/i)).toBeInTheDocument();
+    expect((passwordField as HTMLElement).querySelector(".secret-stored-note")).not.toBeNull();
+    expect(within(passwordField as HTMLElement).getByText(/never displayed/i)).toBeInTheDocument();
     expect(
-      within(passwordLabel as HTMLElement).queryByRole("button", { name: /Show MQTT Password/i }),
+      within(passwordField as HTMLElement).queryByRole("button", { name: /Show MQTT Password/i }),
     ).toBeNull();
   });
 
@@ -282,24 +282,25 @@ describe("ConfigurationPage", () => {
 
     renderPage();
 
-    const passwordLabel = (await screen.findByText("MQTT Password")).closest("label");
-    const input = within(passwordLabel as HTMLElement).getByDisplayValue("********") as HTMLInputElement;
+    const input = (await screen.findByLabelText("MQTT Password")) as HTMLInputElement;
+    const passwordField = input.closest(".field-control");
+    expect(passwordField).not.toBeNull();
 
     // Focusing the stored-secret field blanks it (the onFocus swap); typing a
     // replacement leaves the sentinel behind, so the real Show/Hide toggle
     // returns and the "Saved — hidden" indicator disappears.
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "s3cret-new" } });
-    expect((passwordLabel as HTMLElement).querySelector(".secret-stored-note")).toBeNull();
+    expect((passwordField as HTMLElement).querySelector(".secret-stored-note")).toBeNull();
 
     // Masked by default, revealed on click, re-hidden on a second click, and it
     // keeps working past the first toggle (the original one-view bug).
     expect(input.type).toBe("password");
-    fireEvent.click(within(passwordLabel as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
+    fireEvent.click(within(passwordField as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
     expect(input.type).toBe("text");
-    fireEvent.click(within(passwordLabel as HTMLElement).getByRole("button", { name: /Hide MQTT Password/i }));
+    fireEvent.click(within(passwordField as HTMLElement).getByRole("button", { name: /Hide MQTT Password/i }));
     expect(input.type).toBe("password");
-    fireEvent.click(within(passwordLabel as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
+    fireEvent.click(within(passwordField as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
     expect(input.type).toBe("text");
   });
 
@@ -318,26 +319,60 @@ describe("ConfigurationPage", () => {
 
     renderPage();
 
-    const passwordLabel = (await screen.findByText("MQTT Password")).closest("label");
-    expect(passwordLabel).not.toBeNull();
-    const input = (passwordLabel as HTMLElement).querySelector("input") as HTMLInputElement;
+    const input = (await screen.findByLabelText("MQTT Password")) as HTMLInputElement;
+    const passwordField = input.closest(".field-control");
+    expect(passwordField).not.toBeNull();
 
     // Blank server value => an ordinary field: no stored-secret indicator and a
     // live Show/Hide toggle.
-    expect((passwordLabel as HTMLElement).querySelector(".secret-stored-note")).toBeNull();
+    expect((passwordField as HTMLElement).querySelector(".secret-stored-note")).toBeNull();
     expect(
-      within(passwordLabel as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }),
+      within(passwordField as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }),
     ).toBeInTheDocument();
 
     // Asterisks the operator types are their OWN draft, never the server-echoed
     // sentinel: the field must not flip to "Saved — hidden" or drop the toggle,
     // and Show must still reveal exactly what was typed (ISSUE-1).
     fireEvent.change(input, { target: { value: "****" } });
-    expect((passwordLabel as HTMLElement).querySelector(".secret-stored-note")).toBeNull();
-    expect(within(passwordLabel as HTMLElement).queryByText(/never displayed/i)).toBeNull();
-    fireEvent.click(within(passwordLabel as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
+    expect((passwordField as HTMLElement).querySelector(".secret-stored-note")).toBeNull();
+    expect(within(passwordField as HTMLElement).queryByText(/never displayed/i)).toBeNull();
+    fireEvent.click(within(passwordField as HTMLElement).getByRole("button", { name: /Show MQTT Password/i }));
     expect(input.type).toBe("text");
     expect(input.value).toBe("****");
+  });
+
+  it("gives every secret replacement control its own accessible label", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const certificatesToggle = await screen.findByRole("button", { name: /Certificates & Keys/i });
+    if (certificatesToggle.getAttribute("aria-expanded") !== "true") {
+      fireEvent.click(certificatesToggle);
+    }
+    const storedSecret = (await screen.findByLabelText("CA Certificate")) as HTMLInputElement;
+    const secretField = storedSecret.closest(".secret-field");
+    expect(secretField).not.toBeNull();
+    expect(storedSecret).toHaveAttribute("readonly");
+    expect(
+      (secretField as HTMLElement).querySelectorAll("label input, label textarea, label button"),
+    ).toHaveLength(0);
+
+    const replaceButton = within(secretField as HTMLElement).getByRole("button", {
+      name: /Replace/i,
+    });
+    await waitFor(() => expect(replaceButton).toBeEnabled());
+    fireEvent.click(replaceButton);
+
+    expect(within(secretField as HTMLElement).getByLabelText("Replacement CA Certificate content"))
+      .toBeInTheDocument();
+    expect(within(secretField as HTMLElement).getByLabelText("Upload replacement CA Certificate file"))
+      .toBeInTheDocument();
   });
 
   it("renders a secure/non-secure MQTT connection selector (Use TLS)", async () => {
@@ -1239,14 +1274,15 @@ describe("ConfigurationPage", () => {
       "Error",
     ]);
 
-    const tokenLabel = (await screen.findByText("Log Upload Token")).closest("label");
-    const tokenInput = within(tokenLabel as HTMLElement).getByDisplayValue("********") as HTMLInputElement;
+    const tokenInput = (await screen.findByLabelText("Log Upload Token")) as HTMLInputElement;
+    const tokenField = tokenInput.closest(".field-control");
+    expect(tokenField).not.toBeNull();
     // Masked write-only sentinel: the non-revealing stored-secret indicator
     // stands in for the Show toggle (ISSUE-1), same as MQTT Password.
     expect(tokenInput.type).toBe("password");
-    expect((tokenLabel as HTMLElement).querySelector(".secret-stored-note")).not.toBeNull();
+    expect((tokenField as HTMLElement).querySelector(".secret-stored-note")).not.toBeNull();
     expect(
-      within(tokenLabel as HTMLElement).queryByRole("button", { name: /Show Log Upload Token/i }),
+      within(tokenField as HTMLElement).queryByRole("button", { name: /Show Log Upload Token/i }),
     ).toBeNull();
 
     // The never-wired syslog fields are gone.

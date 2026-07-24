@@ -3280,6 +3280,11 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(initialPayloadGroup.querySelector(".udmi-metric-table")).toBeInTheDocument();
     expect(initialPayloadGroup.querySelector(".udmi-payload-rates")).toBeInTheDocument();
     expect(initialFaultGroup.querySelector(".udmi-metric-table")).toBeInTheDocument();
+    // Wide-grid rules are presentation-only. Empty cells must not enter the
+    // description lists or create extra rows at smaller container widths.
+    expect(initialAssetGroup.querySelectorAll(".udmi-metric-table > div")).toHaveLength(6);
+    expect(initialPayloadGroup.querySelectorAll(".udmi-metric-table > div")).toHaveLength(5);
+    expect(initialFaultGroup.querySelectorAll(".udmi-metric-table > div")).toHaveLength(6);
 
     const initiallyIncorrect = within(initialPayloadGroup)
       .getByText("Payloads incorrect")

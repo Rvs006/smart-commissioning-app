@@ -269,12 +269,11 @@
   font-family: inherit;
   cursor: pointer;
   text-decoration: none;
-  transition: background 150ms, transform 150ms;
+  transition: background 150ms;
 }
 
 .dc-launch:hover {
   background: var(--dc-ach);
-  transform: translateY(-1px);
 }
 
 .dc-launch-dot {
@@ -282,14 +281,6 @@
   height: 7px;
   border-radius: 50%;
   background: #fff;
-  box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.7);
-  animation: dcPulse 2s infinite;
-}
-
-@keyframes dcPulse {
-  0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.6); }
-  70% { box-shadow: 0 0 0 6px rgba(255, 255, 255, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
 }
 
 .dc-ghost {
@@ -483,16 +474,11 @@
   padding: 22px;
   box-shadow: 0 1px 2px rgba(44, 42, 40, 0.05);
   border-top: 3px solid var(--dc-ac);
-  transition: transform 300ms, box-shadow 300ms;
   border-left: 1px solid var(--dc-bdr2);
   border-right: 1px solid var(--dc-bdr2);
   border-bottom: 1px solid var(--dc-bdr2);
 }
 
-.dc-card:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 4px 12px rgba(44, 42, 40, 0.1);
-}
 
 .dc-card-icon {
   width: 40px;
@@ -1203,9 +1189,6 @@
   box-shadow: var(--shadow);
 }
 
-[data-theme="dark"] .dc-card:hover {
-  box-shadow: var(--shadow-strong);
-}
 
 [data-theme="dark"] .dc-pipeline {
   box-shadow: var(--shadow-strong);
@@ -1419,5 +1402,15 @@
 @media (max-width: 980px) {
   .config-grid {
     column-count: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dc-panel {
+    animation: none;
+  }
+
+  .section-toggle-caret {
+    transition: none;
   }
 }

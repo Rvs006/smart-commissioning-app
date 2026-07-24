@@ -241,12 +241,14 @@ export function BriefPage() {
             </Link>
           </div>
         </div>
-        <nav className="dc-tabs">
+        <nav aria-label="Product brief sections" className="dc-tabs">
           {tabs.map((t) => (
             <button
+              aria-pressed={t.id === tab}
               key={t.id}
               className={t.id === tab ? "dc-tab on" : "dc-tab"}
               onClick={() => setTab(t.id)}
+              type="button"
             >
               <span className="dc-tab-num">{t.num}</span>
               <span className="dc-tab-label">{t.label}</span>
@@ -791,8 +793,10 @@ export function BriefPage() {
                 {roles.map((r) => (
                   <button
                     key={r.id}
+                    aria-pressed={r.id === role}
                     className={r.id === role ? "dc-role-pill active" : "dc-role-pill"}
                     onClick={() => setRole(r.id)}
+                    type="button"
                   >
                     <span className="dc-role-pill-icon">{r.icon}</span>
                     {r.pill}
