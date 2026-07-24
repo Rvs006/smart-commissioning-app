@@ -117,7 +117,8 @@ Implemented in `backend/app/services/configuration_service.py` and
   masked metadata; re-submitting the asterisk sentinel means "keep the stored
   secret" rather than overwriting it with asterisks.
 - **Credential-free errors and probes.** Broker/transport errors are mapped to
-  coarse status labels (`tls_error`, `authentication_error`, `broker_timeout`,
+  coarse status labels (`broker_not_configured`, `dns_resolution_failed`,
+  `tls_error`, `authentication_error`, `broker_timeout`, `subscription_rejected`,
   `broker_unreachable`) because raw exception text may embed a connection URL or
   auth detail; the readiness Redis check reports host[:port] only, never the full
   `redis_url`.

@@ -23,6 +23,7 @@ from app.schemas.jobs import (
     RunRecord,
     ValidationIssueRecord,
 )
+from app.services.report_naming import build_report_file_name
 from app.services.udmi_report_model import (
     build_udmi_report_model,
     normalise_udmi_report_scope,
@@ -38,13 +39,6 @@ VALIDATION_JOB_TYPES: set[JobType] = {
     "mapping_validation",
 }
 REPORT_JOB_TYPES: set[JobType] = {"report_generation"}
-REPORT_FORMAT_EXTENSIONS = {
-    "docx": "docx",
-    "pdf": "pdf",
-    "xlsx": "xlsx",
-    "zip": "zip",
-}
-
 _DEFAULT_REPORT_TITLE = "Smart Commissioning Report"
 _DEFAULT_UDMI_REPORT_TITLE = "UDMI Validation Report"
 _TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
@@ -180,10 +174,15 @@ class RunService:
                     )
             sources.append(source)
 
+        custom_report_title = request.report_title is not None
         parameters: dict[str, object] = {
             "output_format": request.output_format,
             "report_type": request.report_type,
             "source_run_ids": request.source_run_ids,
+            # Older report runs have no marker. The summary projection treats
+            # that absence as legacy naming so an upgrade never renames an
+            # existing downloadable artifact.
+            "report_title_custom": custom_report_title,
             "report_title": request.report_title
             or (
                 _DEFAULT_UDMI_REPORT_TITLE
@@ -250,7 +249,13 @@ class RunService:
             report_type=request.report_type,
             output_format=request.output_format,
             status=run.status,
-            file_name=self._report_file_name(request.report_type, run.run_id, request.output_format),
+            file_name=build_report_file_name(
+                request.report_type,
+                run.run_id,
+                request.output_format,
+                report_title=report_title,
+                custom_title=custom_report_title,
+            ),
             # Same projection the list/get path builds in reports.py; `run` here is
             # the RunRecord returned by update_run_status, so created_at is the
             # stored value and the POST response cannot disagree with the later
@@ -615,7 +620,3 @@ class RunService:
             connection.execute(
                 update(Run).where(Run.id == run_id).values(edge_id=local_edge_id)
             )
-
-    def _report_file_name(self, report_type: str, run_id: str, output_format: str) -> str:
-        extension = REPORT_FORMAT_EXTENSIONS.get(output_format, "zip")
-        return f"{report_type}_{run_id}.{extension}"

@@ -1,8 +1,11 @@
 """Tests for MQTT connection-settings resolution (secure/non-secure TLS)."""
 
+import socket
 import unittest
 
 from smart_commissioning_core.mqtt_settings import (
+    MqttSettingsError,
+    _broker_error_status,
     build_mqtt_connection_settings,
     parse_capture_seconds,
     set_configuration_values_provider,
@@ -22,6 +25,11 @@ class ResolveUseTlsTests(unittest.TestCase):
 
     def _provide(self, mqtt_values: dict[str, object]) -> None:
         set_configuration_values_provider(lambda: (mqtt_values, {}))
+
+    def test_missing_broker_host_is_configuration_error(self) -> None:
+        set_configuration_values_provider(None)
+        with self.assertRaisesRegex(MqttSettingsError, "requires an MQTT broker"):
+            build_mqtt_connection_settings({})
 
     def test_use_tls_disabled_overrides_secure_port(self) -> None:
         # Operator picked "not secure" even though the port is the TLS default.
@@ -43,12 +51,12 @@ class ResolveUseTlsTests(unittest.TestCase):
 
     def test_malformed_explicit_parameter_is_rejected(self) -> None:
         self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "8883", "Use TLS": "Enabled"})
-        with self.assertRaisesRegex(ValueError, "use_tls must be a boolean"):
+        with self.assertRaisesRegex(MqttSettingsError, "use_tls must be a boolean"):
             build_mqtt_connection_settings({"use_tls": "Maybe"})
 
     def test_malformed_persisted_selection_is_rejected(self) -> None:
         self._provide({"MQTT Broker FQDN or IP Address": "broker.test", "Port": "8883", "Use TLS": "Maybe"})
-        with self.assertRaisesRegex(ValueError, "Use TLS must be Enabled or Disabled"):
+        with self.assertRaisesRegex(MqttSettingsError, "Use TLS must be Enabled or Disabled"):
             build_mqtt_connection_settings({})
 
     def test_port_inference_when_control_absent(self) -> None:
@@ -90,6 +98,23 @@ class ParseCaptureSecondsTests(unittest.TestCase):
 
 class BrokerErrorStatusTests(unittest.TestCase):
     """The coarse status label must not send an operator down the wrong path."""
+
+    def test_settings_error_is_configuration_gap(self) -> None:
+        self.assertEqual(_broker_error_status(MqttSettingsError("invalid settings")), "broker_not_configured")
+
+    def test_gaierror_is_dns_failure(self) -> None:
+        error = socket.gaierror(11001, "getaddrinfo failed")
+        self.assertEqual(_broker_error_status(error), "dns_resolution_failed")
+
+    def test_forwarded_dns_messages_are_dns_failures(self) -> None:
+        for message in (
+            "getaddrinfo failed",
+            "Name or service not known",
+            "Temporary failure in name resolution",
+            "nodename nor servname provided",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(_broker_error_status(OSError(message)), "dns_resolution_failed")
 
     def test_subscription_rejection_is_not_labelled_unreachable(self) -> None:
         from smart_commissioning_core.mqtt_settings import _broker_error_status

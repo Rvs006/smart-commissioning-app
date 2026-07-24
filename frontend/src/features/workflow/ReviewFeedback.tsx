@@ -154,7 +154,7 @@ export function ReviewFeedback() {
 
   return (
     <aside className="review-feedback" aria-label="Engineer review comments">
-      <section className="review-feedback-panel" hidden={!isOpen}>
+      <section className="review-feedback-panel" hidden={!isOpen} id="review-feedback-panel">
         <div className="review-feedback-heading">
           <div>
             <h2>Engineer Review Comments</h2>

@@ -373,6 +373,48 @@ label {
   scroll-margin-top: 180px;
 }
 
+.module-hero-workbench {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.54fr);
+  align-items: stretch;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-strong);
+}
+
+.module-hero-workbench .module-hero-copy {
+  align-content: center;
+}
+
+.module-hero-workbench .module-metrics {
+  gap: 10px;
+}
+
+.module-hero-workbench .module-metrics article {
+  align-content: center;
+  min-height: 96px;
+  padding: 15px;
+  border: 1px solid var(--border-soft);
+  border-top: 3px solid var(--green);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+}
+
+.module-hero-workbench .module-metrics article:nth-child(2) {
+  border-top-color: var(--amber);
+}
+
+.module-hero-workbench .module-metrics span {
+  color: var(--text);
+}
+
+.module-hero-workbench .module-metrics-empty {
+  grid-column: 1 / -1;
+  border-top-color: var(--muted);
+}
+
 .module-hero > div:first-child {
   display: grid;
   align-content: center;
@@ -421,6 +463,7 @@ label {
 }
 
 .overview-copy h2,
+.module-hero h1,
 .module-hero h2,
 .hero-banner h2 {
   margin: 0;
@@ -970,8 +1013,8 @@ label {
   padding: 8px 0;
 }
 
-/* Native per-row detail dialog. The browser owns focus containment and Escape;
-   the backdrop and depth stay on shared tokens. */
+/* Discovery-only native detail dialog. The UDMI Workbench routes View Issues
+   into its persistent Inspector instead of opening this surface. */
 .result-detail-dialog {
   position: fixed;
   inset: 0;
@@ -1271,8 +1314,10 @@ label {
    recipe as .results-scroll. Scoped to the .compact-list modifier so the
    DashboardPage .issue-list (a single blocking finding) is never capped. */
 .issue-list.compact-list {
-  max-height: min(45vh, 420px);
+  max-height: min(82vh, 840px);
+  max-height: min(82dvh, 840px);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 /* The suggested-action line of a structured issue card (ITEM-9): a quiet accent
@@ -1911,8 +1956,10 @@ input.field-expired {
      box instead of running the inspector off-screen. Same recipe as
      .results-scroll. The nested payload-compare container keeps its own smaller
      inner scroll, so payloads scroll inside the drill-down that scrolls here. */
-  max-height: min(44vh, 440px);
+  max-height: min(82vh, 880px);
+  max-height: min(82dvh, 880px);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .asset-group {
@@ -1980,6 +2027,12 @@ input.field-expired {
   gap: 8px;
 }
 
+.payload-type-group:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 .payload-type-group h5 {
   margin: 0;
   color: var(--accent);
@@ -2014,6 +2067,40 @@ input.field-expired {
    row outline is token-backed and overlays any pass/fail/warn tint. */
 .data-table tbody tr.row-selected td {
   box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.result-row-selectable {
+  cursor: pointer;
+}
+
+.result-asset-button {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.result-asset-button:focus-visible {
+  border-radius: 3px;
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.result-asset-button:active {
+  color: var(--accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .result-asset-button:hover {
+    color: var(--accent-hover);
+  }
 }
 
 .result-row-actions {
@@ -2177,6 +2264,15 @@ input.field-expired {
   margin-top: 4px;
 }
 
+.payload-template-context {
+  max-width: none;
+  margin: 4px 0 10px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
 /* Aligned expected/observed compare (ITEM-8): ONE scroll container holds a
    two-column grid so both panels scroll together (synchronised) on BOTH axes,
    and a massive payload scrolls inside the box instead of taking over the
@@ -2327,7 +2423,42 @@ input.field-expired {
 }
 
 .udmi-metric-group {
+  --metric-rule: var(--border-soft);
+  --metric-surface: var(--surface);
+
+  container-type: inline-size;
+  display: grid;
+  align-content: start;
   min-width: 0;
+  min-height: 100%;
+  padding: 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.udmi-metric-assets {
+  --metric-rule: color-mix(in srgb, var(--green) 28%, transparent);
+  --metric-surface: var(--green-bg);
+
+  border-color: var(--metric-rule);
+  background: var(--metric-surface);
+}
+
+.udmi-metric-payloads {
+  --metric-rule: color-mix(in srgb, var(--accent) 26%, transparent);
+  --metric-surface: var(--accent-bg);
+
+  border-color: var(--metric-rule);
+  background: var(--metric-surface);
+}
+
+.udmi-metric-faults {
+  --metric-rule: color-mix(in srgb, var(--amber) 30%, transparent);
+  --metric-surface: var(--amber-bg);
+
+  border-color: var(--metric-rule);
+  background: var(--metric-surface);
 }
 
 .udmi-metric-group h4,
@@ -2335,19 +2466,32 @@ input.field-expired {
   margin: 0 0 10px;
   color: var(--ink);
   font-size: 14px;
+  text-align: center;
 }
 
 .udmi-metric-group dl {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 12px 16px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
   margin: 0;
+  border: 1px solid var(--metric-rule);
+  background: transparent;
 }
 
 .udmi-metric-group dl div {
   display: grid;
+  align-content: center;
   gap: 4px;
+  justify-items: center;
   min-width: 0;
+  min-height: 72px;
+  padding: 12px 8px;
+  border-block-start: 1px solid var(--metric-rule);
+  background: transparent;
+}
+
+.udmi-metric-group dl div:first-child {
+  border-block-start: 0;
 }
 
 .udmi-metric-group dt,
@@ -2356,7 +2500,7 @@ input.field-expired {
 }
 
 .udmi-metric-group dt {
-  color: var(--muted);
+  color: var(--text);
   font-size: 11px;
   line-height: 1.35;
 }
@@ -2370,20 +2514,70 @@ input.field-expired {
 }
 
 .udmi-metric-group .udmi-payload-rates {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .udmi-payload-rates small {
-  color: var(--muted);
+  display: block;
+  margin-top: 6px;
+  color: var(--text);
   font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
 }
 
 .udmi-metric-basis {
   margin: 8px 0 0;
-  color: var(--muted);
+  color: var(--text);
   font-size: 11px;
   line-height: 1.4;
+}
+
+.udmi-metric-group .udmi-metric-basis {
+  justify-self: center;
+  max-width: 75ch;
+  padding-top: 12px;
+  border-top: 1px solid var(--metric-rule);
+  text-align: center;
+}
+
+@container (min-width: 16rem) {
+  .udmi-metric-group .udmi-metric-table,
+  .udmi-metric-group .udmi-payload-rates {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .udmi-metric-group dl div:nth-child(n) {
+    border-block-start: 1px solid var(--metric-rule);
+    border-inline-start: 1px solid var(--metric-rule);
+  }
+
+  .udmi-metric-group dl div:nth-child(2n + 1) {
+    border-inline-start: 0;
+  }
+
+  .udmi-metric-group dl div:nth-child(-n + 2) {
+    border-block-start: 0;
+  }
+}
+
+@container (min-width: 32rem) {
+  .udmi-metric-group .udmi-metric-table {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .udmi-metric-group .udmi-metric-table div:nth-child(n) {
+    border-block-start: 1px solid var(--metric-rule);
+    border-inline-start: 1px solid var(--metric-rule);
+  }
+
+  .udmi-metric-group .udmi-metric-table div:nth-child(4n + 1) {
+    border-inline-start: 0;
+  }
+
+  .udmi-metric-group .udmi-metric-table div:nth-child(-n + 4) {
+    border-block-start: 0;
+  }
 }
 
 .udmi-system-summary {
@@ -2426,6 +2620,30 @@ input.field-expired {
   display: grid;
   gap: 12px;
   padding: 24px;
+}
+
+.report-scope-summary {
+  margin: 0;
+  padding: 11px 13px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-bg);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.report-name-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 170px;
+}
+
+.report-name-cell strong {
+  color: var(--ink);
+}
+
+.report-name-cell small {
+  color: var(--text);
 }
 
 .report-title-dialog-heading {
@@ -2499,9 +2717,14 @@ input.field-expired {
     grid-template-columns: 1fr;
   }
 
-  .udmi-metric-group .udmi-payload-rates {
-    grid-template-columns: 1fr;
+  .review-feedback {
+    position: static;
+    right: auto;
+    bottom: auto;
+    width: auto;
+    margin: 0 10px calc(10px + env(safe-area-inset-bottom));
   }
+
 }
 
 @media (min-width: 1080px) {
@@ -2766,4 +2989,16 @@ input.field-expired {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   word-break: break-all;
+}
+
+@media (max-width: 720px) {
+  .module-hero-workbench {
+    padding: 18px;
+  }
+}
+
+@media (max-width: 420px) {
+  .module-hero-workbench .module-metrics {
+    grid-template-columns: 1fr;
+  }
 }

@@ -61,8 +61,9 @@ evidence.
 `…/pointset` topics, or a broader `#` / `prefix/#` filter on a live broker) is
 **live-untested**: with no broker egress the engine honestly records
 `live_capture_unavailable`,
-`missing_capture_topics`, `broker_unreachable`/`tls_error`/
-`authentication_error`/`broker_timeout`, or `live_capture_timeout` rather than
+`missing_capture_topics`, `broker_not_configured`/`dns_resolution_failed`/
+`broker_unreachable`/`tls_error`/`authentication_error`/`broker_timeout`/
+`subscription_rejected`, or `live_capture_timeout` rather than
 fabricating payloads. The mapping from topic suffix to payload bucket and the
 status-labelling logic are tested with a fake; MQTT wildcard filter matching is
 covered by a raw transport regression test. The actual subscribe-and-capture

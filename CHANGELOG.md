@@ -5,6 +5,48 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.25] - 2026-07-24
+
+### Added
+
+- **Expected payload timestamps now explain their source.** The Workbench labels
+  them as schema-template build values, separate from observed MQTT timestamps.
+  Freshness checks continue to use the captured payload time and broker receipt
+  time, including during long capture windows.
+- **MQTT setup and DNS failures have distinct diagnoses.** A missing or invalid
+  broker configuration is reported as `broker_not_configured`, while resolver
+  failures are reported as `dns_resolution_failed`, with credential-free setup
+  guidance for each case.
+
+### Fixed
+
+- **Workbench results open directly in the Inspector again.** Clicking an asset
+  selects its evidence, View Issues focuses the same Inspector, and the redundant
+  Result detail popup is removed. The issue viewport is roughly twice as tall on
+  desktop while retaining a safe responsive cap.
+- **Filtered reports freeze the rows visible when generation starts.** Changing
+  filters while the title dialog is open cannot replace a three-asset selection
+  with the full imported register or another later view.
+- **Unexpected-device totals follow the retained device rows.** A stale numeric
+  zero can no longer override a populated unexpected-device list in the screen or
+  generated report. Older compact snapshots without a list keep their stored
+  count.
+- **Custom report titles survive every output step.** Generated Reports shows the
+  title, and safe versions of that title appear in PDF, DOCX, XLSX, ZIP-member,
+  and downloaded filenames with the report run ID retained for uniqueness.
+
+### Changed
+
+- **The Workbench summary is compact again.** The page title, compliance, and
+  Issues values share the prior header composition. Asset, Payload, and Fault
+  metrics use three centered tonal groups, and the label remains `Issues`.
+
+### Security
+
+- **Report filenames are derived as inert filesystem text.** Custom titles are
+  normalised, bounded, stripped of path syntax, and paired with the immutable run
+  ID before use in HTTP downloads or archive members.
+
 ## [0.1.24] - 2026-07-23
 
 ### Added

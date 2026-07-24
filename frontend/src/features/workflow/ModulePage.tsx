@@ -121,6 +121,14 @@ type ActiveRun = {
 // at a time instead of scrolling a single long page of every control at once.
 type ModuleStep = "setup" | "run" | "results";
 
+type FrozenUdmiReportScope = {
+  scope: UdmiReportScopeV1 | null;
+  filtered: boolean;
+  expectedAssets: number;
+  expectedPayloads: number;
+  unexpectedDevices: number;
+};
+
 const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discovery"]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
@@ -305,8 +313,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [resultsCategoryFilter, setResultsCategoryFilter] = useState<
     UdmiReportScopeV1["filters"]["category"]
   >("all");
-  // Per-row "View" opens this result in a native modal dialog (mqe-view). null
-  // means closed; the formatted cells drive buildResultDetailItems.
+  // Discovery routes retain their existing per-row View dialog. The UDMI
+  // Workbench uses the persistent Inspector instead, so this state is never set
+  // for UDMI rows.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
   const detailDialogRef = useRef<HTMLDialogElement | null>(null);
   const detailDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -327,6 +336,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [reportExportFormat, setReportExportFormat] = useState<ReportFormat>("pdf");
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
   const [reportTitle, setReportTitle] = useState("");
+  const [reportScopeSnapshot, setReportScopeSnapshot] =
+    useState<FrozenUdmiReportScope | null>(null);
   const reportDialogRef = useRef<HTMLDialogElement | null>(null);
   const reportTitleInputRef = useRef<HTMLInputElement | null>(null);
   const reportDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -608,6 +619,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReportToast(null);
     setReportDialogOpen(false);
     setReportTitle("");
+    setReportScopeSnapshot(null);
     setScanAuthorized(false);
     setScanDryRun(false);
     setScanTarget("");
@@ -714,9 +726,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     };
   }, [reportDialogOpen]);
 
-  // Result detail uses the same native-dialog contract as report naming. The
-  // browser owns focus containment and Escape; the fallback keeps jsdom and
-  // older embedded engines functional without changing the visible state.
+  // Discovery result detail keeps the native-dialog focus and Escape contract.
   useEffect(() => {
     if (!detailRow) {
       return;
@@ -979,6 +989,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     onSuccess: (result) => {
       setReportDialogOpen(false);
+      setReportScopeSnapshot(null);
       window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
       setReportToast(
         `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
@@ -1394,7 +1405,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Results-table filtering (ISSUE-4). MQTT-route rows carry a Topic column, so a
   // +/# query is matched with broker wildcard semantics; every other route (and
   // any plain query) uses substring matching. Rows keep their ORIGINAL index so
-  // selection, the Inspector, and the View modal never point at the wrong row.
+  // selection and Inspector evidence never point at the wrong row.
   const resultsTopicColumn = tableColumns.includes("Topic") ? "Topic" : undefined;
   // Per-asset facts for the System and observation filters. Both come from the
   // run snapshot; no asset-id heuristic or connection-state inference is used.
@@ -1749,6 +1760,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     secondaryLabel: string;
   } | null>(() => {
     if (liveMetrics) {
+      if (module.route === "udmi-validation") {
+        return {
+          ...liveMetrics,
+          secondaryLabel: "Issues",
+        };
+      }
       return liveMetrics;
     }
     if (
@@ -1766,7 +1783,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             displayedValidationSummary.issue_metrics.blocking +
               displayedValidationSummary.issue_metrics.warning,
           ),
-          secondaryLabel: "issues found",
+          secondaryLabel: "Issues",
         };
       }
       const derived = validationMetrics(module.route, validationRunQuery.data?.result_summary);
@@ -1942,6 +1959,37 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!runId) {
       return;
     }
+    if (module.route === "udmi-validation") {
+      // Freeze a deep copy when the operator opens the naming dialog. Filter
+      // controls can update while a report request is being prepared; reading
+      // currentUdmiScope at submit time could then generate a different report
+      // from the one the operator reviewed before clicking Generate.
+      const scope = currentUdmiScope
+        ? {
+            ...currentUdmiScope,
+            selected_payloads: currentUdmiScope.selected_payloads.map((payload) => ({ ...payload })),
+            unexpected_device_ids: [...currentUdmiScope.unexpected_device_ids],
+            filters: { ...currentUdmiScope.filters },
+          }
+        : null;
+      setReportScopeSnapshot({
+        scope,
+        filtered: scope !== null,
+        expectedAssets: scope
+          ? new Set(scope.selected_payloads.map((payload) => payload.asset_id)).size
+          : (displayedValidationSummary?.asset_metrics.expected ?? 0),
+        expectedPayloads:
+          scope?.selected_payloads.length ??
+          displayedValidationSummary?.payload_metrics.expected ??
+          0,
+        unexpectedDevices:
+          scope?.unexpected_device_ids.length ??
+          displayedValidationSummary?.asset_metrics.unexpected ??
+          0,
+      });
+    } else {
+      setReportScopeSnapshot(null);
+    }
     reportDialogOpenerRef.current = opener;
     setReportTitle(defaultReportTitle(activeRunRecord));
     reportFromRunMutation.reset();
@@ -1950,6 +1998,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const closeReportDialog = () => {
     setReportDialogOpen(false);
+    setReportScopeSnapshot(null);
     window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
   };
 
@@ -1974,8 +2023,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       reportTitle: title,
       reportType,
       runId,
-      ...(reportType === "udmi_validation" && currentUdmiScope
-        ? { udmiScope: currentUdmiScope }
+      ...(reportType === "udmi_validation" && reportScopeSnapshot?.scope
+        ? { udmiScope: reportScopeSnapshot.scope }
         : {}),
     });
   };
@@ -2074,7 +2123,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       const reducedMotion =
         typeof window.matchMedia === "function" &&
         window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      payloadGroupRefs.current.get(key)?.scrollIntoView({
+      const target = payloadGroupRefs.current.get(key);
+      if (!target) {
+        return;
+      }
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({
         behavior: reducedMotion ? "auto" : "smooth",
         block: "nearest",
       });
@@ -2106,13 +2160,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       .join(" ");
     return (
       <tr
+        aria-selected={isUdmiValidation ? selectedResultIndex === rowIndex : undefined}
         className={`${row.__tone ? `row-${row.__tone}` : ""}${
           selectedResultIndex === rowIndex ? " row-selected" : ""
+        }${isUdmiValidation ? " result-row-selectable" : ""
         }`.trim() || undefined}
         key={rowIndex}
+        onClick={isUdmiValidation ? () => selectResultEvidence(row, rowIndex) : undefined}
       >
         {tableColumns.map((column) => (
-          <td key={column}>{renderCell(row, column, handleCopyPayload)}</td>
+          <td key={column}>
+            {isUdmiValidation && column === "Asset" ? (
+              <button
+                aria-pressed={selectedResultIndex === rowIndex}
+                className="result-asset-button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  selectResultEvidence(row, rowIndex);
+                }}
+                type="button"
+              >
+                {renderCell(row, column, handleCopyPayload)}
+              </button>
+            ) : (
+              renderCell(row, column, handleCopyPayload)
+            )}
+          </td>
         ))}
         <td>
           <div className="result-row-actions">
@@ -2120,23 +2193,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
               aria-pressed={selectedResultIndex === rowIndex}
               className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
-              onClick={() => selectResultEvidence(row, rowIndex)}
-              type="button"
-            >
-              Select evidence
-            </button>
-            <button
-              aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
-              className="secondary-button compact"
               onClick={(event) => {
+                event.stopPropagation();
                 selectResultEvidence(row, rowIndex);
-                detailDialogOpenerRef.current = event.currentTarget;
-                setDetailRow(row);
               }}
               type="button"
             >
-              {viewLabel}
+              {isUdmiValidation ? viewLabel : "Select evidence"}
             </button>
+            {!isUdmiValidation && (
+              <button
+                aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
+                className="secondary-button compact"
+                onClick={(event) => {
+                  selectResultEvidence(row, rowIndex);
+                  detailDialogOpenerRef.current = event.currentTarget;
+                  setDetailRow(row);
+                }}
+                type="button"
+              >
+                {viewLabel}
+              </button>
+            )}
           </div>
         </td>
       </tr>
@@ -2145,8 +2223,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   return (
     <div className="app-page">
-      <section aria-label="Current run summary" className="module-hero" ref={heroRef}>
-        <h2 className="visually-hidden">{workspace?.title ?? module.title}</h2>
+      <section
+        aria-label="Current run summary"
+        className={`module-hero${isUdmiValidation ? " module-hero-workbench" : ""}`}
+        ref={heroRef}
+      >
+        {isUdmiValidation ? (
+          <div className="module-hero-copy">
+            <h1>{workspace?.title ?? module.title}</h1>
+            <p>{workspace?.headline ?? module.summary}</p>
+          </div>
+        ) : (
+          <h2 className="visually-hidden">{workspace?.title ?? module.title}</h2>
+        )}
         <div className="module-metrics">
           {metricsView ? (
             <>
@@ -2156,7 +2245,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </article>
               <article>
                 <strong>{metricsView.secondary}</strong>
-                <span>{metricsView.secondaryLabel}</span>
+                <span>{isUdmiValidation ? "Issues" : metricsView.secondaryLabel}</span>
               </article>
             </>
           ) : (
@@ -3442,7 +3531,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             type="checkbox"
                           />
                         </td>
-                        <td>{report.report_id}</td>
+                        <td>
+                          <div className="report-name-cell">
+                            <strong>{report.report_title?.trim() || report.report_id}</strong>
+                            {report.report_title?.trim() ? (
+                              <small>{report.report_id}</small>
+                            ) : null}
+                          </div>
+                        </td>
                         <td>{report.report_type}</td>
                         <td>{report.output_format.toUpperCase()}</td>
                         <td>
@@ -3866,7 +3962,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </div>
         </article>
 
-        {detailRow && (
+        {detailRow && !isUdmiValidation && (
           <dialog
             aria-labelledby="result-detail-heading"
             className="result-detail-dialog surface"
@@ -4018,6 +4114,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                       payloadGroupRefs.current.delete(payloadKey);
                                     }
                                   }}
+                                  tabIndex={-1}
                                 >
                                   <h5>{entry.payloadType}</h5>
                                   {sectionTone && (
@@ -4157,7 +4254,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       )}
       {reportDialogOpen && (
         <dialog
-          aria-describedby="report-title-help"
+          aria-describedby={
+            reportScopeSnapshot
+              ? "report-title-help report-scope-help"
+              : "report-title-help"
+          }
           aria-labelledby="report-title-heading"
           className="report-title-dialog"
           onCancel={(event) => {
@@ -4170,10 +4271,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <div className="report-title-dialog-heading">
               <h3 id="report-title-heading">Name this validation report</h3>
               <p id="report-title-help">
-                Use a title that identifies the site, systems, or capture window. It will appear at
-                the top of the generated {reportExportFormat.toUpperCase()} report.
+                Use a title that identifies the site, systems, or capture window. It will appear in
+                the generated {reportExportFormat.toUpperCase()} report, the Reports list, and the
+                download filename.
               </p>
             </div>
+            {reportScopeSnapshot && (
+              <p className="report-scope-summary" id="report-scope-help">
+                {reportScopeSnapshot.filtered ? "Filtered" : "Full run"} scope locked when this
+                dialog opened: {reportScopeSnapshot.expectedAssets} expected{" "}
+                {reportScopeSnapshot.expectedAssets === 1 ? "asset" : "assets"},{" "}
+                {reportScopeSnapshot.expectedPayloads} expected{" "}
+                {reportScopeSnapshot.expectedPayloads === 1 ? "payload" : "payloads"}, and{" "}
+                {reportScopeSnapshot.unexpectedDevices} unexpected{" "}
+                {reportScopeSnapshot.unexpectedDevices === 1 ? "device" : "devices"}. This report
+                keeps that locked scope even if the filters change behind the dialog.
+              </p>
+            )}
             <label>
               Report title
               <input
@@ -4446,7 +4560,12 @@ function buildValidationSummaryDisplay(
     ...summary,
     asset_metrics: {
       ...summary.asset_metrics,
-      unexpected: summary.asset_metrics.unexpected ?? unexpectedDevices.length,
+      // A populated device list is the row-level evidence and wins over a
+      // provisional/stale scalar. Keep the scalar fallback only for older
+      // snapshots that omitted unexpected_devices altogether.
+      unexpected: Array.isArray(summary.unexpected_devices)
+        ? unexpectedDevices.length
+        : (summary.asset_metrics.unexpected ?? 0),
     },
     payload_metrics: normalisePayloadMetrics(summary.payload_metrics, summary.asset_results),
     system_metrics: summary.system_metrics.map((system) => ({
@@ -4750,11 +4869,19 @@ function filterValidationSummary(
   };
 }
 
-function SummaryMetricGroup({ metrics, title }: { metrics: SummaryMetric[]; title: string }) {
+function SummaryMetricGroup({
+  metrics,
+  title,
+  tone,
+}: {
+  metrics: SummaryMetric[];
+  title: string;
+  tone: "assets" | "faults";
+}) {
   return (
-    <section className="udmi-metric-group">
+    <section className={"udmi-metric-group udmi-metric-" + tone}>
       <h4>{title}</h4>
-      <dl>
+      <dl className="udmi-metric-table">
         {metrics.map((metric) => (
           <div key={metric.label}>
             <dt>{metric.label}</dt>
@@ -4783,9 +4910,9 @@ function PayloadMetricGroup({ summary }: { summary: UdmiSummaryDisplay }) {
   const correct = summary.payload_metrics.successfully_validated;
   const incorrect = Math.max(0, expected - correct);
   return (
-    <section className="udmi-metric-group">
+    <section className="udmi-metric-group udmi-metric-payloads">
       <h4>Payload metrics</h4>
-      <dl>
+      <dl className="udmi-metric-table">
         {metrics.map((metric) => (
           <div key={metric.label}>
             <dt>{metric.label}</dt>
@@ -4796,17 +4923,21 @@ function PayloadMetricGroup({ summary }: { summary: UdmiSummaryDisplay }) {
       <dl className="udmi-payload-rates">
         <div>
           <dt>Payloads correct</dt>
-          <dd>{formatMetricPercent(correct, expected)}</dd>
-          <small>
-            {formatMetricCount(correct)} / {formatMetricCount(expected)} expected
-          </small>
+          <dd>
+            {formatMetricPercent(correct, expected)}
+            <small>
+              {formatMetricCount(correct)} / {formatMetricCount(expected)} expected
+            </small>
+          </dd>
         </div>
         <div>
           <dt>Payloads incorrect</dt>
-          <dd>{formatMetricPercent(incorrect, expected)}</dd>
-          <small>
-            {formatMetricCount(incorrect)} / {formatMetricCount(expected)} expected
-          </small>
+          <dd>
+            {formatMetricPercent(incorrect, expected)}
+            <small>
+              {formatMetricCount(incorrect)} / {formatMetricCount(expected)} expected
+            </small>
+          </dd>
         </div>
       </dl>
       <p className="udmi-metric-basis">
@@ -4889,9 +5020,9 @@ function UdmiSummaryPanel({
       </div>
 
       <div className="udmi-metric-groups">
-        <SummaryMetricGroup metrics={assets} title="Asset metrics" />
+        <SummaryMetricGroup metrics={assets} title="Asset metrics" tone="assets" />
         <PayloadMetricGroup summary={summary} />
-        <SummaryMetricGroup metrics={faults} title="Fault metrics" />
+        <SummaryMetricGroup metrics={faults} title="Fault metrics" tone="faults" />
       </div>
 
       <p className="udmi-metric-basis">
@@ -5249,6 +5380,17 @@ function AlignedDiffCell({ line, flagged }: { line: AlignedRow["expected"]; flag
   );
 }
 
+function ExpectedTemplateContext() {
+  return (
+    <p className="section-copy payload-template-context">
+      The expected timestamp is a schema-valid template value created when this result view was
+      built. Freshness checks use the observed payload timestamp against this tool&apos;s receive
+      time. The expected side keeps its own build value and never borrows broker data. Registered
+      values are shown where known.
+    </p>
+  );
+}
+
 // Expected-vs-observed UDMI payload panels (ITEM-8). When a payload was observed,
 // the two sides are aligned LINE-FOR-LINE inside ONE scroll container (so they
 // scroll together), JSON-syntax-coloured, with the presence diff (amber =
@@ -5303,7 +5445,7 @@ function PayloadComparePanels({
       <div className="payload-compare">
         <div>
           <h6>Expected UDMI template</h6>
-          <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
+          <ExpectedTemplateContext />
           <pre className="payload-cell">{expected ? JSON.stringify(expected, null, 2) : "—"}</pre>
         </div>
         <div>
@@ -5326,7 +5468,7 @@ function PayloadComparePanels({
   const hasFlagged = aligned.some((row) => row.flagged);
   return (
     <>
-      <p className="section-copy">Registered values are shown where known; schema-valid sentinel values identify device-supplied fields and are not observed data.</p>
+      <ExpectedTemplateContext />
       <div className="payload-compare-aligned">
         <div className="payload-compare-grid">
           <div className="payload-compare-head">Expected UDMI template</div>
@@ -5408,7 +5550,7 @@ function toIssueRow(issue: ValidationIssueRecord): IssueRow {
     issue.expected_value != null || issue.observed_value != null
       ? `Expected ${issueDisplayValue(issue.expected_value)}, observed ${issueDisplayValue(issue.observed_value)}`
       : undefined;
-  // The joined one-liner is still built (the row View modal reads issue.message);
+  // The joined one-liner is still built for the Inspector detail list;
   // the same fragments are also carried structured so the issue CARDS can render
   // them as separate lines instead of one run-on string (ITEM-9).
   const details = [
