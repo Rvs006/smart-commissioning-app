@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useId, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ConfigurationExport,
@@ -1099,6 +1099,10 @@ function FieldControl({
   serverValue,
   value,
 }: FieldControlProps) {
+  const controlId = useId();
+  const hintId = hint ? `${controlId}-hint` : undefined;
+  const replacementTextId = `${controlId}-replacement-text`;
+  const replacementFileId = `${controlId}-replacement-file`;
   const [maskedSentinel, setMaskedSentinel] = useState<string | null>(null);
   // Password-kind fields render masked by default with a Show/Hide toggle that
   // flips as many times as the operator wants (the original review flagged a
@@ -1112,23 +1116,38 @@ function FieldControl({
 
   if (kind === "secret" || secretFields.has(field)) {
     return (
-      <label className="secret-field" title={FIELD_TOOLTIPS[field]}>
-        {field}
-        <input readOnly value={maskSecretValue(value)} />
+      <div className="field-control secret-field" title={FIELD_TOOLTIPS[field]}>
+        <label htmlFor={controlId}>{field}</label>
+        <input
+          aria-describedby={hintId}
+          id={controlId}
+          readOnly
+          value={maskSecretValue(value)}
+        />
         {value && !showSecretEditor && (
           <small className="secret-stored">✓ Uploaded — in use by the tool. Replace to change.</small>
         )}
         {showSecretEditor ? (
           <>
+            <label className="visually-hidden" htmlFor={replacementTextId}>
+              Replacement {field} content
+            </label>
             <textarea
+              aria-describedby={hintId}
+              id={replacementTextId}
               onChange={(event) => onSecretChange(event.target.value)}
               placeholder={`Paste ${field.toLowerCase()} content`}
               rows={4}
               value={secretContent}
             />
             <div className="inline-actions">
+              <label className="visually-hidden" htmlFor={replacementFileId}>
+                Upload replacement {field} file
+              </label>
               <input
                 accept=".pem,.crt,.cer,.key,.p12,.pfx"
+                aria-describedby={hintId}
+                id={replacementFileId}
                 onChange={(event) => onFileSelect(event.target.files?.[0] ?? null)}
                 type="file"
               />
@@ -1162,8 +1181,8 @@ function FieldControl({
           </button>
         )}
         {secretFileName && <small>Loaded from {secretFileName}</small>}
-        {hint && <small>{hint}</small>}
-      </label>
+        {hint && <small id={hintId}>{hint}</small>}
+      </div>
     );
   }
 
@@ -1220,11 +1239,9 @@ function FieldControl({
   const effectiveRevealed = revealed && !showsServerSecret;
   const inputElement = (
     <input
-      // Password inputs sit beside the Show/Hide toggle inside the <label>, so
-      // an explicit aria-label keeps the accessible name clean ("MQTT Password")
-      // instead of absorbing the toggle button's name from the label content.
-      aria-label={isPassword ? field : undefined}
+      aria-describedby={hintId}
       className={expired ? "field-expired" : undefined}
+      id={controlId}
       onBlur={() => {
         if (isPassword && maskedSentinel && !value) {
           onValueChange(maskedSentinel);
@@ -1244,15 +1261,16 @@ function FieldControl({
       value={value}
     />
   );
-  return (
-    <label className={expired ? "field-expired" : undefined} title={FIELD_TOOLTIPS[field]}>
-      {field}
-      {isPassword ? (
+  if (isPassword) {
+    return (
+      <div
+        className={`field-control${expired ? " field-expired" : ""}`}
+        title={FIELD_TOOLTIPS[field]}
+      >
+        <label htmlFor={controlId}>{field}</label>
         <span className="password-field">
           {inputElement}
           {hasStoredSecret ? (
-            // Non-toggling: a stored secret can never be revealed (write-only
-            // API by design), so there is no Show action to offer here.
             <span className="secret-stored-note">Saved — hidden</span>
           ) : (
             <button
@@ -1266,15 +1284,20 @@ function FieldControl({
             </button>
           )}
         </span>
-      ) : (
-        inputElement
-      )}
-      {isPassword && hasStoredSecret && (
-        <small>
-          A saved password is never displayed. Type a new value and Save Configuration to replace it.
-        </small>
-      )}
-      {hint && <small>{hint}</small>}
+        {hasStoredSecret && (
+          <small>
+            A saved password is never displayed. Type a new value and Save Configuration to replace it.
+          </small>
+        )}
+        {hint && <small id={hintId}>{hint}</small>}
+      </div>
+    );
+  }
+  return (
+    <label className={expired ? "field-expired" : undefined} title={FIELD_TOOLTIPS[field]}>
+      {field}
+      {inputElement}
+      {hint && <small id={hintId}>{hint}</small>}
     </label>
   );
 }

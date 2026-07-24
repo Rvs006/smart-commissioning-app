@@ -18,16 +18,21 @@ type ReviewComment = {
 
 const storageKey = "smartCommissioningEngineerReviewCommentsV1";
 const reviewerKey = "smartCommissioningEngineerReviewerName";
+const storageUnavailableStatus =
+  "Browser storage is unavailable. Review comments will stay in this session only.";
 
 const moduleLabels: Record<string, string> = {
   "/": "Homepage",
   "/bacnet-discovery": "BACnet Discovery",
   "/configuration": "Configuration",
   "/data-validation": "Validation",
+  "/hub": "Hub",
   "/ip-scanner": "IP Discovery",
   "/mqtt-discovery": "MQTT Discovery",
   "/reports": "Reports",
+  "/run-history": "Run History",
   "/udmi-validation": "UDMI",
+  "/users": "Users",
 };
 
 const modules = [
@@ -39,6 +44,9 @@ const modules = [
   "UDMI",
   "Validation",
   "Reports",
+  "Hub",
+  "Run History",
+  "Users",
 ];
 
 const commentTypes = ["Issue", "Question", "UX comment", "Missing requirement", "Positive note"];
@@ -46,13 +54,15 @@ const priorities = ["Medium", "High", "Low"];
 
 export function ReviewFeedback() {
   const location = useLocation();
+  const [initialState] = useState(loadReviewState);
   const currentModule = useMemo(
     () => moduleLabels[location.pathname] ?? "Current page",
     [location.pathname],
   );
   const [isOpen, setIsOpen] = useState(false);
-  const [comments, setComments] = useState<ReviewComment[]>(() => loadComments());
-  const [reviewer, setReviewer] = useState(() => localStorage.getItem(reviewerKey) ?? "");
+  const [comments, setComments] = useState<ReviewComment[]>(initialState.comments);
+  const [reviewer, setReviewer] = useState(initialState.reviewer);
+  const [storageAvailable, setStorageAvailable] = useState(initialState.storageAvailable);
   const [module, setModule] = useState(currentModule);
   const [type, setType] = useState(commentTypes[0]);
   const [priority, setPriority] = useState(priorities[0]);
@@ -65,12 +75,22 @@ export function ReviewFeedback() {
   }, [currentModule]);
 
   useEffect(() => {
-    localStorage.setItem(storageKey, JSON.stringify(comments));
-  }, [comments]);
+    if (!storageAvailable) {
+      return;
+    }
+    if (!writeStorage(storageKey, JSON.stringify(comments))) {
+      setStorageAvailable(false);
+    }
+  }, [comments, storageAvailable]);
 
   useEffect(() => {
-    localStorage.setItem(reviewerKey, reviewer);
-  }, [reviewer]);
+    if (!storageAvailable) {
+      return;
+    }
+    if (!writeStorage(reviewerKey, reviewer)) {
+      setStorageAvailable(false);
+    }
+  }, [reviewer, storageAvailable]);
 
   useEffect(() => {
     if (!status) {
@@ -108,7 +128,11 @@ export function ReviewFeedback() {
     ]);
     setTitle("");
     setComment("");
-    setStatus("Comment saved locally.");
+    setStatus(
+      storageAvailable
+        ? "Comment saved locally."
+        : "Comment kept for this session; browser storage is unavailable.",
+    );
   };
 
   const removeComment = (id: string) => {
@@ -154,7 +178,7 @@ export function ReviewFeedback() {
 
   return (
     <aside className="review-feedback" aria-label="Engineer review comments">
-      <section className="review-feedback-panel" hidden={!isOpen}>
+      <section className="review-feedback-panel" hidden={!isOpen} id="review-feedback-panel">
         <div className="review-feedback-heading">
           <div>
             <h2>Engineer Review Comments</h2>
@@ -213,6 +237,11 @@ export function ReviewFeedback() {
             </label>
           </div>
 
+          {!storageAvailable && (
+            <div className="review-feedback-status" role="status">
+              {storageUnavailableStatus}
+            </div>
+          )}
           <label>
             Short title
             <input
@@ -301,12 +330,36 @@ export function ReviewFeedback() {
   );
 }
 
-function loadComments(): ReviewComment[] {
+function loadReviewState(): {
+  comments: ReviewComment[];
+  reviewer: string;
+  storageAvailable: boolean;
+} {
   try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey) ?? "[]") as unknown;
-    return Array.isArray(parsed) ? (parsed as ReviewComment[]) : [];
+    const storedComments = localStorage.getItem(storageKey) ?? "[]";
+    const reviewer = localStorage.getItem(reviewerKey) ?? "";
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(storedComments) as unknown;
+    } catch {
+      parsed = [];
+    }
+    return {
+      comments: Array.isArray(parsed) ? (parsed as ReviewComment[]) : [],
+      reviewer,
+      storageAvailable: true,
+    };
   } catch {
-    return [];
+    return { comments: [], reviewer: "", storageAvailable: false };
+  }
+}
+
+function writeStorage(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
   }
 }
 

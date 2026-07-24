@@ -250,6 +250,7 @@ def _contract(value: object) -> dict[str, Any] | None:
     system_metrics = value.get("system_metrics")
     asset_results = value.get("asset_results")
     fault_rows = value.get("fault_rows")
+    unexpected_devices_present = "unexpected_devices" in value
     raw_unexpected = value.get("unexpected_devices", [])
     unexpected_devices = raw_unexpected if isinstance(raw_unexpected, list) else None
     if (
@@ -265,11 +266,12 @@ def _contract(value: object) -> dict[str, Any] | None:
         return None
     if value.get("schema_version") == "1.0":
         payload_metrics = _received_only_payload_metrics(payload_metrics, asset_results)
-    unexpected_count = (
-        _non_negative_int(raw_asset_metrics.get("unexpected"))
-        if isinstance(raw_asset_metrics, dict)
-        else None
-    )
+    # Explicit device rows are the authoritative evidence. Prefer their count
+    # even when a progressively-updated numeric metric still says zero. Older
+    # snapshots omitted the list, so they retain their stored numeric total.
+    unexpected_count = None
+    if not unexpected_devices_present and isinstance(raw_asset_metrics, dict):
+        unexpected_count = _non_negative_int(raw_asset_metrics.get("unexpected"))
     if unexpected_count is None:
         unexpected_count = len([row for row in unexpected_devices if isinstance(row, dict)])
     asset_metrics["unexpected"] = unexpected_count

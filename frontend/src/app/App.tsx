@@ -71,6 +71,11 @@ export function App() {
   const { canAdmin } = useSession();
   const pageTitle = pageTitles[location.pathname] ?? "Workspace";
   const pageSubtitle = pageSubtitles[location.pathname] ?? "Commissioning workflow.";
+  // The UDMI Workbench owns a compact title-and-metrics header inside its page
+  // content. Suppress the shell title there only, otherwise the same title is
+  // repeated above the restored metric cards and the first screen is split in
+  // two. Every other route keeps the shared shell title unchanged.
+  const pageOwnsTitle = location.pathname === "/udmi-validation";
 
   // The Users entry is admin-only; everyone else never sees it (the route itself
   // stays admin-gated server-side, so this is a UX nicety, not security). It
@@ -150,12 +155,14 @@ export function App() {
       </header>
 
       <section className="workspace-shell">
-        <header className="page-titlebar">
-          <div>
-            <h1>{pageTitle}</h1>
-            <p>{pageSubtitle}</p>
-          </div>
-        </header>
+        {!pageOwnsTitle && (
+          <header className="page-titlebar">
+            <div>
+              <h1>{pageTitle}</h1>
+              <p>{pageSubtitle}</p>
+            </div>
+          </header>
+        )}
 
         <main className="page-frame">
           <Outlet />

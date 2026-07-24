@@ -7,13 +7,14 @@ skipped structural check is never presented as a pass.
 """
 
 import json
+import socket
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from smart_commissioning_core import mqtt_transport, udmi_schema
-from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS
+from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, set_configuration_values_provider
 from smart_commissioning_core.mqtt_transport import MqttMessage
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
@@ -28,6 +29,7 @@ from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
     DEFAULT_MAX_MESSAGES,
     UdmiValidationResult,
+    _build_payload_views,
     _capture_topics,
     _conformance_fields,
     _normalise_issues,
@@ -1321,6 +1323,41 @@ class MetadataPointCoverageTests(unittest.TestCase):
         self.assertEqual(expected_by_type["metadata"]["system"]["location"], {"site": "ZZ-DEMO-01", "room": "DEMO-ROOM-01"})
         self.assertEqual(expected_by_type["metadata"]["pointset"]["points"], {"primary_ratio_sensor": {"units": "no_units"}})
         self.assertEqual(expected_by_type["pointset"]["points"], {"primary_ratio_sensor": {"present_value": None}})
+
+    @patch(
+        "smart_commissioning_core.udmi_validation._template_timestamp",
+        return_value="2026-07-24T11:59:59Z",
+    )
+    def test_multi_asset_payload_view_uses_one_template_build_time(
+        self,
+        template_clock,
+    ) -> None:
+        views = _build_payload_views(
+            {
+                "assets": [
+                    {"expected_schedule": _schedule(asset_id="EM-1")},
+                    {"expected_schedule": _schedule(asset_id="EM-2")},
+                ]
+            }
+        )
+
+        expected_payloads = [
+            payload["expected"]
+            for view in views
+            for payload in view["payload_types"]
+        ]
+        self.assertEqual(
+            {payload["timestamp"] for payload in expected_payloads},
+            {"2026-07-24T11:59:59Z"},
+        )
+        self.assertTrue(
+            all(
+                payload["system"]["last_config"] == "2026-07-24T11:59:59Z"
+                for payload in expected_payloads
+                if "system" in payload and "last_config" in payload["system"]
+            )
+        )
+        template_clock.assert_called_once_with()
 
     def test_room_that_fits_location_room_is_embedded_without_a_note(self) -> None:
         # "DEMO_ROOM_01" fails the strict section pattern (underscores) but
@@ -2730,6 +2767,55 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         self.assertEqual(record["status"], "failed")
         self.assertIn("broker_unreachable", record["error_message"])
         self.assertEqual(store.summaries[-1]["broker_status_detail"], "broker_unreachable")
+
+    def test_missing_broker_configuration_fails_with_configuration_action(self) -> None:
+        set_configuration_values_provider(None)
+        store = _FakeRunStore()
+        capture = RecordingCapture()
+
+        record = process_udmi_validation_run(
+            "run-broker-unconfigured",
+            {"use_live_broker": True, **_TOPICS, "capture_seconds": 1},
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=capture,
+        )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "broker_not_configured")
+        self.assertFalse(capture.calls)
+        issue = next(issue for issue in store.issues if issue.issue_type == "payload_error")
+        self.assertIn("Configuration page", issue.suggested_action)
+        self.assertIn("save it", issue.suggested_action)
+
+    def test_multi_asset_dns_failure_fails_with_dns_action(self) -> None:
+        store = _FakeRunStore()
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 1,
+            "assets": [
+                {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+            ],
+        }
+
+        def dns_failure(*_args: object, **_kwargs: object) -> list[MqttMessage]:
+            raise socket.gaierror(11001, "getaddrinfo failed")
+
+        record = process_udmi_validation_run(
+            "run-broker-dns",
+            parameters,
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=dns_failure,
+        )
+
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(store.summaries[-1]["broker_status_detail"], "dns_resolution_failed")
+        issue = next(issue for issue in store.issues if issue.issue_type == "payload_error")
+        self.assertIsNone(issue.asset_id)
+        self.assertIn("Configuration page", issue.suggested_action)
+        self.assertIn("did not resolve in DNS", issue.suggested_action)
 
     def test_unexpected_failure_does_not_expose_exception_text(self) -> None:
         store = _FakeRunStore()

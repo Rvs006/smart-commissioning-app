@@ -23,6 +23,7 @@ export function UsersPage() {
   const [newUsername, setNewUsername] = useState("");
   const [newRole, setNewRole] = useState<Role>("viewer");
   const [issuedKey, setIssuedKey] = useState<{ username: string; apiKey: string } | null>(null);
+  const [issuedKeyStatus, setIssuedKeyStatus] = useState("");
 
   const usersQuery = useQuery({
     enabled: canAdmin,
@@ -38,6 +39,7 @@ export function UsersPage() {
     mutationFn: () => createUser({ role: newRole, username: newUsername.trim() }),
     onSuccess: (result) => {
       setIssuedKey({ apiKey: result.api_key, username: result.user.username });
+      setIssuedKeyStatus("");
       setNewUsername("");
       setNewRole("viewer");
       refresh();
@@ -56,6 +58,7 @@ export function UsersPage() {
     mutationFn: (userId: string) => reissueUserKey(userId),
     onSuccess: (result) => {
       setIssuedKey({ apiKey: result.api_key, username: result.user.username });
+      setIssuedKeyStatus("");
       refresh();
     },
   });
@@ -65,6 +68,41 @@ export function UsersPage() {
       updateUserRole(input.userId, input.role),
     onSuccess: refresh,
   });
+
+  const copyIssuedKey = async () => {
+    if (!issuedKey) {
+      return;
+    }
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API unavailable");
+      }
+      await navigator.clipboard.writeText(issuedKey.apiKey);
+      setIssuedKeyStatus(`API key for ${issuedKey.username} copied to the clipboard.`);
+    } catch {
+      setIssuedKeyStatus("Clipboard access was blocked. Select and copy the API key manually.");
+    }
+  };
+
+  const confirmReissue = (user: UserRecord) => {
+    if (
+      window.confirm(
+        `Re-issue the API key for ${user.username}? Their current key will stop working immediately.`,
+      )
+    ) {
+      reissueMutation.mutate(user.id);
+    }
+  };
+
+  const confirmDeactivate = (user: UserRecord) => {
+    if (
+      window.confirm(
+        `Deactivate ${user.username}? They will lose access immediately and cannot sign in with their current key.`,
+      )
+    ) {
+      deactivateMutation.mutate(user.id);
+    }
+  };
 
   if (!canAdmin) {
     return (
@@ -148,7 +186,20 @@ export function UsersPage() {
             <code className="issued-key">{issuedKey.apiKey}</code>
             <button
               className="secondary-button compact"
-              onClick={() => setIssuedKey(null)}
+              onClick={() => void copyIssuedKey()}
+              type="button"
+            >
+              Copy API key
+            </button>
+            <span aria-live="polite" role="status">
+              {issuedKeyStatus}
+            </span>
+            <button
+              className="secondary-button compact"
+              onClick={() => {
+                setIssuedKey(null);
+                setIssuedKeyStatus("");
+              }}
               type="button"
             >
               Dismiss
@@ -203,8 +254,8 @@ export function UsersPage() {
                     deactivating={
                       deactivateMutation.isPending && deactivateMutation.variables === user.id
                     }
-                    onDeactivate={() => deactivateMutation.mutate(user.id)}
-                    onReissueKey={() => reissueMutation.mutate(user.id)}
+                    onDeactivate={() => confirmDeactivate(user)}
+                    onReissueKey={() => confirmReissue(user)}
                     onRoleChange={(role) => roleMutation.mutate({ role, userId: user.id })}
                     reissuing={
                       reissueMutation.isPending && reissueMutation.variables === user.id

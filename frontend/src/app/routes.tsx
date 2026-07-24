@@ -1,35 +1,69 @@
 import { createHashRouter } from "react-router-dom";
 import { App } from "./App";
-import { ConfigurationPage } from "../features/workflow/ConfigurationPage";
-import { DashboardPage } from "../features/workflow/DashboardPage";
-import { HubPage } from "../features/workflow/HubPage";
-import { ModulePage } from "../features/workflow/ModulePage";
-import { RunHistoryPage } from "../features/workflow/RunHistoryPage";
-import { UsersPage } from "../features/workflow/UsersPage";
-import { BriefPage } from "../features/brief/BriefPage";
-import { LearningPage } from "../features/learning/LearningPage";
+
+async function loadBriefPage() {
+  const { BriefPage } = await import("../features/brief/BriefPage");
+  return { Component: BriefPage };
+}
+
+async function loadLearningPage() {
+  const { LearningPage } = await import("../features/learning/LearningPage");
+  return { Component: LearningPage };
+}
+
+async function loadDashboardPage() {
+  const { DashboardPage } = await import("../features/workflow/DashboardPage");
+  return { Component: DashboardPage };
+}
+
+async function loadConfigurationPage() {
+  const { ConfigurationPage } = await import("../features/workflow/ConfigurationPage");
+  return { Component: ConfigurationPage };
+}
+
+function loadModulePage(moduleRoute: string) {
+  return async () => {
+    const { ModulePage } = await import("../features/workflow/ModulePage");
+    return { element: <ModulePage moduleRoute={moduleRoute} /> };
+  };
+}
+
+async function loadHubPage() {
+  const { HubPage } = await import("../features/workflow/HubPage");
+  return { Component: HubPage };
+}
+
+async function loadRunHistoryPage() {
+  const { RunHistoryPage } = await import("../features/workflow/RunHistoryPage");
+  return { Component: RunHistoryPage };
+}
+
+async function loadUsersPage() {
+  const { UsersPage } = await import("../features/workflow/UsersPage");
+  return { Component: UsersPage };
+}
 
 export const router = createHashRouter([
   // Standalone product surfaces (own demo-shell header), mirroring the
   // Electracom reference's Product Brief + Course. "Launch the App" enters the
   // console layout below.
-  { path: "brief", element: <BriefPage /> },
-  { path: "learning", element: <LearningPage /> },
+  { path: "brief", lazy: loadBriefPage },
+  { path: "learning", lazy: loadLearningPage },
   {
     path: "/",
     element: <App />,
     children: [
-      { index: true, element: <DashboardPage /> },
-      { path: "configuration", element: <ConfigurationPage /> },
-      { path: "ip-scanner", element: <ModulePage moduleRoute="ip-scanner" /> },
-      { path: "bacnet-discovery", element: <ModulePage moduleRoute="bacnet-discovery" /> },
-      { path: "mqtt-discovery", element: <ModulePage moduleRoute="mqtt-discovery" /> },
-      { path: "udmi-validation", element: <ModulePage moduleRoute="udmi-validation" /> },
-      { path: "data-validation", element: <ModulePage moduleRoute="data-validation" /> },
-      { path: "reports", element: <ModulePage moduleRoute="reports" /> },
-      { path: "hub", element: <HubPage /> },
-      { path: "run-history", element: <RunHistoryPage /> },
-      { path: "users", element: <UsersPage /> }
+      { index: true, lazy: loadDashboardPage },
+      { path: "configuration", lazy: loadConfigurationPage },
+      { path: "ip-scanner", lazy: loadModulePage("ip-scanner") },
+      { path: "bacnet-discovery", lazy: loadModulePage("bacnet-discovery") },
+      { path: "mqtt-discovery", lazy: loadModulePage("mqtt-discovery") },
+      { path: "udmi-validation", lazy: loadModulePage("udmi-validation") },
+      { path: "data-validation", lazy: loadModulePage("data-validation") },
+      { path: "reports", lazy: loadModulePage("reports") },
+      { path: "hub", lazy: loadHubPage },
+      { path: "run-history", lazy: loadRunHistoryPage },
+      { path: "users", lazy: loadUsersPage }
     ]
   }
 ]);

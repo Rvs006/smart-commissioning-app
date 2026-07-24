@@ -16,6 +16,7 @@ from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
 from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary, RunRecord
+from app.services.report_naming import build_report_file_name, report_content_disposition
 from app.services.report_pdf import PdfDocument
 from app.services.reports_integrity import INTEGRITY_KEY, build_integrity_metadata
 from app.services.run_service import (
@@ -76,7 +77,15 @@ def _to_report_summary(report_id: str) -> ReportSummary:
         report_type=report_type,
         output_format=output_format,
         status=run.status,
-        file_name=f"{report_type}_{run.run_id}.{output_format}",
+        file_name=build_report_file_name(
+            report_type,
+            run.run_id,
+            output_format,
+            report_title=report_title,
+            # Deliberately require the literal boolean marker. Runs persisted
+            # before v0.1.25 keep their historical names.
+            custom_title=run.parameters.get("report_title_custom") is True,
+        ),
         created_at=run.created_at,
         source_run_ids=source_run_ids,
         report_title=report_title,
@@ -178,7 +187,7 @@ def download_report(report_id: str) -> Response:
     return Response(
         content=content,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{report.file_name}"'},
+        headers={"Content-Disposition": report_content_disposition(report.file_name)},
     )
 
 

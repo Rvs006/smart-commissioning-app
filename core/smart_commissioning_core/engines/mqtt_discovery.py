@@ -572,9 +572,21 @@ def _aggregate_capture(
     )
 
 
+_FAILURE_HINTS = {
+    "broker_not_configured": (
+        " No MQTT broker is configured. Enter the broker FQDN or IP address "
+        "on the Configuration page and save it."
+    ),
+    "dns_resolution_failed": (
+        " The configured broker hostname did not resolve in DNS. Check the "
+        "broker FQDN or IP address on the Configuration page."
+    ),
+}
+
+
 def _mqtt_failure_message(status_detail: str) -> str:
     """Credential-free operator reason for a self-diagnosed failed run."""
-    return f"MQTT discovery failed ({status_detail})."
+    return f"MQTT discovery failed ({status_detail}).{_FAILURE_HINTS.get(status_detail, '')}"
 
 
 def _safe_str(value: Any) -> str | None:

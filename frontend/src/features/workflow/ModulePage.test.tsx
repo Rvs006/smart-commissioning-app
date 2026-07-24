@@ -1110,7 +1110,7 @@ describe("ModulePage discovery wiring", () => {
     expect(document.querySelector("tr.row-pass, tr.row-fail")).toBeNull();
   });
 
-  it("renders the MAC column and opens a per-host detail dialog from the row View button", async () => {
+  it("renders the MAC column and keeps the discovery per-host detail dialog", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1151,8 +1151,8 @@ describe("ModulePage discovery wiring", () => {
     expect(await screen.findByRole("columnheader", { name: "MAC Address" })).toBeInTheDocument();
     expect((await screen.findAllByText("02:00:00:00:00:03")).length).toBeGreaterThan(0);
 
-    // Clicking the per-row "View" opens an unmistakable modal dialog whose labeled
-    // fields include the real MAC and hostname for that host.
+    // Clicking the per-row "View" opens the existing discovery detail dialog.
+    // UDMI alone routes View Issues into the persistent Inspector.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     const viewButton = screen.getAllByRole("button", { name: "View" })[0];
     fireEvent.click(viewButton);
@@ -1164,13 +1164,12 @@ describe("ModulePage discovery wiring", () => {
     expect(within(dialog).getByText("Hostname")).toBeInTheDocument();
     expect(within(dialog).getByText("plant-controller")).toBeInTheDocument();
 
-    // Close returns to the table (dialog dismissed).
+    // Close returns focus to the row action that opened the dialog.
     fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     await waitFor(() => expect(viewButton).toHaveFocus());
 
-    // The native cancel event is the browser's Escape path and restores the
-    // same opener after dismissal.
+    // The native cancel event is the browser Escape path and restores the same opener.
     fireEvent.click(viewButton);
     const escapeDialog = await screen.findByRole("dialog");
     fireEvent(escapeDialog, new Event("cancel", { cancelable: true }));
@@ -2156,7 +2155,9 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(within(inspector).getByRole("button", { name: /EM-1.*issue/i }));
     fireEvent.click(screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0]);
     expect(screen.getByText("Expected UDMI template")).toBeInTheDocument();
-    expect(screen.getByText(/schema-valid sentinel values identify device-supplied fields/i)).toBeInTheDocument();
+    expect(screen.getByText(/expected timestamp is a schema-valid template value created when this result view was built/i)).toBeInTheDocument();
+    expect(screen.getByText(/freshness checks use the observed payload timestamp/i)).toBeInTheDocument();
+    expect(screen.getByText(/expected side keeps its own build value and never borrows broker data/i)).toBeInTheDocument();
 
     // Presence diff (ISSUE-8): the expected-only point spelling shades amber on
     // the expected side, the observed-only (typo'd) spelling shades red on the
@@ -2215,6 +2216,25 @@ describe("ModulePage UDMI workbench live results", () => {
       }),
     );
   }
+
+  it("integrates the Workbench title and compact metric cards in one page header", async () => {
+    stubUdmiRunFetch(udmiIssuesPayload);
+    renderModule("udmi-validation");
+
+    const title = await screen.findByRole("heading", {
+      level: 1,
+      name: "UDMI Payload Workbench",
+    });
+    const hero = title.closest(".module-hero") as HTMLElement;
+    expect(hero).toHaveClass("module-hero-workbench");
+    expect(within(hero).getByText(/Inspect state, metadata, pointset/i)).toBeInTheDocument();
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    await screen.findByText(/Live validation results/i);
+    expect(within(hero).getByText("Issues")).toBeInTheDocument();
+  });
 
   it("shades live UDMI rows amber on non-compliant and green on pass (RAG)", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
@@ -2283,7 +2303,7 @@ describe("ModulePage UDMI workbench live results", () => {
       .find((row): row is HTMLTableRowElement => row !== null);
     expect(metadataRow).toBeDefined();
     fireEvent.click(
-      within(metadataRow!).getByRole("button", { name: /Select evidence/i }),
+      within(metadataRow!).getByRole("button", { name: "EM-1" }),
     );
     const inspector = document.querySelector(".inspector") as HTMLElement;
     const metadataGroup = within(inspector)
@@ -2299,7 +2319,7 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(flagged.some((line) => line.textContent?.includes('"energy_sensor"'))).toBe(false);
   });
 
-  it("keeps measured unexpected devices separate from expected-asset compliance", async () => {
+  it("uses listed unexpected devices when the provisional scalar is stale at zero", async () => {
     const runWithUnexpected = {
       ...udmiTerminalRun,
       result_summary: {
@@ -2312,7 +2332,7 @@ describe("ModulePage UDMI workbench live results", () => {
             not_observed: 0,
             with_issues: 0,
             successfully_validated: 1,
-            unexpected: 1,
+            unexpected: 0,
           },
           payload_metrics: {
             expected: 2,
@@ -2403,7 +2423,7 @@ describe("ModulePage UDMI workbench live results", () => {
       target: { value: "unexpected-devices" },
     });
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
-    expect(within(resultsTable).getByRole("button", { name: /device-9/i })).toBeInTheDocument();
+    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /device-9/i })).toBeInTheDocument();
     expect(within(resultsTable).queryByRole("button", { name: /EM-1/i })).not.toBeInTheDocument();
     const expectedMetric = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
     expect(within(expectedMetric).getByText("0")).toBeInTheDocument();
@@ -2413,7 +2433,7 @@ describe("ModulePage UDMI workbench live results", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the actual issue text in the View detail for a row with 1-2 issues", async () => {
+  it("shows the actual issue text in the Inspector when View issues is clicked", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
     renderModule("udmi-validation");
 
@@ -2424,17 +2444,18 @@ describe("ModulePage UDMI workbench live results", () => {
     // Ensure the issues query has merged before opening the detail.
     await screen.findAllByText("Non-compliant — 1 issue (1 critical)");
 
-    // The pointset row carries the run's single critical issue, so its View
-    // affordance names the count (ITEM-D); the modal shows the id + full message.
+    // The pointset row carries the run's single critical issue. View selects and
+    // focuses the persistent Inspector instead of opening a second detail view.
     fireEvent.click(screen.getByRole("button", { name: "View 1 issue" }));
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("UDMI-PS-001")).toBeInTheDocument();
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(within(inspector).getByText("UDMI-PS-001")).toBeInTheDocument();
     expect(
-      within(dialog).getByText(/Expected schema version does not match the pointset payload version/i),
-    ).toBeInTheDocument();
+      within(inspector).getAllByText(/Expected schema version does not match the pointset payload version/i),
+    ).toHaveLength(2);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
-  it("summarises 3+ issues in the View detail instead of dumping every message", async () => {
+  it("keeps 3+ issue details in the expanded Inspector without a modal", async () => {
     const manyIssues = {
       run_id: "run-udmi-1",
       issues: [1, 2, 3].map((n) => ({
@@ -2462,12 +2483,18 @@ describe("ModulePage UDMI workbench live results", () => {
     await screen.findAllByText("Non-compliant — 3 issues (1 critical)");
 
     fireEvent.click(screen.getByRole("button", { name: "View 3 issues" }));
-    const dialog = await screen.findByRole("dialog");
+    /* Removed modal assertions retained here as historical context.
     expect(
       within(dialog).getByText("3 issues — see the issue details below the table."),
     ).toBeInTheDocument();
     // The full message text stays in the issue panel below, not the modal.
     expect(within(dialog).queryByText(/Pointset problem 1\./)).not.toBeInTheDocument();
+    */
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(within(inspector).getByText("Pointset problem 1.")).toBeInTheDocument();
+    expect(within(inspector).getByText("Pointset problem 2.")).toBeInTheDocument();
+    expect(within(inspector).getByText("Pointset problem 3.")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("names a row's issue count on its View button and drives the inspector to those issues (ITEM-D)", async () => {
@@ -2512,6 +2539,10 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(inspector).getByText(/see details below/i)).toBeInTheDocument();
     await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
     expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "nearest" });
+    const focusedPayloadGroup = within(inspector)
+      .getByRole("heading", { name: "pointset" })
+      .closest(".payload-type-group");
+    await waitFor(() => expect(focusedPayloadGroup).toHaveFocus());
 
     scrollSpy.mockRestore();
   });
@@ -2670,7 +2701,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // under ITEM-7 grouping. Expand EM-2's summary row (scope to the table so the
     // query does not also match the inspector's EM-2 drill-down toggle).
     const resultsTable = screen.getByRole("table");
-    fireEvent.click(within(resultsTable).getByRole("button", { name: /EM-2/ }));
+    fireEvent.click(within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ }));
 
     // Wait for the offline verdict to land (issues merged) on the now-visible
     // EM-2 rows.
@@ -2695,7 +2726,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // Selecting an EM-2 payload row replaces the inspector's EM-1 evidence with
     // EM-2 only; expanding that selected asset reveals its run-observation line.
     fireEvent.click(
-      within(em2Rows[0]).getByRole("button", { name: /Select evidence/i }),
+      within(em2Rows[0]).getByRole("button", { name: /View/i }),
     );
     const inspectorEm2 = document.querySelector(".inspector") as HTMLElement;
     const inspectorToggle = await within(inspectorEm2).findByRole("button", { name: /EM-2.*issue/i });
@@ -2769,20 +2800,23 @@ describe("ModulePage UDMI workbench live results", () => {
 
     const table = screen.getByRole("table");
     // One collapsible summary row per asset.
-    expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
-    expect(within(table).getByRole("button", { name: /AHU-9/ })).toBeInTheDocument();
+    expect(await within(table).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
+    expect(within(table).getByRole("button", { expanded: false, name: /AHU-9/ })).toBeInTheDocument();
     expect(screen.getByText(/across 2 expected assets/i)).toBeInTheDocument();
 
     // EM-1 is the first (selected) asset, so it auto-expands (2 child rows).
     // AHU-9 is collapsed until clicked.
     expect(await screen.findAllByRole("button", { name: "View" })).toHaveLength(2);
-    fireEvent.click(within(table).getByRole("button", { name: /AHU-9/ }));
+    fireEvent.click(within(table).getByRole("button", { expanded: false, name: /AHU-9/ }));
     await waitFor(() => expect(screen.getAllByRole("button", { name: "View" })).toHaveLength(3));
 
-    // Clicking a child row's View selects it (opens the detail modal for AHU-9).
-    fireEvent.click(screen.getAllByRole("button", { name: "View" })[2]);
-    const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("AHU-9")).toBeInTheDocument();
+    // The Asset cell itself is a keyboard-accessible selection control. It
+    // replaces the Inspector immediately and never opens a duplicate modal.
+    const ahuAssetButtons = screen.getAllByRole("button", { name: "AHU-9" });
+    fireEvent.click(ahuAssetButtons[ahuAssetButtons.length - 1]);
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(within(inspector).getByRole("button", { name: /AHU-9.*issue/i })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("filters the results and inspector by observed/not-observed state (ITEM-10)", async () => {
@@ -2881,12 +2915,14 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(await screen.findByText(/across 2 expected assets/i)).toBeInTheDocument();
 
     const table = document.querySelector(".results-scroll table") as HTMLTableElement;
-    expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
+    expect(
+      await within(table).findByRole("button", { expanded: true, name: /EM-1/ }),
+    ).toBeInTheDocument();
 
     // Observation = not observed hides EM-1 and keeps only the silent EM-2.
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "not-observed" } });
-    expect(within(table).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
-    expect(within(table).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { expanded: true, name: /EM-1/ })).not.toBeInTheDocument();
+    expect(await within(table).findByRole("button", { expanded: true, name: /EM-2/ })).toBeInTheDocument();
     expect(screen.getByText(/across 1 expected asset\b/i)).toBeInTheDocument();
     const summaryPanel = screen.getByRole("heading", { name: "Validation summary" }).closest(".udmi-summary") as HTMLElement;
     const expectedAssets = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
@@ -2899,8 +2935,8 @@ describe("ModulePage UDMI workbench live results", () => {
 
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "all" } });
     fireEvent.change(screen.getByLabelText("System"), { target: { value: "BMS" } });
-    expect(within(table).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
-    expect(within(table).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    expect(await within(table).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { expanded: false, name: /EM-2/ })).not.toBeInTheDocument();
     expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
     expect(within(observedAssets).getByText("1")).toBeInTheDocument();
   });
@@ -3012,8 +3048,8 @@ describe("ModulePage UDMI workbench live results", () => {
 
     const table = screen.getByRole("table");
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "observed" } });
-    expect(within(table).getByRole("button", { name: /EM-OBSERVED/ })).toBeInTheDocument();
-    expect(within(table).queryByRole("button", { name: /EM-SILENT/ })).not.toBeInTheDocument();
+    expect(await within(table).findByRole("button", { expanded: true, name: /EM-OBSERVED/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { expanded: false, name: /EM-SILENT/ })).not.toBeInTheDocument();
     expect(screen.getByText(/across 1 expected asset\b/i)).toBeInTheDocument();
     const summaryPanel = screen.getByRole("heading", { name: "Validation summary" }).closest(".udmi-summary") as HTMLElement;
     const expectedAssets = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
@@ -3231,6 +3267,25 @@ describe("ModulePage UDMI workbench live results", () => {
       .getByRole("heading", { name: "Payload metrics" })
       .closest(".udmi-metric-group") as HTMLElement;
     const initiallyCorrect = within(initialPayloadGroup).getByText("Payloads correct").closest("div") as HTMLElement;
+    const initialAssetGroup = within(summaryPanelBeforeFilter)
+      .getByRole("heading", { name: "Asset metrics" })
+      .closest(".udmi-metric-group") as HTMLElement;
+    const initialFaultGroup = within(summaryPanelBeforeFilter)
+      .getByRole("heading", { name: "Fault metrics" })
+      .closest(".udmi-metric-group") as HTMLElement;
+    expect(initialAssetGroup).toHaveClass("udmi-metric-assets");
+    expect(initialPayloadGroup).toHaveClass("udmi-metric-payloads");
+    expect(initialFaultGroup).toHaveClass("udmi-metric-faults");
+    expect(initialAssetGroup.querySelector(".udmi-metric-table")).toBeInTheDocument();
+    expect(initialPayloadGroup.querySelector(".udmi-metric-table")).toBeInTheDocument();
+    expect(initialPayloadGroup.querySelector(".udmi-payload-rates")).toBeInTheDocument();
+    expect(initialFaultGroup.querySelector(".udmi-metric-table")).toBeInTheDocument();
+    // Wide-grid rules are presentation-only. Empty cells must not enter the
+    // description lists or create extra rows at smaller container widths.
+    expect(initialAssetGroup.querySelectorAll(".udmi-metric-table > div")).toHaveLength(6);
+    expect(initialPayloadGroup.querySelectorAll(".udmi-metric-table > div")).toHaveLength(5);
+    expect(initialFaultGroup.querySelectorAll(".udmi-metric-table > div")).toHaveLength(6);
+
     const initiallyIncorrect = within(initialPayloadGroup)
       .getByText("Payloads incorrect")
       .closest("div") as HTMLElement;
@@ -3253,16 +3308,18 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(resultsGrid).not.toHaveClass("two-col");
     expect(resultsGrid.children[1]).toHaveClass("inspector");
     expect(within(resultsTable).getByRole("columnheader", { name: "Topic" })).toBeInTheDocument();
-    expect(within(resultsTable).getByText("HV/SEC/02/MTS-100/pointset")).toBeInTheDocument();
-    expect(within(resultsTable).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
-    expect(within(resultsTable).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    expect(
+      await within(resultsTable).findByText("HV/SEC/02/MTS-100/pointset"),
+    ).toBeInTheDocument();
+    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
+    expect(within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ })).toBeInTheDocument();
     const inspector = document.querySelector(".inspector") as HTMLElement;
     expect(within(inspector).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "hv/sec" } });
-    expect(within(resultsTable).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
-    expect(within(resultsTable).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
+    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
+    expect(within(resultsTable).queryByRole("button", { expanded: false, name: /EM-2/ })).not.toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
     const summaryPanel = screen
@@ -3297,13 +3354,13 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(summaryPanel).getByText(/exact rows retained by every active result filter/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "" } });
-    expect(within(resultsTable).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    expect(within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ })).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
     expect(within(expectedAssetsMetric).getByText("5")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Filter results"), { target: { value: "EM-2" } });
-    expect(within(resultsTable).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
-    expect(within(resultsTable).getByRole("button", { name: /EM-2/ })).toBeInTheDocument();
+    expect(within(resultsTable).queryByRole("button", { expanded: true, name: /EM-1/ })).not.toBeInTheDocument();
+    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /EM-2/ })).toBeInTheDocument();
     expect(within(expectedAssetsMetric).getByText("1")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Filter results"), { target: { value: "" } });
 
@@ -3904,7 +3961,7 @@ describe("ModulePage UDMI workbench live results", () => {
     await screen.findByText(/Live validation results/i);
 
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
-    const assetToggle = await within(resultsTable).findByRole("button", { name: /SUBSET-1/ });
+    const assetToggle = await within(resultsTable).findByRole("button", { expanded: true, name: /SUBSET-1/ });
     if (assetToggle.getAttribute("aria-expanded") !== "true") {
       fireEvent.click(assetToggle);
     }
@@ -4241,7 +4298,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // Collapse EM-1's group in the table: its child row unmounts, so the inspector
     // must stop showing that row's detail rather than describe a hidden row.
     const table = screen.getByRole("table");
-    fireEvent.click(within(table).getByRole("button", { name: /EM-1/ }));
+    fireEvent.click(within(table).getByRole("button", { expanded: true, name: /EM-1/ }));
     await waitFor(() =>
       expect(
         within(document.querySelector(".inspector") as HTMLElement).queryByText("Payload type"),
@@ -4697,6 +4754,25 @@ describe("ModulePage UDMI workbench live results", () => {
 
   it("generates a report from the run in the chosen format (PDF default)", async () => {
     const reportBodies: Record<string, unknown>[] = [];
+    const threeAssetRun = {
+      ...udmiTerminalRun,
+      result_summary: {
+        ...udmiTerminalRun.result_summary,
+        payload_views: ["EM-1", "EM-2", "EM-3"].map((assetId) => ({
+          asset_id: assetId,
+          system: "BMS",
+          payload_types: [
+            {
+              payload_type: "state",
+              expected: { timestamp: "<RFC 3339 timestamp>", version: "1.5.2" },
+              observed: { timestamp: "2026-07-23T10:00:00Z", version: "1.5.2" },
+              observed_present: true,
+            },
+          ],
+        })),
+      },
+    };
+
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -4719,10 +4795,10 @@ describe("ModulePage UDMI workbench live results", () => {
           return jsonResponse(udmiAccepted);
         }
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
-          return jsonResponse(udmiIssuesPayload);
+          return jsonResponse({ run_id: "run-udmi-1", issues: [] });
         }
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
-          return jsonResponse(udmiTerminalRun);
+          return jsonResponse(threeAssetRun);
         }
         if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
           reportBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
@@ -4743,7 +4819,7 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
     fireEvent.change(await screen.findByLabelText("Filter results"), {
-      target: { value: "EM-1" },
+      target: { value: "EM-" },
     });
 
     // Terminal run -> the report affordance appears with the PDF default, once
@@ -4753,7 +4829,16 @@ describe("ModulePage UDMI workbench live results", () => {
       name: /Generate report from this run/i,
     });
     expect(generateButtons).toHaveLength(2);
-    await submitReportDialog(generateButtons[1], "Demo Campus Smart Validation");
+    fireEvent.click(generateButtons[1]);
+    const dialog = await screen.findByRole("dialog", { name: "Name this validation report" });
+    expect(
+      within(dialog).getByText(/Filtered scope locked when this dialog opened: 3 expected assets, 3 expected payloads/i),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Filter results"), {
+      target: { value: "no matching publisher" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Report title"), { target: { value: "Demo Campus Smart Validation" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Generate report" }));
     await waitFor(() => expect(reportBodies).toHaveLength(1));
     const reportBody = reportBodies[0];
     expect(reportBody.output_format).toBe("pdf");
@@ -4764,12 +4849,13 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(reportBody.udmi_scope).toEqual({
       schema_version: "1.0",
       selected_payloads: [
-        { source_run_id: "run-udmi-1", asset_id: "EM-1", payload_type: "metadata" },
-        { source_run_id: "run-udmi-1", asset_id: "EM-1", payload_type: "pointset" },
+        { source_run_id: "run-udmi-1", asset_id: "EM-1", payload_type: "state" },
+        { source_run_id: "run-udmi-1", asset_id: "EM-2", payload_type: "state" },
+        { source_run_id: "run-udmi-1", asset_id: "EM-3", payload_type: "state" },
       ],
       unexpected_device_ids: [],
       filters: {
-        text: "EM-1",
+        text: "EM-",
         verdict: "all",
         topic_contains: "",
         system: "all",
@@ -5309,10 +5395,11 @@ describe("ModulePage reports visibility", () => {
     reports: [
       {
         report_id: "rep-1",
-        report_type: "issue_report",
+        report_type: "udmi_validation",
         output_format: "xlsx",
         status: "succeeded",
-        file_name: "issue_report.xlsx",
+        file_name: "canihazcheezeburger_udmi_validation_rep-1.xlsx",
+        report_title: "canihazcheezeburger",
         created_at: "2026-07-15T10:00:00Z",
         source_run_ids: ["run-1"],
       },
@@ -5341,8 +5428,15 @@ describe("ModulePage reports visibility", () => {
     );
 
     renderModule("reports");
-    expect(await screen.findByLabelText(/Select report issue_report\.xlsx/i)).toBeInTheDocument();
+    expect(
+      await screen.findByLabelText(
+        /Select report canihazcheezeburger_udmi_validation_rep-1\.xlsx/i,
+      ),
+    ).toBeInTheDocument();
+    const reportName = screen.getByText("canihazcheezeburger").closest(".report-name-cell") as HTMLElement;
+    expect(within(reportName).getByText("rep-1")).toBeInTheDocument();
 
+    expect(screen.getByTitle("Download canihazcheezeburger_udmi_validation_rep-1.xlsx")).toBeInTheDocument();
     // The page lands on Setup and stays there, so the reports table has to be
     // in the Setup step group or the CSS hides it — which is the bug this fixes.
     expect(stepOf()).toBe("setup");

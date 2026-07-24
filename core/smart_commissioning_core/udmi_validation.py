@@ -1387,6 +1387,19 @@ def _missing_topics_issue(*, asset_id: str | None, missing: list[list[str]], got
     )
 
 
+_CAPTURE_ERROR_ACTIONS = {
+    "broker_not_configured": (
+        "Enter the MQTT broker FQDN or IP address on the Configuration page "
+        "and save it."
+    ),
+    "dns_resolution_failed": (
+        "Check the broker FQDN or IP address on the Configuration page. The "
+        "configured hostname did not resolve in DNS."
+    ),
+}
+_DEFAULT_CAPTURE_ERROR_ACTION = "Check broker reachability, credentials, TLS configuration, and topic filters."
+
+
 def _capture_error_issue(*, asset_id: str | None, status_detail: str) -> ValidationIssueRecord:
     return _issue(
         [],
@@ -1394,7 +1407,7 @@ def _capture_error_issue(*, asset_id: str | None, status_detail: str) -> Validat
         issue_type="payload_error",
         severity="critical",
         description=f"Live MQTT capture failed ({status_detail}).",
-        suggested_action="Check broker reachability, credentials, TLS configuration, and topic filters.",
+        suggested_action=_CAPTURE_ERROR_ACTIONS.get(status_detail, _DEFAULT_CAPTURE_ERROR_ACTION),
     )
 
 
@@ -2670,17 +2683,26 @@ def _register_canonical_notes(
     return notes
 
 
-def _expected_payload_header(expected: dict[str, Any]) -> dict[str, Any]:
+def _expected_payload_header(
+    expected: dict[str, Any],
+    *,
+    template_timestamp: str | None = None,
+) -> dict[str, Any]:
     """Schema-valid fields shared by display-only UDMI templates."""
-    header: dict[str, Any] = {"timestamp": _template_timestamp()}
+    header: dict[str, Any] = {"timestamp": template_timestamp or _template_timestamp()}
     if version := expected.get("udmi_version"):
         header["version"] = version
     return header
 
 
-def _expected_payload_facet(expected: dict[str, Any], payload_type: str) -> dict[str, Any] | None:
+def _expected_payload_facet(
+    expected: dict[str, Any],
+    payload_type: str,
+    *,
+    template_timestamp: str | None = None,
+) -> dict[str, Any] | None:
     """UDMI-shaped display template with register constraints and explicit placeholders."""
-    header = _expected_payload_header(expected)
+    header = _expected_payload_header(expected, template_timestamp=template_timestamp)
     points = expected.get("points")
     if points is None:
         points = expected.get("units", {})
@@ -2729,6 +2751,8 @@ def _asset_payload_view(
     retained_by_type: dict[str, bool],
     received_at_by_type: dict[str, str | None],
     topic_by_type: dict[str, str | None],
+    *,
+    template_timestamp: str,
 ) -> dict[str, object] | None:
     """Build ONE asset's per-payload-type expected-vs-observed view, or None.
 
@@ -2738,7 +2762,15 @@ def _asset_payload_view(
     payload_types: list[dict[str, object]] = []
     for payload_type in ("state", "metadata", "pointset"):
         observed = observed_by_type[payload_type]
-        expected_facet = _expected_payload_facet(expected, payload_type) if expected else None
+        expected_facet = (
+            _expected_payload_facet(
+                expected,
+                payload_type,
+                template_timestamp=template_timestamp,
+            )
+            if expected
+            else None
+        )
         observed_present = observed_present_by_type[payload_type]
         if not observed_present and not expected_facet:
             continue
@@ -2821,6 +2853,12 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
     single-schedule per run; this view simply surfaces all per-asset payloads
     supplied.
     """
+    # One result snapshot gets one template-build instant. Reusing it across
+    # every asset and payload type prevents the expected panels from inventing
+    # seconds of drift while a large result is projected. This template value is
+    # display/schema metadata only; freshness uses observed payload and receipt
+    # timestamps in _pointset_freshness_issue.
+    template_timestamp = _template_timestamp()
     assets = parameters.get("assets")
     if isinstance(assets, list) and assets:
         views: list[dict[str, object]] = []
@@ -2834,6 +2872,7 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
                 _retained_by_type(entry),
                 _received_at_by_type(entry),
                 _topic_by_type(entry),
+                template_timestamp=template_timestamp,
             )
             if view is not None:
                 views.append(view)
@@ -2846,6 +2885,7 @@ def _build_payload_views(parameters: dict[str, object]) -> list[dict[str, object
         _retained_by_type(parameters),
         _received_at_by_type(parameters),
         _topic_by_type(parameters),
+        template_timestamp=template_timestamp,
     )
     return [view] if view is not None else []
 
