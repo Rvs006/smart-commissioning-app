@@ -12,7 +12,7 @@ COPY core/ ./core/
 COPY worker/ ./worker/
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir ./core ./worker
+    && python -m pip install --no-cache-dir "./core[bacnet]" ./worker
 
 # Resolve `app` and `smart_commissioning_core` from the source trees instead
 # of site-packages so path-derived defaults (the dev SQLite fallback, core's

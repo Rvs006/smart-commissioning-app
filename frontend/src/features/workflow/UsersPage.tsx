@@ -11,6 +11,7 @@ import {
   type UserRecord,
 } from "../../api/client";
 import { useSession } from "../../app/sessionContext";
+import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { formatRelativeTime } from "./runFormat";
 
 // Admin-only user management. The route is only reachable when /me reports an
@@ -18,7 +19,7 @@ import { formatRelativeTime } from "./runFormat";
 // admin-gated server-side, so a non-admin who deep-links here just sees the
 // access notice below — no mutation buttons are ever wired for them.
 export function UsersPage() {
-  const { canAdmin } = useSession();
+  const { apiClient, canAdmin, sessionScopeId, workspace } = useSession();
   const queryClient = useQueryClient();
   const [newUsername, setNewUsername] = useState("");
   const [newRole, setNewRole] = useState<Role>("viewer");
@@ -27,16 +28,22 @@ export function UsersPage() {
 
   const usersQuery = useQuery({
     enabled: canAdmin,
-    queryFn: listUsers,
-    queryKey: ["users"],
+    queryFn: ({ signal }) => listUsers({ client: apiClient, signal }),
+    queryKey: queryKeys.users(sessionScopeId, workspace),
   });
 
   const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ["users"] });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.users(sessionScopeId, workspace) });
   };
 
   const createMutation = useMutation({
-    mutationFn: () => createUser({ role: newRole, username: newUsername.trim() }),
+    mutationKey: mutationKeys.action(sessionScopeId, "users.create"),
+    mutationFn: () =>
+      createUser({
+        context: { client: apiClient },
+        role: newRole,
+        username: newUsername.trim(),
+      }),
     onSuccess: (result) => {
       setIssuedKey({ apiKey: result.api_key, username: result.user.username });
       setIssuedKeyStatus("");
@@ -47,7 +54,8 @@ export function UsersPage() {
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: (userId: string) => deactivateUser(userId),
+    mutationKey: mutationKeys.action(sessionScopeId, "users.deactivate"),
+    mutationFn: (userId: string) => deactivateUser(userId, { client: apiClient }),
     onSuccess: refresh,
   });
 
@@ -55,7 +63,8 @@ export function UsersPage() {
   // the only way back is a fresh key. Re-issuing invalidates the old key
   // immediately; the new plaintext lands in the same issued-key panel as create.
   const reissueMutation = useMutation({
-    mutationFn: (userId: string) => reissueUserKey(userId),
+    mutationKey: mutationKeys.action(sessionScopeId, "users.reissue"),
+    mutationFn: (userId: string) => reissueUserKey(userId, { client: apiClient }),
     onSuccess: (result) => {
       setIssuedKey({ apiKey: result.api_key, username: result.user.username });
       setIssuedKeyStatus("");
@@ -64,8 +73,9 @@ export function UsersPage() {
   });
 
   const roleMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "users.role"),
     mutationFn: (input: { userId: string; role: Role }) =>
-      updateUserRole(input.userId, input.role),
+      updateUserRole(input.userId, input.role, { client: apiClient }),
     onSuccess: refresh,
   });
 

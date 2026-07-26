@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.schemas.configuration import (
+    ConfigurationExportEnvelope,
     ConfigurationImportRequest,
     ConfigurationSecretMaterial,
     SecretMaterialRequest,
@@ -122,6 +123,21 @@ class EncryptionAtRestTests(SecretStorageTestCase):
 
 
 class MaskOnReadTests(SecretStorageTestCase):
+    def test_legacy_plaintext_snapshot_is_migrated_to_encrypted_reference_on_load(self) -> None:
+        payload = DEFAULT_CONFIGURATION.model_copy(deep=True).model_dump(mode="json")
+        payload["mqtt"]["values"]["MQTT Password"] = "legacy-canary-password"
+        ConfigurationRepository(self.engine).save(
+            DEFAULT_PROJECT_ID, DEFAULT_SITE_ID, payload
+        )
+
+        internal = self.service.load(mask_secrets=False)
+        stored = self.stored_payload()["mqtt"]["values"]["MQTT Password"]
+
+        self.assertEqual(internal.mqtt.values["MQTT Password"], "legacy-canary-password")
+        self.assertTrue(stored.startswith("secret://configuration-mqtt-"))
+        self.assertNotIn("legacy-canary-password", str(self.stored_payload()))
+        self.assertEqual(self.service.read_secret(stored), "legacy-canary-password")
+
     def test_api_snapshots_mask_password_kinds_while_internal_load_sees_real_values(self) -> None:
         configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
         configuration.mqtt.values["MQTT Password"] = "broker-pass-1"
@@ -143,7 +159,12 @@ class MaskOnReadTests(SecretStorageTestCase):
         self.assertEqual(internal_snapshot.certificates.values["Key Password"], "key-pass-1")
 
         payload = self.stored_payload()
-        self.assertEqual(payload["mqtt"]["values"]["MQTT Password"], "broker-pass-1")
+        mqtt_ref = payload["mqtt"]["values"]["MQTT Password"]
+        key_ref = payload["certificates"]["values"]["Key Password"]
+        self.assertTrue(mqtt_ref.startswith("secret://configuration-mqtt-"))
+        self.assertTrue(key_ref.startswith("secret://configuration-certificates-"))
+        self.assertEqual(self.service.read_secret(mqtt_ref), "broker-pass-1")
+        self.assertEqual(self.service.read_secret(key_ref), "key-pass-1")
 
     def test_mqtt_provider_hook_receives_unmasked_values(self) -> None:
         # No cert material ships by default (fresh install is honest), so store a
@@ -192,7 +213,9 @@ class WriteOnlyUpdateTests(SecretStorageTestCase):
         self.save_with_mqtt_password("****")  # frontend sentinel matches any /^\*+$/ length
 
         self.assertEqual(self.service.load(mask_secrets=False).mqtt.values["MQTT Password"], "original-secret")
-        self.assertEqual(self.stored_payload()["mqtt"]["values"]["MQTT Password"], "original-secret")
+        stored_ref = self.stored_payload()["mqtt"]["values"]["MQTT Password"]
+        self.assertTrue(stored_ref.startswith("secret://configuration-mqtt-"))
+        self.assertEqual(self.service.read_secret(stored_ref), "original-secret")
 
     def test_new_value_replaces_previous_secret(self) -> None:
         self.save_with_mqtt_password("original-secret")
@@ -366,14 +389,9 @@ class DerivedCertificatesStatusTests(SecretStorageTestCase):
 
 
 class ConfigurationTransferTests(SecretStorageTestCase):
-    """Export-with-secrets + import round-trip (ITEM-1).
+    """Safe exports plus one-release imports of older transfer envelopes."""
 
-    The default export stays masked; this separate engineer action carries the
-    MQTT password and the certificate/key PEM material in plain text so a config
-    can be imported and actually connect on another machine.
-    """
-
-    def test_export_carries_plaintext_password_and_cert_material(self) -> None:
+    def test_compatibility_export_excludes_password_and_cert_material(self) -> None:
         cert = _self_signed_cert(_dt(2030, 1, 2))
         self.service.store_secret(
             SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=cert)
@@ -385,14 +403,12 @@ class ConfigurationTransferTests(SecretStorageTestCase):
         envelope = self.service.export_with_secrets()
 
         self.assertEqual(envelope.version, 2)
-        self.assertTrue(envelope.secrets_included)
-        # Plain-text password rides along (not the '********' mask).
-        self.assertEqual(envelope.configuration.mqtt.values["MQTT Password"], "broker-secret-A")
-        # The CA PEM content is attached, keyed by field name. The store keeps
-        # the upload-normalized form (store_secret strips surrounding
-        # whitespace), so the export carries exactly what the store holds.
-        self.assertIn("CA Certificate", envelope.secret_material)
-        self.assertEqual(envelope.secret_material["CA Certificate"].content, cert.strip())
+        self.assertFalse(envelope.secrets_included)
+        self.assertEqual(envelope.configuration.mqtt.values["MQTT Password"], SECRET_SENTINEL)
+        self.assertEqual(envelope.secret_material, {})
+        serialized = envelope.model_dump_json()
+        self.assertNotIn("broker-secret-A", serialized)
+        self.assertNotIn("BEGIN CERTIFICATE", serialized)
 
     def test_export_skips_a_cert_whose_backing_file_vanished(self) -> None:
         stored = self.service.store_secret(
@@ -405,7 +421,7 @@ class ConfigurationTransferTests(SecretStorageTestCase):
         # A dangling ref never rides along as broken material.
         self.assertNotIn("Client Certificate", envelope.secret_material)
 
-    def test_round_trip_restores_everything_on_a_fresh_machine(self) -> None:
+    def test_legacy_import_restores_and_encrypts_everything_on_a_fresh_machine(self) -> None:
         cert = _self_signed_cert(_dt(2030, 1, 2))
         self.service.store_secret(
             SecretMaterialRequest(field="CA Certificate", file_name="ca.pem", content=cert)
@@ -413,7 +429,20 @@ class ConfigurationTransferTests(SecretStorageTestCase):
         configuration = self.service.load(mask_secrets=False)
         configuration.mqtt.values["MQTT Password"] = "broker-secret-A"
         self.service.save(configuration)
-        envelope = self.service.export_with_secrets()
+        configuration.mqtt.values["MQTT Password"] = "broker-secret-A"
+        envelope = ConfigurationExportEnvelope(
+            exported_at="2026-07-26T00:00:00+00:00",
+            project_id=DEFAULT_PROJECT_ID,
+            site_id=DEFAULT_SITE_ID,
+            secrets_included=True,
+            configuration=configuration,
+            secret_material={
+                "CA Certificate": ConfigurationSecretMaterial(
+                    secret_ref=configuration.certificates.values["CA Certificate"],
+                    content=cert.strip(),
+                )
+            },
+        )
 
         # A second machine: its own secret store (own Fernet key) and database.
         machine_b_dir = self.secrets_root.parent / "machine-b"
@@ -434,6 +463,12 @@ class ConfigurationTransferTests(SecretStorageTestCase):
 
             loaded_b = service_b.load(mask_secrets=False)
             self.assertEqual(loaded_b.mqtt.values["MQTT Password"], "broker-secret-A")
+            stored_b = ConfigurationRepository(machine_b_engine).get_current(
+                DEFAULT_PROJECT_ID, DEFAULT_SITE_ID
+            )
+            password_ref = stored_b["mqtt"]["values"]["MQTT Password"]
+            self.assertTrue(password_ref.startswith("secret://configuration-mqtt-"))
+            self.assertEqual(service_b.read_secret(password_ref), "broker-secret-A")
             ca_ref = loaded_b.certificates.values["CA Certificate"]
             self.assertTrue(ca_ref.startswith("secret://"))
             # Material was re-encrypted with machine B's own key yet reads back

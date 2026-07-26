@@ -1,36 +1,36 @@
-"""Queue-or-inline dispatch shared by discovery + validation routes.
+"""Durable queue-or-inline dispatch shared by discovery and validation routes.
 
-The UDMI route established the pattern: respect ``job_execution_mode``
-(``inline`` -> run in-process; ``queue`` -> enqueue and fail if Redis is down;
-``auto`` -> try the queue, fall back to inline when Redis is unavailable and
-``allow_inline_worker_fallback`` is set). This module factors that pattern out
-so every engine route uses identical semantics.
+Inline execution happens only when the deployment explicitly selects inline
+mode or the route has no worker actor. Worker execution publishes the outbox row
+created atomically with the run. A failed Redis publish leaves that row pending
+for automatic retry and never starts a second inline executor.
 
-A caller supplies:
-
-* ``enqueue`` — a :class:`RunEnqueuer` that enqueues the run (and exposes the
-  queue/actor it targets), OR ``None`` to force the inline path (used by engines
-  whose worker actor is not wired for a given deployment, e.g. mqtt-config-publish
-  historically).
-* ``run_inline`` — a zero-arg callable that runs the engine processor in-process
-  with the RunService as the run store and returns the terminal RunRecord.
-
-It returns a :class:`JobAcceptedResponse`. Inline runs report their real
-terminal status; queued runs report ``queued`` with a worker-required summary.
+A caller supplies an optional queue enqueuer and an inline processor accepting
+the owned run store plus its resolved frozen parameters. The response always
+carries the created run id; synchronous inline runs can also report their final
+status.
 """
 
 import logging
 import threading
 from collections.abc import Callable
+from typing import Any
 
-from app.core.config import get_settings
+from smart_commissioning_core.execution_context import (
+    SecretMaterialUnavailableError,
+    resolve_context_parameters,
+)
+from smart_commissioning_core.owned_run_store import OwnedRunStore
+
+from app.core.config import edge_identity, get_settings
 from app.schemas.jobs import JobAcceptedResponse, RunRecord
-from app.services.job_queue import JobQueueUnavailable, RunEnqueuer
+from app.services.configuration_service import read_secret_material
+from app.services.job_queue import JobQueueService, JobQueueUnavailable, RunEnqueuer
 from app.services.run_service import RunService
 
 logger = logging.getLogger(__name__)
 
-InlineFn = Callable[[], RunRecord]
+InlineFn = Callable[[OwnedRunStore, dict[str, Any]], object]
 
 # Sanitized, credential-free message for a background inline run that raised
 # BEFORE the engine wrapper could write its own terminal status (e.g. a failure
@@ -42,8 +42,44 @@ _INLINE_RUN_CRASH_MESSAGE = (
     "saved. Please run it again."
 )
 
+_OUTBOX_DESTINATIONS = {
+    "ip_discovery": ("discover_ip_range", "discovery"),
+    "bacnet_discovery": ("discover_bacnet", "discovery"),
+    "mqtt_discovery": ("discover_mqtt", "discovery"),
+    "udmi_validation": ("validate_udmi_payloads", "validation"),
+    "bacnet_validation": ("validate_bacnet_points", "validation"),
+    "mapping_validation": ("compare_bacnet_mqtt", "validation"),
+}
 
-def _run_inline_guarded(service: RunService, run_id: str, run_inline: InlineFn) -> None:
+
+def publish_pending_dispatches(service: RunService | None = None) -> list[str]:
+    """Retry durable pending outbox rows without creating a second executor."""
+
+    run_service = service or RunService()
+    queue = JobQueueService()
+    published: list[str] = []
+    for dispatch in run_service.list_pending_dispatches():
+        run = run_service.get_run(dispatch.run_id)
+        destination = _OUTBOX_DESTINATIONS.get(run.job_type)
+        if destination is None or run.status != "queued":
+            continue
+        actor_name, queue_name = destination
+        try:
+            queue.enqueue_for(actor_name, queue_name)(run, dispatch.dispatch_id)
+        except JobQueueUnavailable:
+            continue
+        if run_service.mark_dispatch_published(dispatch.dispatch_id):
+            published.append(dispatch.dispatch_id)
+    return published
+
+
+def _run_inline_guarded(
+    service: RunService,
+    run_id: str,
+    run_inline: InlineFn,
+    owned_store: OwnedRunStore,
+    parameters: dict[str, Any],
+) -> None:
     """Execute ``run_inline`` on a background thread, never letting it strand the run.
 
     The engine wrapper (engines.base.run_engine) already writes a terminal status
@@ -55,11 +91,11 @@ def _run_inline_guarded(service: RunService, run_id: str, run_inline: InlineFn) 
     so a store hiccup cannot raise out of the thread.
     """
     try:
-        run_inline()
+        run_inline(owned_store, parameters)
     except Exception:
         logger.exception("background inline run %s crashed before it could finish", run_id)
         try:
-            service.update_run_status(
+            owned_store.update_run_status(
                 run_id,
                 status="failed",
                 stage="inline_run_crashed",
@@ -99,10 +135,46 @@ def _inline_response(
     that read fails too, fall back to the run as created — so this path returns a
     clean accepted response carrying the run id instead of a 500.
     """
+    dispatch = service.get_dispatch_for_run(run.run_id)
+    stored_context = service.get_execution_context(run.run_id)
+    owned_store = service.claim_owned_run(run.run_id)
+    if owned_store is None:
+        current = service.get_run(run.run_id)
+        return JobAcceptedResponse(
+            run_id=current.run_id,
+            job_type=current.job_type,
+            status=current.status,
+            message=message,
+        )
+    service.mark_dispatch_published(dispatch.dispatch_id)
+    try:
+        parameters = resolve_context_parameters(
+            stored_context.context,
+            owned_store.lease,
+            deployment_id=edge_identity().edge_id,
+            channel=run.job_type,
+            secret_resolver=lambda reference: read_secret_material(reference).encode("utf-8"),
+        )
+    except (FileNotFoundError, ValueError, SecretMaterialUnavailableError):
+        owned_store.update_run_status(
+            run.run_id,
+            status="failed",
+            stage="execution_context_unavailable",
+            progress_percent=100,
+            error_message="Frozen execution inputs could not be resolved.",
+        )
+        current = service.get_run(run.run_id)
+        return JobAcceptedResponse(
+            run_id=current.run_id,
+            job_type=current.job_type,
+            status=current.status,
+            message=message,
+        )
+
     if get_settings().inline_run_async:
         threading.Thread(
             target=_run_inline_guarded,
-            args=(service, run.run_id, run_inline),
+            args=(service, run.run_id, run_inline, owned_store, parameters),
             name=f"inline-run-{run.run_id}",
             daemon=True,
         ).start()
@@ -113,12 +185,11 @@ def _inline_response(
             message=message,
         )
 
-    processed = run_inline()
-    if processed is None:
-        try:
-            processed = service.get_run(run.run_id)
-        except Exception:
-            processed = run
+    run_inline(owned_store, parameters)
+    try:
+        processed = service.get_run(run.run_id)
+    except Exception:
+        processed = run
     return JobAcceptedResponse(
         run_id=processed.run_id,
         job_type=processed.job_type,
@@ -135,38 +206,19 @@ def dispatch_run(
     run_inline: InlineFn,
     inline_message: str,
     queued_message: str,
-    fallback_message: str,
 ) -> JobAcceptedResponse:
-    """Dispatch ``run`` via queue or inline per the configured execution mode.
-
-    Raises HTTPException-friendly behaviour to the caller only indirectly: a
-    hard queue failure in ``queue`` mode (or when inline fallback is disabled)
-    raises :class:`JobQueueUnavailable` for the route to map to 503.
-    """
+    """Dispatch inline or publish the run's durable pending outbox row."""
     settings = get_settings()
 
     if enqueue is None or settings.job_execution_mode == "inline":
         return _inline_response(run, service=service, run_inline=run_inline, message=inline_message)
 
-    # Stamp the worker-dispatch markers BEFORE handing the run to the queue.
-    # queue_name/actor_name are the fixed enqueue destination (known up front) and
-    # are what the startup orphan sweep uses to tell a live worker run from an
-    # interrupted inline run (see run_service._was_queued_to_worker). Written
-    # after the enqueue, they left a crash window in which a worker had already
-    # flipped the run to 'running' while the markers were still absent, so the
-    # sweep false-failed the live run; writing them first closes that window.
-    service.update_result_summary(
-        run.run_id,
-        {
-            "queued": True,
-            "worker_required": True,
-            "execution_mode": "dramatiq_redis",
-            "queue_name": enqueue.queue_name,
-            "actor_name": enqueue.actor_name,
-        },
-    )
+    # Run creation committed this pending row with the frozen context. Publishing
+    # it can therefore be retried safely without reconstructing current settings.
+    dispatch = service.get_dispatch_for_run(run.run_id)
     try:
-        enqueue(run)
+        enqueue(run, dispatch.dispatch_id)
+        service.mark_dispatch_published(dispatch.dispatch_id)
         return JobAcceptedResponse(
             run_id=run.run_id,
             job_type=run.job_type,
@@ -174,29 +226,18 @@ def dispatch_run(
             message=queued_message,
         )
     except JobQueueUnavailable as error:
-        if settings.job_execution_mode == "queue" or not settings.allow_inline_worker_fallback:
-            service.update_run_status(
-                run.run_id,
-                status="failed",
-                stage="queue_unavailable",
-                progress_percent=100,
-                error_message=str(error),
-            )
-            raise
-
-        # The message never reached the queue, so no worker will ever run this.
-        # Clear the worker-dispatch markers stamped above so the sweep can still
-        # reclaim this run if the inline attempt below is interrupted mid-persist
-        # — otherwise the stale markers would make an orphaned inline run look
-        # like a live worker run and it would spin at 'running' forever.
-        service.update_result_summary(
+        logger.warning(
+            "queue publish deferred for run_id=%s dispatch_id=%s: %s",
             run.run_id,
-            {
-                "queued": False,
-                "worker_required": False,
-                "execution_mode": "inline_local_fallback",
-                "queue_name": None,
-                "actor_name": None,
-            },
+            dispatch.dispatch_id,
+            error,
         )
-        return _inline_response(run, service=service, run_inline=run_inline, message=fallback_message)
+
+        # Keep the durable row pending. The publisher retries the same dispatch
+        # id, and the worker's lease fence prevents duplicate finalization.
+        return JobAcceptedResponse(
+            run_id=run.run_id,
+            job_type=run.job_type,
+            status=run.status,
+            message="Job accepted; queue publication is pending automatic retry.",
+        )

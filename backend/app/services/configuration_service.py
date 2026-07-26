@@ -26,7 +26,6 @@ from app.core.runtime import SECRETS_ROOT, ensure_runtime_directories
 from app.schemas.configuration import (
     ConfigurationExportEnvelope,
     ConfigurationImportRequest,
-    ConfigurationSecretMaterial,
     ConfigurationSection,
     ConfigurationSnapshot,
     ConfigurationValidationResult,
@@ -252,12 +251,11 @@ def _previous_section_values(payload: dict[str, object] | None, section_name: st
 class ConfigurationService:
     """Versioned configuration snapshots stored per project+site in the database.
 
-    Secret material stays file-based (encrypted) under the secrets root;
-    configuration payloads only ever hold secret:// references. Password-kind
-    values are stored unmasked in the DB payload but masked on every snapshot
-    returned to the API routes; internal consumers (e.g. the MQTT connection
-    builder via the configuration values provider) load with
-    mask_secrets=False to see the real values.
+    Secret material stays file-based and encrypted under the secrets root.
+    Versioned configuration payloads contain only ``secret://`` references;
+    API-facing snapshots replace password-kind references with the write-only
+    sentinel. Trusted in-process consumers may resolve them in memory; run
+    records and execution contexts retain references only.
     """
 
     def __init__(self, engine: Engine | None = None) -> None:
@@ -276,11 +274,20 @@ class ConfigurationService:
             snapshot = self._persist(DEFAULT_CONFIGURATION, project_id, site_id)
         else:
             snapshot = self._merge_with_defaults(ConfigurationSnapshot.model_validate(payload))
+            # One-release compatibility reader: move password/token values from
+            # legacy plaintext snapshots into the encrypted store and write a
+            # new version containing references only.
+            if self._extract_password_secrets(snapshot):
+                self._repository.save(project_id, site_id, snapshot.model_dump(mode="json"))
         # Answer field engineer's question ("why does it say Not configured?") from disk:
         # GET /configuration reports what is verifiably present right now, whether
         # or not anything was re-saved since the material was uploaded.
         self._derive_certificates_status(snapshot)
-        return self._mask_for_api(snapshot) if mask_secrets else snapshot
+        return (
+            self._mask_for_api(snapshot)
+            if mask_secrets
+            else self._resolve_password_references(snapshot)
+        )
 
     def save(
         self,
@@ -301,37 +308,21 @@ class ConfigurationService:
         project_id: str = DEFAULT_PROJECT_ID,
         site_id: str = DEFAULT_SITE_ID,
     ) -> ConfigurationExportEnvelope:
-        """A shareable export that INCLUDES secrets, for cross-machine import.
+        """Return a compatibility envelope without exposing secret values.
 
-        Field decision 2026-07-20: plain text is fine for the moment, encryption
-        at a later date. Unlike the default masked export, this loads
-        the snapshot UNMASKED (so the MQTT password / tokens / key password ride
-        along as plain text) and attaches the CA/client-certificate/private-key
-        PEM material so another engineer can import a working configuration on
-        their own machine. A cert field whose secret:// reference does not resolve
-        to a file on disk is skipped (the import-side dangling-drop keeps the
-        result honest), so the envelope never carries a broken reference.
+        v0.1.26 retires the former plaintext transfer response. A working
+        installation is transferred with the encrypted runtime backup, which
+        keeps the secret store and its key together. The endpoint remains for
+        one release so older clients receive a safe envelope.
         """
-        snapshot = self.load(project_id, site_id, mask_secrets=False)
-        secret_material: dict[str, ConfigurationSecretMaterial] = {}
-        cert_values = snapshot.certificates.values
-        for field in ("CA Certificate", "Client Certificate", "Private Key"):
-            value = str(cert_values.get(field, "")).strip()
-            if not value.startswith("secret://"):
-                continue
-            try:
-                if not _secret_path(value).exists():
-                    continue
-                content = read_secret_material(value)
-            except (ValueError, FileNotFoundError, OSError):
-                continue
-            secret_material[field] = ConfigurationSecretMaterial(secret_ref=value, content=content)
+        snapshot = self.load(project_id, site_id, mask_secrets=True)
         return ConfigurationExportEnvelope(
             exported_at=datetime.now(UTC).isoformat(),
             project_id=project_id,
             site_id=site_id,
             configuration=snapshot,
-            secret_material=secret_material,
+            secrets_included=False,
+            secret_material={},
         )
 
     def import_with_secrets(
@@ -348,9 +339,9 @@ class ConfigurationService:
         so ``_persist``'s dangling-ref drop finds the material resolvable and the
         certificate status/expiry re-derive honestly from disk. Material is
         re-encrypted with the receiving machine's own key (cross-machine works
-        because the envelope carries the PEM content, not ciphertext). Password-
-        kind values in ``request.configuration`` are plain text, not sentinels, so
-        ``save`` persists them verbatim and masks them on the returned snapshot.
+        because the legacy envelope carries the PEM content, not ciphertext).
+        Plaintext password-kind values from that compatibility import are
+        encrypted and replaced with versioned references before persistence.
 
         Callers validate ``request.configuration`` (mirroring PUT) before invoking
         this; a bad secret field or reference raises ValueError for a 400.
@@ -443,6 +434,7 @@ class ConfigurationService:
     def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
+        self._extract_password_secrets(configuration)
         self._drop_dangling_secret_refs(configuration)
         # Derive AFTER dropping dangling refs so a blanked ref persists as
         # "Not configured", not "needs attention". This overwrites any stale
@@ -451,12 +443,35 @@ class ConfigurationService:
         self._repository.save(project_id, site_id, configuration.model_dump(mode="json"))
         return configuration
 
+    def _extract_password_secrets(self, configuration: ConfigurationSnapshot) -> bool:
+        """Replace plaintext password-kind values with encrypted references.
+
+        The content digest is the secret version. Re-saving an unchanged value
+        reuses the same opaque reference, while rotation creates a new immutable
+        encrypted file.
+        """
+        changed = False
+        for section_name, field_names in PASSWORD_KIND_FIELDS.items():
+            values = getattr(configuration, section_name).values
+            for field_name in field_names:
+                value = str(values.get(field_name) or "")
+                if not value or value.startswith("secret://"):
+                    continue
+                digest = sha256(value.encode("utf-8")).hexdigest()
+                section_slug = section_name.replace("_", "-")
+                field_slug = "-".join(field_name.casefold().split())
+                reference = f"secret://configuration-{section_slug}-{field_slug}-{digest}"
+                write_secret_material(reference, value)
+                values[field_name] = reference
+                changed = True
+        return changed
+
     def _mask_for_api(self, configuration: ConfigurationSnapshot) -> ConfigurationSnapshot:
         """Mask password-kind values on snapshots that cross the API boundary.
 
-        The stored DB payload and internal consumers keep the real values;
-        only the serialized GET/PUT responses carry the sentinel. secret://
-        references are already opaque and stay as-is.
+        Stored payloads and internal snapshots keep references only. Serialized
+        GET/PUT responses carry the sentinel so neither a value nor a reference
+        crosses the API boundary.
         """
         masked = configuration.model_copy(deep=True)
         for section_name, field_names in PASSWORD_KIND_FIELDS.items():
@@ -465,6 +480,25 @@ class ConfigurationService:
                 if values.get(field_name, ""):
                     values[field_name] = SECRET_SENTINEL
         return masked
+
+    def _resolve_password_references(
+        self, configuration: ConfigurationSnapshot
+    ) -> ConfigurationSnapshot:
+        """Resolve password references only for trusted in-process consumers."""
+        resolved = configuration.model_copy(deep=True)
+        for section_name, field_names in PASSWORD_KIND_FIELDS.items():
+            values = getattr(resolved, section_name).values
+            for field_name in field_names:
+                value = str(values.get(field_name) or "")
+                if not value.startswith("secret://"):
+                    continue
+                try:
+                    values[field_name] = read_secret_material(value)
+                except (FileNotFoundError, ValueError, OSError):
+                    # Preserve the unresolved reference. Execution-context
+                    # resolution will fail before any network connection.
+                    values[field_name] = value
+        return resolved
 
     def _resolve_secret_sentinels(
         self,

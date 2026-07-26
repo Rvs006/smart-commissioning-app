@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { listRuns, type JobStatus, type JobType, type ListRunsParams } from "../../api/client";
+import { useSession } from "../../app/sessionContext";
+import { queryKeys } from "../../api/queryKeys";
 import {
   formatRelativeTime,
   humanizeJobType,
@@ -50,6 +52,7 @@ const INITIAL_FILTERS: HubFilters = {
 };
 
 export function HubPage() {
+  const { apiClient, sessionScopeId, workspace } = useSession();
   const [filters, setFilters] = useState<HubFilters>(INITIAL_FILTERS);
 
   // Only send filters the operator actually set. project_id/site_id default on
@@ -76,8 +79,8 @@ export function HubPage() {
   }, [filters]);
 
   const runsQuery = useQuery({
-    queryFn: () => listRuns(params),
-    queryKey: ["hub-runs", params],
+    queryFn: ({ signal }) => listRuns(params, { client: apiClient, signal }),
+    queryKey: queryKeys.hubRuns(sessionScopeId, workspace, JSON.stringify(params)),
     // Reuse the terminal-status polling cadence: poll fast while any listed run
     // is still in flight, otherwise settle to a slower refresh.
     refetchInterval: (query) =>

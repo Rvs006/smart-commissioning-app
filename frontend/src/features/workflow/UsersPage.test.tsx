@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { UserRecord } from "../../api/client";
+import { createSessionBoundApiClient, type UserRecord } from "../../api/client";
 import { SessionContext, type SessionContextValue } from "../../app/sessionContext";
+import { createSessionScopeId, DEFAULT_WORKSPACE } from "../../app/sessionScope";
 import { UsersPage } from "./UsersPage";
 
 const user: UserRecord = {
@@ -49,7 +50,9 @@ function renderUsers() {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
+  const sessionScopeId = createSessionScopeId();
   const session: SessionContextValue = {
+    apiClient: createSessionBoundApiClient(sessionScopeId, DEFAULT_WORKSPACE, null),
     canAdmin: true,
     canEngineer: true,
     error: null,
@@ -57,8 +60,10 @@ function renderUsers() {
     isLoading: false,
     me: { role: "admin", source: "local", username: "local-admin" },
     role: "admin",
+    sessionScopeId,
     signIn: vi.fn(),
     signOut: vi.fn(),
+    workspace: DEFAULT_WORKSPACE,
   };
 
   return render(

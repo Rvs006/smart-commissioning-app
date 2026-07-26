@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router";
 import { isAuthRejection } from "../api/client";
 import { ReviewFeedback } from "../features/workflow/ReviewFeedback";
 import { useSession } from "./sessionContext";

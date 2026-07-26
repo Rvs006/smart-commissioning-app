@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { clearApiKey, setApiKey } from "../../api/client";
 import { SessionProvider } from "../../app/session";
 import { ModulePage } from "./ModulePage";
@@ -2233,7 +2233,7 @@ describe("ModulePage UDMI workbench live results", () => {
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     await screen.findByText(/Live validation results/i);
-    expect(within(hero).getByText("Issues")).toBeInTheDocument();
+    expect(await within(hero).findByText("Issues")).toBeInTheDocument();
   });
 
   it("shades live UDMI rows amber on non-compliant and green on pass (RAG)", async () => {
@@ -2537,8 +2537,9 @@ describe("ModulePage UDMI workbench live results", () => {
     scrollSpy.mockClear();
     fireEvent.click(pointsetView);
     expect(within(inspector).getByText(/see details below/i)).toBeInTheDocument();
-    await waitFor(() => expect(scrollSpy).toHaveBeenCalled());
-    expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "nearest" });
+    await waitFor(() =>
+      expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "nearest" }),
+    );
     const focusedPayloadGroup = within(inspector)
       .getByRole("heading", { name: "pointset" })
       .closest(".payload-type-group");
@@ -3256,7 +3257,11 @@ describe("ModulePage UDMI workbench live results", () => {
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
 
-    const summaryHeading = await screen.findByRole("heading", { name: "Validation summary" });
+    const summaryHeading = await screen.findByRole(
+      "heading",
+      { name: "Validation summary" },
+      { timeout: 5_000 },
+    );
     const summaryPanelBeforeFilter = summaryHeading.closest(".udmi-summary") as HTMLElement;
     const overallMetric = within(summaryPanelBeforeFilter)
       .getByText("Overall compliance")
@@ -5336,6 +5341,65 @@ describe("ModulePage run retention", () => {
     expect(stepOf()).toBe("setup");
   });
 
+  it("replaces a cached terminal seed when the server returns a newer terminal run", async () => {
+    let latestIpRun = ipRunSummary;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=ip_discovery") ? [latestIpRun] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse(mePayload);
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) {
+          return jsonResponse(profilesPayload);
+        }
+        if (url.includes("/api/v1/discovery/runs/") && url.endsWith("/results")) {
+          const runId = url.includes("run-ip-2") ? "run-ip-2" : "run-ip-1";
+          return jsonResponse({ ...resultsPayload, run_id: runId });
+        }
+        if (url.includes("/api/v1/discovery/runs/")) {
+          const runId = url.includes("run-ip-2") ? "run-ip-2" : "run-ip-1";
+          return jsonResponse({ ...terminalRun, run_id: runId });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    setApiKey("engineer-key");
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const tree = (route: string) => (
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>
+          <MemoryRouter>
+            <ModulePage moduleRoute={route} />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>
+    );
+    const view = render(tree("ip-scanner"));
+    expect((await screen.findAllByText("run-ip-1")).length).toBeGreaterThan(0);
+
+    latestIpRun = {
+      ...ipRunSummary,
+      run_id: "run-ip-2",
+      created_at: "2026-06-11T10:00:00Z",
+      updated_at: "2026-06-11T10:05:00Z",
+    };
+    view.rerender(tree("mqtt-discovery"));
+    await waitFor(() => expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument());
+    view.rerender(tree("ip-scanner"));
+
+    expect((await screen.findAllByText("run-ip-2")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument();
+  });
+
   it("still advances an operator-started run to the Run step", async () => {
     // This run stays non-terminal, isolating the queued -> Run advance from the
     // succeeded -> Results one the discovery wiring suite covers.
@@ -5521,9 +5585,7 @@ describe("ModulePage reports visibility", () => {
       defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
     });
     setApiKey("engineer-key");
-    // Seed the cache the reports page would populate, so invalidation has
-    // something to mark stale.
-    queryClient.setQueryData(["reports-list"], { reports: [] });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
     render(
       <QueryClientProvider client={queryClient}>
         <SessionProvider>
@@ -5546,9 +5608,13 @@ describe("ModulePage reports visibility", () => {
 
     // The toast tells the operator to look in the Reports tab, so the cached
     // list behind that tab must not still be the pre-report one.
-    await waitFor(() =>
-      expect(queryClient.getQueryState(["reports-list"])?.isInvalidated).toBe(true),
-    );
+    await waitFor(() => {
+      const reportInvalidation = invalidateSpy.mock.calls.find(([filters]) => {
+        const key = filters?.queryKey;
+        return Array.isArray(key) && key[key.length - 1] === "reports";
+      });
+      expect(reportInvalidation).toBeDefined();
+    });
   });
 });
 

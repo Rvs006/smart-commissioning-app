@@ -17,6 +17,9 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 class WorkerSettings:
     redis_url: str
     database_url: str
+    deployment_id: str
+    lease_seconds: int
+    heartbeat_seconds: float
 
 
 @lru_cache
@@ -26,4 +29,7 @@ def get_settings() -> WorkerSettings:
         database_url=os.getenv(
             "DATABASE_URL", default_sqlite_url(_REPOSITORY_ROOT / "backend" / "runtime")
         ),
+        deployment_id=os.getenv("SMART_COMMISSIONING_DEPLOYMENT_ID", "local-worker"),
+        lease_seconds=max(15, int(os.getenv("RUN_LEASE_SECONDS", "60"))),
+        heartbeat_seconds=max(1.0, float(os.getenv("RUN_HEARTBEAT_SECONDS", "15"))),
     )

@@ -85,7 +85,7 @@ class MqttCaptureWindowCapTests(ApiTestCase):
         source = _WORKER_TASKS.read_text(encoding="utf-8")
         match = re.search(
             r'@dramatiq\.actor\(queue_name="discovery", max_retries=0, '
-            r"time_limit=([\d_]+)\)\s*\n@_with_worker_heartbeat\s*\n"
+            r"time_limit=([\d_]+)\)\s*\n@_with_worker_lease\s*\n"
             r"def discover_mqtt",
             source,
         )

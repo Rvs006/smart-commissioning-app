@@ -6,11 +6,15 @@ from smart_commissioning_core.db.db_run_store import (
     DbRunStore,
 )
 from smart_commissioning_core.db.models import Run
+from smart_commissioning_core.db.repositories import DiscoveryRepository
+from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+from smart_commissioning_core.integrity import sha256_bytes
+from smart_commissioning_core.owned_run_store import OwnedRunStore
 from sqlalchemy import select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.core.config import edge_identity
+from app.core.config import edge_identity, get_settings
 from app.core.db import get_engine
 from app.core.runtime import ensure_runtime_directories
 from app.schemas.jobs import (
@@ -23,7 +27,14 @@ from app.schemas.jobs import (
     RunRecord,
     ValidationIssueRecord,
 )
+from app.services.report_artifacts import (
+    REPORT_RENDERER_VERSION,
+    REPORT_SNAPSHOT_SCHEMA_VERSION,
+    canonical_json_bytes,
+    snapshot_sha256,
+)
 from app.services.report_naming import build_report_file_name
+from app.services.run_context_builder import build_run_context
 from app.services.udmi_report_model import (
     build_udmi_report_model,
     normalise_udmi_report_scope,
@@ -129,28 +140,62 @@ class RunService:
         ensure_runtime_directories()
         self._engine = engine if engine is not None else get_engine()
         self._store = DbRunStore(self._engine)
+        self._lifecycle = RunLifecycleRepository(self._engine)
 
     def create_job_run(
         self,
         request: JobCreateRequest,
         *,
         expected_job_type: JobType,
+        requesting_principal: str = "system",
     ) -> RunRecord:
         if request.job_type != expected_job_type:
             raise ValueError(f"Endpoint expects job_type '{expected_job_type}'.")
 
-        return self._create_run(
+        context = build_run_context(
+            engine=self._engine,
             project_id=request.project_id,
             site_id=request.site_id,
             job_type=expected_job_type,
             parameters=dict(request.parameters),
+            requesting_principal=requesting_principal,
         )
+        envelope = self._lifecycle.create_run_with_context(
+            job_type=expected_job_type,
+            context=context,
+            execution_mode=get_settings().job_execution_mode,
+            edge_id=edge_identity().edge_id,
+        )
+        logger.info("run created run_id=%s job_type=%s", envelope.run_id, expected_job_type)
+        return self.get_run(envelope.run_id)
+
+    def get_dispatch_for_run(self, run_id: str):
+        return self._lifecycle.get_dispatch_for_run(run_id)
+
+    def get_execution_context(self, run_id: str):
+        return self._lifecycle.get_context(run_id)
+
+    def claim_owned_run(self, run_id: str) -> OwnedRunStore | None:
+        dispatch = self._lifecycle.get_dispatch_for_run(run_id)
+        lease = self._lifecycle.claim_run(run_id, dispatch.dispatch_id, lease_seconds=60)
+        return OwnedRunStore(self._lifecycle, lease) if lease is not None else None
+
+    def mark_dispatch_published(self, dispatch_id: str) -> bool:
+        return self._lifecycle.mark_dispatch_published(dispatch_id)
+
+    def list_pending_dispatches(self):
+        return self._lifecycle.list_pending_dispatches()
+
+    def recover_expired_leases(self) -> list[str]:
+        return self._lifecycle.recover_expired_leases()
 
     def create_report_run(self, request: ReportRequest) -> tuple[RunRecord, ReportSummary]:
         # A report must never silently change scope because a source id is bad or
         # belongs to another project/site. Empty source lists remain valid for a
         # metadata-only report.
         sources: list[RunRecord] = []
+        source_seals: dict[str, dict[str, object]] = {}
+        source_context_provenance: dict[str, dict[str, object]] = {}
         for source_run_id in request.source_run_ids:
             try:
                 source = self.get_run(source_run_id)
@@ -161,16 +206,51 @@ class RunService:
                     f"Source run '{source_run_id}' does not belong to project "
                     f"'{request.project_id}' and site '{request.site_id}'."
                 )
+            if source.status not in _TERMINAL_RUN_STATUSES:
+                raise ValueError(
+                    f"Source run '{source_run_id}' is not terminal "
+                    f"(status '{source.status}'). Wait for it to succeed, fail, or be cancelled."
+                )
+            # Lifecycle-v2 runs are reportable only after the authoritative
+            # finalizer has committed a terminal result and immutable seal.
+            # Pre-v0.1.26 rows have no execution-context row and remain readable
+            # for backward-compatible historical reporting.
+            try:
+                context = self._lifecycle.get_context(source_run_id)
+            except FileNotFoundError:
+                context = None
+            if context is not None:
+                try:
+                    seal = self._lifecycle.get_seal(source_run_id)
+                except FileNotFoundError as error:
+                    raise ValueError(
+                        f"Source run '{source_run_id}' is terminal but unsealed. "
+                        "Recover or rerun it before generating evidence."
+                    ) from error
+                if seal.terminal_status != source.status:
+                    raise ValueError(
+                        f"Source run '{source_run_id}' has inconsistent terminal metadata."
+                    )
+                source_seals[source_run_id] = seal.model_dump(mode="json")
+                captured = context.context
+                source_context_provenance[source_run_id] = {
+                    "context_sha256": context.context_sha256,
+                    "configuration_version": captured.configuration_version,
+                    "configuration_sha256": sha256_bytes(
+                        canonical_json_bytes(captured.configuration_snapshot)
+                    ),
+                    "schema_versions": dict(captured.schema_versions),
+                    "credential_version_ids": sorted(
+                        f"{location}:{reference.version}"
+                        for location, reference in captured.secret_references.items()
+                    ),
+                    "application_version": captured.application_version,
+                }
             if request.report_type == "udmi_validation":
                 if source.job_type != "udmi_validation":
                     raise ValueError(
                         f"Source run '{source_run_id}' must be a UDMI validation run; "
                         f"found job type '{source.job_type}'."
-                    )
-                if source.status not in _TERMINAL_RUN_STATUSES:
-                    raise ValueError(
-                        f"Source run '{source_run_id}' is not terminal "
-                        f"(status '{source.status}'). Wait for it to succeed, fail, or be cancelled."
                     )
             sources.append(source)
 
@@ -189,6 +269,8 @@ class RunService:
                 if request.report_type == "udmi_validation"
                 else _DEFAULT_REPORT_TITLE
             ),
+            "report_generated_at": datetime.now(UTC).isoformat(),
+            "renderer_version": REPORT_RENDERER_VERSION,
         }
         snapshot_sources: list[RunRecord] = []
         seen_source_ids: set[str] = set()
@@ -210,13 +292,61 @@ class RunService:
                 parameters.get("udmi_scope"),
             )
             parameters["udmi_report_snapshot"] = report_snapshot
-            if report_snapshot is None:
-                # Pre-contract validation runs still use the legacy renderers.
-                # Retain their complete, redacted records so those renderers do
-                # not re-read mutable source evidence at download time.
-                parameters["source_run_snapshots"] = [
-                    source.model_dump(mode="json") for source in snapshot_sources
-                ]
+        source_snapshots = [
+            self._safe_report_value(source.model_dump(mode="json"))
+            for source in snapshot_sources
+        ]
+        parameters["source_run_snapshots"] = source_snapshots
+        parameters["source_run_seals"] = {
+            source.run_id: source_seals[source.run_id]
+            for source in snapshot_sources
+            if source.run_id in source_seals
+        }
+        discovery_snapshots = self._snapshot_discovery_rows(snapshot_sources)
+        parameters["source_discovery_snapshots"] = discovery_snapshots
+        selected_assets = sorted(
+            {
+                str(row.get("asset_id"))
+                for row in (parameters.get("udmi_scope") or {}).get("selected_payloads", [])
+                if isinstance(row, dict) and row.get("asset_id")
+            },
+            key=str.casefold,
+        )
+        report_snapshot_v2 = {
+            "schema_version": REPORT_SNAPSHOT_SCHEMA_VERSION,
+            "project_id": request.project_id,
+            "site_id": request.site_id,
+            "report_type": request.report_type,
+            "output_format": request.output_format,
+            "source_run_ids": [source.run_id for source in snapshot_sources],
+            "source_result_hashes": {
+                source.run_id: (
+                    source_seals[source.run_id]["result_sha256"]
+                    if source.run_id in source_seals
+                    else sha256_bytes(canonical_json_bytes(snapshot))
+                )
+                for source, snapshot in zip(snapshot_sources, source_snapshots, strict=True)
+            },
+            "selected_assets": selected_assets,
+            "filters": parameters.get("udmi_scope") or {},
+            "configuration_provenance": {
+                source.run_id: source_context_provenance[source.run_id]
+                for source in snapshot_sources
+                if source.run_id in source_context_provenance
+            },
+            "schema_versions": {
+                source_id: provenance["schema_versions"]
+                for source_id, provenance in source_context_provenance.items()
+            },
+            "renderer_version": REPORT_RENDERER_VERSION,
+            "displayed_counts": self._displayed_counts(
+                snapshot_sources,
+                discovery_snapshots=discovery_snapshots,
+                udmi_snapshot=parameters.get("udmi_report_snapshot"),
+            ),
+        }
+        parameters["report_snapshot_v2"] = report_snapshot_v2
+        parameters["report_snapshot_sha256"] = snapshot_sha256(report_snapshot_v2)
 
         report_title = str(parameters["report_title"])
         run = self._create_run(
@@ -228,22 +358,12 @@ class RunService:
         # Pin the rendered timestamp at creation. New reports therefore build
         # entirely from their own stored record and downloads never need to
         # mutate this provenance field.
-        run = self.update_result_summary(
-            run.run_id,
-            {"report_generated_at": run.created_at.isoformat()},
-        )
         # Reports are NOT processed by a worker actor: the artifact is built
         # on-demand from the stored run record at GET /reports/{id}/download. A
         # report run therefore has nothing to wait for — it is ready the moment
         # it is created. Without this the run sat at the default "queued" status
         # forever and the UI (which only offers a download for "succeeded"
         # reports) could never export it. Mark it terminal-succeeded immediately.
-        run = self.update_run_status(
-            run.run_id,
-            status="succeeded",
-            stage="report_ready",
-            progress_percent=100,
-        )
         report = ReportSummary(
             report_id=run.run_id,
             report_type=request.report_type,
@@ -266,11 +386,90 @@ class RunService:
         )
         return run, report
 
+    def _snapshot_discovery_rows(self, sources: list[RunRecord]) -> dict[str, object]:
+        repository = DiscoveryRepository(self._engine)
+        snapshots: dict[str, object] = {}
+        for source in sources:
+            if source.job_type not in DISCOVERY_JOB_TYPES:
+                continue
+            topics: list[dict[str, object]] = []
+            for topic in repository.list_topics(source.run_id):
+                safe_topic = self._safe_report_value(dict(topic))
+                if isinstance(safe_topic, dict):
+                    topics.append(safe_topic)
+            snapshots[source.run_id] = {
+                "devices": self._safe_report_value(repository.list_devices(source.run_id)),
+                "points": self._safe_report_value(repository.list_points(source.run_id)),
+                "topics": topics,
+            }
+        return snapshots
+
+    @staticmethod
+    def _safe_report_value(value: object) -> object:
+        """Copy renderer input while dropping secrets and unsafe raw payloads."""
+        excluded = {
+            "password",
+            "broker_password",
+            "mqtt_password",
+            "key_password",
+            "token",
+            "access_token",
+            "api_token",
+            "api_key",
+            "private_key",
+            "client_certificate",
+            "ca_certificate",
+            "secret",
+            "payload",
+            "last_payload",
+            "raw_payload",
+            "payload_bytes",
+            "raw_message",
+        }
+        if isinstance(value, dict):
+            return {
+                str(key): RunService._safe_report_value(child)
+                for key, child in value.items()
+                if str(key).strip().casefold().replace("-", "_") not in excluded
+            }
+        if isinstance(value, list):
+            return [RunService._safe_report_value(child) for child in value]
+        if isinstance(value, tuple):
+            return [RunService._safe_report_value(child) for child in value]
+        return value
+
+    @staticmethod
+    def _displayed_counts(
+        sources: list[RunRecord],
+        *,
+        discovery_snapshots: dict[str, object],
+        udmi_snapshot: object,
+    ) -> dict[str, object]:
+        counts: dict[str, object] = {
+            "source_runs": len(sources),
+            "issues": sum(len(source.issues) for source in sources),
+        }
+        for key in ("devices", "points", "topics"):
+            counts[key] = sum(
+                len(snapshot.get(key, []))
+                for snapshot in discovery_snapshots.values()
+                if isinstance(snapshot, dict) and isinstance(snapshot.get(key), list)
+            )
+        if isinstance(udmi_snapshot, dict):
+            for key in (
+                "asset_metrics",
+                "payload_metrics",
+                "fault_metrics",
+                "issue_metrics",
+            ):
+                value = udmi_snapshot.get(key)
+                if isinstance(value, dict):
+                    counts[key] = RunService._safe_report_value(value)
+        return counts
+
     def get_run(self, run_id: str) -> RunRecord:
-        # Polling a run doubles as a liveness check. A hard-killed worker cannot
-        # execute an exception handler, so its heartbeat is the only reliable
-        # distinction between a live actor and a fossilized marker-bearing row.
-        self._recover_stale_worker_run(run_id)
+        # Read paths are observational only. Lease expiry and stale-worker
+        # recovery belong to the periodic recovery task, never to GET or SSE.
         return RunRecord.model_validate(self._store.get_run(run_id))
 
     def list_runs(
@@ -505,26 +704,15 @@ class RunService:
         record = self._store.update_result_summary(run_id, result_summary, merge=merge)
         return RunRecord.model_validate(record)
 
-    def initialize_report_summary_value(
-        self,
-        run_id: str,
-        key: str,
-        value: object,
-    ) -> object:
-        """Atomically set one report-summary value only when it is absent.
-
-        Report artifacts are generated on demand, so two viewer downloads can
-        reach the same pre-upgrade report before either request has persisted its
-        generated timestamp or integrity record. The row lock serializes that
-        first-write decision on Postgres; the engine's ``BEGIN IMMEDIATE`` hook
-        provides the equivalent read-modify-write exclusion on SQLite.
-        """
+    def complete_report_run(self, run_id: str, manifest: dict[str, object]) -> RunRecord:
+        """Publish one immutable artifact manifest and terminal status atomically."""
 
         statement = (
-            select(Run.job_type, Run.result_summary)
+            select(Run.status, Run.job_type, Run.result_summary)
             .where(Run.id == run_id)
             .with_for_update()
         )
+        now = datetime.now(UTC)
         with self._engine.begin() as connection:
             row = connection.execute(statement).one_or_none()
             if row is None:
@@ -532,17 +720,44 @@ class RunService:
             if row.job_type != "report_generation":
                 raise ValueError(f"Run '{run_id}' is not a report-generation run.")
             current = row.result_summary if isinstance(row.result_summary, dict) else {}
-            if key in current:
-                return current[key]
-            next_summary = {**current, key: value}
-            result = connection.execute(
-                update(Run)
-                .where(Run.id == run_id, Run.job_type == "report_generation")
-                .values(result_summary=next_summary, updated_at=datetime.now(UTC))
-            )
-            if not result.rowcount:
-                raise FileNotFoundError(run_id)
-        return value
+            existing = current.get("artifact_manifest")
+            if existing is not None:
+                if existing != manifest or row.status != "succeeded":
+                    raise RuntimeError("Report artifact finalization conflicts with stored state.")
+            else:
+                if row.status not in {"queued", "running"}:
+                    raise RuntimeError(f"Report run '{run_id}' is already terminal ({row.status}).")
+                artifact_hash = manifest.get("artifact_sha256")
+                next_summary = {
+                    **current,
+                    "artifact_manifest": dict(manifest),
+                    "integrity": {
+                        "algorithm": "sha256",
+                        "hash": artifact_hash,
+                        "signature_algorithm": manifest.get("signature_algorithm"),
+                        "signature": manifest.get("signature"),
+                        "public_key_pem": manifest.get("public_key_pem"),
+                        "public_key_fingerprint": manifest.get("signing_key_id"),
+                        "signed_at": manifest.get("signed_at"),
+                    },
+                }
+                values: dict[str, object] = {
+                    "result_summary": next_summary,
+                    "status": "succeeded",
+                    "stage": "report_ready",
+                    "progress_percent": 100,
+                    "updated_at": now,
+                }
+                if hasattr(Run, "terminal_at"):
+                    values["terminal_at"] = now
+                result = connection.execute(
+                    update(Run)
+                    .where(Run.id == run_id, Run.status.in_(("queued", "running")))
+                    .values(**values)
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError("Report artifact finalization lost its lifecycle race.")
+        return self.get_run(run_id)
 
     def replace_issues(
         self,
@@ -560,7 +775,12 @@ class RunService:
         early, flipping the terminal status to ``cancelled``. Raises
         FileNotFoundError for a missing run (the route maps that to 404).
         """
-        return RunRecord.model_validate(self._store.request_cancel(run_id))
+        try:
+            self._lifecycle.get_context(run_id)
+        except FileNotFoundError:
+            return RunRecord.model_validate(self._store.request_cancel(run_id))
+        self._lifecycle.request_cancel(run_id)
+        return self.get_run(run_id)
 
     def is_cancel_requested(self, run_id: str) -> bool:
         """Return True if cancellation has been requested for the run.

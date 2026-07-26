@@ -1,10 +1,8 @@
 """MQTT discovery register-comparison tests.
 
-The whole-broker MQTT scan is compared, at results-read time, against the newest
-uploaded ``mqtt_register`` import: a topic that matches a register entry is
-"matched" (green), a topic observed on the broker but absent from the register is
-"unmatched" (red). Verdicts are computed on GET (never persisted), so importing a
-register AFTER an old run re-verdicts that run on its next read.
+Each real MQTT run binds the newest usable ``mqtt_register`` import when the
+run is created. Results derive verdicts from that exact import, so later register
+uploads cannot rewrite completed evidence.
 
 HONESTY: no register means NO verdicts (never all-red); a dry/failed run that
 observed nothing carries no comparison; and an expected-but-unobserved register
@@ -17,6 +15,8 @@ DISTINCT project_id because the harness database is shared process-wide.
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
+from app.schemas.jobs import JobCreateRequest
+from lifecycle_helpers import finish_run
 from openpyxl import load_workbook
 from smart_commissioning_core.db.repositories import ImportRepository
 from test_engines_api import _EngineApiTestCase
@@ -53,20 +53,32 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         return response.json()["run_id"]
 
     def _succeeded_run(self, project_id: str, topics: list[dict]) -> str:
-        """A run that looks like a real (non-dry) succeeded MQTT capture."""
+        """Create and finalize a real (non-dry) MQTT capture."""
         from app.api.routes import discovery as discovery_routes
 
-        run_id = self._new_run(project_id)
-        # Strip the dry_run flag (merge=False replaces the summary) and force a
-        # terminal succeeded status so _annotate_register_matches will compare.
-        discovery_routes.service.update_result_summary(
-            run_id, {"topics_discovered": len(topics)}, merge=False
+        parameters: dict[str, object] = {
+            "authorized": True,
+            "broker_host": f"{project_id}.invalid",
+        }
+        discovery_routes._bind_mqtt_register(project_id, _SITE, parameters)
+        run = discovery_routes.service.create_job_run(
+            JobCreateRequest(
+                project_id=project_id,
+                site_id=_SITE,
+                job_type="mqtt_discovery",
+                parameters=parameters,
+            ),
+            expected_job_type="mqtt_discovery",
+            requesting_principal="test-suite",
         )
-        discovery_routes.service.update_run_status(
-            run_id, status="succeeded", stage="capture_complete", progress_percent=100
+        finish_run(
+            discovery_routes.service,
+            run.run_id,
+            stage="capture_complete",
+            summary={"topics_discovered": len(topics)},
+            topics=topics,
         )
-        discovery_routes._discovery_repository().replace_topics(run_id, topics)
-        return run_id
+        return run.run_id
 
     def _seed_register(
         self,
@@ -154,18 +166,15 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         for row in data["topics"]:
             self.assertNotIn("register_match", row.get("attributes") or {})
 
-    def test_verdicts_apply_retroactively_to_earlier_run(self) -> None:
+    def test_later_register_import_does_not_rewrite_completed_evidence(self) -> None:
         project = "reg-compare-retro"
         run_id = self._succeeded_run(project, self._observed_topics())
-        # Before any register: no verdicts.
         first = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertEqual(first["register_comparison"], {"register_available": False})
-        # Import the register AFTER the run, then re-read: the old run is verdicted.
+
         self._seed_register(project, self._register_rows(), import_id="imp_retro")
         second = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
-        self.assertTrue(second["register_comparison"]["register_available"])
-        by_topic = self._by_topic(second["topics"])
-        self.assertEqual(by_topic["demo-site/b1/ahu-1/state"]["attributes"]["register_match"], "matched")
+        self.assertEqual(first, second)
 
     def test_dry_run_carries_no_comparison(self) -> None:
         from app.api.routes import discovery as discovery_routes

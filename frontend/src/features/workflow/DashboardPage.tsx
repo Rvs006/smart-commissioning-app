@@ -1,6 +1,6 @@
 import { useEffect, useMemo } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import {
   createReport,
   getHealth,
@@ -23,6 +23,8 @@ import {
 } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
+import { mutationKeys, queryKeys } from "../../api/queryKeys";
+import { toRunRef } from "./runIsolation";
 
 const briefSteps = [
   {
@@ -117,22 +119,26 @@ function parseBlockingFinding(issue: ValidationIssueRecord): ParsedFinding {
 export function DashboardPage() {
   // Queueing an evidence pack is a report-create (engineer+). A viewer/reviewer
   // sees the button disabled with an explanatory tooltip rather than a 403.
-  const { canEngineer } = useSession();
+  const { apiClient, canEngineer, sessionScopeId, workspace } = useSession();
   const healthQuery = useQuery({
-    queryFn: getHealth,
-    queryKey: ["health"],
+    queryFn: ({ signal }) => getHealth({ client: apiClient, signal }),
+    queryKey: queryKeys.health(sessionScopeId, workspace),
     refetchInterval: 15000,
   });
   const profilesQuery = useQuery({
-    queryFn: listImportProfiles,
-    queryKey: ["import-profiles"],
+    queryFn: ({ signal }) => listImportProfiles({ client: apiClient, signal }),
+    queryKey: queryKeys.importProfiles(sessionScopeId, workspace),
   });
 
   // Recent runs (real). Poll fast while any run is still in flight, otherwise
   // settle to the slower 15s cadence so a queued -> succeeded flip shows live.
   const runsQuery = useQuery({
-    queryFn: () => listRuns({ limit: 50 }),
-    queryKey: ["runs"],
+    queryFn: ({ signal }) =>
+      listRuns(
+        { limit: 50, projectId: workspace.projectId, siteId: workspace.siteId },
+        { client: apiClient, signal },
+      ),
+    queryKey: queryKeys.runs(sessionScopeId, workspace, "dashboard"),
     refetchInterval: (query) =>
       query.state.data?.runs?.some((run) => !isTerminalStatus(run.status)) ? 1500 : 15000,
   });
@@ -141,12 +147,15 @@ export function DashboardPage() {
   // refetch of the runs list when that run goes terminal, so the dashboard
   // reflects completion without waiting on the 1.5s poll. On SSE error the
   // existing polling above is untouched, so nothing regresses.
-  const newestActiveRunId = useMemo(() => {
+  const newestActiveRun = useMemo(() => {
     const all = runsQuery.data?.runs ?? [];
-    return all.find((run) => !isTerminalStatus(run.status))?.run_id ?? null;
-  }, [runsQuery.data]);
+    const run = all.find((candidate) => !isTerminalStatus(candidate.status));
+    return run
+      ? toRunRef(sessionScopeId, workspace, "dashboard", run, "dashboard")
+      : null;
+  }, [runsQuery.data, sessionScopeId, workspace]);
 
-  const runEvents = useRunEvents(newestActiveRunId, Boolean(newestActiveRunId));
+  const runEvents = useRunEvents(newestActiveRun, Boolean(newestActiveRun), apiClient);
   const refetchRuns = runsQuery.refetch;
   useEffect(() => {
     if (runEvents.reachedTerminal) {
@@ -156,8 +165,8 @@ export function DashboardPage() {
 
   // Reports (real) — used for the evidence-pack count KPI.
   const reportsQuery = useQuery({
-    queryFn: listReports,
-    queryKey: ["reports"],
+    queryFn: ({ signal }) => listReports({ client: apiClient, signal }),
+    queryKey: queryKeys.reports(sessionScopeId, workspace),
     refetchInterval: (query) =>
       query.state.data?.reports?.some((report) => !isTerminalStatus(report.status)) ? 1500 : 15000,
   });
@@ -165,8 +174,8 @@ export function DashboardPage() {
   // Latest terminal validation run, used to derive the open-issues KPI and the
   // single blocking finding. Issues are only fetched once a run is terminal.
   const validationRunsQuery = useQuery({
-    queryFn: listValidationRuns,
-    queryKey: ["validation-runs"],
+    queryFn: ({ signal }) => listValidationRuns({ client: apiClient, signal }),
+    queryKey: queryKeys.runs(sessionScopeId, workspace, "validations"),
     refetchInterval: (query) =>
       query.state.data?.runs?.some((run) => !isTerminalStatus(run.status)) ? 1500 : 15000,
   });
@@ -179,12 +188,26 @@ export function DashboardPage() {
 
   const issuesQuery = useQuery({
     enabled: Boolean(latestTerminalValidationRunId),
-    queryFn: () => getValidationIssues(latestTerminalValidationRunId ?? ""),
-    queryKey: ["validation-issues", latestTerminalValidationRunId],
+    queryFn: ({ signal }) =>
+      getValidationIssues(latestTerminalValidationRunId ?? "", {
+        client: apiClient,
+        signal,
+      }),
+    queryKey: queryKeys.issuesById(
+      sessionScopeId,
+      workspace,
+      latestTerminalValidationRunId,
+    ),
   });
 
   const reportMutation = useMutation({
-    mutationFn: () => createReport({ reportType: "evidence_pack" }),
+    mutationKey: mutationKeys.reports(sessionScopeId, workspace),
+    mutationFn: () =>
+      createReport({
+        context: { client: apiClient },
+        reportType: "evidence_pack",
+        workspace,
+      }),
     onSuccess: () => {
       void reportsQuery.refetch();
     },

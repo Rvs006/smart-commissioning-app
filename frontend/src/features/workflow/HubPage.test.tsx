@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { clearApiKey } from "../../api/client";
+import { SessionProvider } from "../../app/session";
 import { HubPage } from "./HubPage";
 
 // The hub view renders cross-project runs from listRuns, showing honest edge
@@ -50,6 +51,9 @@ function stubRuns(payload: unknown) {
       if (url.includes("/api/v1/runs")) {
         return jsonResponse(payload);
       }
+      if (url.endsWith("/api/v1/me")) {
+        return jsonResponse({ role: "admin", source: "local", username: "local-admin" });
+      }
       throw new Error(`Unexpected fetch in test: ${url}`);
     }),
   );
@@ -61,9 +65,11 @@ function renderHub() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <HubPage />
-      </MemoryRouter>
+      <SessionProvider>
+        <MemoryRouter>
+          <HubPage />
+        </MemoryRouter>
+      </SessionProvider>
     </QueryClientProvider>,
   );
 }

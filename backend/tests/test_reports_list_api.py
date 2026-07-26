@@ -39,6 +39,7 @@ class ReportListProjectionTests(ApiTestCase):
     def _seed_source_runs(self, count: int) -> list[str]:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from lifecycle_helpers import finish_run
 
         service = RunService()
         ids: list[str] = []
@@ -52,12 +53,7 @@ class ReportListProjectionTests(ApiTestCase):
                 ),
                 expected_job_type="udmi_validation",
             )
-            service.update_run_status(
-                run.run_id,
-                status="succeeded",
-                stage="done",
-                progress_percent=100,
-            )
+            finish_run(service, run.run_id)
             ids.append(run.run_id)
         return ids
 

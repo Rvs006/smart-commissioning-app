@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -19,7 +22,14 @@ jobs:
         run: pip install -e ./core -e ./backend -e ./worker ruff mypy
 
       - name: Ruff lint
-        run: ruff check backend worker core
+        run: >-
+          ruff check backend worker core
+          scripts/backup_rollback_smoke.py
+          scripts/check_v0126_release_contracts.py
+          scripts/generate_release_evidence.py
+          scripts/generate_sbom.py
+          scripts/smoke_hosted_queue.py
+          scripts/validate_release_evidence.py
 
       - name: Public repository hygiene
         run: python scripts/check_public_hygiene.py
@@ -73,6 +83,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -115,15 +128,15 @@ jobs:
 
   # Additive SBOM + license inventory job. Generates a CycloneDX SBOM across the
   # three Python distributions and runs an allowlist-based license gate.
-  # NON-BLOCKING (continue-on-error) because the generated inventory depends on
-  # the exact transitive versions resolved at install time, which are not pinned
-  # here — so a transient license-metadata change should surface as a warning,
-  # not a red build. Flip continue-on-error to false (and pin versions) to make
-  # the gate enforcing.
+  # The release workflow adds npm and image SBOMs. This merge gate keeps the
+  # Python runtime inventory and license policy blocking.
   sbom:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - uses: actions/setup-python@v5
         with:
@@ -132,11 +145,16 @@ jobs:
       # Install the same runtime tree the SBOM inventories (no extra SBOM tool;
       # scripts/generate_sbom.py uses only the standard library).
       - name: Install packages
-        run: pip install -e ./core -e ./backend -e ./worker
+        run: pip install -e './core[bacnet]' -e ./backend -e ./worker
 
       - name: Generate SBOM (CycloneDX JSON) and run the license gate
-        continue-on-error: true
-        run: python scripts/generate_sbom.py --json sbom.json --markdown docs/SBOM.generated.md --check
+        run: >-
+          python scripts/generate_sbom.py
+          --json SBOM.python.cdx.json
+          --markdown docs/SBOM.generated.md
+          --application-version ci-${{ github.sha }}
+          --source-commit ${{ github.sha }}
+          --check
 
       - name: Upload SBOM artifact
         if: always()
@@ -144,9 +162,9 @@ jobs:
         with:
           name: sbom
           path: |
-            sbom.json
+            SBOM.python.cdx.json
             docs/SBOM.generated.md
-          if-no-files-found: warn
+          if-no-files-found: error
 
   frontend:
     runs-on: ubuntu-latest
@@ -156,13 +174,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prove exact checkout
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
       - uses: actions/setup-node@v4
         with:
-          # frontend/package-lock.json is generated with npm 10 so its esbuild
-          # optional-platform deps install cleanly under both npm 10 and 11.
-          # Node 22 (ships npm 10.9) is used to match the dev environment; the
-          # lockfile installs the same way on Node 20.
-          node-version: 22
+          # React Router 8 requires Node >=22.22. Node 24 is the release build
+          # baseline across Linux and Windows so npm resolves one lockfile.
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -180,3 +199,15 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Generate npm CycloneDX
+        run: |
+          mkdir -p ../build
+          npm sbom --omit=dev --sbom-format cyclonedx --sbom-type application > ../build/SBOM.npm.cdx.json
+
+      - name: Upload npm SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-npm
+          path: build/SBOM.npm.cdx.json
+          if-no-files-found: error

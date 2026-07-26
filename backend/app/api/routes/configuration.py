@@ -74,11 +74,10 @@ def export_configuration_with_secrets(
     project_id: str = Query(default=DEFAULT_PROJECT_ID),
     site_id: str = Query(default=DEFAULT_SITE_ID),
 ) -> ConfigurationExportEnvelope:
-    """Export the configuration INCLUDING plain-text secrets (engineer only).
+    """Compatibility export with every secret value excluded.
 
-    Distinct from GET /configuration (which always masks). The returned envelope
-    carries the MQTT password/tokens and the certificate/key PEM material so it
-    can be imported on another machine — engineer-gated and warned about in the UI.
+    The former route name remains for one release so older clients receive a
+    masked envelope instead of plaintext credentials or key material.
     """
     return service.export_with_secrets(project_id, site_id)
 
@@ -93,7 +92,7 @@ def import_configuration(
     project_id: str = Query(default=DEFAULT_PROJECT_ID),
     site_id: str = Query(default=DEFAULT_SITE_ID),
 ) -> ConfigurationSnapshot:
-    """Import a configuration, restoring any exported secret material.
+    """Import configuration, accepting secret material only from legacy v2 envelopes.
 
     Validation mirrors PUT (invalid snapshot -> 400 with the error list); a bad
     secret field/reference -> 400. Returns the masked snapshot, like PUT, and

@@ -29,21 +29,28 @@ from typing import Any
 import dramatiq
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.middleware import Interrupt, TimeLimitExceeded
-from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
+from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
 from smart_commissioning_core.engines.base import ThrottleConfig, make_cancel_checker
 from smart_commissioning_core.engines.comparison import process_mapping_validation_run
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
 from smart_commissioning_core.engines.point_validation import process_bacnet_validation_run
+from smart_commissioning_core.execution_context import resolve_context_parameters
 from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
+from smart_commissioning_core.owned_run_store import OwnedRunStore
+from smart_commissioning_core.run_context import RunContextV1
+from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 from app.config import get_settings
 from app.db import get_engine
 from app.logging import configure_logging, run_id_context
-from app.mqtt_config_provider import register_worker_mqtt_configuration_provider
+from app.mqtt_config_provider import (
+    register_worker_mqtt_secret_resolver,
+    resolve_worker_secret,
+)
 
 # Structured JSON logging is installed at worker import (the dramatiq CLI imports
 # this module). Every actor binds its run_id via run_id_context so each log line
@@ -58,13 +65,13 @@ dramatiq.set_broker(broker)
 # Shared database-backed run store (same DATABASE_URL as the backend). The
 # backend owns the schema; the worker only reads/writes run + discovery rows.
 _engine = get_engine()
-run_store = DbRunStore(_engine)
-discovery_repository = DiscoveryRepository(_engine)
+lifecycle_repository = RunLifecycleRepository(_engine)
 import_repository = ImportRepository(_engine)
+discovery_repository = DiscoveryRepository(_engine)
 
-# Give the worker broker connection defaults from stored configuration so MQTT
-# engines can connect on the worker path (run parameters still take precedence).
-register_worker_mqtt_configuration_provider()
+# Register the secret-reference resolver used by frozen execution contexts.
+# Broker settings themselves come only from the persisted context.
+register_worker_mqtt_secret_resolver()
 
 
 # -- conservative worker-side scan throttle defaults ------------------------
@@ -75,28 +82,65 @@ _DEFAULT_SCAN_CONNECT_TIMEOUT_S = 5.0
 # Hard floor for the rate limiter: a request may lower the rate but can never
 # disable it (None/unlimited). Mirrors engine_dispatch._MIN_RATE_LIMIT_PER_SEC.
 _MIN_SCAN_RATE_LIMIT_PER_SEC = 0.1
-_WORKER_HEARTBEAT_SECONDS = 30.0
+_WORKER_HEARTBEAT_SECONDS = settings.heartbeat_seconds
+_WORKER_LEASE_SECONDS = settings.lease_seconds
 
 
-def _with_worker_heartbeat(function: Callable[..., None]) -> Callable[..., None]:
-    """Refresh an active run while its actor is alive.
-
-    Dramatiq cannot deliver ``Interrupt`` after a process kill or power loss.
-    The API therefore treats four missed 30-second heartbeats as a dead running
-    actor. Terminal-state protection in DbRunStore makes a late beat harmless.
-    """
+def _with_worker_lease(
+    function: Callable[[str, RunContextV1, OwnedRunStore], None]
+) -> Callable[[str, str], None]:
+    """Claim, load frozen context, heartbeat, and guard one delivery."""
 
     @wraps(function)
-    def wrapped(run_id: str, *args: Any, **kwargs: Any) -> None:
+    def wrapped(run_id: str, dispatch_id: str) -> None:
+        lease = lifecycle_repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=_WORKER_LEASE_SECONDS,
+        )
+        if lease is None:
+            logger.info(
+                "Skipping duplicate or stale delivery",
+                extra={"run_id": run_id, "dispatch_id": dispatch_id},
+            )
+            return
+        owned_store = OwnedRunStore(lifecycle_repository, lease)
+        try:
+            stored_context = lifecycle_repository.get_context(run_id)
+        except Exception:
+            logger.exception("Stored execution context could not be loaded")
+            lifecycle_repository.finalize_run(
+                run_id,
+                lease.owner_token,
+                TerminalResultV1(
+                    status="failed",
+                    stage="context_load_failed",
+                    summary={},
+                    error_message="stored execution context is unavailable",
+                ),
+            )
+            return
+        if stored_context.context_sha256 != lease.context_sha256:
+            lifecycle_repository.finalize_run(
+                run_id,
+                lease.owner_token,
+                TerminalResultV1(
+                    status="failed",
+                    stage="context_hash_mismatch",
+                    summary={},
+                    error_message="stored execution context failed integrity verification",
+                ),
+            )
+            return
+
         stopped = threading.Event()
 
         def refresh() -> bool:
             try:
-                record = run_store.update_run_status(run_id, status="running")
+                return owned_store.heartbeat(lease_seconds=_WORKER_LEASE_SECONDS)
             except Exception:
                 logger.exception("Could not refresh worker heartbeat", extra={"run_id": run_id})
-                return True
-            return not isinstance(record, dict) or record.get("status") == "running"
+                return False
 
         def beat() -> None:
             while not stopped.wait(_WORKER_HEARTBEAT_SECONDS):
@@ -104,9 +148,6 @@ def _with_worker_heartbeat(function: Callable[..., None]) -> Callable[..., None]
                     stopped.set()
                     break
 
-        if not refresh():
-            logger.warning("Skipping actor because run is already terminal", extra={"run_id": run_id})
-            return
         heartbeat = threading.Thread(
             target=beat,
             name=f"run-heartbeat-{run_id}",
@@ -114,7 +155,28 @@ def _with_worker_heartbeat(function: Callable[..., None]) -> Callable[..., None]
         )
         heartbeat.start()
         try:
-            return function(run_id, *args, **kwargs)
+            function(run_id, stored_context.context, owned_store)
+            if owned_store.terminal_outcome is None:
+                owned_store.update_run_status(
+                    run_id,
+                    status="failed",
+                    stage="worker_missing_terminal_result",
+                    progress_percent=100,
+                    error_message="worker processor returned without a terminal result",
+                )
+        except BaseException:
+            if owned_store.terminal_outcome is None:
+                try:
+                    owned_store.update_run_status(
+                        run_id,
+                        status="failed",
+                        stage="worker_unhandled_failure",
+                        progress_percent=100,
+                        error_message="worker execution was interrupted",
+                    )
+                except Exception:
+                    logger.exception("Could not seal unhandled worker failure")
+            raise
         finally:
             stopped.set()
             heartbeat.join(timeout=1.0)
@@ -146,35 +208,55 @@ def _is_dry_run(parameters: dict) -> bool:
     return bool(value)
 
 
-def _persist_devices(run_id: str, records) -> None:
-    discovery_repository.replace_devices(run_id, [dict(r) for r in records])
+def _effective_parameters(
+    context: RunContextV1,
+    store: OwnedRunStore,
+    *,
+    channel: str,
+) -> dict[str, Any]:
+    """Build engine input exclusively from the persisted context."""
+    return resolve_context_parameters(
+        context,
+        store.lease,
+        deployment_id=settings.deployment_id,
+        channel=channel,
+        secret_resolver=resolve_worker_secret,
+    )
 
 
-def _persist_topics(run_id: str, records) -> None:
-    discovery_repository.replace_topics(run_id, [dict(r) for r in records])
+def _import_loader(context: RunContextV1) -> Callable[[str], list[dict[str, Any]]]:
+    allowed = {binding.resource_id for binding in (*context.registers, *context.imports)}
 
-
-def _persist_devices_and_points(run_id: str, records) -> None:
-    devices, points = [], []
-    for record in records:
-        target = points if ("point_id" in record or "device_ref" in record) else devices
-        target.append(dict(record))
-    discovery_repository.replace_devices(run_id, devices)
-    discovery_repository.replace_points(run_id, points)
-
-
-def _import_loader(import_id: str):
-    try:
+    def load(import_id: str) -> list[dict[str, Any]]:
+        if import_id not in allowed:
+            raise ValueError("requested import is not bound to the execution context")
         return list(import_repository.get_accepted_rows(import_id))
-    except FileNotFoundError:
-        return []
+
+    return load
 
 
-def _discovery_loader(run_id: str):
-    return list(discovery_repository.list_points(run_id))
+def _discovery_loader(context: RunContextV1) -> Callable[[str], list[dict[str, Any]]]:
+    parameters = context.engine_parameters
+    allowed = {
+        str(value)
+        for key, value in parameters.items()
+        if key in {"source_run_id", "discovery_run_id"} and value
+    }
+    source_run_ids = parameters.get("source_run_ids", [])
+    if isinstance(source_run_ids, (list, tuple, set)):
+        allowed.update(str(value) for value in source_run_ids if value)
+
+    def load(run_id: str) -> list[dict[str, Any]]:
+        if run_id not in allowed:
+            raise ValueError("requested discovery run is not bound to the execution context")
+        return list(discovery_repository.list_points(run_id))
+
+    return load
 
 
-def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) -> None:
+def _fail_interrupted_run(
+    store: OwnedRunStore, interrupt: BaseException, *, stage: str
+) -> None:
     """Record an honest terminal failure when dramatiq interrupts an actor.
 
     Dramatiq's time-limit/shutdown interrupts derive from BaseException, so they
@@ -190,8 +272,8 @@ def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) 
     else:
         message = f"run interrupted by the worker ({type(interrupt).__name__})"
     try:
-        run_store.update_run_status(
-            run_id,
+        store.update_run_status(
+            store.lease.run_id,
             status="failed",
             stage=stage,
             progress_percent=100,
@@ -218,31 +300,37 @@ def _fail_interrupted_run(run_id: str, interrupt: BaseException, *, stage: str) 
 # that cannot raise an interrupt. A BACnet scan against large object-lists with
 # dead points is not as bounded as once assumed, so it can reach the 1h ceiling.
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
-@_with_worker_heartbeat
-def discover_ip_range(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def discover_ip_range(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="ip-discovery")
         logger.info("Starting IP discovery", extra={"actor": "discover_ip_range"})
         try:
             process_ip_discovery_run(
                 run_id,
                 parameters,
-                run_store=run_store,
+                run_store=store,
                 execution_mode="dramatiq_worker",
                 throttle=_build_throttle(parameters),
                 dry_run=_is_dry_run(parameters),
-                persist_records=_persist_devices,
+                persist_records=store.replace_devices,
             )
         except Interrupt as interrupt:
             # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
-            _fail_interrupted_run(run_id, interrupt, stage="engine_failed")
+            _fail_interrupted_run(store, interrupt, stage="engine_failed")
             raise
         logger.info("Finished IP discovery", extra={"actor": "discover_ip_range"})
 
 
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=3_600_000)
-@_with_worker_heartbeat
-def discover_bacnet(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def discover_bacnet(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="bacnet-discovery")
         logger.info("Starting BACnet discovery", extra={"actor": "discover_bacnet"})
         # Non-dry runs default to the UNVALIDATED real bacpypes3 path; simulation
         # is dry-run/test-only. The engine stamps result_summary['backend'] so a
@@ -251,43 +339,44 @@ def discover_bacnet(run_id: str, parameters: dict) -> None:
             process_bacnet_discovery_run(
                 run_id,
                 parameters,
-                run_store=run_store,
+                run_store=store,
                 execution_mode="dramatiq_worker",
                 throttle=_build_throttle(parameters),
                 dry_run=_is_dry_run(parameters),
-                persist_records=_persist_devices_and_points,
-                is_cancelled=make_cancel_checker(run_store, run_id),
+                persist_records=store.replace_devices_and_points,
+                is_cancelled=make_cancel_checker(store, run_id),
             )
         except Interrupt as interrupt:
             # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
-            _fail_interrupted_run(run_id, interrupt, stage="engine_failed")
+            _fail_interrupted_run(store, interrupt, stage="engine_failed")
             raise
         logger.info("Finished BACnet discovery", extra={"actor": "discover_bacnet"})
 
 
 @dramatiq.actor(queue_name="discovery", max_retries=0, time_limit=176_400_000)
-@_with_worker_heartbeat
-def discover_mqtt(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def discover_mqtt(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="mqtt-discovery")
         logger.info("Starting MQTT discovery", extra={"actor": "discover_mqtt"})
-        # live_capture defaults to the real raw-socket subscribe_and_capture. With
-        # the worker MQTT configuration provider registered above, the broker host
-        # resolves from stored configuration or run parameters. If no broker is
-        # reachable the engine records a credential-free 'broker_unreachable' status
-        # rather than faking success.
+        # live_capture defaults to the real raw-socket subscribe_and_capture.
+        # Broker settings and secret references came from the frozen context. If
+        # no broker is reachable the engine records 'broker_unreachable'.
         try:
             process_mqtt_discovery_run(
                 run_id,
                 parameters,
-                run_store=run_store,
+                run_store=store,
                 execution_mode="dramatiq_worker",
                 throttle=_build_throttle(parameters),
                 dry_run=_is_dry_run(parameters),
-                persist_records=_persist_topics,
+                persist_records=store.replace_topics,
             )
         except Interrupt as interrupt:
             # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
-            _fail_interrupted_run(run_id, interrupt, stage="engine_failed")
+            _fail_interrupted_run(store, interrupt, stage="engine_failed")
             raise
         logger.info("Finished MQTT discovery", extra={"actor": "discover_mqtt"})
 
@@ -302,77 +391,101 @@ def discover_mqtt(run_id: str, parameters: dict) -> None:
 # backend routes/discovery.py) and validate_udmi_payloads here. The remaining
 # validation actors keep their 15 min ceiling.
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=176_400_000)
-@_with_worker_heartbeat
-def validate_udmi_payloads(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def validate_udmi_payloads(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="udmi-capture")
         logger.info("Starting UDMI validation", extra={"actor": "validate_udmi_payloads"})
-        # live_capture defaults to the real subscribe_and_capture; broker host now
-        # resolves via the worker MQTT configuration provider / run parameters.
+        # live_capture defaults to the real subscribe_and_capture; broker
+        # settings came from the frozen context.
         try:
             process_udmi_validation_run(
                 run_id,
                 parameters,
-                run_store=run_store,
+                run_store=store,
                 execution_mode="dramatiq_worker",
             )
         except Interrupt as interrupt:
             # A fully silent broker with no cancel rides the indefinite capture
             # into the actor time limit; the processor's own failure path only
             # catches Exception. Stage mirrors its failure stage.
-            _fail_interrupted_run(run_id, interrupt, stage="udmi_fixture_validation_failed")
+            _fail_interrupted_run(
+                store, interrupt, stage="udmi_fixture_validation_failed"
+            )
             raise
         logger.info("Finished UDMI validation", extra={"actor": "validate_udmi_payloads"})
 
 
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
-@_with_worker_heartbeat
-def publish_mqtt_config(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def publish_mqtt_config(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="mqtt-config")
         logger.info("Starting MQTT config publish", extra={"actor": "publish_mqtt_config"})
-        # broker_publisher defaults to the real publish path; broker host resolves
-        # via the worker MQTT configuration provider / run parameters. A run without
+        # broker_publisher defaults to the real publish path. A run without
         # use_live_broker stays validate-only (no broker write).
         process_mqtt_config_publish_run(
             run_id,
             parameters,
-            run_store=run_store,
+            run_store=store,
             execution_mode="dramatiq_worker",
         )
         logger.info("Finished MQTT config publish", extra={"actor": "publish_mqtt_config"})
 
 
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
-@_with_worker_heartbeat
-def validate_bacnet_points(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def validate_bacnet_points(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="bacnet-validation")
         logger.info("Starting BACnet point validation", extra={"actor": "validate_bacnet_points"})
         process_bacnet_validation_run(
             run_id,
             parameters,
-            run_store=run_store,
+            run_store=store,
             execution_mode="dramatiq_worker",
-            import_loader=_import_loader,
-            discovery_loader=_discovery_loader,
-            is_cancelled=make_cancel_checker(run_store, run_id),
+            import_loader=_import_loader(context),
+            discovery_loader=_discovery_loader(context),
+            is_cancelled=make_cancel_checker(store, run_id),
         )
         logger.info("Finished BACnet point validation", extra={"actor": "validate_bacnet_points"})
 
 
 @dramatiq.actor(queue_name="validation", max_retries=0, time_limit=900_000)
-@_with_worker_heartbeat
-def compare_bacnet_mqtt(run_id: str, parameters: dict) -> None:
+@_with_worker_lease
+def compare_bacnet_mqtt(
+    run_id: str, context: RunContextV1, store: OwnedRunStore
+) -> None:
     with run_id_context(run_id):
+        parameters = _effective_parameters(context, store, channel="mapping-validation")
         logger.info("Starting BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})
         process_mapping_validation_run(
             run_id,
             parameters,
-            run_store=run_store,
+            run_store=store,
             execution_mode="dramatiq_worker",
-            import_loader=_import_loader,
-            discovery_loader=_discovery_loader,
-            is_cancelled=make_cancel_checker(run_store, run_id),
+            import_loader=_import_loader(context),
+            discovery_loader=_discovery_loader(context),
+            is_cancelled=make_cancel_checker(store, run_id),
         )
         logger.info("Finished BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})
+
+
+@dramatiq.actor(queue_name="maintenance", max_retries=0, time_limit=60_000)
+def recover_expired_run_leases() -> None:
+    """Periodic maintenance primitive; HTTP GET/SSE paths never call it."""
+    recovered = lifecycle_repository.recover_expired_leases()
+    if recovered:
+        logger.warning(
+            "Recovered expired run leases",
+            extra={"recovered_count": len(recovered)},
+        )
 
 
 def _positive_int(value, default: int) -> int:

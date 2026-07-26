@@ -22,12 +22,14 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
+from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.rbac import Role
 
 from app.api.routes.reports import _build_report_artifact, _to_report_summary
 from app.core.auth import require_role
-from app.core.runtime import IMPORT_FILES_ROOT, SECRETS_ROOT
+from app.core.runtime import ARTIFACTS_ROOT, IMPORT_FILES_ROOT, REPORT_SIGNING_ROOT, SECRETS_ROOT
 from app.services.backup_service import BackupError, BackupSources, create_backup_bundle
+from app.services.report_artifacts import load_report_artifact, verify_signed_manifest
 from app.services.reports_integrity import (
     INTEGRITY_KEY,
     fingerprint_for_pem,
@@ -84,6 +86,37 @@ def verify_report(report_id: str) -> ReportVerifyResponse:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.")
 
     metadata = run.result_summary.get(INTEGRITY_KEY) if isinstance(run.result_summary, dict) else None
+    manifest = (
+        run.result_summary.get("artifact_manifest")
+        if isinstance(run.result_summary, dict)
+        else None
+    )
+    if isinstance(manifest, dict):
+        try:
+            artifact = load_report_artifact(manifest)
+        except (FileNotFoundError, RuntimeError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        computed_hash = sha256_bytes(artifact)
+        stored_hash = manifest.get("artifact_sha256")
+        stored_key_id = manifest.get("signing_key_id")
+        try:
+            current_key_id = load_signing_key().public_key_fingerprint()
+        except Exception:
+            current_key_id = None
+        return ReportVerifyResponse(
+            report_id=report_id,
+            hash_matches=isinstance(stored_hash, str) and stored_hash == computed_hash,
+            signature_valid=verify_signed_manifest(manifest),
+            key_matches_current=(
+                stored_key_id == current_key_id
+                if isinstance(stored_key_id, str) and isinstance(current_key_id, str)
+                else None
+            ),
+            signed_at=manifest.get("signed_at") if isinstance(manifest.get("signed_at"), str) else None,
+            public_key_fingerprint=stored_key_id if isinstance(stored_key_id, str) else None,
+            stored_hash=stored_hash if isinstance(stored_hash, str) else None,
+            computed_hash=computed_hash,
+        )
     if not isinstance(metadata, dict):
         raise HTTPException(
             status_code=404,
@@ -124,6 +157,8 @@ def create_backup() -> Response:
         database_url=service.engine.url.render_as_string(hide_password=False),
         secrets_root=SECRETS_ROOT,
         imports_files_root=IMPORT_FILES_ROOT,
+        report_artifacts_root=ARTIFACTS_ROOT,
+        report_signing_root=REPORT_SIGNING_ROOT,
     )
     created_at = datetime.now(UTC)
     try:

@@ -53,6 +53,7 @@ from smart_commissioning_core.integrity import (
     sha256_bytes,
     verify_bytes,
 )
+from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from smart_commissioning_core.sync_identity import EdgeIdentity
 
 __all__ = [
@@ -69,7 +70,7 @@ __all__ = [
 # Top-level on-disk format version of the .scbundle zip layout.
 BUNDLE_FORMAT_VERSION = 1
 # Schema version of the per-run content payload + manifest content map.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MANIFEST_MEMBER = "manifest.json"
 _RUNS_PREFIX = "runs/"
@@ -119,6 +120,8 @@ def build_run_content(export: dict[str, Any]) -> dict[str, Any]:
         "devices": [_normalize_discovery_row(d) for d in (export.get("devices") or [])],
         "points": [_normalize_discovery_row(p) for p in (export.get("points") or [])],
         "topics": [_normalize_discovery_row(t) for t in (export.get("topics") or [])],
+        "result": export.get("result"),
+        "seal": export.get("seal"),
     }
 
 
@@ -403,6 +406,7 @@ def ingest_sync_bundle(
         return summary
 
     contents: dict[str, bytes] = {}
+    parsed_contents: dict[str, dict[str, Any]] = {}
     with ZipFile(BytesIO(bundle_bytes)) as archive:
         names = set(archive.namelist())
         for run_id in run_ids:
@@ -419,12 +423,24 @@ def ingest_sync_bundle(
                 return summary
             contents[run_id] = raw
 
+    # A trusted signature authenticates the edge, but the v2 seal must also be
+    # internally coherent. Validate every member before the first write so a
+    # malformed result/seal pair can never produce a partial bundle ingest.
+    for run_id in run_ids:
+        try:
+            content = json.loads(contents[run_id].decode("utf-8"))
+            _validate_run_content(run_id, content)
+        except (SyncError, ValueError, TypeError, KeyError) as exc:
+            summary.rejected_bad_hash = 1
+            summary.rejected_reason = f"invalid_run_content: {run_id}: {exc}"
+            return summary
+        parsed_contents[run_id] = content
+
     # (e) per-run immutable upsert. Bundle is trusted + intact past this point.
     summary.accepted = True
     repository = SyncRepository(engine)
     for run_id in run_ids:
-        content = json.loads(contents[run_id].decode("utf-8"))
-        _ingest_one_run(repository, run_id, content, edge_id, summary)
+        _ingest_one_run(repository, run_id, parsed_contents[run_id], edge_id, summary)
     return summary
 
 
@@ -439,7 +455,7 @@ def _ingest_one_run(
     existing = repository.get_run_for_export(run_id)
     if existing is not None:
         existing_hash = sha256_bytes(_canonical_json(build_run_content(existing)))
-        incoming_hash = sha256_bytes(_canonical_json(content))
+        incoming_hash = sha256_bytes(_canonical_json(_current_schema_content(content)))
         if existing_hash == incoming_hash:
             summary.skipped_identical += 1
             summary.skipped_run_ids.append(run_id)
@@ -456,10 +472,86 @@ def _ingest_one_run(
         devices=list(content.get("devices") or []),
         points=list(content.get("points") or []),
         topics=list(content.get("topics") or []),
+        result=content.get("result"),
+        seal=content.get("seal"),
         edge_id=edge_id,
     )
     summary.inserted += 1
     summary.inserted_run_ids.append(run_id)
+
+
+def _current_schema_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a legacy v1 payload for semantic comparison with v2 storage."""
+    normalized = dict(content)
+    normalized["schema_version"] = SCHEMA_VERSION
+    normalized.setdefault("result", None)
+    normalized.setdefault("seal", None)
+    return normalized
+
+
+def _validate_run_content(run_id: str, content: object) -> None:
+    """Validate identity and v2 terminal-result/seal coherence before ingest."""
+    if not isinstance(content, dict):
+        raise SyncError("run member must be a JSON object")
+    schema_version = content.get("schema_version")
+    if schema_version not in (1, SCHEMA_VERSION):
+        raise SyncError(f"unsupported run schema_version {schema_version!r}")
+    run = content.get("run")
+    if not isinstance(run, dict) or run.get("run_id") != run_id:
+        raise SyncError("member run_id does not match manifest run_id")
+    if run.get("status") not in TERMINAL_RUN_STATUSES:
+        raise SyncError("only terminal runs may be ingested")
+
+    result = content.get("result")
+    seal = content.get("seal")
+    if (result is None) != (seal is None):
+        raise SyncError("result and seal must either both be present or both be absent")
+    if result is None:
+        return
+    if schema_version != SCHEMA_VERSION:
+        raise SyncError("v2 result/seal fields require run schema_version 2")
+    if not isinstance(result, dict) or not isinstance(seal, dict):
+        raise SyncError("result and seal must be JSON objects")
+
+    terminal = TerminalResultV1.model_validate(result.get("result_payload"))
+    computed_sha256 = terminal.sha256()
+    claimed_result_sha256 = result.get("result_sha256")
+    if not _is_sha256(claimed_result_sha256) or claimed_result_sha256 != computed_sha256:
+        raise SyncError("result_sha256 does not match canonical terminal payload")
+    if result.get("schema_version") != terminal.schema_version:
+        raise SyncError("result schema_version does not match terminal payload")
+    if result.get("terminal_status") != terminal.status:
+        raise SyncError("result terminal_status does not match terminal payload")
+    if result.get("terminal_stage") != terminal.stage:
+        raise SyncError("result terminal_stage does not match terminal payload")
+    if result.get("summary") != terminal.summary:
+        raise SyncError("result summary does not match terminal payload")
+
+    if seal.get("terminal_status") != terminal.status:
+        raise SyncError("seal terminal_status does not match terminal payload")
+    if seal.get("result_sha256") != computed_sha256:
+        raise SyncError("seal result_sha256 does not match terminal payload")
+    if not _is_sha256(seal.get("context_sha256")):
+        raise SyncError("seal context_sha256 is not a SHA-256 digest")
+
+    if run.get("status") != terminal.status:
+        raise SyncError("run status does not match sealed terminal status")
+    if run.get("stage") != terminal.stage:
+        raise SyncError("run stage does not match sealed terminal stage")
+    if run.get("result_summary") != terminal.summary:
+        raise SyncError("run summary does not match sealed terminal summary")
+    if run.get("error_message") != terminal.error_message:
+        raise SyncError("run error_message does not match sealed terminal result")
+
+    # Prove timestamp values are parseable before handing them to persistence.
+    datetime.fromisoformat(str(result["created_at"]))
+    datetime.fromisoformat(str(seal["sealed_at"]))
+
+
+def _is_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    return all(character in "0123456789abcdef" for character in value)
 
 
 def _edge_is_trusted(

@@ -6,11 +6,11 @@ Commissioning App across its three first-party distributions
 `smart-commissioning-worker`), with the license of each and a flag on any
 license that warrants review.
 
-Scope: this is a **Python runtime** SBOM. The frontend (`frontend/`, npm) is a
-static Vite build served by nginx and is inventoried separately by
-`npm` (`npm ls --all`, `npm sbom`); it is not covered here. The optional
-`bacpypes3` BACnet extra is listed but is **not installed** in this
-environment (see `docs/protocol-conformance.md`).
+Scope: this file explains the **Python runtime** SBOM. Release workflows also
+generate a frontend CycloneDX file with `npm sbom` and image SBOMs for the API,
+worker, and frontend. The hosted worker and Windows portable build install the
+`bacpypes3` BACnet extra; the default developer install may still list it as
+declared but absent.
 
 ## How this was generated
 
@@ -22,13 +22,14 @@ a version-pinning burden):
 
 ```bash
 # CycloneDX JSON + run the allowlist gate (exit 2 on a disallowed license)
-python scripts/generate_sbom.py --json deliverables/sbom.json --check
+python scripts/generate_sbom.py --json deliverables/SBOM.python.cdx.json \
+  --application-version v0.1.26 --source-commit "$(git rev-parse HEAD)" --check
 
 # Refresh the generated markdown table block (committed alongside this file)
 python scripts/generate_sbom.py --markdown docs/SBOM.generated.md
 ```
 
-The script emits CycloneDX-1.5-flavoured JSON and a markdown table. It is
+The script emits CycloneDX 1.5 JSON and a markdown table. It is
 **honest about what is installed**: a declared-but-absent dependency (the
 optional `bacpypes3` extra here) is listed with `installed: false` and no
 fabricated version or license; the license string is whatever the package
@@ -80,7 +81,7 @@ pinned versions at any point in time.
 | prometheus-client | Apache-2.0 AND BSD-2-Clause | `/metrics` exposition. |
 | httpx | BSD-3-Clause | HTTP client (API/tests). |
 | python-multipart | Apache-2.0 | `multipart/form-data` parsing for uploads. |
-| bacpypes3 *(optional, not installed)* | MIT | Real BACnet/IP transport — UNVALIDATED extra. |
+| bacpypes3 *(installed in hosted worker and portable release)* | MIT | Real BACnet/IP transport; import-tested in CI, live controllers still need on-site validation. |
 
 Common transitive dependencies (`anyio`, `sniffio`, `idna`, `certifi`,
 `h11`, `httpcore`, `click`, `colorama`, `MarkupSafe`, `Mako`, `greenlet`,
@@ -124,10 +125,8 @@ Flagged for review (present, but accepted):
 
 No **GPL** or **AGPL** dependency is present. The previously-considered
 object-storage service (**MinIO**, whose server is AGPL-3.0) was removed from
-the stack — nothing in `core/`, `backend/`, or `worker/` references it (see
-`infra/README.md`). Reports are generated in-memory and evidence/import files
-are written to local disk or the `api_runtime` volume, so no S3/MinIO client is
-required.
+the stack. Reports are stored as immutable files in `report_artifacts`; no
+S3/MinIO client is required.
 
 Action items if redistribution model changes (e.g. shipping a closed binary
 that statically embeds these libraries): re-review the LGPL components, since
@@ -138,7 +137,7 @@ packages), the current posture is clean.
 
 The React frontend's dependency licenses are governed by `frontend/package.json`
 / `package-lock.json` and are out of scope for `scripts/generate_sbom.py`.
-Generate that inventory with `npm sbom --sbom-format cyclonedx` or
-`npm ls --all` from `frontend/`. There is no GPL/AGPL package known in the
-React/Vite/TanStack toolchain (all MIT/ISC/BSD), but run the npm tooling to
-confirm before a release.
+Generate that inventory with
+`npm sbom --omit=dev --sbom-format cyclonedx --sbom-type application` from
+`frontend/`. `scripts/validate_release_evidence.py` checks the CycloneDX shape
+and recorded digests; the release gate also reviews runtime license output.

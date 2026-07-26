@@ -203,7 +203,7 @@ class DiscoveryInventoryReportApiTests(ApiTestCase):
     ) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
-        from smart_commissioning_core.db.repositories import DiscoveryRepository
+        from lifecycle_helpers import finish_run
 
         run_service = RunService()
         run = run_service.create_job_run(
@@ -215,20 +215,20 @@ class DiscoveryInventoryReportApiTests(ApiTestCase):
             ),
             expected_job_type=job_type,
         )
-        run_service.update_run_status(run.run_id, status="succeeded", stage="done", progress_percent=100)
-        run_service.update_result_summary(run.run_id, result_summary)
-        repository = DiscoveryRepository(run_service.engine)
-        if devices is not None:
-            repository.replace_devices(run.run_id, devices)
-        if points is not None:
-            repository.replace_points(run.run_id, points)
-        if topics is not None:
-            repository.replace_topics(run.run_id, topics)
+        finish_run(
+            run_service,
+            run.run_id,
+            summary=result_summary,
+            devices=devices,
+            points=points,
+            topics=topics,
+        )
         return run.run_id
 
     def _seed_validation_run(self, result_summary: dict) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from lifecycle_helpers import finish_run
 
         run_service = RunService()
         run = run_service.create_job_run(
@@ -240,8 +240,7 @@ class DiscoveryInventoryReportApiTests(ApiTestCase):
             ),
             expected_job_type="udmi_validation",
         )
-        run_service.update_run_status(run.run_id, status="succeeded", stage="done", progress_percent=100)
-        run_service.update_result_summary(run.run_id, result_summary)
+        finish_run(run_service, run.run_id, summary=result_summary)
         return run.run_id
 
     def _seed_all_three(self) -> list[str]:

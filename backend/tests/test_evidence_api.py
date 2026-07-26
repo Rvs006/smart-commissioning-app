@@ -47,17 +47,26 @@ class EvidenceVerifyApiTests(ApiTestCase):
         cls._temp_runtime = tempfile.mkdtemp(prefix="sct-evidence-runtime-")
         atexit.register(shutil.rmtree, cls._temp_runtime, ignore_errors=True)
         secrets_root = Path(cls._temp_runtime) / "secrets"
+        report_signing_root = Path(cls._temp_runtime) / "report-signing"
+        artifacts_root = Path(cls._temp_runtime) / "artifacts"
         imports_files = Path(cls._temp_runtime) / "imports" / "files"
         secrets_root.mkdir(parents=True, exist_ok=True)
+        report_signing_root.mkdir(parents=True, exist_ok=True)
+        artifacts_root.mkdir(parents=True, exist_ok=True)
         imports_files.mkdir(parents=True, exist_ok=True)
 
         import app.api.routes.evidence as evidence_module
+        import app.services.report_artifacts as artifacts_module
         import app.services.reports_integrity as integrity_module
 
         cls._patchers = [
             mock.patch.object(integrity_module, "SECRETS_ROOT", secrets_root),
+            mock.patch.object(integrity_module, "REPORT_SIGNING_ROOT", report_signing_root),
+            mock.patch.object(artifacts_module, "ARTIFACTS_ROOT", artifacts_root),
             mock.patch.object(evidence_module, "SECRETS_ROOT", secrets_root),
             mock.patch.object(evidence_module, "IMPORT_FILES_ROOT", imports_files),
+            mock.patch.object(evidence_module, "ARTIFACTS_ROOT", artifacts_root),
+            mock.patch.object(evidence_module, "REPORT_SIGNING_ROOT", report_signing_root),
         ]
         for patcher in cls._patchers:
             patcher.start()
@@ -82,10 +91,11 @@ class EvidenceVerifyApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["report_id"]
 
-    def test_verify_404_before_generation(self) -> None:
+    def test_verify_succeeds_before_first_download(self) -> None:
         report_id = self._create_report()
         response = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
-        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["hash_matches"], response.text)
 
     def test_generate_then_verify_true_for_each_format(self) -> None:
         for output_format in ("zip", "xlsx", "docx", "pdf"):
@@ -119,24 +129,25 @@ class EvidenceVerifyApiTests(ApiTestCase):
         second = self.client.get(f"/api/v1/reports/{report_id}/download")
         self.assertEqual(first.content, second.content, "artifact must be reproducible")
 
-    def test_tampered_stored_hash_makes_verify_false(self) -> None:
+    def test_tampered_stored_hash_fails_verification_loudly(self) -> None:
         report_id = self._create_report("zip")
         self.client.get(f"/api/v1/reports/{report_id}/download")
 
-        # Tamper the persisted integrity hash directly in the run record.
-        from app.services.reports_integrity import INTEGRITY_KEY
         from app.services.run_service import RunService
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
 
         run_service = RunService()
         run = run_service.get_run(report_id)
-        metadata = dict(run.result_summary[INTEGRITY_KEY])
-        metadata["hash"] = "0" * 64
-        run_service.update_result_summary(report_id, {INTEGRITY_KEY: metadata})
+        summary = dict(run.result_summary)
+        manifest = dict(summary["artifact_manifest"])
+        manifest["artifact_sha256"] = "0" * 64
+        summary["artifact_manifest"] = manifest
+        with run_service.engine.begin() as connection:
+            connection.execute(update(Run).where(Run.id == report_id).values(result_summary=summary))
 
         verify = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
-        self.assertEqual(verify.status_code, 200, verify.text)
-        body = verify.json()
-        self.assertFalse(body["hash_matches"], body)
+        self.assertEqual(verify.status_code, 409, verify.text)
 
     def test_tampered_signature_makes_signature_invalid(self) -> None:
         import base64
@@ -144,16 +155,20 @@ class EvidenceVerifyApiTests(ApiTestCase):
         report_id = self._create_report("zip")
         self.client.get(f"/api/v1/reports/{report_id}/download")
 
-        from app.services.reports_integrity import INTEGRITY_KEY
         from app.services.run_service import RunService
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
 
         run_service = RunService()
         run = run_service.get_run(report_id)
-        metadata = dict(run.result_summary[INTEGRITY_KEY])
-        bad = bytearray(base64.b64decode(metadata["signature"]))
+        summary = dict(run.result_summary)
+        manifest = dict(summary["artifact_manifest"])
+        bad = bytearray(base64.b64decode(manifest["signature"]))
         bad[0] ^= 0xFF
-        metadata["signature"] = base64.b64encode(bytes(bad)).decode("ascii")
-        run_service.update_result_summary(report_id, {INTEGRITY_KEY: metadata})
+        manifest["signature"] = base64.b64encode(bytes(bad)).decode("ascii")
+        summary["artifact_manifest"] = manifest
+        with run_service.engine.begin() as connection:
+            connection.execute(update(Run).where(Run.id == report_id).values(result_summary=summary))
 
         body = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify").json()
         self.assertTrue(body["hash_matches"], body)
@@ -168,30 +183,40 @@ class EvidenceVerifyApiTests(ApiTestCase):
         report_id = self._create_report("zip")
         download = self.client.get(f"/api/v1/reports/{report_id}/download")
         self.assertEqual(download.status_code, 200, download.text)
-        artifact = download.content
 
         # Genuine record verifies AND pins to the current key.
         genuine = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify").json()
         self.assertTrue(genuine["signature_valid"], genuine)
         self.assertTrue(genuine["key_matches_current"], genuine)
 
-        # Forge a DIFFERENT keypair and re-sign the SAME artifact, then swap the
+        # Forge a DIFFERENT keypair and re-sign the SAME manifest, then swap the
         # whole signature+public_key+fingerprint into the stored record. The
         # self-signature stays internally consistent, but the embedded key is no
         # longer the current signing key.
-        from app.services.reports_integrity import INTEGRITY_KEY
+        from app.services.report_artifacts import canonical_json_bytes
         from app.services.run_service import RunService
+        from smart_commissioning_core.db.models import Run
+        from smart_commissioning_core.integrity import sha256_bytes
+        from sqlalchemy import update
 
         rogue = SigningKey.generate()
-        rogue_signature = base64.b64encode(rogue.sign(artifact)).decode("ascii")
-
         run_service = RunService()
         run = run_service.get_run(report_id)
-        metadata = dict(run.result_summary[INTEGRITY_KEY])
-        metadata["signature"] = rogue_signature
-        metadata["public_key_pem"] = rogue.public_key_pem()
-        metadata["public_key_fingerprint"] = rogue.public_key_fingerprint()
-        run_service.update_result_summary(report_id, {INTEGRITY_KEY: metadata})
+        summary = dict(run.result_summary)
+        manifest = dict(summary["artifact_manifest"])
+        manifest["signing_key_id"] = rogue.public_key_fingerprint()
+        unsigned = {
+            key: value
+            for key, value in manifest.items()
+            if key not in {"signature_algorithm", "signature", "public_key_pem", "signed_manifest_sha256"}
+        }
+        signed_body = canonical_json_bytes(unsigned)
+        manifest["signature"] = base64.b64encode(rogue.sign(signed_body)).decode("ascii")
+        manifest["public_key_pem"] = rogue.public_key_pem()
+        manifest["signed_manifest_sha256"] = sha256_bytes(signed_body)
+        summary["artifact_manifest"] = manifest
+        with run_service.engine.begin() as connection:
+            connection.execute(update(Run).where(Run.id == report_id).values(result_summary=summary))
 
         body = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify").json()
         # Self-signature is internally consistent (it verifies against the
@@ -251,10 +276,19 @@ class BackupServiceTests(unittest.TestCase):
 
         self.secrets_root = self.runtime / "secrets"
         self.imports_files = self.runtime / "imports" / "files"
+        self.report_artifacts = self.runtime / "artifacts"
+        self.report_signing = self.runtime / "report-signing"
         self.secrets_root.mkdir(parents=True)
         self.imports_files.mkdir(parents=True)
+        self.report_artifacts.mkdir(parents=True)
+        self.report_signing.mkdir(parents=True)
         (self.secrets_root / "ca-certificate.pem").write_bytes(b"ENCRYPTED-PEM-BYTES")
         (self.imports_files / "devices.csv").write_text("asset_id,name\nA1,AHU")
+        (self.report_artifacts / "sha256" / "ab").mkdir(parents=True)
+        (self.report_artifacts / "sha256" / "ab" / "artifact.pdf").write_bytes(
+            b"IMMUTABLE-REPORT"
+        )
+        (self.report_signing / ".evidence_signing_key").write_bytes(b"SIGNING-KEY")
 
     def _seed_run(self) -> str:
         from smart_commissioning_core.db.db_run_store import DbRunStore
@@ -275,6 +309,8 @@ class BackupServiceTests(unittest.TestCase):
             database_url=self.url,
             secrets_root=self.secrets_root,
             imports_files_root=self.imports_files,
+            report_artifacts_root=self.report_artifacts,
+            report_signing_root=self.report_signing,
         )
 
     def _signing_key(self):
@@ -318,6 +354,14 @@ class BackupServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             (target.imports_files_root / "devices.csv").read_text(), "asset_id,name\nA1,AHU"
+        )
+        self.assertEqual(
+            (target_root / "artifacts" / "sha256" / "ab" / "artifact.pdf").read_bytes(),
+            b"IMMUTABLE-REPORT",
+        )
+        self.assertEqual(
+            (target_root / "report-signing" / ".evidence_signing_key").read_bytes(),
+            b"SIGNING-KEY",
         )
 
     def test_restore_refuses_overwrite_without_force(self) -> None:

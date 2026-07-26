@@ -271,7 +271,7 @@ def _license_allowed(license_str: str | None, allowlist: tuple[str, ...]) -> boo
     return any(allowed.lower() in haystack for allowed in allowlist)
 
 
-def build_sbom() -> dict[str, object]:
+def build_inventory() -> dict[str, object]:
     index = _collect_installed_index()
 
     # Direct declared deps across the three projects.
@@ -315,19 +315,88 @@ def build_sbom() -> dict[str, object]:
         )
 
     return {
-        "bomFormat": "CycloneDX",
-        "specVersion": "1.5",
-        "metadata": {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "tool": "scripts/generate_sbom.py (importlib.metadata, stdlib)",
-            "component": {"type": "application", "name": "smart-commissioning-app"},
-        },
+        "metadata": {"timestamp": datetime.now(UTC).isoformat()},
         "components": component_list,
     }
 
 
-def render_markdown(sbom: dict[str, object], allowlist: tuple[str, ...]) -> str:
-    components = sbom["components"]
+def build_sbom(
+    inventory: dict[str, object],
+    *,
+    application_version: str,
+    source_commit: str | None,
+) -> dict[str, object]:
+    """Convert the internal inventory into CycloneDX 1.5 JSON fields."""
+    components: list[dict[str, object]] = []
+    for item in inventory["components"]:
+        version = item["version"] or "not-installed"
+        normalized = item["normalized_name"]
+        properties = [
+            {
+                "name": "smart-commissioning:installed",
+                "value": str(item["installed"]).lower(),
+            },
+            {
+                "name": "smart-commissioning:direct",
+                "value": str(item["direct"]).lower(),
+            },
+            {
+                "name": "smart-commissioning:required-by",
+                "value": ",".join(item["required_by"]),
+            },
+        ]
+        if item["purpose"]:
+            properties.append(
+                {"name": "smart-commissioning:purpose", "value": item["purpose"]}
+            )
+        components.append(
+            {
+                "type": "library",
+                "bom-ref": f"python:{normalized}@{version}",
+                "name": item["name"],
+                "version": version,
+                "scope": "required",
+                "licenses": [{"license": {"name": item["license"]}}],
+                "properties": properties,
+            }
+        )
+
+    metadata_properties = []
+    if source_commit:
+        metadata_properties.append(
+            {"name": "smart-commissioning:source-commit", "value": source_commit}
+        )
+    metadata: dict[str, object] = {
+        "timestamp": inventory["metadata"]["timestamp"],
+        "tools": {
+            "components": [
+                {
+                    "type": "application",
+                    "name": "scripts/generate_sbom.py",
+                    "version": "1.0",
+                }
+            ]
+        },
+        "component": {
+            "type": "application",
+            "name": "smart-commissioning-app",
+            "version": application_version,
+        },
+    }
+    if metadata_properties:
+        metadata["properties"] = metadata_properties
+    return {
+        "$schema": "http://cyclonedx.org/schema/bom-1.5.schema.json",
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": metadata,
+        "components": components,
+    }
+
+
+def render_markdown(inventory: dict[str, object], allowlist: tuple[str, ...]) -> str:
+    components = inventory["components"]
     direct = [c for c in components if c["direct"]]
     transitive = [c for c in components if not c["direct"]]
 
@@ -336,7 +405,7 @@ def render_markdown(sbom: dict[str, object], allowlist: tuple[str, ...]) -> str:
     lines.append("")
     lines.append("## Generated inventory")
     lines.append("")
-    lines.append(f"Generated: {sbom['metadata']['timestamp']}")
+    lines.append(f"Generated: {inventory['metadata']['timestamp']}")
     lines.append("")
     lines.append("### Direct (declared) dependencies")
     lines.append("")
@@ -392,12 +461,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Exit 2 if any installed dependency has a non-allowlisted/unknown license.",
     )
+    parser.add_argument(
+        "--application-version",
+        default="unversioned",
+        help="Version recorded on the CycloneDX application component.",
+    )
+    parser.add_argument(
+        "--source-commit",
+        default=None,
+        help="Full release commit recorded in CycloneDX metadata.",
+    )
     args = parser.parse_args(argv)
 
     allowlist = DEFAULT_ALLOWLIST
 
-    sbom = build_sbom()
-    markdown = render_markdown(sbom, allowlist)
+    inventory = build_inventory()
+    sbom = build_sbom(
+        inventory,
+        application_version=args.application_version,
+        source_commit=args.source_commit,
+    )
+    markdown = render_markdown(inventory, allowlist)
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -410,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
 
     flagged = [
         c
-        for c in sbom["components"]
+        for c in inventory["components"]
         if c["installed"] and not _license_allowed(c["license"], allowlist)
     ]
     if flagged:

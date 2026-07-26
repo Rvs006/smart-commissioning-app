@@ -15,6 +15,11 @@
 x-app-env: &app-env
   DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required (copy infra/.env.example to infra/.env)}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (copy infra/.env.example to infra/.env)}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required (copy infra/.env.example to infra/.env)}"
   REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (copy infra/.env.example to infra/.env)}@redis:6379/0"
+  JOB_EXECUTION_MODE: "queue"
+  SMART_COMMISSIONING_DEPLOYMENT_ID: "${SMART_COMMISSIONING_DEPLOYMENT_ID:?SMART_COMMISSIONING_DEPLOYMENT_ID is required (a stable, non-secret deployment name)}"
+  SMART_COMMISSIONING_RUNTIME_ROOT: "/app/runtime"
+  SMART_COMMISSIONING_SECRETS_ROOT: "/app/runtime/secrets"
+  SMART_COMMISSIONING_ARTIFACTS_ROOT: "/app/runtime/artifacts"
 
 services:
   # Production frontend: static Vite build served by nginx, which also
@@ -28,13 +33,37 @@ services:
       - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
+
+  # Initializes ownership and the encrypted-store key before either long-lived
+  # service starts. The key stays in the named secret_store volume; it is never
+  # supplied through Compose environment or copied into an image layer.
+  runtime-init:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    user: "0:0"
+    restart: "no"
+    environment:
+      SMART_COMMISSIONING_RUNTIME_ROOT: "/app/runtime"
+      SMART_COMMISSIONING_SECRETS_ROOT: "/app/runtime/secrets"
+      SMART_COMMISSIONING_ARTIFACTS_ROOT: "/app/runtime/artifacts"
+      SMART_COMMISSIONING_REPORT_SIGNING_ROOT: "/app/runtime/report-signing"
+    volumes:
+      - api_runtime:/app/runtime
+      - secret_store:/app/runtime/secrets
+      - report_artifacts:/app/runtime/artifacts
+      - report_signing:/app/runtime/report-signing
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        python -c "from app.services.configuration_service import _secret_store_key; _secret_store_key()"
+        chown -R app:app /app/runtime
 
   # Run/import/configuration records live in Postgres (DATABASE_URL); the API
-  # applies Alembic migrations on startup (backend owns the schema). Reports
-  # are generated in-memory by the API at download time, so no run-file volume
-  # is shared with the worker anymore. api_runtime only persists file
-  # artifacts the API writes locally: uploaded import files and secret material.
+  # applies Alembic migrations on startup (backend owns the schema). The API
+  # owns uploaded imports, immutable report artifacts, and report signing. The
+  # worker receives only a read-only mount of the encrypted connection secrets.
   api:
     build:
       context: ..
@@ -44,6 +73,7 @@ services:
       <<: *app-env
       AUTH_MODE: api_key
       API_KEY: "${API_KEY:?API_KEY is required (generate with openssl rand -hex 32)}"
+      SMART_COMMISSIONING_REPORT_SIGNING_ROOT: "/app/runtime/report-signing"
       # Comma-separated browser origins allowed by CORS. Browser traffic
       # normally arrives same-origin through the nginx /api proxy (no CORS
       # involved); this only matters for direct cross-origin API access.
@@ -53,8 +83,13 @@ services:
       # curl against /api/v1/...). Browsers should go through the frontend.
       - "127.0.0.1:${API_PORT:-8000}:8000"
     volumes:
-      - api_runtime:/app/backend/runtime
+      - api_runtime:/app/runtime
+      - secret_store:/app/runtime/secrets
+      - report_artifacts:/app/runtime/artifacts
+      - report_signing:/app/runtime/report-signing
     depends_on:
+      runtime-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -69,8 +104,8 @@ services:
       start_period: 30s
 
   # The worker reads/writes run rows through the same DATABASE_URL but never
-  # runs migrations; it depends on the api (service_started) so the schema
-  # exists before jobs are picked up.
+  # runs migrations. It waits for API readiness and proves exact schema head,
+  # encrypted-secret access, queue access, task import, and BACnet import.
   worker:
     build:
       context: ..
@@ -78,20 +113,23 @@ services:
     restart: unless-stopped
     environment:
       <<: *app-env
+    volumes:
+      - secret_store:/app/runtime/secrets:ro
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Liveness: the worker is useless if it cannot reach Redis (its only job
-    # source). A wedged Redis consumer connection surfaces here even though the
-    # process is still up, so `restart: unless-stopped` (which only restarts on
-    # exit) does not catch it. A failing probe + the runs-by-status "running not
-    # draining" metric are the two signals an operator alerts on.
+    # Readiness proves the queue, exact Alembic head, encrypted store/key, task
+    # module, and real BACnet dependency are all available to this container.
     healthcheck:
-      test: ["CMD", "python", "-c", "import os,redis; redis.from_url(os.environ['REDIS_URL']).ping()"]
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import os; from pathlib import Path; import redis, bacpypes3; from alembic.script import ScriptDirectory; from sqlalchemy import text; from app.db import get_engine; from smart_commissioning_core.db.migrate import build_alembic_config; import app.tasks; redis.from_url(os.environ['REDIS_URL']).ping(); engine=get_engine(); current=engine.connect().execute(text('SELECT version_num FROM alembic_version')).scalar_one(); head=ScriptDirectory.from_config(build_alembic_config(os.environ['DATABASE_URL'])).get_current_head(); assert current == head, (current, head); key=Path(os.environ['SMART_COMMISSIONING_SECRETS_ROOT']) / '.secret_store_key'; assert key.is_file(); assert key.open('rb').read(1)"
       interval: 30s
       timeout: 5s
       retries: 3
@@ -141,3 +179,6 @@ volumes:
   postgres_data:
   redis_data:
   api_runtime:
+  secret_store:
+  report_artifacts:
+  report_signing:

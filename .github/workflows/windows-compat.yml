@@ -12,13 +12,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prove exact checkout
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          $expected = $env:GITHUB_SHA.Trim().ToLowerInvariant()
+          if ($actual -cne $expected) { throw "Checkout $actual does not match event SHA $expected" }
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 

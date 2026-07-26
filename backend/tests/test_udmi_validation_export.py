@@ -7,6 +7,7 @@ from pathlib import Path
 
 from harness import ApiTestCase
 from jsonschema import Draft202012Validator
+from lifecycle_helpers import finish_run
 from smart_commissioning_core.udmi_results import build_validation_summary_v1
 
 _SHARED_KEY = "test-udmi-validation-export-key"
@@ -67,23 +68,40 @@ class UdmiValidationExportApiTests(ApiTestCase):
         from app.services.run_service import RunService
 
         run_service = RunService()
+        effective_site_id = (
+            f"demo-site-{uuid.uuid4().hex[:8]}"
+            if site_id == "demo-site"
+            else site_id
+        )
         run = run_service.create_job_run(
             JobCreateRequest(
                 project_id="demo-project",
-                site_id=site_id,
+                site_id=effective_site_id,
                 job_type=job_type,
-                parameters={},
+                parameters={
+                    "broker_host": f"{uuid.uuid4().hex}.invalid",
+                    "bacnet_port": 48_000 + (uuid.uuid4().int % 10_000),
+                },
             ),
             expected_job_type=job_type,
         )
-        run_service.update_result_summary(run.run_id, result_summary or {}, merge=False)
-        if issues is not None:
-            run_service.replace_issues(run.run_id, issues)
-        run_service.update_run_status(
+        if status in {"queued", "running"}:
+            if status == "running":
+                owned = run_service.claim_owned_run(run.run_id)
+                self.assertIsNotNone(owned)
+                owned.update_run_status(
+                    run.run_id,
+                    status="running",
+                    stage="validating",
+                    progress_percent=10,
+                )
+            return run.run_id
+
+        finish_run(
+            run_service,
             run.run_id,
             status=status,
             stage="done" if status == "succeeded" else f"{status}_with_partial_results",
-            progress_percent=100,
             error_message=(
                 error_message
                 if error_message is not None
@@ -91,6 +109,8 @@ class UdmiValidationExportApiTests(ApiTestCase):
                 if status == "failed"
                 else None
             ),
+            summary=result_summary or {},
+            issues=issues,
         )
         return run.run_id
 

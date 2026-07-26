@@ -20,6 +20,7 @@ from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
+from smart_commissioning_core.db.run_lifecycle import ProtocolConflictError
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
 from smart_commissioning_core.engines.bacnet_params import (
     PARAM_BACNET_TARGETS,
@@ -57,14 +58,11 @@ from app.services.engine_dispatch import (
     build_throttle,
     is_dry_run,
     make_cancel_checker,
-    make_device_persister,
-    make_device_point_persister,
-    make_topic_persister,
     resolve_bacnet_backend,
     resolve_ip_enrichment,
     resolve_source_interface,
 )
-from app.services.job_queue import JobQueueService, JobQueueUnavailable
+from app.services.job_queue import JobQueueService
 from app.services.register_topics import expected_topic_filters
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
@@ -139,9 +137,25 @@ def _stamp_authorizer(parameters: dict, principal: AuthPrincipal) -> None:
     }
 
 
-def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRecord:
+def _create_run(
+    request: JobCreateRequest,
+    expected_job_type: JobType,
+    principal: AuthPrincipal,
+) -> RunRecord:
     try:
-        return service.create_job_run(request, expected_job_type=expected_job_type)
+        return service.create_job_run(
+            request,
+            expected_job_type=expected_job_type,
+            requesting_principal=principal.username,
+        )
+    except ProtocolConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A run already owns this protocol connection.",
+                "active_run_id": error.active_run_id,
+            },
+        ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -404,18 +418,19 @@ def create_ip_discovery_run(
     _resolve_expected_hostnames(request.project_id, request.site_id, parameters)
     _resolve_asset_ids(request.project_id, request.site_id, parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
-    run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery")
+    run = _create_run(
+        request.model_copy(update={"parameters": parameters}), "ip_discovery", principal
+    )
 
-    def run_inline() -> RunRecord:
-        persist = make_device_persister(_discovery_repository())
+    def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_ip_discovery_run(
             run.run_id,
-            dict(run.parameters),
-            run_store=service,
+            frozen_parameters,
+            run_store=run_store,
             execution_mode="inline_local_fallback",
-            throttle=_settings_throttle(parameters),
-            dry_run=is_dry_run(parameters),
-            persist_records=persist,
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            persist_records=run_store.replace_devices,
         )
 
     return _dispatch(
@@ -458,19 +473,20 @@ def create_bacnet_discovery_run(
         resolve_bacnet_backend(parameters)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_discovery")
+    run = _create_run(
+        request.model_copy(update={"parameters": parameters}), "bacnet_discovery", principal
+    )
 
-    def run_inline() -> RunRecord:
-        persist = make_device_point_persister(_discovery_repository())
+    def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_bacnet_discovery_run(
             run.run_id,
-            parameters,
-            run_store=service,
+            frozen_parameters,
+            run_store=run_store,
             execution_mode="inline_local_fallback",
-            throttle=_settings_throttle(parameters),
-            dry_run=is_dry_run(parameters),
-            persist_records=persist,
-            is_cancelled=make_cancel_checker(service, run.run_id),
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            persist_records=run_store.replace_devices_and_points,
+            is_cancelled=make_cancel_checker(run_store, run.run_id),
         )
 
     return _dispatch(
@@ -509,23 +525,25 @@ def create_mqtt_discovery_run(
     # capture-all default). The saved Root Topic field was removed (ITEM-2), so
     # nothing is injected here for topics.
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
+    _bind_mqtt_register(request.project_id, request.site_id, parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
-    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_discovery")
+    run = _create_run(
+        request.model_copy(update={"parameters": parameters}), "mqtt_discovery", principal
+    )
 
-    def run_inline() -> RunRecord:
-        persist = make_topic_persister(_discovery_repository())
+    def run_inline(run_store, frozen_parameters: dict) -> object:
         # live_capture defaults to the real raw-socket subscribe_and_capture; in
         # the API process broker egress may be absent, but the engine honestly
         # records 'broker_unreachable'/'live_capture_unavailable' rather than
         # faking success, so we keep the real default here.
         return process_mqtt_discovery_run(
             run.run_id,
-            parameters,
-            run_store=service,
+            frozen_parameters,
+            run_store=run_store,
             execution_mode="inline_local_fallback",
-            throttle=_settings_throttle(parameters),
-            dry_run=is_dry_run(parameters),
-            persist_records=persist,
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            persist_records=run_store.replace_topics,
             # Synchronous inline (INLINE_RUN_ASYNC=0) blocks this request until the
             # run finishes, so the client never gets a run_id to reach Stop run — a
             # blank window must bound itself. Async inline is backgrounded (ITEM-4).
@@ -541,18 +559,14 @@ def create_mqtt_discovery_run(
 
 
 def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAcceptedResponse:
-    try:
-        return dispatch_run(
-            run,
-            service=service,
-            enqueue=enqueue,
-            run_inline=run_inline,
-            inline_message=f"{label} run started (local inline execution). Follow progress in the run monitor.",
-            queued_message=f"{label} job queued for worker execution.",
-            fallback_message=f"{label} run started inline because Redis/Dramatiq was unavailable.",
-        )
-    except JobQueueUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+    return dispatch_run(
+        run,
+        service=service,
+        enqueue=enqueue,
+        run_inline=run_inline,
+        inline_message=f"{label} run started (local inline execution). Follow progress in the run monitor.",
+        queued_message=f"{label} job queued for worker execution.",
+    )
 
 
 @router.get("/runs", response_model=RunListResponse, dependencies=[Depends(require_viewer)])
@@ -737,34 +751,55 @@ def _load_discovery_run(run_id: str) -> RunRecord:
     return run
 
 
-def _mqtt_register_filters(
-    project_id: str, site_id: str
-) -> tuple[list[tuple[str, str]], str | None]:
-    """(expected_topic_filters, import_filename) from the newest mqtt_register import.
+def _bind_mqtt_register(
+    project_id: str, site_id: str, parameters: dict[str, object]
+) -> None:
+    """Freeze the newest usable MQTT register into the run parameters."""
 
-    Mirrors validation.py ``_expected_assets_from_register``: iterate imports
-    newest-first and use the FIRST record with non-empty ``accepted_rows`` (a
-    newer but fully-rejected import is skipped, so a bad re-upload never blanks
-    the comparison). Returns ``([], None)`` when there is no usable register.
-    """
+    # The route owns this binding. A caller cannot smuggle an import from
+    # another workspace by supplying its id in the request body.
+    parameters.pop("mqtt_register_import_id", None)
     imports = ImportRepository(service.engine).list(
         project_id=project_id, site_id=site_id, import_type="mqtt_register"
     )
-    for record in imports:  # newest-first
-        rows = record.get("accepted_rows", [])
-        if rows:
-            return expected_topic_filters(rows), record.get("original_filename")
+    for record in imports:
+        if record.get("accepted_rows"):
+            parameters["mqtt_register_import_id"] = str(record["import_id"])
+            return
+
+
+def _mqtt_register_filters(
+    run: RunRecord,
+) -> tuple[list[tuple[str, str]], str | None]:
+    """Return filters from the exact register bound when this run was created."""
+
+    raw_import_id = run.parameters.get("mqtt_register_import_id")
+    if not isinstance(raw_import_id, str) or not raw_import_id:
+        return [], None
+    repository = ImportRepository(service.engine)
+    try:
+        record = repository.get(raw_import_id)
+    except FileNotFoundError:
+        return [], None
+    if (
+        record.get("import_type") != "mqtt_register"
+        or record.get("project_id") != run.project_id
+        or record.get("site_id") != run.site_id
+    ):
+        return [], None
+    rows = record.get("accepted_rows", [])
+    if isinstance(rows, list) and rows:
+        return expected_topic_filters(rows), str(record.get("original_filename") or "")
     return [], None
 
 
 def _annotate_register_matches(
     run: RunRecord, topics: list[dict]
 ) -> tuple[list[dict], dict | None]:
-    """Stamp each observed topic with a register-comparison verdict, at read time.
+    """Stamp observed topics using the register frozen into the run at creation.
 
-    Verdicts are computed on GET (not persisted), so importing a register AFTER
-    an old run — or re-importing a corrected one — re-verdicts that run on its
-    next read with no migration.
+    Verdicts are derived on GET from the exact import bound at run creation.
+    The binding is immutable; later imports cannot rewrite completed evidence.
 
     HONESTY RULE, applied deliberately:
       * Only a SUCCEEDED, non-dry mqtt_discovery run is compared. A dry run sent
@@ -781,7 +816,7 @@ def _annotate_register_matches(
         and run.result_summary.get("dry_run") is not True
     ):
         return topics, None
-    filters, filename = _mqtt_register_filters(run.project_id, run.site_id)
+    filters, filename = _mqtt_register_filters(run)
     if not filters:
         return topics, {"register_available": False}
 

@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { clearApiKey } from "../../api/client";
+import { SessionProvider } from "../../app/session";
 import { RunHistoryPage } from "./RunHistoryPage";
 
 // Run History renders the full /runs list as a sortable, filterable table with
@@ -71,6 +72,9 @@ function stubRuns(payload: unknown) {
       if (url.includes("/api/v1/runs")) {
         return jsonResponse(payload);
       }
+      if (url.endsWith("/api/v1/me")) {
+        return jsonResponse({ role: "admin", source: "local", username: "local-admin" });
+      }
       throw new Error(`Unexpected fetch in test: ${url}`);
     }),
   );
@@ -82,9 +86,11 @@ function renderPage() {
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <RunHistoryPage />
-      </MemoryRouter>
+      <SessionProvider>
+        <MemoryRouter>
+          <RunHistoryPage />
+        </MemoryRouter>
+      </SessionProvider>
     </QueryClientProvider>,
   );
 }

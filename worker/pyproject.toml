@@ -24,7 +24,9 @@ classifiers = [
 dependencies = [
   "dramatiq[redis]==1.18.0",
   "sqlalchemy==2.0.49",
-  "psycopg[binary]==3.3.4"
+  "psycopg[binary]==3.3.4",
+  "cryptography==48.0.1",
+  "bacpypes3==0.0.106"
 ]
 
 [project.optional-dependencies]

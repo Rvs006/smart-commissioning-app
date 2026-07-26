@@ -2,7 +2,7 @@
 
 Usage (from backend/):
 
-    # Create a signed bundle of the current runtime (DB + secrets + imports):
+    # Create a signed bundle of the current runtime:
     python -m app.scripts.backup create --out backup.zip
 
     # Inspect/verify a bundle without restoring:
@@ -12,9 +12,9 @@ Usage (from backend/):
     python -m app.scripts.backup restore --bundle backup.zip --target /path/runtime
 
 The bundle is a single zip: a CONSISTENT SQLite snapshot (online backup API),
-the secrets dir (encrypted PEMs + store key + signing key), import files, and a
-signed manifest. Postgres (hub) is out of scope here — use pg_dump (see the
-backup_service docstring / decisions).
+encrypted secrets, imports, immutable report artifacts, the API-only signing
+key, and a signed manifest. Postgres (hub) is out of scope here — use pg_dump
+(see the backup_service docstring / decisions).
 """
 
 from __future__ import annotations
@@ -29,7 +29,9 @@ from smart_commissioning_core.db.engine import default_sqlite_url
 
 from app.core.config import get_settings
 from app.core.runtime import (
+    ARTIFACTS_ROOT,
     IMPORT_FILES_ROOT,
+    REPORT_SIGNING_ROOT,
     SECRETS_ROOT,
     ensure_runtime_directories,
 )
@@ -77,6 +79,8 @@ def _cmd_create(args: argparse.Namespace) -> int:
         database_url=get_settings().database_url,
         secrets_root=SECRETS_ROOT,
         imports_files_root=IMPORT_FILES_ROOT,
+        report_artifacts_root=ARTIFACTS_ROOT,
+        report_signing_root=REPORT_SIGNING_ROOT,
     )
     bundle = create_backup_bundle(
         sources,
@@ -103,6 +107,8 @@ def _cmd_restore(args: argparse.Namespace) -> int:
         database_path=Path(default_sqlite_url(target_root).removeprefix("sqlite:///")),
         secrets_root=target_root / "secrets",
         imports_files_root=target_root / "imports" / "files",
+        report_artifacts_root=target_root / "artifacts",
+        report_signing_root=target_root / "report-signing",
     )
     manifest = restore_backup_bundle(
         args.bundle.read_bytes(),

@@ -28,6 +28,7 @@ are missing:
 | `POSTGRES_PASSWORD` | Postgres password. Generate: `openssl rand -hex 32` |
 | `REDIS_PASSWORD` | Redis `requirepass` password. Generate: `openssl rand -hex 32` |
 | `API_KEY` | Shared key clients must send when `AUTH_MODE=api_key`. Generate: `openssl rand -hex 32` |
+| `SMART_COMMISSIONING_DEPLOYMENT_ID` | Stable non-secret name used when deriving unique MQTT client IDs. |
 | `FRONTEND_PORT` (optional, default 8080) | Loopback host port for the frontend + `/api` proxy. |
 | `API_PORT` (optional, default 8000) | Loopback host port for direct API debugging. |
 | `CORS_ORIGINS` (optional) | Comma-separated origins for direct cross-origin API access. |
@@ -41,9 +42,15 @@ the values above — do not define them separately.
 docker compose -f infra/docker-compose.yml up -d --build
 ```
 
-Startup order is handled by healthchecks: Postgres and Redis must report
-healthy before the api starts; the api applies Alembic migrations on startup
-(it owns the schema); the worker waits for the api so the schema exists.
+Startup order is explicit. `runtime-init` creates the encrypted-store key and
+sets named-volume ownership. Postgres and Redis must be healthy before the API
+starts; the API applies Alembic migrations; the worker waits for API readiness.
+Worker readiness then checks Redis, the exact Alembic head, read access to the
+encrypted-store key, the task module, and `bacpypes3`.
+
+Hosted execution is always `JOB_EXECUTION_MODE=queue`. If Redis publication is
+unavailable, the durable outbox keeps the dispatch pending for automatic retry.
+The API never starts a second inline copy of a queued job.
 
 Open the app at `http://127.0.0.1:8080` (or your `FRONTEND_PORT`). Everything
 binds to loopback only — to expose the app beyond the host, put a
@@ -61,6 +68,10 @@ curl http://127.0.0.1:8080/api/v1/ready
 
 # Or directly against the api port
 curl http://127.0.0.1:8000/api/v1/ready
+
+# Worker must report healthy, then prove the real BACnet package once more.
+docker compose -f infra/docker-compose.yml exec -T worker \
+  python -c "import bacpypes3, app.tasks; print('worker imports OK')"
 ```
 
 `/api/v1/ready` returns 503 until migrations have run and the run store is
@@ -71,6 +82,12 @@ docker compose -f infra/docker-compose.yml exec redis sh -c 'redis-cli -a "$REDI
 ```
 
 ## Rotating secrets
+
+The `secret_store` volume is mounted read/write in the API and read-only in the
+worker. Both processes use `/app/runtime/secrets`, including the same
+`.secret_store_key`. Report signing uses the separate `report_signing` volume,
+which is never mounted in the worker. Immutable report bytes use the
+`report_artifacts` volume and stay API-owned.
 
 **API_KEY** — generate a new value (`openssl rand -hex 32`), update `.env`,
 then recreate the api so it picks up the new environment:
@@ -109,8 +126,16 @@ docker compose -f infra/docker-compose.yml up -d api worker
 
 ## Notes
 
-- Images run as non-root users; the api's writable state (uploaded import
-  files, secret material, dev SQLite) lives in the `api_runtime` volume.
+- Images run as non-root users. Uploaded imports live in `api_runtime`,
+  encrypted connection material in `secret_store`, report bytes in
+  `report_artifacts`, and the signing key in `report_signing`.
+- The worker image installs `core[bacnet]`. A green healthcheck proves the
+  import, not live device communication. Real controller validation remains an
+  on-site gate.
+- Set broker ACLs for dynamic client IDs before rollout. See
+  `docs/mqtt-client-id-and-acl.md`.
+- Back up all four runtime volumes with Postgres before migration. Follow
+  `docs/migration-rollback-v0.1.26.md`; a database-only backup is incomplete.
 - Postgres publishes `127.0.0.1:5432` for host `psql` access during
   development; remove that mapping in locked-down deployments.
 - The former MinIO/object-storage service was removed: nothing in

@@ -15,6 +15,12 @@ RUNTIME_ROOT = Path(
 IMPORTS_ROOT = RUNTIME_ROOT / "imports"
 IMPORT_FILES_ROOT = IMPORTS_ROOT / "files"
 SECRETS_ROOT = Path(os.getenv("SMART_COMMISSIONING_SECRETS_ROOT", str(RUNTIME_ROOT / "secrets"))).expanduser()
+ARTIFACTS_ROOT = Path(
+    os.getenv("SMART_COMMISSIONING_ARTIFACTS_ROOT", str(RUNTIME_ROOT / "artifacts"))
+).expanduser()
+REPORT_SIGNING_ROOT = Path(
+    os.getenv("SMART_COMMISSIONING_REPORT_SIGNING_ROOT", str(RUNTIME_ROOT / "report-signing"))
+).expanduser()
 
 
 def ensure_runtime_directories() -> None:
@@ -22,6 +28,8 @@ def ensure_runtime_directories() -> None:
     IMPORTS_ROOT.mkdir(parents=True, exist_ok=True)
     IMPORT_FILES_ROOT.mkdir(parents=True, exist_ok=True)
     SECRETS_ROOT.mkdir(parents=True, exist_ok=True)
+    ARTIFACTS_ROOT.mkdir(parents=True, exist_ok=True)
+    REPORT_SIGNING_ROOT.mkdir(parents=True, exist_ok=True)
     # SECRETS_ROOT holds the Fernet key (.secret_store_key) and every encrypted
     # cert/key. The per-file 0600 is only meaningful if the directory itself is
     # owner-only, so lock it down here (the directory ACL was previously left at

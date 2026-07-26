@@ -282,7 +282,9 @@ class ConfigMigrationTests(_ConfigTestCase):
         self.service.save(configuration)
 
         raw = ConfigurationRepository(self.engine).get_current(DEFAULT_PROJECT_ID, DEFAULT_SITE_ID)
-        self.assertEqual(raw["logging"]["values"]["Log Upload Token"], "real-upload-token")
+        token_ref = raw["logging"]["values"]["Log Upload Token"]
+        self.assertTrue(token_ref.startswith("secret://configuration-logging-"))
+        self.assertEqual(self.service.read_secret(token_ref), "real-upload-token")
 
         # API snapshot renders the sentinel, never the real token.
         masked = self.service.load()
@@ -292,7 +294,9 @@ class ConfigMigrationTests(_ConfigTestCase):
         echoed = self.service.load()  # masked -> token is the sentinel
         self.service.save(echoed)
         raw_again = ConfigurationRepository(self.engine).get_current(DEFAULT_PROJECT_ID, DEFAULT_SITE_ID)
-        self.assertEqual(raw_again["logging"]["values"]["Log Upload Token"], "real-upload-token")
+        preserved_ref = raw_again["logging"]["values"]["Log Upload Token"]
+        self.assertEqual(preserved_ref, token_ref)
+        self.assertEqual(self.service.read_secret(preserved_ref), "real-upload-token")
 
     def test_validate_rejects_bad_logging_values(self) -> None:
         cases = [

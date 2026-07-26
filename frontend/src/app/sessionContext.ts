@@ -1,10 +1,15 @@
 import { createContext, useContext } from "react";
 import type { MeResponse, Role } from "../api/client";
+import type { SessionBoundApiClient } from "../api/client";
+import type { SessionScopeId, WorkspaceRef } from "./sessionScope";
 
 // Session/role context value. Split out from the provider component so this
 // module exports only non-component values (keeps react-refresh happy and lets
 // hooks/components import the context + hook without pulling in the provider).
 export type SessionContextValue = {
+  sessionScopeId: SessionScopeId;
+  workspace: WorkspaceRef;
+  apiClient: SessionBoundApiClient;
   // The resolved principal, or null when unauthenticated / not yet loaded.
   me: MeResponse | null;
   role: Role | null;

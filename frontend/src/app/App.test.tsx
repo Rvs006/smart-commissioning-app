@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import { createMemoryRouter } from "react-router";
+import { RouterProvider } from "react-router/dom";
 import { clearApiKey, getApiKey, setApiKey } from "../api/client";
 import { DashboardPage } from "../features/workflow/DashboardPage";
 import { App } from "./App";
@@ -241,9 +242,18 @@ describe("App shell", () => {
     expect(await screen.findByText("IP discovery")).toBeInTheDocument();
     expect(await screen.findByText("MQTT discovery")).toBeInTheDocument();
 
-    expect(fetch).toHaveBeenCalledWith("/api/v1/health", undefined);
-    expect(fetch).toHaveBeenCalledWith("/api/v1/imports/profiles", undefined);
-    expect(fetch).toHaveBeenCalledWith("/api/v1/runs?limit=50", undefined);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/health",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/imports/profiles",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/v1/runs?project_id=demo-project&site_id=demo-site&limit=50",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("shows the recent-runs empty state when no runs exist", async () => {

@@ -13,6 +13,7 @@ worker run.
 """
 
 import unittest
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from harness import ApiTestCase
@@ -25,15 +26,17 @@ _ENV = {
     "API_KEY": _API_KEY,
 }
 
-# Auto mode with inline fallback enabled, so dispatch_run exercises the real
-# queue branch (and its Redis-down inline fallback) instead of the inline
+# Auto mode exercises durable queue publication instead of the explicit inline
 # short-circuit.
 _QUEUE_ENV = {
     "JOB_EXECUTION_MODE": "auto",
-    "ALLOW_INLINE_WORKER_FALLBACK": "true",
     "AUTH_MODE": "api_key",
     "API_KEY": _API_KEY,
 }
+
+
+def _unique_bacnet_parameters() -> dict[str, int]:
+    return {"bacnet_port": 48_000 + (uuid.uuid4().int % 10_000)}
 
 
 def _new_bacnet_run():
@@ -47,7 +50,7 @@ def _new_bacnet_run():
             project_id="demo-project",
             site_id="demo-site",
             job_type="bacnet_discovery",
-            parameters={},
+            parameters=_unique_bacnet_parameters(),
         ),
         expected_job_type="bacnet_discovery",
     )
@@ -91,7 +94,7 @@ class OrphanRunSweepTests(ApiTestCase):
                 project_id="demo-project",
                 site_id="demo-site",
                 job_type="bacnet_discovery",
-                parameters={},
+                parameters=_unique_bacnet_parameters(),
             ),
             expected_job_type="bacnet_discovery",
         )
@@ -237,7 +240,7 @@ class OrphanRunSweepTests(ApiTestCase):
         self.assertEqual(record["error_message"], WORKER_INTERRUPTED_RUN_MESSAGE)
         self.assertNotIn(WORKER_STALE_OBSERVED_AT_KEY, record["result_summary"])
 
-    def test_poll_recovers_expired_worker_without_api_restart(self) -> None:
+    def test_poll_is_read_only_and_periodic_recovery_reaps_expired_worker(self) -> None:
         from smart_commissioning_core.db.db_run_store import WORKER_STALE_OBSERVED_AT_KEY
         from smart_commissioning_core.db.models import Run
         from sqlalchemy import update
@@ -254,8 +257,17 @@ class OrphanRunSweepTests(ApiTestCase):
                 .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
             )
 
+        # GET is observational only in v0.1.26. It must not write a suspicion
+        # marker or terminalize lifecycle state.
+        observed = run_service.get_run(run_id)
+
+        self.assertEqual(observed.status, "running")
+        self.assertNotIn(WORKER_STALE_OBSERVED_AT_KEY, observed.result_summary)
+
+        first_recovery = run_service.sweep_interrupted_runs()
         suspected = run_service.get_run(run_id)
 
+        self.assertNotIn(run_id, first_recovery)
         self.assertEqual(suspected.status, "running")
         self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected.result_summary)
         aged_summary = dict(suspected.result_summary)
@@ -267,8 +279,10 @@ class OrphanRunSweepTests(ApiTestCase):
                 update(Run).where(Run.id == run_id).values(result_summary=aged_summary)
             )
 
+        second_recovery = run_service.sweep_interrupted_runs()
         record = run_service.get_run(run_id)
 
+        self.assertIn(run_id, second_recovery)
         self.assertEqual(record.status, "failed")
         self.assertEqual(record.stage, "worker_heartbeat_expired")
 
@@ -289,6 +303,7 @@ class OrphanRunSweepTests(ApiTestCase):
                 .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
             )
 
+        run_service.sweep_interrupted_runs()
         suspected = run_service.get_run(run_id)
         self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected.result_summary)
 
@@ -318,6 +333,7 @@ class OrphanRunSweepTests(ApiTestCase):
                 .values(updated_at=datetime.now(UTC) - timedelta(minutes=3))
             )
 
+        run_service.sweep_interrupted_runs()
         suspected = run_service.get_run(run_id)
         self.assertIn(WORKER_STALE_OBSERVED_AT_KEY, suspected.result_summary)
 
@@ -351,7 +367,7 @@ class PersisterSessionHygieneTests(ApiTestCase):
                 project_id="demo-project",
                 site_id="demo-site",
                 job_type="bacnet_discovery",
-                parameters={},
+                parameters=_unique_bacnet_parameters(),
             ),
             expected_job_type="bacnet_discovery",
         )
@@ -403,11 +419,6 @@ class InlineDispatchStoreFailureTests(ApiTestCase):
 
         run_service, run_id = _new_bacnet_run()
         run = run_service.get_run(run_id)
-        # run_engine writes 'running' first, then its terminal write fails and it
-        # returns None, leaving the run fossilized at 'running'.
-        run_service.update_run_status(
-            run_id, status="running", stage="engine_running", progress_percent=15
-        )
         self.addCleanup(
             run_service.update_run_status,
             run_id,
@@ -420,15 +431,13 @@ class InlineDispatchStoreFailureTests(ApiTestCase):
             run,
             service=run_service,
             enqueue=None,
-            run_inline=lambda: None,
+            run_inline=lambda _store, _parameters: None,
             inline_message="inline",
             queued_message="queued",
-            fallback_message="fallback",
         )
 
-        # No AttributeError/500: a clean accepted response carrying the run id, and
-        # the re-read reports the real current state (still 'running'; the startup
-        # sweep reclaims it on the next restart).
+        # The owner claim put the run into its real running state, and a missing
+        # terminal return cannot erase the created run identity.
         self.assertEqual(response.run_id, run_id)
         self.assertEqual(response.job_type, "bacnet_discovery")
         self.assertEqual(response.status, "running")
@@ -448,8 +457,9 @@ class InlineDispatchStoreFailureTests(ApiTestCase):
         )
 
         class _ReadFailsService:
-            # Only get_run is reached on the inline path; make it raise to model a
-            # store so broken that even the re-read fails.
+            def __getattr__(self, name: str):
+                return getattr(run_service, name)
+
             def get_run(self, _run_id: str):
                 raise RuntimeError("run store is unreadable")
 
@@ -457,34 +467,24 @@ class InlineDispatchStoreFailureTests(ApiTestCase):
             run,
             service=_ReadFailsService(),
             enqueue=None,
-            run_inline=lambda: None,
+            run_inline=lambda _store, _parameters: None,
             inline_message="inline",
             queued_message="queued",
-            fallback_message="fallback",
         )
 
-        # Still no 500: the response falls back to the run as created.
         self.assertEqual(response.run_id, run_id)
         self.assertEqual(response.status, run.status)
 
 
-class QueueDispatchMarkerTimingTests(ApiTestCase):
-    """The queue path must mark a run worker-bound BEFORE it enqueues it.
-
-    Once enqueue() returns, a worker can pick the job up and flip the run to
-    'running'. If the queue markers were written only after enqueue, a backend
-    crash in that window left a live worker run marker-less, and the startup
-    sweep would false-fail it. The markers must therefore be durable first, and
-    cleared again if the dispatch falls back to inline.
-    """
+class QueueDispatchOutboxTests(ApiTestCase):
+    """The pending dispatch must exist before publish and survive Redis failure."""
 
     env = _QUEUE_ENV
     client_headers = {"X-API-Key": _API_KEY}
 
-    def test_worker_markers_written_before_enqueue(self) -> None:
+    def test_pending_dispatch_exists_before_enqueue(self) -> None:
         from app.services.job_queue import JobDispatch
         from app.services.run_dispatch import dispatch_run
-        from app.services.run_service import _was_queued_to_worker
 
         run_service, run_id = _new_bacnet_run()
         run = run_service.get_run(run_id)
@@ -502,34 +502,29 @@ class QueueDispatchMarkerTimingTests(ApiTestCase):
             queue_name = "discovery"
             actor_name = "discover_bacnet"
 
-            def __call__(self, _run) -> JobDispatch:
-                # By the time the message is enqueued, the markers must already be
-                # durable — that is the whole point.
-                summary = run_service.get_run(run_id).result_summary
-                observed["queued_before_enqueue"] = _was_queued_to_worker(summary)
+            def __call__(self, _run, dispatch_id: str) -> JobDispatch:
+                dispatch = run_service.get_dispatch_for_run(run_id)
+                observed["pending"] = dispatch.state == "pending"
+                observed["same_id"] = dispatch.dispatch_id == dispatch_id
                 return JobDispatch(actor_name=self.actor_name, queue_name=self.queue_name)
 
         response = dispatch_run(
             run,
             service=run_service,
             enqueue=_FakeEnqueuer(),
-            run_inline=lambda: run_service.get_run(run_id),
+            run_inline=lambda _store, _parameters: None,
             inline_message="inline",
             queued_message="queued",
-            fallback_message="fallback",
         )
 
-        self.assertTrue(
-            observed.get("queued_before_enqueue"),
-            "worker markers must be durable before the message is enqueued",
-        )
+        self.assertTrue(observed.get("pending"))
+        self.assertTrue(observed.get("same_id"))
         self.assertEqual(response.message, "queued")
-        self.assertTrue(_was_queued_to_worker(run_service.get_run(run_id).result_summary))
+        self.assertEqual(run_service.get_dispatch_for_run(run_id).state, "published")
 
-    def test_inline_fallback_clears_markers_so_sweep_can_reclaim(self) -> None:
+    def test_queue_failure_keeps_dispatch_pending_for_retry(self) -> None:
         from app.services.job_queue import JobQueueUnavailable
         from app.services.run_dispatch import dispatch_run
-        from app.services.run_service import RunService, _was_queued_to_worker
 
         run_service, run_id = _new_bacnet_run()
         run = run_service.get_run(run_id)
@@ -540,21 +535,18 @@ class QueueDispatchMarkerTimingTests(ApiTestCase):
             stage="test_cleanup",
             progress_percent=100,
         )
+        inline_called = False
 
         class _FailingEnqueuer:
             queue_name = "discovery"
             actor_name = "discover_bacnet"
 
-            def __call__(self, _run):
+            def __call__(self, _run, _dispatch_id: str):
                 raise JobQueueUnavailable("redis down")
 
-        def run_inline():
-            # Redis was down, so we fall back to inline; model that inline run
-            # fossilizing at 'running' (its terminal write was lost).
-            run_service.update_run_status(
-                run_id, status="running", stage="engine_running", progress_percent=15
-            )
-            return None
+        def run_inline(_store, _parameters):
+            nonlocal inline_called
+            inline_called = True
 
         response = dispatch_run(
             run,
@@ -563,26 +555,21 @@ class QueueDispatchMarkerTimingTests(ApiTestCase):
             run_inline=run_inline,
             inline_message="inline",
             queued_message="queued",
-            fallback_message="fallback",
         )
 
-        self.assertEqual(response.message, "fallback")
-        # The pre-enqueue markers must be cleared: no worker will ever run this, so
-        # the sweep must be free to reclaim it.
-        summary = run_service.get_run(run_id).result_summary
-        self.assertFalse(
-            _was_queued_to_worker(summary),
-            "the inline fallback must clear the worker markers",
+        self.assertEqual(
+            response.message,
+            "Job accepted; queue publication is pending automatic retry.",
         )
-        swept = RunService().sweep_interrupted_runs()
-        self.assertIn(run_id, swept)
+        self.assertEqual(response.status, "queued")
+        self.assertFalse(inline_called)
+        self.assertEqual(run_service.get_dispatch_for_run(run_id).state, "pending")
 
 
 class JobQueueBrokerConstructionTests(unittest.TestCase):
     """A RedisBroker construction failure (e.g. a malformed REDIS_URL that redis
-    parses eagerly) must surface as JobQueueUnavailable — the ONLY error dispatch_run
-    handles — so it clears markers / falls back instead of stranding a
-    marker-stamped run at 'queued' until the worker liveness window expires."""
+    parses eagerly) must surface as JobQueueUnavailable so the dispatcher keeps
+    the durable outbox row pending for retry."""
 
     def test_broker_construction_failure_becomes_job_queue_unavailable(self) -> None:
         from unittest import mock

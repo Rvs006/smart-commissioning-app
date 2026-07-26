@@ -1,6 +1,6 @@
-import { ChangeEvent, FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import {
   cancelRun,
   createImport,
@@ -39,6 +39,7 @@ import {
   UdmiReportScopeV1,
   UdmiValidationSummaryV1,
   ValidationIssueRecord,
+  type SessionBoundApiClient,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import {
@@ -81,6 +82,17 @@ import {
 import { alignPayloadDiff, isPlainObject, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
+import type { RunRef } from "../../app/sessionScope";
+import { mutationKeys, queryKeys } from "../../api/queryKeys";
+import {
+  createReportIntent,
+  initialRunControllerState,
+  latestAttachableRun,
+  resultIdentity,
+  runControllerReducer,
+  toRunRef,
+  type ReportIntent,
+} from "./runIsolation";
 
 type ModulePageProps = {
   moduleRoute: string;
@@ -115,6 +127,7 @@ type ActiveRun = {
   runId: string;
   kind: "discovery" | "validation";
   restored?: boolean;
+  ref: RunRef;
 };
 
 // The module page is split into three stages so the operator works one screen
@@ -242,7 +255,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Discovery/validation/report runs, imports, cancel, publish, and rollback are
   // all engineer+ mutations server-side. A viewer/reviewer sees these controls
   // disabled with an explanatory tooltip rather than letting the click 403.
-  const { canEngineer } = useSession();
+  const { apiClient, canEngineer, sessionScopeId, workspace: workspaceRef } = useSession();
   const queryClient = useQueryClient();
   const module = getModuleByRoute(moduleRoute);
   const workspace = moduleWorkspaces[moduleRoute];
@@ -253,6 +266,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [runOutcome, setRunOutcome] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const [runController, dispatchRun] = useReducer(
+    runControllerReducer,
+    initialRunControllerState,
+  );
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback | null>(null);
   const [publishTopic, setPublishTopic] = useState("demo-site/b1/ahu-1000001/config");
   const [publishPayload, setPublishPayload] = useState(
@@ -298,7 +315,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // files for the multipart POST; the uploaded-set list below it is GET-backed.
   const [schemaSetLabel, setSchemaSetLabel] = useState("");
   const [schemaSetFiles, setSchemaSetFiles] = useState<File[]>([]);
-  const [selectedResultIndex, setSelectedResultIndex] = useState(0);
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
   // Results-table client-side filter (ISSUE-4): free-text (substring across the
   // visible cells, or an MQTT wildcard against the Topic column) plus a verdict
   // tone filter. Row selection stays positional into the FULL resultRows, so the
@@ -338,6 +355,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [reportTitle, setReportTitle] = useState("");
   const [reportScopeSnapshot, setReportScopeSnapshot] =
     useState<FrozenUdmiReportScope | null>(null);
+  const [reportIntent, setReportIntent] = useState<ReportIntent | null>(null);
   const reportDialogRef = useRef<HTMLDialogElement | null>(null);
   const reportTitleInputRef = useRef<HTMLInputElement | null>(null);
   const reportDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -363,21 +381,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // to that payload's issues (ITEM-D). A ref map, not getElementById: asset ids
   // are arbitrary imported field data, unsafe to trust as DOM element ids.
   const payloadGroupRefs = useRef(new Map<string, HTMLDivElement>());
-  const templateDownload = useFileDownload();
-  const reportDownload = useFileDownload();
-  const exportDownload = useFileDownload();
-  const validationJsonDownload = useFileDownload();
-  const schemaTemplateDownload = useFileDownload();
+  const templateDownload = useFileDownload(apiClient);
+  const reportDownload = useFileDownload(apiClient);
+  const exportDownload = useFileDownload(apiClient);
+  const validationJsonDownload = useFileDownload(apiClient);
+  const schemaTemplateDownload = useFileDownload(apiClient);
 
   const profilesQuery = useQuery({
-    queryFn: listImportProfiles,
-    queryKey: ["import-profiles"],
+    queryFn: ({ signal }) => listImportProfiles({ client: apiClient, signal }),
+    queryKey: queryKeys.importProfiles(sessionScopeId, workspaceRef),
   });
 
   // SSE-first run progress for the active run. status/stage/progress update
   // live from the stream; on stream error/unsupported, sseActive flips false
   // and the queries below resume the proven 1.5s polling (no regression).
-  const runEvents = useRunEvents(activeRun?.runId, Boolean(activeRun));
+  const runEvents = useRunEvents(activeRun?.ref, Boolean(activeRun), apiClient);
   const sseEvent = runEvents.event;
   const sseDriving = runEvents.sseActive && sseEvent !== null;
 
@@ -386,8 +404,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // payload views, metrics, and issue counts.
   const validationRunQuery = useQuery({
     enabled: Boolean(activeRun) && activeRun?.kind === "validation",
-    queryFn: () => getValidationRun(activeRun?.runId ?? ""),
-    queryKey: ["validation-run", activeRun?.runId],
+    queryFn: ({ signal }) =>
+      getValidationRun(activeRun?.runId ?? "", { client: apiClient, signal }),
+    queryKey: activeRun?.ref
+      ? queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref)
+      : [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", module.route, "none"],
     refetchInterval: (query) =>
       isTerminalStatus(query.state.data?.status) ? false : 1500,
   });
@@ -396,8 +417,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // status endpoint, so queued/running discovery runs update live.
   const discoveryRunQuery = useQuery({
     enabled: Boolean(activeRun) && activeRun?.kind === "discovery",
-    queryFn: () => getDiscoveryRun(activeRun?.runId ?? ""),
-    queryKey: ["discovery-run", activeRun?.runId],
+    queryFn: ({ signal }) =>
+      getDiscoveryRun(activeRun?.runId ?? "", { client: apiClient, signal }),
+    queryKey: activeRun?.ref
+      ? queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref)
+      : [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", module.route, "none"],
     refetchInterval: (query) =>
       runPollInterval({
         reachedTerminal: runEvents.reachedTerminal,
@@ -458,8 +482,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled:
       Boolean(activeRun) &&
       activeRun?.kind === "validation",
-    queryFn: () => getValidationIssues(activeRun?.runId ?? ""),
-    queryKey: ["validation-issues", activeRun?.runId],
+    queryFn: ({ signal }) =>
+      getValidationIssues(activeRun?.runId ?? "", { client: apiClient, signal }),
+    queryKey: queryKeys.issues(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
     refetchInterval: () =>
       isTerminalStatus(validationRunQuery.data?.status) ? false : 1500,
   });
@@ -470,8 +495,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       Boolean(activeRun) &&
       activeRun?.kind === "discovery" &&
       isTerminalStatus(discoveryRunQuery.data?.status),
-    queryFn: () => getDiscoveryResults(activeRun?.runId ?? ""),
-    queryKey: ["discovery-results", activeRun?.runId],
+    queryFn: ({ signal }) =>
+      getDiscoveryResults(activeRun?.runId ?? "", { client: apiClient, signal }),
+    queryKey: queryKeys.results(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
   });
 
   // Live MQTT topic snapshot for the Explorer-like capture panel (mq9nhbzu).
@@ -480,8 +506,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const captureTopicsQuery = useQuery({
     enabled:
       module.route === "mqtt-discovery" && Boolean(activeRun) && activeRun?.kind === "discovery",
-    queryFn: () => getDiscoveryTopics(activeRun?.runId ?? ""),
-    queryKey: ["discovery-topics", activeRun?.runId],
+    queryFn: ({ signal }) =>
+      getDiscoveryTopics(activeRun?.runId ?? "", { client: apiClient, signal }),
+    queryKey: queryKeys.topics(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
     // Poll while the run is active so the table refreshes the instant the run
     // goes terminal (topics persist at run end), then stop polling (mq9nhbzu).
     refetchInterval: () =>
@@ -491,15 +518,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Reports list for the reports page (per-report selection + Export selected).
   const reportsQuery = useQuery({
     enabled: module.route === "reports",
-    queryFn: listReports,
-    queryKey: ["reports-list"],
+    queryFn: ({ signal }) => listReports({ client: apiClient, signal }),
+    queryKey: queryKeys.reports(sessionScopeId, workspaceRef),
   });
 
   // Uploaded non-published UDMI schema sets, shown on the UDMI workbench only.
   const udmiSchemaSetsQuery = useQuery({
     enabled: module.route === "udmi-validation",
-    queryFn: listUdmiSchemaSets,
-    queryKey: ["udmi-schema-sets"],
+    queryFn: ({ signal }) => listUdmiSchemaSets({ client: apiClient, signal }),
+    queryKey: queryKeys.schemaSets(sessionScopeId, workspaceRef),
   });
 
   // Per-row rejection reasons for the import just uploaded. The POST returns
@@ -512,8 +539,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // effect nulls importOutcome, which disables the query on navigation.
   const importErrorsQuery = useQuery({
     enabled: Boolean(importOutcome && importOutcome.status !== "accepted"),
-    queryFn: () => getImportErrors(importOutcome?.import_id ?? ""),
-    queryKey: ["import-errors", importOutcome?.import_id],
+    queryFn: ({ signal }) =>
+      getImportErrors(importOutcome?.import_id ?? "", { client: apiClient, signal }),
+    queryKey: queryKeys.importErrors(sessionScopeId, workspaceRef, importOutcome?.import_id),
   });
 
   // Server-truth "already imported" lookup for the Setup card (ISSUE-5): the
@@ -525,8 +553,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // error leaves data undefined, so the note only ever renders on a real hit.
   const latestImportQuery = useQuery({
     enabled: module.importTypes.length > 0 && selectedImportType !== "",
-    queryFn: () => getLatestImport(selectedImportType as ImportType),
-    queryKey: ["latest-import", selectedImportType],
+    queryFn: ({ signal }) =>
+      getLatestImport(
+        selectedImportType as ImportType,
+        workspaceRef.projectId,
+        workspaceRef.siteId,
+        { client: apiClient, signal },
+      ),
+    queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef, selectedImportType),
   });
 
   // Run retention: the page state is wiped on every navigation, so arriving at a
@@ -537,7 +571,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Now that runs execute in the background (ITEM-4), a run can still be
   // RUNNING/QUEUED when the operator refreshes or navigates away. Prefer the
   // newest non-terminal run so its LIVE monitor and Stop control re-attach; fall
-  // back to the newest succeeded run otherwise. The seed effect below marks the
+  // back to the newest terminal run otherwise, including failed and cancelled
+  // runs. The seed effect below marks the
   // re-attached run restored:true, so rehydration never hijacks the step — and
   // polling resumes automatically because the run monitor queries key off
   // activeRun.
@@ -550,50 +585,126 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const lastRunQuery = useQuery({
     enabled: rehydratableActions.length > 0,
     // Keyed by route so one head's cached run can never be handed to another.
-    queryKey: ["last-attachable-run", module.route],
-    queryFn: async () => {
-      // Two requests per job type: the newest run of ANY status (catches a live
-      // running/queued run) and the newest succeeded run (the terminal fallback).
+    queryKey: queryKeys.latestRun(sessionScopeId, workspaceRef, module.route),
+    queryFn: async ({ signal }) => {
       const responses = await Promise.all(
-        rehydratableActions.flatMap((action) => [
-          listRuns({ jobType: action.jobType, limit: 1 }),
-          listRuns({ jobType: action.jobType, limit: 1, status: "succeeded" }),
-        ]),
+        rehydratableActions.map((action) =>
+          listRuns(
+            {
+              jobType: action.jobType,
+              limit: 20,
+              projectId: workspaceRef.projectId,
+              siteId: workspaceRef.siteId,
+            },
+            { client: apiClient, signal },
+          ),
+        ),
       );
-      // created_at is ISO-8601 UTC, so it sorts lexicographically.
-      const byNewest = (a: { created_at: string }, b: { created_at: string }) =>
-        a.created_at < b.created_at ? 1 : -1;
-      const all = responses.flatMap((response) => response.runs);
-      const live = all.filter((run) => !isTerminalStatus(run.status)).sort(byNewest)[0];
-      const succeeded = all.filter((run) => run.status === "succeeded").sort(byNewest)[0];
-      return live ?? succeeded ?? null;
+      return latestAttachableRun(responses.flatMap((response) => response.runs));
     },
   });
 
-  // When SSE reports the run terminal, the polled record may still be mid-run.
-  // Trigger a single refetch so the terminal snapshot lands promptly.
+  // A terminal scalar event is only the start of completion. The controller
+  // enters terminal-sync, then forces the authoritative run and evidence
+  // endpoints through one barrier. Completed metrics stay hidden until every
+  // response succeeds and confirms the same run identity.
+  useEffect(() => {
+    if (activeRun && activeRunTerminal) {
+      dispatchRun({ type: "terminal-observed", runId: activeRun.runId });
+    }
+  }, [activeRun, activeRunTerminal]);
+
+  const evidenceSyncRef = useRef<string | null>(null);
+  useEffect(() => {
+    evidenceSyncRef.current = null;
+  }, [activeRun?.runId]);
+
   const refetchValidationRun = validationRunQuery.refetch;
   const refetchDiscoveryRun = discoveryRunQuery.refetch;
+  const refetchValidationIssues = validationIssuesQuery.refetch;
+  const refetchDiscoveryResults = discoveryResultsQuery.refetch;
+  const refetchCaptureTopics = captureTopicsQuery.refetch;
   useEffect(() => {
-    if (!runEvents.reachedTerminal || !activeRun) {
+    const run = activeRun;
+    if (
+      !run ||
+      runController.phase !== "terminal-sync" ||
+      runController.runRef?.runId !== run.runId ||
+      evidenceSyncRef.current === run.runId
+    ) {
       return;
     }
-    if (activeRun.kind === "discovery") {
-      void refetchDiscoveryRun();
-    } else {
-      void refetchValidationRun();
-    }
-  }, [runEvents.reachedTerminal, activeRun, refetchDiscoveryRun, refetchValidationRun]);
+    evidenceSyncRef.current = run.runId;
+    let disposed = false;
 
-  // The issues query also runs during live validation. Once the run flips
-  // terminal, fetch once more before its interval stops so a snapshot taken a
-  // moment before completion cannot leave stale provisional issues on screen.
-  const refetchValidationIssues = validationIssuesQuery.refetch;
-  useEffect(() => {
-    if (activeRun?.kind === "validation" && activeRunTerminal) {
-      void refetchValidationIssues();
-    }
-  }, [activeRun?.kind, activeRunTerminal, refetchValidationIssues]);
+    void (async () => {
+      try {
+        const runResult =
+          run.kind === "discovery"
+            ? await refetchDiscoveryRun()
+            : await refetchValidationRun();
+        if (runResult.isError || runResult.data?.run_id !== run.runId) {
+          throw runResult.error ?? new Error("Final run evidence did not match the active run.");
+        }
+
+        if (run.kind === "validation") {
+          const issues = await refetchValidationIssues();
+          if (issues.isError || issues.data?.run_id !== run.runId) {
+            throw issues.error ?? new Error("Final issues did not match the active run.");
+          }
+        } else {
+          const results = await refetchDiscoveryResults();
+          if (results.isError || results.data?.run_id !== run.runId) {
+            throw new Error("Final discovery evidence did not match the active run.");
+          }
+          if (run.ref.jobType === "mqtt_discovery") {
+            const topics = await refetchCaptureTopics();
+            if (topics.isError || topics.data?.run_id !== run.runId) {
+              throw new Error("Final MQTT topics did not match the active run.");
+            }
+          }
+        }
+
+        if (!disposed) {
+          dispatchRun({
+            type: "evidence-succeeded",
+            runId: run.runId,
+            requirements:
+              run.kind === "validation"
+                ? ["run", "issues"]
+                : run.ref.jobType === "mqtt_discovery"
+                  ? ["run", "results", "topics"]
+                  : ["run", "results"],
+          });
+        }
+      } catch (cause) {
+        if (!disposed) {
+          dispatchRun({
+            type: "evidence-failed",
+            runId: run.runId,
+            error: cause instanceof Error ? cause.message : "Final evidence refresh failed.",
+          });
+        }
+      }
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [
+    activeRun,
+    refetchCaptureTopics,
+    refetchDiscoveryResults,
+    refetchDiscoveryRun,
+    refetchValidationIssues,
+    refetchValidationRun,
+    runController.phase,
+    runController.runRef?.runId,
+  ]);
+
+  const finalEvidenceReady =
+    runController.phase === "settled" &&
+    runController.runRef?.runId === activeRun?.runId;
 
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
@@ -608,7 +719,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setLastReport(null);
     setActiveRun(null);
     setCopyFeedback(null);
-    setSelectedResultIndex(0);
+    setSelectedResultId(null);
     setResultsTextFilter("");
     setResultsToneFilter("all");
     setResultsTopicContainsFilter("");
@@ -620,6 +731,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReportDialogOpen(false);
     setReportTitle("");
     setReportScopeSnapshot(null);
+    setReportIntent(null);
+    dispatchRun({ type: "reset" });
     setScanAuthorized(false);
     setScanDryRun(false);
     setScanTarget("");
@@ -643,6 +756,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetReportDownload,
     resetExportDownload,
     resetValidationJsonDownload,
+    sessionScopeId,
   ]);
 
   // Re-attach this head's most recent succeeded run (see lastRunQuery above).
@@ -660,18 +774,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!run) {
       return;
     }
-    // A LIVE (non-terminal) run always outranks a restored terminal seed. The
-    // query cache can hand this effect a stale succeeded run first (mount
-    // serves cached data, the refetch lands later with the background run that
-    // is actually executing); without this upgrade the activeRun guard below
-    // would pin the stale run and the live run's monitor + Stop control would
-    // never attach (Codex P1 on PR #88). A session-started run (restored not
-    // set) is never replaced.
-    const upgradeToLive =
+    // The query cache can hand this effect an older run first, then replace it
+    // with the server's newest run after the background refetch. Replace any
+    // restored seed whose identity changed, including terminal-to-terminal;
+    // otherwise a just-completed run can display the previous run's metrics and
+    // rows after navigation. A session-started run (restored not set) is never
+    // replaced.
+    const replaceRestoredRun =
       activeRun?.restored === true &&
-      activeRun.runId !== run.run_id &&
-      !isTerminalStatus(run.status);
-    if (activeRun && !upgradeToLive) {
+      activeRun.runId !== run.run_id;
+    if (activeRun && !replaceRestoredRun) {
       return;
     }
     // Belt-and-braces on top of the route-keyed query: only ever seed a run
@@ -682,8 +794,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!action || action.kind === "report") {
       return;
     }
-    setActiveRun({ kind: action.kind, restored: true, runId: run.run_id });
-  }, [lastRunQuery.data, activeRun, module.runActions]);
+    const ref = toRunRef(sessionScopeId, workspaceRef, module.route, run, "restored");
+    setActiveRun({ kind: action.kind, ref, restored: true, runId: run.run_id });
+    dispatchRun({ type: "restored", runRef: ref, status: run.status });
+  }, [
+    activeRun,
+    lastRunQuery.data,
+    module.route,
+    module.runActions,
+    sessionScopeId,
+    workspaceRef,
+  ]);
 
   // Auto-clear the report confirmation toast after a few seconds so a stale
   // "report generated" note does not linger on the page (mqautz9j follow-up).
@@ -775,10 +896,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // activeRunError — otherwise the operator would land on an empty Results view
   // with no clue why the job ended.
   useEffect(() => {
-    if (activeRunTerminal && activeRunStatus === "succeeded" && activeRun && !activeRun.restored) {
+    if (
+      activeRunTerminal &&
+      finalEvidenceReady &&
+      activeRunStatus === "succeeded" &&
+      activeRun &&
+      !activeRun.restored
+    ) {
       setStep("results");
     }
-  }, [activeRunTerminal, activeRunStatus, activeRun]);
+  }, [activeRunTerminal, activeRunStatus, activeRun, finalEvidenceReady]);
 
   // field engineer's walkthrough ask (2026-07-15): when Results opens, snap to the top of
   // the page so the operator sees the headline results first, not whatever
@@ -800,16 +927,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [step]);
 
   const importMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.import`),
     mutationFn: (input: { importType: ImportType; file: File }) =>
       createImport({
+        context: { client: apiClient },
         file: input.file,
         importType: input.importType,
+        projectId: workspaceRef.projectId,
+        siteId: workspaceRef.siteId,
       }),
     onSuccess: (summary) => {
       setImportOutcome(summary);
       // Refresh the "already imported" note so it reflects this upload the next
       // time the file input is empty (ISSUE-5).
-      void queryClient.invalidateQueries({ queryKey: ["latest-import"] });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+      });
       // Default accepted MQTT registers to uploaded-row validation against live
       // broker payloads; both options remain editable.
       if (summary.import_type === "mqtt_register" && summary.status !== "rejected") {
@@ -822,23 +955,31 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Non-published UDMI schema set upload/delete. Engineer-gated in the UI; a
   // 400 (bad label / missing roots / invalid JSON) surfaces via isError below.
   const schemaUploadMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "udmi-schema.upload"),
     mutationFn: () =>
-      uploadUdmiSchemaSet({ files: schemaSetFiles, versionLabel: schemaSetLabel.trim() }),
+      uploadUdmiSchemaSet({
+        context: { client: apiClient },
+        files: schemaSetFiles,
+        versionLabel: schemaSetLabel.trim(),
+      }),
     onSuccess: () => {
       void udmiSchemaSetsQuery.refetch();
     },
   });
 
   const schemaDeleteMutation = useMutation({
-    mutationFn: (versionLabel: string) => deleteUdmiSchemaSet(versionLabel),
+    mutationKey: mutationKeys.action(sessionScopeId, "udmi-schema.delete"),
+    mutationFn: (versionLabel: string) =>
+      deleteUdmiSchemaSet(versionLabel, { client: apiClient }),
     onSuccess: () => {
       void udmiSchemaSetsQuery.refetch();
     },
   });
 
   const runMutation = useMutation({
-    mutationFn: async (actionIndex: number) => {
-      const action = module.runActions[actionIndex];
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.run`),
+    mutationFn: async (actionId: string) => {
+      const action = module.runActions.find((candidate) => candidate.id === actionId);
       if (!action) {
         throw new Error("Unknown run action.");
       }
@@ -848,6 +989,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         // backend returns 403. The operator confirms via the checkbox; a dry-run
         // previews the plan with no I/O and needs no authorization.
         return startDiscoveryRun({
+          context: { client: apiClient },
           jobType: action.jobType,
           parameters: buildDiscoveryParameters(action, {
             authorized: scanAuthorized,
@@ -858,11 +1000,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             target: scanTarget,
           }),
           runKind: action.runKind,
+          workspace: workspaceRef,
         });
       }
 
       if (action.kind === "validation") {
         return startValidationRun({
+          context: { client: apiClient },
           jobType: action.jobType,
           parameters:
             action.runKind === "udmi"
@@ -880,13 +1024,29 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 })
               : undefined,
           runKind: action.runKind,
+          workspace: workspaceRef,
         });
       }
 
-      return createReport({ format: action.format ?? "zip", reportType: action.reportType });
+      return createReport({
+        context: { client: apiClient },
+        format: action.format ?? "zip",
+        reportType: action.reportType,
+        workspace: workspaceRef,
+      });
     },
-    onSuccess: (result, actionIndex) => {
-      const action = module.runActions[actionIndex];
+    onMutate: () => {
+      dispatchRun({ type: "submitting" });
+    },
+    onError: () => {
+      if (activeRun) {
+        dispatchRun({ type: "accepted", runRef: activeRun.ref });
+      } else {
+        dispatchRun({ type: "reset" });
+      }
+    },
+    onSuccess: (result, actionId) => {
+      const action = module.runActions.find((candidate) => candidate.id === actionId);
       if ("run_id" in result) {
         // The new run has been ACCEPTED and is about to take over the single run
         // monitor. Only now cancel a still-live REHYDRATED run being monitored,
@@ -900,14 +1060,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           activeRun?.restored &&
           runIsActive
         ) {
-          void cancelRun(activeRun.runId).catch(() => {});
+          void cancelRun(activeRun.runId, { client: apiClient }).catch(() => {});
         }
         setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
         setLastReport(null);
         if (action?.kind === "discovery") {
-          setActiveRun({ kind: "discovery", runId: result.run_id });
+          const ref = toRunRef(
+            sessionScopeId,
+            workspaceRef,
+            module.route,
+            result,
+            "submitted",
+          );
+          setActiveRun({ kind: "discovery", ref, runId: result.run_id });
+          dispatchRun({ type: "accepted", runRef: ref });
         } else if (action?.kind === "validation") {
-          setActiveRun({ kind: "validation", runId: result.run_id });
+          const ref = toRunRef(
+            sessionScopeId,
+            workspaceRef,
+            module.route,
+            result,
+            "submitted",
+          );
+          setActiveRun({ kind: "validation", ref, runId: result.run_id });
+          dispatchRun({ type: "accepted", runRef: ref });
         }
       } else {
         setLastReport(result);
@@ -922,8 +1098,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   const publishMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "mqtt-config.publish"),
     mutationFn: () =>
       startMqttConfigPublishRun({
+        context: { client: apiClient },
         confirmed: publishConfirmed,
         expectedPoint: publishPoint,
         expectedValue: parsePublishValue(publishValue),
@@ -940,15 +1118,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         topic: publishTopic,
         useLiveBroker: publishUseLiveBroker,
         waitSeconds: Number(publishWaitSeconds) || 5,
+        workspace: workspaceRef,
       }),
     onSuccess: (result) => {
       setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
-      setActiveRun({ kind: "validation", runId: result.run_id });
+      const ref = toRunRef(
+        sessionScopeId,
+        workspaceRef,
+        module.route,
+        result,
+        "submitted",
+      );
+      setActiveRun({ kind: "validation", ref, runId: result.run_id });
+      dispatchRun({ type: "accepted", runRef: ref });
     },
   });
 
   const cancelMutation = useMutation({
-    mutationFn: (runId: string) => cancelRun(runId),
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.cancel`),
+    mutationFn: (runId: string) => cancelRun(runId, { client: apiClient }),
     onSuccess: () => {
       if (activeRun?.kind === "discovery") {
         void discoveryRunQuery.refetch();
@@ -959,7 +1147,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   const rollbackMutation = useMutation({
-    mutationFn: (runId: string) => rollbackMqttConfigPublish(runId),
+    mutationKey: mutationKeys.action(sessionScopeId, "mqtt-config.rollback"),
+    mutationFn: (runId: string) =>
+      rollbackMqttConfigPublish(runId, { client: apiClient }),
     onSuccess: (result) => {
       setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
     },
@@ -969,27 +1159,27 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // originating run via source_run_ids so the report actually traces to it.
   // Format is operator-chosen (field ask 2026-07-14: PDF and Word exports).
   const reportFromRunMutation = useMutation({
+    mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),
     mutationFn: ({
+      intent,
       reportTitle: title,
-      reportType,
-      runId,
-      udmiScope,
     }: {
+      intent: ReportIntent;
       reportTitle: string;
-      reportType: ReportType;
-      runId: string;
-      udmiScope?: UdmiReportScopeV1;
     }) =>
       createReport({
-        format: reportExportFormat,
+        context: { client: apiClient },
+        format: intent.format,
         reportTitle: title,
-        reportType,
-        sourceRunIds: [runId],
-        udmiScope,
+        reportType: intent.reportType,
+        sourceRunIds: [intent.runId],
+        udmiScope: intent.udmiScope,
+        workspace: workspaceRef,
       }),
     onSuccess: (result) => {
       setReportDialogOpen(false);
       setReportScopeSnapshot(null);
+      setReportIntent(null);
       window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
       setReportToast(
         `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
@@ -997,7 +1187,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // The toast points at the Reports tab, so the list behind it must not be
       // stale. The reports query is disabled off the reports route, so this
       // marks it stale and it refetches when that route enables it.
-      void queryClient.invalidateQueries({ queryKey: ["reports-list"] });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.reports(sessionScopeId, workspaceRef),
+      });
     },
   });
 
@@ -1031,7 +1223,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   // Run actions the Run Controls card list renders. Used ONLY to decide which
   // branch the list shows — the map below still walks the full module.runActions
-  // so each card keeps its original index for runMutation.mutate(index).
+  // and each dispatch uses a stable action id rather than an array position.
   const visibleRunActions = module.runActions.filter((action) => !action.hiddenFromRunControls);
 
   // Index of the UDMI validation run action, used by the Schedule & Payload
@@ -1041,9 +1233,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Deliberately NOT clamped to 0: a -1 flows into runMutation's "Unknown run
   // action." guard, surfacing a visible error panel on this same Setup step,
   // instead of silently dispatching whatever happens to sit at index 0.
-  const udmiRunActionIndex = module.runActions.findIndex(
+  const udmiRunActionId = module.runActions.find(
     (action) => action.kind === "validation" && action.runKind === "udmi",
-  );
+  )?.id ?? "udmi-validation.missing";
 
   // Verdicts derive from the run's issues list, so an empty list only means
   // "no issues" once the issues query has actually SUCCEEDED. Payload views
@@ -1052,7 +1244,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // row View detail, the per-asset payload sections) must stay neutral instead
   // of deriving a false green "Pass" from the empty array. Reuses the 'none'
   // verdict kind, which carries no tone class.
-  const udmiIssuesSettled = validationIssuesQuery.isSuccess && activeRunTerminal;
+  const udmiIssuesSettled =
+    validationIssuesQuery.isSuccess && activeRunTerminal && finalEvidenceReady;
   const gatedUdmiVerdict = useCallback(
     (issues: IssueRow[], observedPresent: boolean, assetOffline: boolean): UdmiVerdict =>
       // Keep the "Verdict pending" gate FIRST so a summary-derived offline
@@ -1337,7 +1530,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const hasUdmiLiveResults = udmiLiveResults !== null;
   useEffect(() => {
     if (hasUdmiLiveResults) {
-      setSelectedResultIndex(0);
+      setSelectedResultId(null);
       setDetailRow(null);
       // A fresh result set starts unfiltered so a stale filter never hides new
       // rows behind a "no rows match" note (ISSUE-4). The facet filters (ITEM-10)
@@ -1366,18 +1559,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // never leaves a stale, out-of-range selection pointing at the old rows.
   useEffect(() => {
     if (discoveryView) {
-      setSelectedResultIndex(0);
+      setSelectedResultId(null);
       setResultsTextFilter("");
       setResultsToneFilter("all");
     }
   }, [discoveryView]);
 
   const liveMetrics = useMemo(() => {
-    if (!isDiscoveryModule || !discoveryResultsQuery.data) {
+    if (!isDiscoveryModule || !discoveryResultsQuery.data || !finalEvidenceReady) {
       return null;
     }
     return discoveryMetrics(module.route, discoveryResultsQuery.data);
-  }, [isDiscoveryModule, discoveryResultsQuery.data, module.route]);
+  }, [finalEvidenceReady, isDiscoveryModule, discoveryResultsQuery.data, module.route]);
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
@@ -1609,7 +1802,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const selectedResult =
     visibleResultRows.length === 0
       ? null
-      : (visibleResultRows.find(({ index }) => index === selectedResultIndex) ?? visibleResultRows[0]).row;
+      : (visibleResultRows.find(
+          ({ row }) => resultIdentity(module.route, row) === selectedResultId,
+        ) ?? visibleResultRows[0]).row;
   // In the grouped UDMI table a collapsed asset unmounts its child rows, so the
   // inspector must not keep showing a hidden row's detail (ISSUE-4). Fall back to
   // the empty state until the asset is re-expanded — selectedResult (and its
@@ -1710,10 +1905,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (visibleResultRows.length === 0) {
       return;
     }
-    if (!visibleResultRows.some(({ index }) => index === selectedResultIndex)) {
-      setSelectedResultIndex(visibleResultRows[0].index);
+    if (
+      !visibleResultRows.some(
+        ({ row }) => resultIdentity(module.route, row) === selectedResultId,
+      )
+    ) {
+      setSelectedResultId(resultIdentity(module.route, visibleResultRows[0].row));
     }
-  }, [visibleResultRows, selectedResultIndex]);
+  }, [module.route, selectedResultId, visibleResultRows]);
 
   // The structured DiscoveredTopic record for the selected MQTT row, matched by
   // topic (topics are distinct per run by aggregation construction). Yields the
@@ -1736,7 +1935,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Gating on activeRun keeps this composable with run rehydration: a restored
   // terminal run sets activeRun and lights this state up unchanged.
   const discoveryEmptyState =
-    isDiscoveryModule && activeRun && activeRunTerminal && resultRows.length === 0
+    isDiscoveryModule && activeRun && activeRunTerminal && finalEvidenceReady && resultRows.length === 0
       ? discoveryEmptyStateFor(module.route, discoveryResultsQuery.data, activeRunError)
       : null;
   const validationEmptyState =
@@ -1770,6 +1969,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     if (
       (module.route === "udmi-validation" || module.route === "data-validation") &&
+      finalEvidenceReady &&
       isTerminalStatus(validationRunQuery.data?.status)
     ) {
       if (module.route === "udmi-validation" && displayedValidationSummary) {
@@ -1805,6 +2005,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [
     liveMetrics,
     module.route,
+    finalEvidenceReady,
     validationRunQuery.data,
     displayedValidationSummary,
     reportsQuery.isLoading,
@@ -1824,7 +2025,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const canDownloadValidationJson =
     activeRun?.kind === "validation" &&
     validationRunQuery.data?.job_type === "udmi_validation" &&
-    isTerminalStatus(validationRunQuery.data.status);
+    isTerminalStatus(validationRunQuery.data.status) &&
+    finalEvidenceReady;
 
   // Export wiring: report downloads use the generated artifact endpoint. A
   // terminal UDMI run can also download its persisted, versioned JSON evidence.
@@ -1959,6 +2161,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!runId) {
       return;
     }
+    const reportType: ReportType =
+      activeRun.kind === "discovery"
+        ? ((module.route === "ip-scanner"
+            ? "ip_discovery"
+            : module.route === "bacnet-discovery"
+              ? "bacnet_discovery"
+              : "mqtt_discovery") as ReportType)
+        : validationRunQuery.data?.job_type === "udmi_validation"
+          ? "udmi_validation"
+          : "issue_report";
+    let frozenScope: UdmiReportScopeV1 | undefined;
     if (module.route === "udmi-validation") {
       // Freeze a deep copy when the operator opens the naming dialog. Filter
       // controls can update while a report request is being prepared; reading
@@ -1972,6 +2185,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             filters: { ...currentUdmiScope.filters },
           }
         : null;
+      frozenScope = scope ?? undefined;
       setReportScopeSnapshot({
         scope,
         filtered: scope !== null,
@@ -1990,6 +2204,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     } else {
       setReportScopeSnapshot(null);
     }
+    setReportIntent(
+      createReportIntent({
+        format: reportExportFormat,
+        reportType,
+        runId,
+        ...(frozenScope ? { udmiScope: frozenScope } : {}),
+      }),
+    );
     reportDialogOpenerRef.current = opener;
     setReportTitle(defaultReportTitle(activeRunRecord));
     reportFromRunMutation.reset();
@@ -1999,33 +2221,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const closeReportDialog = () => {
     setReportDialogOpen(false);
     setReportScopeSnapshot(null);
+    setReportIntent(null);
     window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
   };
 
   const handleReportDialogSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const runId = activeRun?.runId;
     const title = reportTitle.trim();
-    if (!runId || !title || title.length > 160) {
+    if (!reportIntent || !title || title.length > 160) {
       return;
     }
-    const reportType: ReportType =
-      activeRun?.kind === "discovery"
-        ? ((module.route === "ip-scanner"
-            ? "ip_discovery"
-            : module.route === "bacnet-discovery"
-              ? "bacnet_discovery"
-              : "mqtt_discovery") as ReportType)
-        : validationRunQuery.data?.job_type === "udmi_validation"
-          ? "udmi_validation"
-          : "issue_report";
     reportFromRunMutation.mutate({
+      intent: reportIntent,
       reportTitle: title,
-      reportType,
-      runId,
-      ...(reportType === "udmi_validation" && reportScopeSnapshot?.scope
-        ? { udmiScope: reportScopeSnapshot.scope }
-        : {}),
     });
   };
 
@@ -2135,8 +2343,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     });
   };
 
-  const selectResultEvidence = (row: Record<string, string>, rowIndex: number) => {
-    setSelectedResultIndex(rowIndex);
+  const selectResultEvidence = (row: Record<string, string>) => {
+    setSelectedResultId(resultIdentity(module.route, row));
     focusInspectorPayload(row);
   };
 
@@ -2146,10 +2354,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   };
 
   // One results-table data row. Shared by the flat (discovery) render and the
-  // grouped-by-asset render (ITEM-7) so the two can never drift. rowIndex is the
-  // ORIGINAL index in resultRows, so selection and detail joins stay correct
-  // while the list is filtered (ISSUE-4).
-  const renderResultRow = ({ row, index: rowIndex }: { row: Record<string, string>; index: number }) => {
+  // grouped-by-asset render (ITEM-7) so the two can never drift. Selection is
+  // keyed to the evidence fields, so a response reorder cannot move it.
+  const renderResultRow = ({ row }: { row: Record<string, string>; index: number }) => {
+    const rowId = resultIdentity(module.route, row);
+    const selected = selectedResultId === rowId;
     // Live-UDMI rows carry a real issue count; name it on the View affordance so
     // the button reads as "holds N issues", not a bare "View" (ITEM-D). Honest:
     // the count is only claimed when the row actually has issues.
@@ -2160,23 +2369,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       .join(" ");
     return (
       <tr
-        aria-selected={isUdmiValidation ? selectedResultIndex === rowIndex : undefined}
+        aria-selected={isUdmiValidation ? selected : undefined}
         className={`${row.__tone ? `row-${row.__tone}` : ""}${
-          selectedResultIndex === rowIndex ? " row-selected" : ""
+          selected ? " row-selected" : ""
         }${isUdmiValidation ? " result-row-selectable" : ""
         }`.trim() || undefined}
-        key={rowIndex}
-        onClick={isUdmiValidation ? () => selectResultEvidence(row, rowIndex) : undefined}
+        key={rowId}
+        onClick={isUdmiValidation ? () => selectResultEvidence(row) : undefined}
       >
         {tableColumns.map((column) => (
           <td key={column}>
             {isUdmiValidation && column === "Asset" ? (
               <button
-                aria-pressed={selectedResultIndex === rowIndex}
+                aria-pressed={selected}
                 className="result-asset-button"
                 onClick={(event) => {
                   event.stopPropagation();
-                  selectResultEvidence(row, rowIndex);
+                  selectResultEvidence(row);
                 }}
                 type="button"
               >
@@ -2191,11 +2400,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <div className="result-row-actions">
             <button
               aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
-              aria-pressed={selectedResultIndex === rowIndex}
-              className={`secondary-button compact${selectedResultIndex === rowIndex ? " selected" : ""}`}
+              aria-pressed={selected}
+              className={`secondary-button compact${selected ? " selected" : ""}`}
               onClick={(event) => {
                 event.stopPropagation();
-                selectResultEvidence(row, rowIndex);
+                selectResultEvidence(row);
               }}
               type="button"
             >
@@ -2206,7 +2415,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 aria-description={evidenceLabel ? `Evidence for ${evidenceLabel}` : "Evidence row"}
                 className="secondary-button compact"
                 onClick={(event) => {
-                  selectResultEvidence(row, rowIndex);
+                  selectResultEvidence(row);
                   detailDialogOpenerRef.current = event.currentTarget;
                   setDetailRow(row);
                 }}
@@ -2517,7 +2726,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               // Mapped over the FULL list and skipped in place, never
               // filter-then-map: `index` must stay the action's real index in
               // module.runActions or mutate(index) dispatches the wrong action.
-              module.runActions.map((action, index) => {
+              module.runActions.map((action) => {
                 if (action.hiddenFromRunControls) {
                   return null;
                 }
@@ -2548,7 +2757,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           ? "A run is already in progress — stop it before starting another."
                           : undefined;
                 return (
-                  <div className="run-card" key={action.label}>
+                  <div className="run-card" key={action.id}>
                     <div>
                       <strong>{action.label}</strong>
                       <span>{action.helper}</span>
@@ -2556,7 +2765,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <button
                       className="secondary-button compact"
                       disabled={runMutation.isPending || blocked}
-                      onClick={() => runMutation.mutate(index)}
+                      onClick={() => runMutation.mutate(action.id)}
                       title={blockedTooltip}
                       type="button"
                     >
@@ -2657,6 +2866,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div style={progressIndeterminate ? undefined : { width: `${progressWidth}%` }} />
               </div>
 
+              {runController.phase === "terminal-sync" && (
+                <div className={`state-panel ${runController.evidenceError ? "error" : ""}`}>
+                  <strong>
+                    {runController.evidenceError
+                      ? "Final evidence unavailable"
+                      : "Final evidence is synchronising"}
+                  </strong>
+                  <span>
+                    {runController.evidenceError ??
+                      "Completed metrics and exports will appear after the final run data is confirmed."}
+                  </span>
+                </div>
+              )}
+
               <dl className="summary-grid">
                 <div>
                   <dt>Stage</dt>
@@ -2718,7 +2941,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 {canEngineer &&
                   activeRun.kind === "validation" &&
                   validationRunQuery.data?.job_type === "mqtt_config_publish" &&
-                  activeRunTerminal && (
+                  activeRunTerminal &&
+                  finalEvidenceReady && (
                     <button
                       className="secondary-button compact"
                       disabled={rollbackMutation.isPending}
@@ -2728,7 +2952,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
                     </button>
                   )}
-                {canEngineer && activeRunTerminal && (
+                {canEngineer && activeRunTerminal && finalEvidenceReady && (
                   <ReportFromRunControls
                     format={reportExportFormat}
                     onFormatChange={setReportExportFormat}
@@ -3306,7 +3530,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <button
               className="primary-button compact"
               disabled={runMutation.isPending || !canEngineer || udmiCaptureOverCap || startedRunActive}
-              onClick={() => runMutation.mutate(udmiRunActionIndex)}
+              onClick={() => runMutation.mutate(udmiRunActionId)}
               title={
                 !canEngineer
                   ? ENGINEER_REQUIRED_TOOLTIP
@@ -4226,7 +4450,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           attach itself to the monitor, this card would toast twice on one
           screen. Cheap insurance, unreachable today; don't read it as evidence
           the case exists. */}
-      {module.route !== "reports" && canEngineer && activeRun && activeRunTerminal && (
+      {module.route !== "reports" &&
+        canEngineer &&
+        activeRun &&
+        activeRunTerminal &&
+        finalEvidenceReady && (
         <section className="surface" data-stepgroup="results">
           <div className="surface-heading">
             <div>
@@ -4272,7 +4500,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <h3 id="report-title-heading">Name this validation report</h3>
               <p id="report-title-help">
                 Use a title that identifies the site, systems, or capture window. It will appear in
-                the generated {reportExportFormat.toUpperCase()} report, the Reports list, and the
+                the generated {(reportIntent?.format ?? reportExportFormat).toUpperCase()} report, the Reports list, and the
                 download filename.
               </p>
             </div>
@@ -5808,7 +6036,7 @@ function captureRowsToCsv(rows: CaptureRow[]): string {
  * navigate outside fetch(), so they cannot carry the X-API-Key header and
  * 401 in hosted deployments; this routes downloads through downloadFile().
  */
-function useFileDownload() {
+function useFileDownload(apiClient: SessionBoundApiClient) {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -5817,7 +6045,7 @@ function useFileDownload() {
       setPendingKey(key);
       setError(null);
       try {
-        const { blob, filename } = await downloadFile(path, init);
+        const { blob, filename } = await downloadFile(path, init, { client: apiClient });
         triggerBlobDownload(blob, filename ?? fallbackFilename);
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : "Download failed.");
@@ -5825,7 +6053,7 @@ function useFileDownload() {
         setPendingKey(null);
       }
     },
-    [],
+    [apiClient],
   );
 
   const reset = useCallback(() => {

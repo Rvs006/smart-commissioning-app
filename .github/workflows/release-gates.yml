@@ -1,0 +1,269 @@
+name: v0.1.26 Release Gates
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example v0.1.26
+        required: true
+        default: v0.1.26
+      release_sha:
+        description: Full 40-character commit SHA to build and test
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-gates-${{ inputs.release_sha }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_SHA: ${{ inputs.release_sha }}
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+
+      - name: Prove exact release commit on main
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "${#RELEASE_SHA}" -eq 40
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test -z "$(git status --porcelain)"
+
+      - name: Prove release SHA is a merged PR commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_SHA/pulls" \
+            --jq '.[].merge_commit_sha' | grep -Fx "$RELEASE_SHA"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install release Python tree
+        run: python -m pip install -e "./core[bacnet]" -e ./backend -e ./worker ruff
+
+      - name: Lint and test
+        run: |
+          ruff check backend worker core \
+            scripts/backup_rollback_smoke.py \
+            scripts/check_v0126_release_contracts.py \
+            scripts/generate_release_evidence.py \
+            scripts/generate_sbom.py \
+            scripts/smoke_hosted_queue.py \
+            scripts/validate_release_evidence.py
+          python -m unittest discover -s core/tests
+          (cd backend && python -m unittest discover -s tests)
+          (cd worker && python -m unittest discover -s tests)
+
+      - name: Deployment contracts and rollback fixture
+        run: |
+          python scripts/check_v0126_release_contracts.py
+          python scripts/backup_rollback_smoke.py
+
+      - name: Python CycloneDX and runtime licenses
+        run: |
+          mkdir -p build/release-evidence
+          python scripts/generate_sbom.py \
+            --json build/release-evidence/SBOM.python.cdx.json \
+            --application-version "$RELEASE_VERSION" \
+            --source-commit "$RELEASE_SHA" \
+            --check
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-python-evidence-${{ inputs.release_sha }}
+          path: build/release-evidence/SBOM.python.cdx.json
+          if-no-files-found: error
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+
+      - name: Prove exact release commit
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install, test, and build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm test -- --run
+          npm run build
+
+      - name: npm CycloneDX
+        working-directory: frontend
+        run: |
+          mkdir -p ../build/release-evidence
+          npm sbom --omit=dev --sbom-format cyclonedx --sbom-type application \
+            > ../build/release-evidence/SBOM.npm.cdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-npm-evidence-${{ inputs.release_sha }}
+          path: build/release-evidence/SBOM.npm.cdx.json
+          if-no-files-found: error
+
+  hosted:
+    needs: [python, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+
+      - name: Prove exact release commit
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create disposable hosted environment
+        run: sh scripts/bootstrap-env.sh
+
+      - name: Validate and build hosted Compose
+        run: |
+          mkdir -p build/release-evidence
+          docker compose -f infra/docker-compose.yml --env-file infra/.env config --quiet
+          docker compose -f infra/docker-compose.yml --env-file infra/.env build runtime-init api worker frontend
+          docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q api)" "smart-commissioning-api:$RELEASE_SHA"
+          docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q worker)" "smart-commissioning-worker:$RELEASE_SHA"
+          docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q frontend)" "smart-commissioning-frontend:$RELEASE_SHA"
+
+      - uses: anchore/sbom-action@v0
+        with:
+          image: smart-commissioning-api:${{ inputs.release_sha }}
+          format: cyclonedx-json
+          output-file: build/release-evidence/SBOM.image-api.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - uses: anchore/sbom-action@v0
+        with:
+          image: smart-commissioning-worker:${{ inputs.release_sha }}
+          format: cyclonedx-json
+          output-file: build/release-evidence/SBOM.image-worker.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - uses: anchore/sbom-action@v0
+        with:
+          image: smart-commissioning-frontend:${{ inputs.release_sha }}
+          format: cyclonedx-json
+          output-file: build/release-evidence/SBOM.image-frontend.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Start and wait for worker readiness
+        run: |
+          docker compose -f infra/docker-compose.yml --env-file infra/.env up -d postgres redis runtime-init api worker frontend
+          for attempt in $(seq 1 60); do
+            state=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose -f infra/docker-compose.yml --env-file infra/.env ps -q worker)" 2>/dev/null || true)
+            if [ "$state" = healthy ]; then break; fi
+            if [ "$attempt" -eq 60 ]; then
+              docker compose -f infra/docker-compose.yml --env-file infra/.env ps
+              docker compose -f infra/docker-compose.yml --env-file infra/.env logs api worker
+              exit 1
+            fi
+            sleep 5
+          done
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/ > /tmp/frontend.html && \
+               grep -q '<div id="root"></div>' /tmp/frontend.html && \
+               curl --fail --silent --show-error http://127.0.0.1:8080/api/v1/health > /tmp/proxied-health.json; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker compose -f infra/docker-compose.yml --env-file infra/.env logs frontend api
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Hosted BACnet, encrypted secret, and queued UDMI smoke
+        run: |
+          docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T worker \
+            python -c "import bacpypes3, app.tasks; print('BACnet and worker imports OK')"
+          docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T api \
+            python -c "import os; from app.services.configuration_service import write_secret_material; write_secret_material('secret://release-mtls-smoke', os.urandom(32).hex())"
+          docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T worker \
+            python -c "from app.mqtt_config_provider import _resolve_secret; value=_resolve_secret('secret://release-mtls-smoke'); assert value is not None and len(value) == 64 and all(chr(c) in '0123456789abcdef' for c in value)"
+          python scripts/smoke_hosted_queue.py \
+            --api-key "$(sed -n 's/^API_KEY=//p' infra/.env)"
+
+      - name: Stop hosted stack
+        if: always()
+        run: docker compose -f infra/docker-compose.yml --env-file infra/.env down -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image-sboms-${{ inputs.release_sha }}
+          path: build/release-evidence/SBOM.image-*.cdx.json
+          if-no-files-found: error
+
+  evidence:
+    needs: [python, frontend, hosted]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_sha }}
+
+      - name: Prove exact release commit
+        run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*-${{ inputs.release_sha }}
+          path: build/release-evidence
+          merge-multiple: true
+
+      - name: Assemble and validate release evidence
+        run: |
+          cp docs/migration-rollback-v0.1.26.md build/release-evidence/MIGRATION_ROLLBACK.md
+          python scripts/generate_release_evidence.py \
+            --version "$RELEASE_VERSION" \
+            --commit "$RELEASE_SHA" \
+            --output-dir build/release-evidence \
+            --artifact build/release-evidence/MIGRATION_ROLLBACK.md \
+            --sbom build/release-evidence/SBOM.python.cdx.json \
+            --sbom build/release-evidence/SBOM.npm.cdx.json \
+            --sbom build/release-evidence/SBOM.image-api.cdx.json \
+            --sbom build/release-evidence/SBOM.image-worker.cdx.json \
+            --sbom build/release-evidence/SBOM.image-frontend.cdx.json \
+            --gate python=passed --gate frontend=passed \
+            --gate hosted_compose=passed --gate backup_rollback=passed
+          python scripts/validate_release_evidence.py \
+            --evidence build/release-evidence/release-evidence.json \
+            --version "$RELEASE_VERSION" --commit "$RELEASE_SHA" \
+            --require-gate python --require-gate frontend \
+            --require-gate hosted_compose --require-gate backup_rollback
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v0.1.26-release-evidence-${{ inputs.release_sha }}
+          path: build/release-evidence
+          if-no-files-found: error
+          retention-days: 30

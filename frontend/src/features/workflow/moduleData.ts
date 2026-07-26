@@ -8,12 +8,13 @@ import type {
 } from "../../api/client";
 
 // `hiddenFromRunControls` hides an action from the Run Controls card list ONLY.
-// The action MUST stay in `runActions`: ModulePage resolves actions by array
-// index (runMutation.mutate(index), udmiRunActionIndex), so removing an entry
-// renumbers every later one. Narrowing on `kind` still works through the
-// intersection, as does Exclude<ModuleRunAction, { kind: "report" }>.
+// ModulePage resolves every action through its explicit `id`, so reordering the
+// configuration cannot send a click to another endpoint. Narrowing on `kind`
+// still works through the intersection, as does
+// Exclude<ModuleRunAction, { kind: "report" }>.
 export type ModuleRunAction = (
   | {
+      id: string;
       kind: "discovery";
       label: string;
       helper: string;
@@ -21,6 +22,7 @@ export type ModuleRunAction = (
       jobType: JobType;
     }
   | {
+      id: string;
       kind: "validation";
       label: string;
       helper: string;
@@ -28,6 +30,7 @@ export type ModuleRunAction = (
       jobType: JobType;
     }
   | {
+      id: string;
       kind: "report";
       label: string;
       helper: string;
@@ -68,6 +71,7 @@ const modules: ModuleDefinition[] = [
     importTypes: ["ip_register"],
     runActions: [
       {
+        id: "ip-discovery.run",
         kind: "discovery",
         label: "Run IP Discovery",
         helper: "Runs an IP discovery through the API and tracks it in the run monitor below.",
@@ -85,6 +89,7 @@ const modules: ModuleDefinition[] = [
     importTypes: ["bacnet_register", "bacnet_points"],
     runActions: [
       {
+        id: "bacnet-discovery.run",
         kind: "discovery",
         label: "Run BACnet Discovery",
         helper: "Runs a BACnet discovery through the API and tracks it in the run monitor below.",
@@ -102,6 +107,7 @@ const modules: ModuleDefinition[] = [
     importTypes: ["mqtt_register", "mqtt_points"],
     runActions: [
       {
+        id: "mqtt-discovery.run",
         kind: "discovery",
         label: "Run MQTT Discovery",
         helper: "Runs an MQTT discovery through the API and tracks it in the run monitor below.",
@@ -119,6 +125,7 @@ const modules: ModuleDefinition[] = [
     importTypes: ["mqtt_register", "asset_validation", "mqtt_points"],
     runActions: [
       {
+        id: "udmi-validation.run",
         // Hidden from the Run Controls card (field engineer 2026-07-15: the run control
         // belongs at the bottom, after the operator has been through the
         // options — the "Execute capture" button in Schedule and Payload
@@ -148,6 +155,7 @@ const modules: ModuleDefinition[] = [
     importTypes: ["asset_validation", "bacnet_points", "mqtt_points", "mapping", "tolerances"],
     runActions: [
       {
+        id: "data-validation.udmi",
         kind: "validation",
         label: "Run MQTT Payload Check",
         helper: "Checks UDMI/MQTT payload structure, timestamps, state, metadata, and live point values.",
@@ -155,6 +163,7 @@ const modules: ModuleDefinition[] = [
         jobType: "udmi_validation"
       },
       {
+        id: "data-validation.bacnet",
         kind: "validation",
         label: "Run BACnet Point Check",
         helper: "Checks BACnet point names, object details, reliability, units, and present values.",
@@ -162,6 +171,7 @@ const modules: ModuleDefinition[] = [
         jobType: "bacnet_validation"
       },
       {
+        id: "data-validation.mapping",
         kind: "validation",
         label: "Compare BACnet and MQTT",
         helper: "Compares matching live BACnet and MQTT values using mapping and tolerance templates.",
@@ -179,6 +189,7 @@ const modules: ModuleDefinition[] = [
     importTypes: [],
     runActions: [
       {
+        id: "reports.xlsx",
         kind: "report",
         label: "Generate Excel Report",
         helper: "Generates an XLSX report for review, filtering, and issue handover; it then appears in the Reports list below.",
@@ -186,6 +197,7 @@ const modules: ModuleDefinition[] = [
         reportType: "issue_report"
       },
       {
+        id: "reports.docx",
         kind: "report",
         label: "Generate Word Report",
         helper: "Generates a DOCX report for formal commissioning handover; it then appears in the Reports list below.",

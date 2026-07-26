@@ -3,9 +3,9 @@
 #   docker build -f frontend/Dockerfile .
 
 # --- Stage 1: build the static bundle ---------------------------------------
-# Node 22 ships npm 11, matching the npm that generated package-lock.json;
-# node:20 (npm 10) rejects the lockfile's optional-dependency tree under npm ci.
-FROM node:22-alpine AS build
+# Node 24 meets React Router 8's maintained runtime baseline and ships npm 11,
+# matching the npm that generated package-lock.json.
+FROM node:24-alpine AS build
 
 WORKDIR /build
 

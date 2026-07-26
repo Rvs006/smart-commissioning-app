@@ -42,11 +42,11 @@ class RunEnqueuer:
     actor_name: str
     queue_name: str
 
-    def __call__(self, run: RunRecord) -> JobDispatch:
+    def __call__(self, run: RunRecord, dispatch_id: str) -> JobDispatch:
         return self.service._enqueue(
             actor_name=self.actor_name,
             queue_name=self.queue_name,
-            args=(run.run_id, dict(run.parameters)),
+            args=(run.run_id, dispatch_id),
         )
 
 

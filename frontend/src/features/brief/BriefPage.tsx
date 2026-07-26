@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { getTheme, toggleTheme } from "../../app/theme";
 
 // Standalone Product Brief surface. Mirrors the Electracom reference brief 1:1 in
