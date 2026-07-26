@@ -148,6 +148,7 @@ jobs:
           mkdir -p build/release-evidence
           docker compose -f infra/docker-compose.yml --env-file infra/.env config --quiet
           docker compose -f infra/docker-compose.yml --env-file infra/.env build runtime-init api worker frontend
+          docker compose -f infra/docker-compose.yml --env-file infra/.env create --no-deps api worker frontend
           docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q api)" "smart-commissioning-api:$RELEASE_SHA"
           docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q worker)" "smart-commissioning-worker:$RELEASE_SHA"
           docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q frontend)" "smart-commissioning-frontend:$RELEASE_SHA"

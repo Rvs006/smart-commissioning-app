@@ -92,6 +92,6 @@ and must be discarded when the signed release SHA exists.
 - Exact Windows packaging is pending. This machine has PowerShell 5.1, no
   PowerShell 7 command, and no PyInstaller installation. The release workflow
   supplies that clean build environment after a release commit is pushed.
-- GitHub CLI authentication is valid. A dedicated SSH signing identity is being
-  registered before publication. No unsigned commit, tag, or release is
-  permitted.
+- GitHub CLI authentication is valid. A dedicated SSH signing identity is
+  configured and verified locally before publication. No unsigned commit, tag,
+  or release is permitted.
