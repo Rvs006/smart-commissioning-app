@@ -40,9 +40,17 @@ def _validate_cyclonedx(path: Path) -> list[str]:
             if not isinstance(component, dict):
                 failures.append(f"{path.name}: component {index} is not an object")
                 continue
-            for field in ("type", "name", "version"):
+            for field in ("type", "name"):
                 if not component.get(field):
                     failures.append(f"{path.name}: component {index} lacks {field}")
+            if component.get("type") == "file":
+                hashes = component.get("hashes")
+                if not isinstance(hashes, list) or not hashes:
+                    failures.append(
+                        f"{path.name}: file component {index} lacks hashes"
+                    )
+            elif not component.get("version"):
+                failures.append(f"{path.name}: component {index} lacks version")
     return failures
 
 
