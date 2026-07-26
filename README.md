@@ -8,7 +8,7 @@
 ![status](https://img.shields.io/badge/status-pre--production%20(pending%20on--site%20validation)-orange)
 ![latest release](https://img.shields.io/github/v/release/Rvs006/smart-commissioning-app?display_name=tag)
 ![python](https://img.shields.io/badge/python-3.12-blue)
-![node](https://img.shields.io/badge/node-22-green)
+![node](https://img.shields.io/badge/node-24-green)
 
 ## Get it running (pick one path)
 
@@ -288,14 +288,17 @@ Smart Commissioning Tool Specification.pdf
   are rate-throttled, and support cooperative cancellation. No packets leave without consent.
 - **Evidence integrity** — reports and backups are hashed (SHA-256) and signed (detached Ed25519);
   restores verify before writing (with a zip-slip guard).
+- **Sealed execution** - one database owner may execute a run, and completed
+  results plus generated report bytes are immutable.
 - **Honest status** — live-infrastructure paths that have not been run against real hardware are
   marked as such, never faked. See the honesty rule in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Project status & roadmap
 
-> **Repo status - reviewed 2026-07-23:** GitHub Releases is authoritative for
-> publication state. Use v0.1.24 only after its matching tag, workflow-built and
-> boot-smoked portable bundle, and release-body SHA-256 values are present. Check
+> **Repo status - reviewed 2026-07-26:** GitHub Releases is authoritative for
+> publication state. Use v0.1.26 only after its matching signed tag,
+> workflow-built and boot-smoked portable bundle, hosted release-gate record,
+> SBOMs, and release-body SHA-256 values are present. Check
 > the live workflow badges rather than inferring CI status from this source file.
 > Public fixtures use neutral demo identities. The July field review covers the
 > Results view and generated UDMI reports; live MQTT broker capture remains
@@ -305,17 +308,19 @@ Smart Commissioning Tool Specification.pdf
 > remaining production-gating items are tracked in
 > [issue #4](https://github.com/Rvs006/smart-commissioning-app/issues/4).
 
-**Code-complete and hardened, pending on-site sign-off.** Phases 0–4b are built and merged:
-persistence, auth + secret encryption, real discovery/validation engines with scan-safety,
-observability / evidence-integrity / backup-restore, and signed edge → hub sync. CI is green on the
-blocking `python` and `frontend` jobs.
+v0.1.26 adds database-fenced run ownership, sealed terminal results, frozen
+execution context, write-once reports, protocol collision keys, and session-bound
+frontend state. Deployment order and rollback stop conditions are documented in
+[the migration guide](docs/migration-rollback-v0.1.26.md); observable changes and
+the v0.1.27 sync limit are in [the release notes](docs/release-notes-v0.1.26.md).
 
-The **only gate to production is Phase 5 on-site validation** — the live paths (active scanning
-against real BMS/OT hardware, a real MQTT broker, Postgres/Redis at scale, a remote hub) were
-developed without that infrastructure and must be validated on site. A controlled team **pilot**
-(config / import / fixture-validation / dry-run / reports) is safe today; see
-[docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) and
-[docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
+Production approval still requires Phase 5 on-site validation. Active scans
+against real BMS/OT hardware, live MQTT, Postgres/Redis at scale, and a remote hub
+must pass the documented checks. Each published release must also carry hosted
+and Windows workflow evidence from its signed tag commit. A controlled team pilot
+(configuration, import, fixture validation, dry-run, and reports) remains the
+supported boundary; see [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md)
+and [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
 
 **Implemented:** source-interface (NIC) selection — an operator can choose which
 network interface active scans egress from, via a **"Source Interface"** field on

@@ -13,7 +13,6 @@ import traceback
 import webbrowser
 from pathlib import Path
 
-
 APP_NAME = "Smart Commissioning App"
 DEFAULT_PORT = 8000
 
@@ -68,6 +67,7 @@ def install_crash_logging(runtime_root: Path) -> Path | None:
 def _bundle_dependency_imports() -> None:
     """Keep PyInstaller aware of runtime dependencies imported by backend/app."""
     import alembic  # noqa: F401
+
     # bacpypes3 (real BACnet/IP discovery backend, core's [bacnet] extra) is
     # imported lazily via a string import in Bacpypes3Backend._ensure_app, so
     # PyInstaller cannot trace it from the launcher. Naming it here (belt-and-
@@ -84,6 +84,7 @@ def _bundle_dependency_imports() -> None:
     import multipart  # noqa: F401
     import openpyxl  # noqa: F401
     import prometheus_client  # noqa: F401
+
     # psutil is import-guarded in backend/app (degrades to an Auto-only NIC
     # list when absent), so a missing module here breaks the Source Interface
     # picker silently instead of crashing boot — keep it frozen explicitly.
@@ -226,6 +227,8 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
         sys.path.insert(0, str(core_root))
     os.environ["SCT_FRONTEND_DIST"] = str(frontend_dist)
     os.environ["SMART_COMMISSIONING_SECRETS_ROOT"] = str(runtime_root / "secrets")
+    os.environ["SMART_COMMISSIONING_ARTIFACTS_ROOT"] = str(runtime_root / "artifacts")
+    os.environ["SMART_COMMISSIONING_REPORT_SIGNING_ROOT"] = str(runtime_root / "report-signing")
     # Anchor the backend-derived paths (imports, edge identity, default sqlite
     # location) to the same stable dir; without this app.core.runtime derives
     # them from the per-release backend folder and they are lost on upgrade.
@@ -241,7 +244,6 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     # the hosted compose profile (infra/) sets AUTH_MODE=api_key instead.
     _set_env_default("AUTH_MODE", "local")
     _set_env_default("JOB_EXECUTION_MODE", "inline")
-    _set_env_default("ALLOW_INLINE_WORKER_FALLBACK", "true")
 
 
 def open_browser_later(url: str) -> None:

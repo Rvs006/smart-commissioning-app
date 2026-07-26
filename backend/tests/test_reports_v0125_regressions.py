@@ -135,6 +135,7 @@ class ReportsV0125RegressionTests(ApiTestCase):
     def _seed_source(self, summary: dict[str, object]) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from lifecycle_helpers import finish_run
 
         service = RunService()
         assets = [
@@ -151,13 +152,11 @@ class ReportsV0125RegressionTests(ApiTestCase):
             ),
             expected_job_type="udmi_validation",
         )
-        service.update_run_status(
+        finish_run(
+            service,
             run.run_id,
-            status="succeeded",
-            stage="done",
-            progress_percent=100,
+            summary={"validation_summary_v1": summary},
         )
-        service.update_result_summary(run.run_id, {"validation_summary_v1": summary})
         return run.run_id
 
     def _create_report(

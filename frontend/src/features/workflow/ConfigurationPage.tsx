@@ -7,7 +7,6 @@ import {
   ConfigurationSnapshot,
   downloadFile,
   exportConfiguration,
-  exportConfigurationWithSecrets,
   getConfiguration,
   getSystemInterfaces,
   importConfiguration,
@@ -20,6 +19,8 @@ import {
 import { isSecretSentinel, maskSecretValue } from "./secretField";
 import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
+import { mutationKeys, queryKeys } from "../../api/queryKeys";
+import { mergeConfigurationRefresh } from "./configurationRefresh";
 
 type FieldKind = "text" | "password" | "select" | "textarea" | "secret" | "readonly";
 
@@ -278,7 +279,7 @@ export function ConfigurationPage() {
   // Publishing configuration (PUT /configuration) and storing secrets are
   // engineer+ mutations. Viewing the snapshot and validating it stay viewer, so
   // only the Save, Import, and secret-store controls are role-gated here.
-  const { canEngineer } = useSession();
+  const { apiClient, canEngineer, sessionScopeId, workspace } = useSession();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<ConfigurationSnapshot | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
@@ -291,10 +292,11 @@ export function ConfigurationPage() {
   const [transferMessage, setTransferMessage] = useState<string | null>(null);
   const [transferError, setTransferError] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const savedSnapshotRef = useRef<ConfigurationSnapshot | null>(null);
 
   const configurationQuery = useQuery({
-    queryFn: getConfiguration,
-    queryKey: ["configuration"],
+    queryFn: ({ signal }) => getConfiguration({ client: apiClient, signal }),
+    queryKey: queryKeys.configuration(sessionScopeId, workspace),
   });
 
   // Live NIC enumeration for the Source Interface selector. Kept independent of
@@ -303,8 +305,8 @@ export function ConfigurationPage() {
   // FieldControl !options.includes(value) escape hatch still surfaces a stored
   // non-enumerated value (e.g. an interface that is down or on another host).
   const systemInterfacesQuery = useQuery({
-    queryFn: getSystemInterfaces,
-    queryKey: ["system-interfaces"],
+    queryFn: ({ signal }) => getSystemInterfaces({ client: apiClient, signal }),
+    queryKey: queryKeys.interfaces(sessionScopeId, workspace),
   });
   // Virtual adapters (Hyper-V vEthernet, VPN/TAP, docker bridges, ...) are
   // LISTED with a pick-with-care label rather than hidden: on Hyper-V vSwitch
@@ -354,7 +356,13 @@ export function ConfigurationPage() {
   // are independent: this app is never itself a BBMD (v0.1.12).
   useEffect(() => {
     if (configurationQuery.data) {
-      setDraft(configurationQuery.data);
+      const previousSaved = savedSnapshotRef.current;
+      setDraft((current) =>
+        current && previousSaved
+          ? mergeConfigurationRefresh(previousSaved, current, configurationQuery.data)
+          : configurationQuery.data,
+      );
+      savedSnapshotRef.current = configurationQuery.data;
       setValidationErrors([]);
     }
   }, [configurationQuery.data]);
@@ -391,38 +399,50 @@ export function ConfigurationPage() {
   }, [configurationQuery.data, defaultWiredCidr]);
 
   const validationMutation = useMutation({
-    mutationFn: validateConfiguration,
+    mutationKey: mutationKeys.action(sessionScopeId, "configuration.validate"),
+    mutationFn: (configuration: ConfigurationSnapshot) =>
+      validateConfiguration(configuration, { client: apiClient }),
     onSuccess: (result) => {
       setValidationErrors(result.errors);
     },
   });
 
   const saveMutation = useMutation({
-    mutationFn: updateConfiguration,
+    mutationKey: mutationKeys.action(sessionScopeId, "configuration.save"),
+    mutationFn: (configuration: ConfigurationSnapshot) =>
+      updateConfiguration(configuration, { client: apiClient }),
     onSuccess: (savedConfiguration) => {
-      queryClient.setQueryData(["configuration"], savedConfiguration);
+      queryClient.setQueryData(
+        queryKeys.configuration(sessionScopeId, workspace),
+        savedConfiguration,
+      );
+      savedSnapshotRef.current = savedConfiguration;
       setDraft(savedConfiguration);
       setValidationErrors([]);
     },
   });
 
   const secretMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "configuration.secret"),
     mutationFn: (input: { field: string; content: string; fileName?: string | null }) =>
-      storeSecretMaterial(input),
+      storeSecretMaterial({ ...input, context: { client: apiClient } }),
     onSuccess: (response) => {
       setSecretMessage(
         `${response.field} stored as masked reference ${response.secret_ref} (fingerprint ${response.fingerprint}).`,
       );
       setSecretDrafts((current) => ({ ...current, [response.field]: "" }));
       setSecretFiles((current) => ({ ...current, [response.field]: response.file_name }));
-      queryClient.invalidateQueries({ queryKey: ["configuration"] });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.configuration(sessionScopeId, workspace),
+      });
     },
   });
 
   // Download the masked local log bundle (GET /logs/bundle) and save it via a
   // transient object-URL anchor. Errors surface on the mutation state.
   const downloadLogsMutation = useMutation({
-    mutationFn: () => downloadFile("/logs/bundle"),
+    mutationKey: mutationKeys.action(sessionScopeId, "logs.download"),
+    mutationFn: () => downloadFile("/logs/bundle", undefined, { client: apiClient }),
     onSuccess: (file) => {
       saveBlob(file.blob, file.filename ?? "smart_commissioning_logs.zip");
     },
@@ -432,7 +452,8 @@ export function ConfigurationPage() {
   // carries the honest outcome (uploaded / rejected / no_response); a missing or
   // invalid URL is an ApiError surfaced on the mutation error state.
   const uploadLogsMutation = useMutation({
-    mutationFn: () => uploadLogs(),
+    mutationKey: mutationKeys.action(sessionScopeId, "logs.upload"),
+    mutationFn: () => uploadLogs({ client: apiClient }),
   });
 
   // Export reads the current snapshot (via exportConfiguration -> GET
@@ -440,33 +461,13 @@ export function ConfigurationPage() {
   // password fields masked (sentinel) and certificate material as secret://
   // references, so the exported envelope never carries raw secret values.
   const exportMutation = useMutation({
-    mutationFn: () => exportConfiguration(),
+    mutationKey: mutationKeys.action(sessionScopeId, "configuration.export"),
+    mutationFn: () => exportConfiguration(undefined, undefined, { client: apiClient }),
     onSuccess: (envelope) => {
       downloadConfigurationEnvelope(envelope);
       setTransferError(null);
       setTransferMessage(
         "Exported the current configuration as JSON. Secret material is exported as masked references only, never raw values.",
-      );
-    },
-    onError: (error: Error) => {
-      setTransferMessage(null);
-      setTransferError(error.message);
-    },
-  });
-
-  // Export WITH secrets (2026-07-20 walkthrough ITEM-1): an explicit,
-  // engineer-gated action separate from the default masked export. The file
-  // carries the MQTT password, all stored passwords/tokens, and the CA/client
-  // certificate + private key material in plain text so another engineer can
-  // import a working config on their own machine (field decision: plain text now,
-  // encryption later).
-  const exportWithSecretsMutation = useMutation({
-    mutationFn: () => exportConfigurationWithSecrets(),
-    onSuccess: (envelope) => {
-      downloadConfigurationEnvelope(envelope, "-with-secrets");
-      setTransferError(null);
-      setTransferMessage(
-        "Exported the configuration WITH its secrets as JSON. This file contains the MQTT password, all stored passwords and tokens, and the CA/client-certificate/private-key material in PLAIN TEXT — handle it like a password and delete it once imported.",
       );
     },
     onError: (error: Error) => {
@@ -481,12 +482,27 @@ export function ConfigurationPage() {
   // envelope or a bare snapshot keeps the existing PUT /configuration path. Both
   // validate again server-side before persisting (surfacing an ApiError on 400).
   const importMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "configuration.import"),
     mutationFn: (payload: ConfigurationExport | ConfigurationExportEnvelope | ConfigurationSnapshot) =>
       hasSecretMaterial(payload)
-        ? importConfigurationWithSecrets(payload)
-        : importConfiguration(payload),
+        ? importConfigurationWithSecrets(
+            payload,
+            undefined,
+            undefined,
+            { client: apiClient },
+          )
+        : importConfiguration(
+            payload,
+            undefined,
+            undefined,
+            { client: apiClient },
+          ),
     onSuccess: (savedConfiguration, payload) => {
-      queryClient.setQueryData(["configuration"], savedConfiguration);
+      queryClient.setQueryData(
+        queryKeys.configuration(sessionScopeId, workspace),
+        savedConfiguration,
+      );
+      savedSnapshotRef.current = savedConfiguration;
       // As saved by the API — an imported snapshot prepared off-site for the
       // lab keeps its Foreign Device setting instead of being reset on arrival.
       setDraft(savedConfiguration);
@@ -663,15 +679,6 @@ export function ConfigurationPage() {
             </button>
             <button
               className="secondary-button compact"
-              disabled={exportWithSecretsMutation.isPending || !canEngineer}
-              onClick={() => exportWithSecretsMutation.mutate()}
-              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-              type="button"
-            >
-              {exportWithSecretsMutation.isPending ? "Exporting..." : "Export with secrets"}
-            </button>
-            <button
-              className="secondary-button compact"
               disabled={importMutation.isPending || !canEngineer}
               onClick={() => importInputRef.current?.click()}
               title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
@@ -689,11 +696,9 @@ export function ConfigurationPage() {
             />
           </div>
           <p className="action-note">
-            Export downloads the current configuration as JSON with secrets masked, so it can be reused
-            on another project. Export with secrets includes the MQTT password and the certificate and
-            key material in plain text for a full transfer to another machine — handle that file like a
-            password. Import validates a JSON file and saves it as the new snapshot, restoring any
-            secrets the file carries.
+            Export downloads the current configuration as JSON with secret values excluded. Import
+            validates a JSON file and saves it as the new snapshot. A full machine transfer uses the
+            encrypted runtime backup so its secret store and encryption key stay together.
           </p>
         </aside>
       </section>

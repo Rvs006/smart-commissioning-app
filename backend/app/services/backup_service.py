@@ -4,11 +4,12 @@ A backup is a single zip *bundle* containing:
 
   * ``db/smart_commissioning.db`` — a CONSISTENT copy of the SQLite database,
     taken via SQLite's online backup API (never a naive mid-write file copy).
-  * ``secrets/*`` — the secret store: encrypted PEMs, the ``.secret_store_key``,
-    and the evidence ``.evidence_signing_key`` (so signatures stay verifiable
-    after a restore).
+  * ``secrets/*`` — encrypted PEMs and the ``.secret_store_key``.
   * ``imports/files/*`` — uploaded import source files referenced by import
     records.
+  * ``artifacts/*`` — immutable, content-addressed report artifacts.
+  * ``report-signing/*`` — the API-only evidence-signing key, so restored
+    artifacts remain verifiable.
   * ``manifest.json`` — bundle metadata: versions, a caller-supplied
     ``created_at`` timestamp, the SHA-256 of every member, and a detached
     Ed25519 signature over the canonical manifest body (via integrity.py).
@@ -48,6 +49,8 @@ _DB_MEMBER = "db/smart_commissioning.db"
 _MANIFEST_MEMBER = "manifest.json"
 _SECRETS_PREFIX = "secrets/"
 _IMPORTS_PREFIX = "imports/files/"
+_ARTIFACTS_PREFIX = "artifacts/"
+_REPORT_SIGNING_PREFIX = "report-signing/"
 
 _BUNDLE_FORMAT_VERSION = 1
 # Fixed zip member timestamp so a given input yields reproducible bytes.
@@ -65,6 +68,8 @@ class BackupSources:
     database_url: str
     secrets_root: Path | None = None
     imports_files_root: Path | None = None
+    report_artifacts_root: Path | None = None
+    report_signing_root: Path | None = None
 
 
 def _sqlite_path(database_url: str) -> Path:
@@ -154,6 +159,8 @@ def create_backup_bundle(
     ]
     members.extend(_iter_dir_members(sources.secrets_root, _SECRETS_PREFIX))
     members.extend(_iter_dir_members(sources.imports_files_root, _IMPORTS_PREFIX))
+    members.extend(_iter_dir_members(sources.report_artifacts_root, _ARTIFACTS_PREFIX))
+    members.extend(_iter_dir_members(sources.report_signing_root, _REPORT_SIGNING_PREFIX))
 
     manifest: dict[str, object] = {
         "bundle_format_version": _BUNDLE_FORMAT_VERSION,
@@ -198,6 +205,8 @@ class RestoreTarget:
     database_path: Path
     secrets_root: Path
     imports_files_root: Path
+    report_artifacts_root: Path | None = None
+    report_signing_root: Path | None = None
 
 
 def verify_bundle(bundle_bytes: bytes, *, allow_unsigned: bool = False) -> dict[str, object]:
@@ -257,6 +266,8 @@ def restore_backup_bundle(
     target.database_path.parent.mkdir(parents=True, exist_ok=True)
     target.secrets_root.mkdir(parents=True, exist_ok=True)
     target.imports_files_root.mkdir(parents=True, exist_ok=True)
+    _report_artifacts_target(target).mkdir(parents=True, exist_ok=True)
+    _report_signing_target(target).mkdir(parents=True, exist_ok=True)
 
     with ZipFile(_readonly_buffer(bundle_bytes)) as archive:
         # Map (and path-traversal check) every member BEFORE writing any byte, so
@@ -309,7 +320,25 @@ def _member_destination(name: str, target: RestoreTarget) -> Path | None:
     if name.startswith(_IMPORTS_PREFIX):
         destination = target.imports_files_root / name[len(_IMPORTS_PREFIX):]
         return _ensure_within(destination, target.imports_files_root, name)
+    if name.startswith(_ARTIFACTS_PREFIX):
+        root = _report_artifacts_target(target)
+        destination = root / name[len(_ARTIFACTS_PREFIX):]
+        return _ensure_within(destination, root, name)
+    if name.startswith(_REPORT_SIGNING_PREFIX):
+        root = _report_signing_target(target)
+        destination = root / name[len(_REPORT_SIGNING_PREFIX):]
+        return _ensure_within(destination, root, name)
     return None
+
+
+def _report_artifacts_target(target: RestoreTarget) -> Path:
+    """Return the explicit artifact root or its legacy-call-site default."""
+    return target.report_artifacts_root or target.database_path.parent / "artifacts"
+
+
+def _report_signing_target(target: RestoreTarget) -> Path:
+    """Return the explicit signing root or its legacy-call-site default."""
+    return target.report_signing_root or target.database_path.parent / "report-signing"
 
 
 def _readonly_buffer(data: bytes):  # noqa: ANN202 - tiny BytesIO factory

@@ -1,5 +1,6 @@
-import { createHashRouter } from "react-router-dom";
+import { createHashRouter } from "react-router";
 import { App } from "./App";
+import { RouteLoadingFallback } from "./RouteLoadingFallback";
 
 async function loadBriefPage() {
   const { BriefPage } = await import("../features/brief/BriefPage");
@@ -47,11 +48,20 @@ export const router = createHashRouter([
   // Standalone product surfaces (own demo-shell header), mirroring the
   // Electracom reference's Product Brief + Course. "Launch the App" enters the
   // console layout below.
-  { path: "brief", lazy: loadBriefPage },
-  { path: "learning", lazy: loadLearningPage },
+  {
+    path: "brief",
+    lazy: loadBriefPage,
+    hydrateFallbackElement: <RouteLoadingFallback />
+  },
+  {
+    path: "learning",
+    lazy: loadLearningPage,
+    hydrateFallbackElement: <RouteLoadingFallback />
+  },
   {
     path: "/",
     element: <App />,
+    hydrateFallbackElement: <RouteLoadingFallback />,
     children: [
       { index: true, lazy: loadDashboardPage },
       { path: "configuration", lazy: loadConfigurationPage },

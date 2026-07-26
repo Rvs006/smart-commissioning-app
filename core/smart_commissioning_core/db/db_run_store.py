@@ -21,7 +21,13 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from smart_commissioning_core.db.engine import session_factory
-from smart_commissioning_core.db.models import Project, Run, RunIssue, Site
+from smart_commissioning_core.db.models import (
+    Project,
+    Run,
+    RunIssue,
+    RunLifecycleConflict,
+    Site,
+)
 from smart_commissioning_core.records import ValidationIssueRecord
 
 _ISSUE_FIELDS = tuple(ValidationIssueRecord.model_fields)
@@ -103,6 +109,27 @@ def _clear_worker_stale_observation(run: Run) -> None:
     if WORKER_STALE_OBSERVED_AT_KEY in result_summary:
         result_summary.pop(WORKER_STALE_OBSERVED_AT_KEY)
         run.result_summary = result_summary
+
+
+def _record_terminal_conflict(
+    session: Session,
+    run_id: str,
+    *,
+    operation: str,
+    attempted_status: str | None = None,
+) -> None:
+    """Account for a compatibility-path mutation without touching sealed data."""
+    session.add(
+        RunLifecycleConflict(
+            run_id=run_id,
+            operation=operation,
+            reason="terminal_result_sealed",
+            owner_token_fingerprint=None,
+            attempted_status=attempted_status,
+            attempted_sha256=None,
+            observed_at=_utcnow(),
+        )
+    )
 
 
 class DbRunStore:
@@ -193,13 +220,16 @@ class DbRunStore:
     ) -> dict[str, object]:
         with self._session_factory.begin() as session:
             run = self._load(session, run_id, for_update=True)
-            # A terminal run is terminal. A late best-effort progress write from an
-            # engine unit still unwinding after the run already failed/cancelled (a
-            # BACnet device's finally-block progress write, or asyncio.run teardown
-            # of sibling tasks) must never resurrect it to 'running' and erase the
-            # vetted terminal error_message. Once terminal, only another terminal
-            # status may change it; a non-terminal write is dropped.
-            if run.status in _TERMINAL_STATUSES and status not in _TERMINAL_STATUSES:
+            # Compatibility writers are read/write only until the first terminal
+            # status. Lifecycle-v2 writers use RunLifecycleRepository.finalize_run;
+            # after either path completes, no later status is allowed to replace it.
+            if run.status in _TERMINAL_STATUSES:
+                _record_terminal_conflict(
+                    session,
+                    run_id,
+                    operation="compat_status",
+                    attempted_status=status,
+                )
                 return _run_to_dict(run)
             _clear_worker_stale_observation(run)
             run.status = status
@@ -225,6 +255,11 @@ class DbRunStore:
         # the write lock up front so concurrent mergers serialize.
         with self._session_factory.begin() as session:
             run = self._load(session, run_id, for_update=True)
+            if run.status in _TERMINAL_STATUSES:
+                _record_terminal_conflict(
+                    session, run_id, operation="compat_result_summary"
+                )
+                return _run_to_dict(run)
             if merge:
                 current = run.result_summary if isinstance(run.result_summary, dict) else {}
                 next_summary = {**current, **result_summary}
@@ -244,6 +279,9 @@ class DbRunStore:
         records = [ValidationIssueRecord.model_validate(issue) for issue in issues]
         with self._session_factory.begin() as session:
             run = self._load(session, run_id, for_update=True)
+            if run.status in _TERMINAL_STATUSES:
+                _record_terminal_conflict(session, run_id, operation="compat_issues")
+                return _run_to_dict(run)
             _clear_worker_stale_observation(run)
             session.execute(delete(RunIssue).where(RunIssue.run_id == run_id))
             session.flush()
@@ -269,6 +307,9 @@ class DbRunStore:
         """
         with self._session_factory.begin() as session:
             run = self._load(session, run_id, for_update=True)
+            if run.status in _TERMINAL_STATUSES:
+                _record_terminal_conflict(session, run_id, operation="compat_cancel")
+                return _run_to_dict(run)
             run.cancel_requested = True
             run.updated_at = _utcnow()
             session.flush()

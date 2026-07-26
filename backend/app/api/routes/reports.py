@@ -11,14 +11,13 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 from smart_commissioning_core.db.repositories import DiscoveryRepository
-from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
 from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary, RunRecord
+from app.services.report_artifacts import load_report_artifact, store_report_artifact
 from app.services.report_naming import build_report_file_name, report_content_disposition
 from app.services.report_pdf import PdfDocument
-from app.services.reports_integrity import INTEGRITY_KEY, build_integrity_metadata
 from app.services.run_service import (
     DISCOVERY_JOB_TYPES,
     REPORT_JOB_TYPES,
@@ -95,10 +94,41 @@ def _to_report_summary(report_id: str) -> ReportSummary:
 @router.post("", response_model=ReportSummary, dependencies=[Depends(require_engineer)])
 def create_report(request: ReportRequest) -> ReportSummary:
     try:
-        _, report = service.create_report_run(request)
+        run, report = service.create_report_run(request)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return report
+    try:
+        render_run = run.model_copy(
+            update={"status": "succeeded", "stage": "report_ready", "progress_percent": 100}
+        )
+        content, media_type = _build_report_artifact(render_run, report.output_format)
+        snapshot_hash = run.parameters.get("report_snapshot_sha256")
+        generated_at = run.parameters.get("report_generated_at")
+        if not isinstance(snapshot_hash, str) or not isinstance(generated_at, str):
+            raise RuntimeError("Report snapshot provenance is incomplete.")
+        manifest = store_report_artifact(
+            report_id=run.run_id,
+            snapshot_hash=snapshot_hash,
+            file_name=report.file_name,
+            media_type=media_type,
+            artifact=content,
+            origin=str(run.edge_id or "api"),
+            signed_at=generated_at,
+        )
+        service.complete_report_run(run.run_id, manifest)
+    except Exception as error:
+        try:
+            service.update_run_status(
+                run.run_id,
+                status="failed",
+                stage="report_materialization_failed",
+                progress_percent=100,
+                error_message="The report artifact could not be materialized.",
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="Report artifact materialization failed.") from error
+    return _to_report_summary(run.run_id)
 
 
 @router.get("", response_model=ReportListResponse, dependencies=[Depends(require_viewer)])
@@ -148,8 +178,7 @@ def export_reports(request: ReportExportRequest) -> Response:
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         for run in runs:
             report = _to_report_summary(run.run_id)
-            content, _media_type = _build_report_artifact(run, report.output_format)
-            _persist_integrity(run, content)
+            content, _media_type = _stored_or_legacy_artifact(run, report.output_format)
             # Pinned to the zip epoch (same as _normalize_zip_bytes) so the
             # bundle is byte-reproducible; member name embeds the run id, so
             # names are unique and never collide.
@@ -182,13 +211,25 @@ def download_report(report_id: str) -> Response:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.")
 
     report = _to_report_summary(report_id)
-    content, media_type = _build_report_artifact(run, report.output_format)
-    _persist_integrity(run, content)
+    content, media_type = _stored_or_legacy_artifact(run, report.output_format)
     return Response(
         content=content,
         media_type=media_type,
         headers={"Content-Disposition": report_content_disposition(report.file_name)},
     )
+
+
+def _stored_or_legacy_artifact(run: object, output_format: str) -> tuple[bytes, str]:
+    summary = run.result_summary if isinstance(run.result_summary, dict) else {}
+    manifest = summary.get("artifact_manifest")
+    if isinstance(manifest, dict):
+        media_type = manifest.get("media_type")
+        if not isinstance(media_type, str) or not media_type:
+            raise RuntimeError("Stored report manifest has no media type.")
+        return load_report_artifact(manifest), media_type
+    # Pre-v0.1.26 records remain downloadable, but the compatibility path is
+    # strictly read-only and never creates provenance during GET.
+    return _build_report_artifact(run, output_format)
 
 
 def _generated_at(run: object) -> str:
@@ -201,54 +242,18 @@ def _generated_at(run: object) -> str:
     result_summary; every later regeneration reuses it, yielding byte-identical
     artifacts that the verify endpoint can re-hash.
     """
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    frozen = parameters.get("report_generated_at")
+    if isinstance(frozen, str) and frozen:
+        return frozen
     summary = run.result_summary if isinstance(run.result_summary, dict) else {}
     existing = summary.get("report_generated_at")
     if isinstance(existing, str) and existing:
         return existing
-    candidate = datetime.now(UTC).isoformat()
-    generated_at = service.initialize_report_summary_value(
-        run.run_id,
-        "report_generated_at",
-        candidate,
-    )
-    if not isinstance(generated_at, str) or not generated_at:
-        raise RuntimeError("Stored report generation timestamp is invalid.")
-    # Reflect the winning persisted value on this request's in-memory run. A
-    # concurrent first download may have initialized it before this request.
-    if isinstance(run.result_summary, dict):
-        run.result_summary["report_generated_at"] = generated_at
-    return generated_at
-
-
-def _persist_integrity(run: object, artifact: bytes) -> dict[str, object]:
-    """Persist integrity once, then verify without rewriting signed metadata."""
-
-    artifact_hash = sha256_bytes(artifact)
-
-    def validated(value: object) -> dict[str, object]:
-        if not isinstance(value, dict):
-            raise RuntimeError("Stored report integrity metadata is invalid.")
-        stored_hash = value.get("hash")
-        if not isinstance(stored_hash, str) or not stored_hash:
-            raise RuntimeError("Stored report integrity metadata has no artifact hash.")
-        if stored_hash != artifact_hash:
-            raise RuntimeError(
-                "Regenerated report bytes do not match the stored integrity record."
-            )
-        return dict(value)
-
-    summary = run.result_summary if isinstance(run.result_summary, dict) else {}
-    existing = summary.get(INTEGRITY_KEY)
-    if existing is not None:
-        return validated(existing)
-
-    candidate = build_integrity_metadata(artifact)
-    metadata = validated(
-        service.initialize_report_summary_value(run.run_id, INTEGRITY_KEY, candidate)
-    )
-    if isinstance(run.result_summary, dict):
-        run.result_summary[INTEGRITY_KEY] = metadata
-    return metadata
+    created_at = getattr(run, "created_at", None)
+    if isinstance(created_at, datetime):
+        return created_at.isoformat()
+    raise RuntimeError("Stored report generation timestamp is invalid.")
 
 
 # Fixed member timestamp (1980-01-01, the zip epoch) so regenerated artifacts
@@ -780,6 +785,21 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
         return None
 
     repo = DiscoveryRepository(service.engine)
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    frozen_rows = parameters.get("source_discovery_snapshots")
+
+    def discovery_rows(source_run_id: str, name: str) -> list[dict[str, object]]:
+        if isinstance(frozen_rows, dict):
+            snapshot = frozen_rows.get(source_run_id)
+            if isinstance(snapshot, dict):
+                rows = snapshot.get(name)
+                if isinstance(rows, list):
+                    return [dict(item) for item in rows if isinstance(item, dict)]
+        if name == "devices":
+            return repo.list_devices(source_run_id)
+        if name == "points":
+            return repo.list_points(source_run_id)
+        return repo.list_topics(source_run_id)
 
     summary_rows: list[dict[str, str]] = []
     ip_rows: list[dict[str, str]] = []
@@ -799,7 +819,7 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
             has_ip = True
             devices = [
                 device
-                for device in repo.list_devices(source.run_id)
+                for device in discovery_rows(source.run_id, "devices")
                 if device.get("device_type") == "ip_host"
             ]
             for device in devices:
@@ -823,10 +843,10 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
             has_bacnet = True
             devices = [
                 device
-                for device in repo.list_devices(source.run_id)
+                for device in discovery_rows(source.run_id, "devices")
                 if device.get("device_type") == "bacnet_device"
             ]
-            points = repo.list_points(source.run_id)
+            points = discovery_rows(source.run_id, "points")
             # Points per device: the point's device_ref is the device's asset_id.
             points_by_asset: dict[object, int] = {}
             for point in points:
@@ -902,7 +922,7 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
 
         else:  # mqtt_discovery
             has_mqtt = True
-            for topic in repo.list_topics(source.run_id):
+            for topic in discovery_rows(source.run_id, "topics"):
                 attributes = topic.get("attributes") or {}
                 # last_payload is deliberately excluded — non-tabular, and a
                 # signed shareable artifact should not embed captured payloads.

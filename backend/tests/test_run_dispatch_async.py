@@ -22,16 +22,29 @@ class _FakeService:
     def __init__(self) -> None:
         self.status_calls: list[dict] = []
         self.status_written = threading.Event()
+        self.status = "running"
+        self.lease = SimpleNamespace(run_id="run_abc")
 
     def update_run_status(self, run_id, *, status, stage=None, progress_percent=None, error_message=None):
-        self.status_calls.append(
-            {"run_id": run_id, "status": status, "stage": stage, "error_message": error_message}
-        )
+        self.status_calls.append({"run_id": run_id, "status": status, "stage": stage, "error_message": error_message})
+        self.status = status
         self.status_written.set()
         return SimpleNamespace(run_id=run_id, job_type="mqtt_discovery", status=status)
 
     def get_run(self, run_id):  # only the sync None-guard path uses this
-        return SimpleNamespace(run_id=run_id, job_type="mqtt_discovery", status="running")
+        return SimpleNamespace(run_id=run_id, job_type="mqtt_discovery", status=self.status)
+
+    def get_dispatch_for_run(self, run_id):
+        return SimpleNamespace(run_id=run_id, dispatch_id="dispatch_abc")
+
+    def get_execution_context(self, run_id):
+        return SimpleNamespace(context=SimpleNamespace(engine_parameters={}))
+
+    def claim_owned_run(self, run_id):
+        return self
+
+    def mark_dispatch_published(self, dispatch_id):
+        return True
 
 
 def _run() -> SimpleNamespace:
@@ -42,9 +55,11 @@ def _dispatch(service, run_inline, *, inline_run_async: bool):
     settings = SimpleNamespace(
         inline_run_async=inline_run_async,
         job_execution_mode="inline",
-        allow_inline_worker_fallback=True,
     )
-    with mock.patch.object(run_dispatch, "get_settings", return_value=settings):
+    with (
+        mock.patch.object(run_dispatch, "get_settings", return_value=settings),
+        mock.patch.object(run_dispatch, "resolve_context_parameters", return_value={}),
+    ):
         return run_dispatch.dispatch_run(
             _run(),
             service=service,
@@ -52,7 +67,6 @@ def _dispatch(service, run_inline, *, inline_run_async: bool):
             run_inline=run_inline,
             inline_message="MQTT discovery run started.",
             queued_message="queued",
-            fallback_message="fallback",
         )
 
 
@@ -63,7 +77,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         release = threading.Event()
         finished = threading.Event()
 
-        def slow_run_inline():
+        def slow_run_inline(_run_store, _parameters):
             started.set()
             self.assertTrue(release.wait(_WAIT), "release never signalled")
             service.update_run_status("run_abc", status="succeeded", stage="engine_complete", progress_percent=100)
@@ -88,7 +102,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
     def test_async_crash_before_terminal_write_marks_run_failed(self) -> None:
         service = _FakeService()
 
-        def crashing_run_inline():
+        def crashing_run_inline(_run_store, _parameters):
             raise RuntimeError("boom before the engine wrapper could run")
 
         _dispatch(service, crashing_run_inline, inline_run_async=True)
@@ -103,9 +117,9 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         service = _FakeService()
         ran_on = {}
 
-        def run_inline():
+        def run_inline(_run_store, _parameters):
             ran_on["thread"] = threading.current_thread().name
-            return SimpleNamespace(run_id="run_abc", job_type="mqtt_discovery", status="succeeded")
+            service.update_run_status("run_abc", status="succeeded", stage="engine_complete", progress_percent=100)
 
         response = _dispatch(service, run_inline, inline_run_async=False)
 

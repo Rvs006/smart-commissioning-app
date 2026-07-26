@@ -112,6 +112,7 @@ class ValidationReportApiTests(ApiTestCase):
     def _seed_validation_run(self, result_summary: dict, issues: list[dict] | None = None) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from lifecycle_helpers import finish_run
 
         run_service = RunService()
         run = run_service.create_job_run(
@@ -123,10 +124,7 @@ class ValidationReportApiTests(ApiTestCase):
             ),
             expected_job_type="udmi_validation",
         )
-        run_service.update_run_status(run.run_id, status="succeeded", stage="done", progress_percent=100)
-        run_service.update_result_summary(run.run_id, result_summary)
-        if issues:
-            run_service.replace_issues(run.run_id, issues)
+        finish_run(run_service, run.run_id, summary=result_summary, issues=issues)
         return run.run_id
 
     def _create_report(self, output_format: str, source_run_ids: list[str]) -> str:

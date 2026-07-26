@@ -81,9 +81,16 @@ def build_mqtt_connection_settings(parameters: dict[str, object]) -> MqttConnect
         username=_optional_secret(parameters.get("username") or mqtt_values.get("MQTT Username")),
         password=_optional_secret(parameters.get("password") or mqtt_values.get("MQTT Password")),
         use_tls=use_tls,
-        ca_certificate=_optional_secret(certificate_values.get("CA Certificate")),
-        client_certificate=_optional_secret(certificate_values.get("Client Certificate")),
-        private_key=_optional_secret(certificate_values.get("Private Key")),
+        ca_certificate=_optional_secret(
+            parameters.get("ca_certificate") or certificate_values.get("CA Certificate")
+        ),
+        client_certificate=_optional_secret(
+            parameters.get("client_certificate")
+            or certificate_values.get("Client Certificate")
+        ),
+        private_key=_optional_secret(
+            parameters.get("private_key") or certificate_values.get("Private Key")
+        ),
         timeout_seconds=parse_float(parameters.get("connect_timeout_seconds"), default=5.0),
         source_address=source_address,
     )

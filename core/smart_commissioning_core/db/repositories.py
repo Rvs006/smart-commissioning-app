@@ -27,6 +27,8 @@ from smart_commissioning_core.db.models import (
     ImportRecord,
     Run,
     RunIssue,
+    RunResult,
+    RunSeal,
     UdmiSchemaSet,
     User,
 )
@@ -805,9 +807,10 @@ class SyncRepository:
         """Return the full exportable payload for a run, or None if absent.
 
         Shape is the canonical sync content (see sync.build_run_content): the
-        13-key run record plus its edge_id, issues, and discovery rows. Used both
-        to export a run for a bundle and to recompute a stored run's content hash
-        on the hub for idempotency / immutability checks.
+        13-key run record plus its edge_id, issues, discovery rows, and any v2
+        terminal result/seal. Used both to export a run for a bundle and to
+        recompute a stored run's content hash on the hub for idempotency /
+        immutability checks.
         """
         from smart_commissioning_core.db.db_run_store import _run_to_dict
 
@@ -817,6 +820,8 @@ class SyncRepository:
                 return None
             record = _run_to_dict(run)
             edge_id = run.edge_id
+            result = session.get(RunResult, run_id)
+            seal = session.get(RunSeal, run_id)
         discovery = self._discovery
         return {
             "run": record,
@@ -825,6 +830,8 @@ class SyncRepository:
             "devices": discovery.list_devices(run_id),
             "points": discovery.list_points(run_id),
             "topics": discovery.list_topics(run_id),
+            "result": self._result_payload(result),
+            "seal": self._seal_payload(seal),
         }
 
     # -- hub: immutable insert -----------------------------------------------
@@ -838,6 +845,8 @@ class SyncRepository:
         points: list[dict[str, object]],
         topics: list[dict[str, object]],
         edge_id: str | None,
+        result: dict[str, object] | None = None,
+        seal: dict[str, object] | None = None,
     ) -> None:
         """Insert a complete run + children in ONE transaction (hub ingest).
 
@@ -854,7 +863,7 @@ class SyncRepository:
             get_or_create_project_and_site(
                 session, str(run["project_id"]), str(run["site_id"])
             )
-            session.add(self._run_row(run, edge_id=edge_id))
+            session.add(self._run_row(run, edge_id=edge_id, result=result, seal=seal))
             session.flush()
             run_id = str(run["run_id"])
             for position, issue in enumerate(issues):
@@ -865,11 +874,30 @@ class SyncRepository:
                 session.add(self._discovery._point_row(run_id, position, point))
             for position, topic in enumerate(topics):
                 session.add(self._discovery._topic_row(run_id, position, topic))
+            if result is not None:
+                session.add(self._result_row(run_id, result))
+            if seal is not None:
+                session.add(self._seal_row(run_id, seal))
             session.flush()
 
     # -- row builders --------------------------------------------------------
 
-    def _run_row(self, run: dict[str, object], *, edge_id: str | None) -> Run:
+    def _run_row(
+        self,
+        run: dict[str, object],
+        *,
+        edge_id: str | None,
+        result: dict[str, object] | None,
+        seal: dict[str, object] | None,
+    ) -> Run:
+        result_sha256 = None
+        terminal_at = None
+        if seal is not None:
+            result_sha256 = str(seal["result_sha256"])
+            terminal_at = _parse_dt(seal.get("sealed_at"))
+        elif result is not None:
+            result_sha256 = str(result["result_sha256"])
+            terminal_at = _parse_dt(result.get("created_at"))
         return Run(
             id=str(run["run_id"]),
             project_id=str(run["project_id"]),
@@ -882,10 +910,60 @@ class SyncRepository:
             result_summary=dict(run.get("result_summary") or {}),
             execution_mode=run.get("execution_mode"),
             error_message=run.get("error_message"),
+            terminal_at=terminal_at,
+            result_sha256=result_sha256,
             edge_id=edge_id,
             synced_at=None,
             created_at=_parse_dt(run.get("created_at")),
             updated_at=_parse_dt(run.get("updated_at")),
+        )
+
+    @staticmethod
+    def _result_payload(result: RunResult | None) -> dict[str, object] | None:
+        if result is None:
+            return None
+        return {
+            "schema_version": result.schema_version,
+            "terminal_status": result.terminal_status,
+            "terminal_stage": result.terminal_stage,
+            "summary": dict(result.summary or {}),
+            "result_payload": dict(result.result_payload or {}),
+            "result_sha256": result.result_sha256,
+            "created_at": result.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def _seal_payload(seal: RunSeal | None) -> dict[str, object] | None:
+        if seal is None:
+            return None
+        return {
+            "terminal_status": seal.terminal_status,
+            "context_sha256": seal.context_sha256,
+            "result_sha256": seal.result_sha256,
+            "sealed_at": seal.sealed_at.isoformat(),
+        }
+
+    @staticmethod
+    def _result_row(run_id: str, result: dict[str, object]) -> RunResult:
+        return RunResult(
+            run_id=run_id,
+            schema_version=str(result["schema_version"]),
+            terminal_status=str(result["terminal_status"]),
+            terminal_stage=str(result["terminal_stage"]),
+            summary=dict(result.get("summary") or {}),
+            result_payload=dict(result.get("result_payload") or {}),
+            result_sha256=str(result["result_sha256"]),
+            created_at=_parse_dt(result.get("created_at")),
+        )
+
+    @staticmethod
+    def _seal_row(run_id: str, seal: dict[str, object]) -> RunSeal:
+        return RunSeal(
+            run_id=run_id,
+            terminal_status=str(seal["terminal_status"]),
+            context_sha256=str(seal["context_sha256"]),
+            result_sha256=str(seal["result_sha256"]),
+            sealed_at=_parse_dt(seal.get("sealed_at")),
         )
 
     def _issue_row(self, run_id: str, position: int, issue: dict[str, object]) -> RunIssue:

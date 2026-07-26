@@ -105,6 +105,16 @@ class Run(Base):
     #                NULL means "never synced from here / un-synced".
     edge_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # Lifecycle-v2 fencing. Nullable ownership timestamps keep legacy rows
+    # readable; ``attempt`` and ``state_version`` have additive zero defaults.
+    owner_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    claimed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    terminal_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    result_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
@@ -118,6 +128,7 @@ class Run(Base):
     __table_args__ = (
         Index("ix_runs_project_site_created", "project_id", "site_id", "created_at"),
         Index("ix_runs_status", "status"),
+        Index("ix_runs_lease_expiry", "status", "lease_expires_at"),
     )
 
 
@@ -287,3 +298,93 @@ class DiscoveredTopic(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     __table_args__ = (Index("ix_discovered_topics_run_position", "run_id", "position"),)
+
+
+class RunExecutionContext(Base):
+    """Insert-once canonical RunContextV1 captured before dispatch."""
+
+    __tablename__ = "run_execution_contexts"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(16), default="1.0")
+    context_json: Mapped[dict] = mapped_column(JSON)
+    context_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class RunDispatch(Base):
+    """Transactional outbox row. Redis carries only this ID and the run ID."""
+
+    __tablename__ = "run_dispatch_outbox"
+
+    dispatch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    state: Mapped[str] = mapped_column(String(16), default="pending")
+    publish_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class ActiveProtocolSlot(Base):
+    """One reserved queued/running run per canonical network collision key."""
+
+    __tablename__ = "active_protocol_slots"
+
+    protocol_key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    owner_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acquired_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class RunResult(Base):
+    """Insert-once canonical terminal result payload."""
+
+    __tablename__ = "run_results"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(16), default="1.0")
+    terminal_status: Mapped[str] = mapped_column(String(32))
+    terminal_stage: Mapped[str] = mapped_column(String(128))
+    summary: Mapped[dict] = mapped_column(JSON)
+    result_payload: Mapped[dict] = mapped_column(JSON)
+    result_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class RunSeal(Base):
+    """Evidence seal binding a result digest to the exact execution context."""
+
+    __tablename__ = "run_seals"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    terminal_status: Mapped[str] = mapped_column(String(32))
+    context_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    result_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    sealed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class RunLifecycleConflict(Base):
+    """Observable audit row for stale, duplicate-conflicting, or terminal writes."""
+
+    __tablename__ = "run_lifecycle_conflicts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    operation: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(String(128))
+    owner_token_fingerprint: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    attempted_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    attempted_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

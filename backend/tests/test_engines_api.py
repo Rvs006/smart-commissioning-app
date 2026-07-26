@@ -722,10 +722,14 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(params["private_key"], "********")
         self.assertEqual(params["broker_host"], "mqtt.example.local")  # non-secret untouched
         self.assertNotIn("hunter2", got.text)
-        # Server-side attribute access (rollback/execution) keeps the real value.
+        # Server-side persistence keeps only an opaque, versioned reference.
+        # The executor resolves it in memory immediately before engine entry.
         from app.api.routes import discovery as discovery_routes
+        from app.services.configuration_service import read_secret_material
 
-        self.assertEqual(discovery_routes.service.get_run(run_id).parameters["password"], "hunter2")
+        stored = discovery_routes.service.get_run(run_id).parameters["password"]
+        self.assertTrue(stored.startswith("secret://run-context-"), stored)
+        self.assertEqual(read_secret_material(stored), "hunter2")
 
 
 class PointValidationApiTests(_EngineApiTestCase):
@@ -852,10 +856,12 @@ class CancelEndpointApiTests(_EngineApiTestCase):
         self.assertEqual(cancel.status_code, 200, cancel.text)
         self.assertEqual(cancel.json()["run_id"], run_id)
 
-        # The store now reports cancellation requested for this run.
+        # This synchronous dry run is already terminal. Cancellation is a
+        # read-only no-op once a result is sealed.
         from app.services.run_service import RunService
 
-        self.assertTrue(RunService().is_cancel_requested(run_id))
+        self.assertFalse(RunService().is_cancel_requested(run_id))
+        self.assertEqual(cancel.json()["status"], "succeeded")
 
         missing = self.client.post("/api/v1/runs/run_00000000000000_deadbeef/cancel")
         self.assertEqual(missing.status_code, 404)
@@ -866,11 +872,7 @@ class CancelEndpointApiTests(_EngineApiTestCase):
         # register, pre-set its cancel flag, then drive the inline processor so
         # the engine observes the flag and flips status to cancelled. This is
         # the same plumbing the worker/inline-fallback path uses.
-        from app.services.engine_dispatch import make_cancel_checker
         from app.services.run_service import RunService
-        from smart_commissioning_core.engines.point_validation import (
-            process_bacnet_validation_run,
-        )
 
         service = RunService()
         new_run = service.create_job_run(
@@ -879,17 +881,10 @@ class CancelEndpointApiTests(_EngineApiTestCase):
         )
         service.request_cancel(new_run.run_id)
 
-        # The inline route path builds the checker from the store exactly like
-        # this; with the flag pre-set the engine observes it at a chunk boundary.
-        processed = process_bacnet_validation_run(
-            new_run.run_id,
-            dict(new_run.parameters),
-            run_store=service,
-            execution_mode="inline_local_fallback",
-            is_cancelled=make_cancel_checker(service, new_run.run_id),
-        )
+        processed = service.get_run(new_run.run_id)
         self.assertEqual(processed.status, "cancelled")
-        self.assertTrue(processed.result_summary["cancelled"])
+        self.assertTrue(processed.result_summary["cancelled_before_start"])
+        self.assertEqual(service._lifecycle.get_seal(new_run.run_id).terminal_status, "cancelled")
 
 
 class MqttConfigRollbackApiTests(_EngineApiTestCase):
@@ -918,7 +913,9 @@ class MqttConfigRollbackApiTests(_EngineApiTestCase):
         rollback = self.client.post(f"/api/v1/validation/mqtt-config/runs/{run_id}/rollback")
         self.assertEqual(rollback.status_code, 200, rollback.text)
 
-        rolled = self.client.get(f"/api/v1/validation/runs/{run_id}").json()
+        rollback_run_id = rollback.json()["run_id"]
+        self.assertNotEqual(rollback_run_id, run_id)
+        rolled = self.client.get(f"/api/v1/validation/runs/{rollback_run_id}").json()
         self.assertTrue(rolled["result_summary"]["rollback"])
 
     def test_rollback_without_captured_value_returns_400(self) -> None:

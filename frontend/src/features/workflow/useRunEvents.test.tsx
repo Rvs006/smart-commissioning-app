@@ -78,6 +78,20 @@ describe("useRunEvents", () => {
     expect(result.current.reachedTerminal).toBe(false);
   });
 
+  it("does not attach a delayed event from another run to the active stream", async () => {
+    stubFetch(
+      sseStreamResponse([
+        sseFrame({ run_id: "run-a", status: "succeeded", progress_percent: 100 }, "terminal"),
+      ]),
+    );
+
+    const { result } = renderHook(() => useRunEvents("run-b", true));
+
+    await waitFor(() => expect(result.current.sseActive).toBe(false));
+    expect(result.current.event).toBeNull();
+    expect(result.current.reachedTerminal).toBe(false);
+  });
+
   it("stays idle (no fetch) when disabled or no run id", () => {
     const fetchMock = stubFetch(sseStreamResponse([]));
 

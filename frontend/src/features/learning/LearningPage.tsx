@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { getTheme, toggleTheme } from "../../app/theme";
 
 // Stand-alone "Learning as a…" course surface for the Smart Commissioning Tool.

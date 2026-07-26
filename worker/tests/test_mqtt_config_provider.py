@@ -77,22 +77,15 @@ class ReachableStoreTests(WorkerSecretStoreTestCase):
         self._write_key()
         self.assertIsNone(provider._resolve_secret("secret://../escape"))
 
-    def test_certificate_values_surfaced_when_reachable(self) -> None:
+    def test_current_configuration_is_never_used_when_reachable(self) -> None:
         self._write_key()
-        cert_refs = {
-            "CA Certificate": "secret://bootstrap-ca",
-            "Client Certificate": "secret://bootstrap-client",
-            "Private Key": "secret://bootstrap-key",
-        }
-        payload = {"certificates": {"values": cert_refs}, "mqtt": {"values": {"Port": "8883"}}}
         with mock.patch(
             "smart_commissioning_core.db.repositories.ConfigurationRepository"
-        ) as repo_cls, mock.patch("app.db.get_engine"):
-            repo_cls.return_value.get_current.return_value = payload
+        ) as repo_cls:
             mqtt_values, certificate_values = provider._configuration_values()
 
-        self.assertEqual(certificate_values, cert_refs)
-        self.assertEqual(mqtt_values.get("Port"), "8883")
+        self.assertEqual((mqtt_values, certificate_values), ({}, {}))
+        repo_cls.assert_not_called()
 
 
 class UnreachableStoreTests(WorkerSecretStoreTestCase):
@@ -102,20 +95,13 @@ class UnreachableStoreTests(WorkerSecretStoreTestCase):
         self.assertIsNone(provider._resolve_secret("secret://anything"))
 
     def test_certificate_values_empty_when_unreachable(self) -> None:
-        payload = {
-            "certificates": {"values": {"CA Certificate": "secret://x"}},
-            "mqtt": {"values": {"Port": "8883"}},
-        }
         with mock.patch(
             "smart_commissioning_core.db.repositories.ConfigurationRepository"
-        ) as repo_cls, mock.patch("app.db.get_engine"):
-            repo_cls.return_value.get_current.return_value = payload
+        ) as repo_cls:
             mqtt_values, certificate_values = provider._configuration_values()
 
-        # No shared store => no cert defaults advertised (run params must carry
-        # cert material). MQTT values still resolve normally.
-        self.assertEqual(certificate_values, {})
-        self.assertEqual(mqtt_values.get("Port"), "8883")
+        self.assertEqual((mqtt_values, certificate_values), ({}, {}))
+        repo_cls.assert_not_called()
 
     def test_resolver_registered_self_gates_on_reachability(self) -> None:
         from smart_commissioning_core import mqtt_transport

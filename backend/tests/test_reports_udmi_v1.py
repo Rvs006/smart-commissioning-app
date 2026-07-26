@@ -8,10 +8,8 @@ import json
 import unittest
 import xml.etree.ElementTree as ElementTree
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
-from threading import Barrier, current_thread
 from unittest import mock
+from uuid import uuid4
 
 from harness import ApiTestCase
 from openpyxl import load_workbook
@@ -438,6 +436,7 @@ class UdmiV1ReportTests(ApiTestCase):
     ) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from lifecycle_helpers import finish_run
 
         service = RunService()
         run = service.create_job_run(
@@ -445,22 +444,63 @@ class UdmiV1ReportTests(ApiTestCase):
                 project_id=project_id,
                 site_id=site_id,
                 job_type=job_type,
-                parameters=parameters or {},
+                parameters={
+                    # Report fixtures never contact a broker. Each source gets
+                    # its own reserved identity so an active-run test cannot
+                    # block unrelated renderer cases.
+                    "broker_host": f"report-fixture-{uuid4().hex}.invalid",
+                    **(parameters or {}),
+                },
             ),
             expected_job_type=job_type,
         )
-        if status != "queued":
-            service.update_run_status(
+        frozen_summary = (
+            {"validation_summary_v1": summary} if summary is not None else None
+        )
+        if status in {"succeeded", "failed", "cancelled"}:
+            finish_run(
+                service,
                 run.run_id,
                 status=status,
-                stage="done" if status in {"succeeded", "failed", "cancelled"} else status,
-                progress_percent=100 if status in {"succeeded", "failed", "cancelled"} else 50,
+                summary=frozen_summary,
+                issues=issues,
             )
-        if summary is not None:
-            service.update_result_summary(run.run_id, {"validation_summary_v1": summary})
-        if issues is not None:
-            service.replace_issues(run.run_id, issues)
+        elif status == "running":
+            owned = service.claim_owned_run(run.run_id)
+            self.assertIsNotNone(owned)
+            active_owned = getattr(self, "_active_owned_test_runs", {})
+            active_owned[run.run_id] = owned
+            self._active_owned_test_runs = active_owned
+            if frozen_summary is not None:
+                owned.update_result_summary(run.run_id, frozen_summary, merge=False)
+            owned.update_run_status(
+                run.run_id,
+                status="running",
+                stage="running",
+                progress_percent=50,
+            )
+        else:
+            if frozen_summary is not None:
+                service.update_result_summary(run.run_id, frozen_summary)
+            if issues is not None:
+                service.replace_issues(run.run_id, issues)
         return run.run_id
+
+    def _finish_active_test_run(self, run_id: str) -> None:
+        from app.services.run_service import RunService
+
+        active_owned = getattr(self, "_active_owned_test_runs", {})
+        owned = active_owned.pop(run_id, None)
+        if owned is None:
+            owned = RunService().claim_owned_run(run_id)
+        self.assertIsNotNone(owned)
+        outcome = owned.update_run_status(
+            run_id,
+            status="cancelled",
+            stage="test_cleanup",
+            progress_percent=100,
+        )
+        self.assertNotEqual(outcome.get("status"), "ownership_lost")
 
     def _create_report(
         self,
@@ -568,18 +608,21 @@ class UdmiV1ReportTests(ApiTestCase):
         for status in ("queued", "running"):
             with self.subTest(status=status):
                 source_id = self._seed_run(status=status)
-                response = self.client.post(
-                    "/api/v1/reports",
-                    json={
-                        "project_id": "demo-project",
-                        "site_id": "demo-site",
-                        "report_type": "udmi_validation",
-                        "source_run_ids": [source_id],
-                    },
-                )
-                self.assertEqual(response.status_code, 422)
-                self.assertIn("is not terminal", response.json()["detail"])
-                self.assertIn(status, response.json()["detail"])
+                try:
+                    response = self.client.post(
+                        "/api/v1/reports",
+                        json={
+                            "project_id": "demo-project",
+                            "site_id": "demo-site",
+                            "report_type": "udmi_validation",
+                            "source_run_ids": [source_id],
+                        },
+                    )
+                    self.assertEqual(response.status_code, 422)
+                    self.assertIn("is not terminal", response.json()["detail"])
+                    self.assertIn(status, response.json()["detail"])
+                finally:
+                    self._finish_active_test_run(source_id)
 
     def test_malformed_current_contract_fails_but_absent_legacy_contract_exports(self) -> None:
         malformed = {"schema_version": "1.1", "asset_metrics": {"expected": 1}}
@@ -1104,8 +1147,8 @@ class UdmiV1ReportTests(ApiTestCase):
             stored_before_download.parameters.get("udmi_report_snapshot"),
             dict,
         )
-        self.assertIn("report_generated_at", stored_before_download.result_summary)
-        self.assertNotIn(INTEGRITY_KEY, stored_before_download.result_summary)
+        self.assertIn("artifact_manifest", stored_before_download.result_summary)
+        self.assertIn(INTEGRITY_KEY, stored_before_download.result_summary)
 
         service.update_result_summary(
             source_id,
@@ -1133,83 +1176,31 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(first, second)
         self.assertEqual(integrity_after_first, integrity_after_second)
 
-    def test_legacy_first_download_initialization_is_atomic(self) -> None:
+    def test_legacy_download_is_deterministic_and_read_only(self) -> None:
         from app.api.routes import reports as reports_module
-        from app.services.reports_integrity import INTEGRITY_KEY
         from app.services.run_service import RunService
-        from smart_commissioning_core.integrity import sha256_bytes
 
         report = self._create_report("zip", [], report_type="evidence_pack")
         service = RunService()
-        # Emulate a report persisted before report_generated_at and integrity
-        # were initialized during report creation.
-        service.update_result_summary(report["report_id"], {}, merge=False)
-        run_a = service.get_run(report["report_id"])
-        run_b = service.get_run(report["report_id"])
+        # Emulate a pre-v0.1.26 report that has neither a stored artifact nor
+        # integrity metadata. Compatibility downloads may rebuild it in memory,
+        # but a GET must not mutate the terminal record or sign it silently.
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
 
-        timestamp_barrier = Barrier(2)
-        timestamp_base = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
-
-        class ConcurrentClock:
-            @classmethod
-            def now(cls, _timezone: object) -> datetime:
-                timestamp_barrier.wait(timeout=10)
-                offset = 0 if current_thread().name.endswith("_0") else 1
-                return timestamp_base + timedelta(seconds=offset)
-
-        with (
-            mock.patch.object(reports_module, "datetime", ConcurrentClock),
-            ThreadPoolExecutor(max_workers=2, thread_name_prefix="report-timestamp") as executor,
-        ):
-            timestamps = [
-                future.result(timeout=10)
-                for future in (
-                    executor.submit(reports_module._generated_at, run_a),
-                    executor.submit(reports_module._generated_at, run_b),
-                )
-            ]
-
-        self.assertEqual(timestamps[0], timestamps[1])
-        artifact_a, _ = reports_module._build_report_artifact(run_a, "zip")
-        artifact_b, _ = reports_module._build_report_artifact(run_b, "zip")
-        self.assertEqual(artifact_a, artifact_b)
-
-        integrity_barrier = Barrier(2)
-
-        def concurrent_metadata(artifact: bytes) -> dict[str, object]:
-            integrity_barrier.wait(timeout=10)
-            return {
-                "algorithm": "sha256",
-                "hash": sha256_bytes(artifact),
-                "signature_algorithm": "ed25519",
-                "signature": None,
-                "public_key_pem": None,
-                "public_key_fingerprint": None,
-                "signed_at": current_thread().name,
-            }
-
-        with (
-            mock.patch.object(
-                reports_module,
-                "build_integrity_metadata",
-                side_effect=concurrent_metadata,
-            ),
-            ThreadPoolExecutor(max_workers=2, thread_name_prefix="report-integrity") as executor,
-        ):
-            metadata = [
-                future.result(timeout=10)
-                for future in (
-                    executor.submit(reports_module._persist_integrity, run_a, artifact_a),
-                    executor.submit(reports_module._persist_integrity, run_b, artifact_b),
-                )
-            ]
-
-        self.assertEqual(metadata[0], metadata[1])
+        with service.engine.begin() as connection:
+            connection.execute(
+                update(Run)
+                .where(Run.id == report["report_id"])
+                .values(result_summary={})
+            )
+        run = service.get_run(report["report_id"])
+        first, _ = reports_module._stored_or_legacy_artifact(run, "zip")
+        second = self._download(report["report_id"]).content
         fresh = service.get_run(report["report_id"])
-        rebuilt, _ = reports_module._build_report_artifact(fresh, "zip")
-        self.assertEqual(fresh.result_summary[INTEGRITY_KEY], metadata[0])
-        self.assertEqual(fresh.result_summary[INTEGRITY_KEY]["hash"], sha256_bytes(rebuilt))
-        self.assertEqual(self._download(report["report_id"]).content, rebuilt)
+
+        self.assertEqual(first, second)
+        self.assertEqual(fresh.result_summary, {})
 
     def test_same_asset_id_in_two_sources_does_not_cross_contaminate_scope(self) -> None:
         first_summary = copy.deepcopy(_SCOPABLE_SUMMARY)
@@ -1644,7 +1635,7 @@ class UdmiV1ReportTests(ApiTestCase):
         )
         self.assertEqual(
             details.cell(first_issue_row, detail_headers["Observed"]).value,
-            "observedvalue",
+            "observed\\uD800value",
         )
         with zipfile.ZipFile(io.BytesIO(xlsx_content)) as archive:
             for name in archive.namelist():
@@ -1658,7 +1649,7 @@ class UdmiV1ReportTests(ApiTestCase):
         docx_content = self._download(docx_report["report_id"]).content
         with zipfile.ZipFile(io.BytesIO(docx_content)) as archive:
             document = archive.read("word/document.xml")
-        self.assertIn(b"observedvalue", document)
+        self.assertIn(b"observed\\uD800value", document)
         self.assertNotIn(b"\x01", document)
         ElementTree.fromstring(document)
 

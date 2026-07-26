@@ -22,9 +22,10 @@
   --ink: #2c2a28;
   --text: #6b6560;
   --muted: #6f6963;
-  --accent: #2a7b9b;
+  --accent: #26718f;
   --accent-hover: #226986;
   --accent-bg: #e4f2f7;
+  --on-accent: #ffffff;
   --green: #216f42;
   --green-bg: #e8f5ee;
   --amber: #865d0b;
@@ -45,8 +46,9 @@
   --dc-bdr2: #eeebe5;
   --dc-tx: #2c2a28;
   --dc-tx2: #6b6560;
-  --dc-mu: #9e9790;
-  --dc-ac: #2a7b9b;
+  --dc-on-accent: #ffffff;
+  --dc-mu: #746d67;
+  --dc-ac: #26718f;
   --dc-ach: #226986;
   --dc-acbg: #e4f2f7;
   --dc-ok: #2d8b55;
@@ -73,6 +75,7 @@
   --text: #b8b2aa;
   --muted: #ada79f;
   --accent: #58a6c8;
+  --on-accent: #17232a;
   --accent-hover: #7bbcd8;
   --accent-bg: rgba(42, 123, 155, 0.18);
   --green: #5fc98a;
@@ -94,8 +97,9 @@
   --dc-bdr2: #2d313b;
   --dc-tx: #e8e6e0;
   --dc-tx2: #b8b2aa;
-  --dc-mu: #7c7670;
+  --dc-mu: #9e9790;
   --dc-ac: #58a6c8;
+  --dc-on-accent: #17232a;
   --dc-ach: #7bbcd8;
   --dc-acbg: rgba(42, 123, 155, 0.18);
   --dc-ok: #5fc98a;
@@ -160,12 +164,12 @@
 .header-pill.accent {
   border-color: var(--accent);
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .header-pill.accent:hover {
   background: var(--accent-hover);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .header-pill svg {
@@ -260,7 +264,7 @@
   align-items: center;
   gap: 8px;
   background: var(--dc-ac);
-  color: #fff;
+  color: var(--dc-on-accent);
   border: none;
   padding: 10px 20px;
   border-radius: 980px;
@@ -356,7 +360,6 @@
 
 .dc-tab.on .dc-tab-num {
   color: var(--dc-ac);
-  opacity: 0.7;
 }
 
 .dc-tab-label {
@@ -485,7 +488,7 @@
   height: 40px;
   border-radius: 8px;
   background: var(--dc-ac);
-  color: #fff;
+  color: var(--dc-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -589,7 +592,7 @@
 .dc-pipe-arrow {
   text-align: center;
   font-size: 22px;
-  color: var(--dc-ac);
+  color: var(--dc-ach);
   margin: 6px 0;
 }
 
@@ -644,7 +647,7 @@
   justify-content: center;
   font-size: 20px;
   flex-shrink: 0;
-  color: #fff;
+  color: var(--dc-on-accent);
   background: var(--dc-ac);
 }
 
@@ -833,7 +836,7 @@
   height: 34px;
   border-radius: 50%;
   background: var(--dc-ac);
-  color: #fff;
+  color: var(--dc-on-accent);
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -1118,7 +1121,7 @@
 
 .dc-footer-link:hover {
   background: var(--dc-ac);
-  color: #fff;
+  color: var(--dc-on-accent);
   text-decoration: none;
 }
 
@@ -1264,12 +1267,12 @@
 
 .step-nav button.active .step-num {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .step-nav .step-num.step-done {
   background: var(--green);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 /* The step container keeps the app-page grid rhythm for whichever sections show. */

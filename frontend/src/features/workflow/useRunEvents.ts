@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { streamRunEvents, type RunEvent } from "../../api/client";
+import { streamRunEvents, type RunEvent, type SessionBoundApiClient } from "../../api/client";
+import type { RunRef } from "../../app/sessionScope";
 
 // Live run-progress state surfaced by useRunEvents. `event` is the most recent
 // SSE progress frame (null until the first frame arrives). `sseActive` is true
@@ -7,6 +8,7 @@ import { streamRunEvents, type RunEvent } from "../../api/client";
 // should fall back to its existing polling (the 1.5s react-query refetch).
 export type RunEventsState = {
   event: RunEvent | null;
+  runRef: RunRef | null;
   sseActive: boolean;
   // True once the SSE stream observed a terminal status for this run. The
   // caller can use this to stop polling without waiting for a poll round-trip.
@@ -15,6 +17,7 @@ export type RunEventsState = {
 
 const INITIAL_STATE: RunEventsState = {
   event: null,
+  runRef: null,
   reachedTerminal: false,
   sseActive: true,
 };
@@ -29,7 +32,13 @@ const INITIAL_STATE: RunEventsState = {
  * re-opened whenever the run id changes. The disposer aborts the in-flight
  * fetch on unmount / run change, so no stream is leaked.
  */
-export function useRunEvents(runId: string | null | undefined, enabled: boolean): RunEventsState {
+export function useRunEvents(
+  run: RunRef | string | null | undefined,
+  enabled: boolean,
+  apiClient?: SessionBoundApiClient,
+): RunEventsState {
+  const runId = typeof run === "string" ? run : run?.runId;
+  const runRef = typeof run === "string" ? null : (run ?? null);
   const [state, setState] = useState<RunEventsState>(INITIAL_STATE);
   // Track the run id this state belongs to so a stale async callback from a
   // previous stream cannot write into the current run's state.
@@ -43,7 +52,7 @@ export function useRunEvents(runId: string | null | undefined, enabled: boolean)
     }
 
     activeRunRef.current = runId;
-    setState(INITIAL_STATE);
+    setState({ ...INITIAL_STATE, runRef });
 
     const dispose = streamRunEvents(runId, {
       onClose: (reachedTerminal) => {
@@ -65,22 +74,23 @@ export function useRunEvents(runId: string | null | undefined, enabled: boolean)
         setState((current) => ({ ...current, sseActive: false }));
       },
       onEvent: (event, name) => {
-        if (activeRunRef.current !== runId) {
+        if (activeRunRef.current !== runId || event.run_id !== runId) {
           return;
         }
         setState((current) => ({
           event,
+          runRef,
           reachedTerminal: current.reachedTerminal || name === "terminal",
           sseActive: true,
         }));
       },
-    });
+    }, apiClient ? { client: apiClient } : undefined);
 
     return () => {
       activeRunRef.current = null;
       dispose();
     };
-  }, [runId, enabled]);
+  }, [apiClient, enabled, runId, runRef]);
 
   return state;
 }

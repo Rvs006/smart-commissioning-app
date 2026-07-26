@@ -75,17 +75,36 @@ class SseEventsApiTests(ApiTestCase):
         return accepted
 
     def test_stream_for_terminal_run_emits_final_event_and_closes(self) -> None:
-        run = self._seed_terminal_run()
+        from app.services.run_service import RunService
+        from sqlalchemy import event
 
-        with self.client.stream("GET", f"/api/v1/runs/{run['run_id']}/events") as response:
-            self.assertEqual(response.status_code, 200)
-            self.assertTrue(
-                response.headers["content-type"].startswith("text/event-stream"),
-                response.headers.get("content-type"),
-            )
-            # Reading to completion must terminate (the stream closes itself on
-            # the terminal status); a non-closing stream would hang here.
-            body = "".join(response.iter_text())
+        run = self._seed_terminal_run()
+        dml: list[str] = []
+
+        def record_dml(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+            verb = statement.lstrip().split(None, 1)[0].upper()
+            if verb in {"DELETE", "INSERT", "UPDATE"}:
+                dml.append(statement)
+
+        engine = RunService().engine
+        event.listen(engine, "before_cursor_execute", record_dml)
+        try:
+            observed = self.client.get(f"/api/v1/validation/runs/{run['run_id']}")
+            self.assertEqual(observed.status_code, 200, observed.text)
+
+            with self.client.stream("GET", f"/api/v1/runs/{run['run_id']}/events") as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(
+                    response.headers["content-type"].startswith("text/event-stream"),
+                    response.headers.get("content-type"),
+                )
+                # Reading to completion must terminate (the stream closes itself on
+                # the terminal status); a non-closing stream would hang here.
+                body = "".join(response.iter_text())
+        finally:
+            event.remove(engine, "before_cursor_execute", record_dml)
+
+        self.assertEqual(dml, [], "GET and SSE must execute no lifecycle DML")
 
         frames = _parse_sse(body)
         self.assertTrue(frames, "stream produced no frames")

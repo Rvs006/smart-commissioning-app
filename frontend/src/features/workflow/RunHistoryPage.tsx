@@ -16,6 +16,8 @@ import {
   statusTokenLabels,
   toHealthState,
 } from "./runFormat";
+import { useSession } from "../../app/sessionContext";
+import { queryKeys } from "../../api/queryKeys";
 
 // Read-only Run History: the full run list from GET /runs as a sortable table
 // with ABSOLUTE Started/Finished timestamps and a derived Duration. Where the
@@ -95,6 +97,7 @@ function saveBlob(blob: Blob, filename: string): void {
 }
 
 export function RunHistoryPage() {
+  const { apiClient, sessionScopeId, workspace } = useSession();
   const [jobType, setJobType] = useState<JobType | "">("");
   const [status, setStatus] = useState<JobStatus | "">("");
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
@@ -105,8 +108,16 @@ export function RunHistoryPage() {
   // that array, so the exported rows are exactly what the table shows. Reuse the
   // Hub's terminal-status polling cadence: poll fast while any run is in flight.
   const runsQuery = useQuery({
-    queryFn: () => listRuns({ limit: RUNS_LIMIT }),
-    queryKey: ["run-history", RUNS_LIMIT],
+    queryFn: ({ signal }) =>
+      listRuns(
+        {
+          limit: RUNS_LIMIT,
+          projectId: workspace.projectId,
+          siteId: workspace.siteId,
+        },
+        { client: apiClient, signal },
+      ),
+    queryKey: queryKeys.runs(sessionScopeId, workspace, `history-${RUNS_LIMIT}`),
     refetchInterval: (query) =>
       query.state.data?.runs?.some((run) => !isTerminalStatus(run.status)) ? 2000 : 15000,
   });
@@ -126,7 +137,11 @@ export function RunHistoryPage() {
     setJsonPendingRunId(runId);
     setJsonDownloadError(null);
     try {
-      const { blob, filename } = await downloadFile(getValidationJsonExportPath(runId));
+      const { blob, filename } = await downloadFile(
+        getValidationJsonExportPath(runId),
+        undefined,
+        { client: apiClient },
+      );
       saveBlob(blob, filename ?? `udmi-validation-${runId}.json`);
     } catch (cause) {
       setJsonDownloadError(cause instanceof Error ? cause.message : "Raw JSON download failed.");

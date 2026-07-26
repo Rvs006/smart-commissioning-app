@@ -1,9 +1,25 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { clearApiKey, setApiKey } from "../../api/client";
+import { clearApiKey, setApiKey, type ConfigurationSnapshot } from "../../api/client";
 import { ENGINEER_REQUIRED_TOOLTIP } from "../../app/sessionContext";
 import { SessionProvider } from "../../app/session";
 import { ConfigurationPage } from "./ConfigurationPage";
+import { mergeConfigurationRefresh } from "./configurationRefresh";
+
+it("merges a configuration refresh without overwriting unrelated unsaved edits", () => {
+  const previous = configurationPayload() as ConfigurationSnapshot;
+  const draft = structuredClone(previous);
+  draft.mqtt.values.Port = "1883";
+  const refreshed = structuredClone(previous);
+  refreshed.mqtt.values["MQTT Broker FQDN or IP Address"] = "broker.example";
+  refreshed.logging.values["Log Level"] = "Debug";
+
+  const merged = mergeConfigurationRefresh(previous, draft, refreshed);
+
+  expect(merged.mqtt.values.Port).toBe("1883");
+  expect(merged.mqtt.values["MQTT Broker FQDN or IP Address"]).toBe("broker.example");
+  expect(merged.logging.values["Log Level"]).toBe("Debug");
+});
 
 // An engineer principal so Save/Import are not gated by role in these tests.
 const mePayload = { username: "engineer-1", role: "engineer", source: "user_key" };
@@ -1174,24 +1190,8 @@ describe("ConfigurationPage", () => {
     expect(await screen.findByText(/MQTT Port must be between/i)).toBeInTheDocument();
   });
 
-  it("exports the configuration WITH secrets via the engineer-gated endpoint (ITEM-1)", async () => {
-    let calledSecretsExport = false;
+  it("does not offer a plaintext secret export control", async () => {
     stubFetch((url) => {
-      if (url.endsWith("/api/v1/configuration/export-with-secrets")) {
-        calledSecretsExport = true;
-        return jsonResponse({
-          kind: "smart-commissioning-configuration",
-          version: 2,
-          exported_at: "2026-07-20T10:00:00.000Z",
-          project_id: null,
-          site_id: null,
-          secrets_included: true,
-          configuration: configurationPayload(),
-          secret_material: {
-            "CA Certificate": { secret_ref: "secret://ca", content: "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----" },
-          },
-        });
-      }
       if (url.endsWith("/api/v1/configuration")) {
         return jsonResponse(configurationPayload());
       }
@@ -1200,12 +1200,9 @@ describe("ConfigurationPage", () => {
 
     renderPage();
 
-    fireEvent.click(await screen.findByRole("button", { name: /Export with secrets/i }));
-    // The success banner warns the file carries secrets in plain text, and the
-    // separate with-secrets endpoint was called (not the masked default export).
-    expect(await screen.findByText(/PLAIN TEXT/i)).toBeInTheDocument();
-    expect(calledSecretsExport).toBe(true);
-    expect(URL.createObjectURL).toHaveBeenCalled();
+    await screen.findByRole("button", { name: /Export JSON/i });
+    expect(screen.queryByRole("button", { name: /Export with secrets/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/secret values excluded/i)).toBeInTheDocument();
   });
 
   it("imports a v2 with-secrets envelope via POST /configuration/import (ITEM-1)", async () => {

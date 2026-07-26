@@ -38,7 +38,6 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 20 * 1024 * 1024
     max_xlsx_decompressed_bytes: int = 200 * 1024 * 1024
     job_execution_mode: Literal["auto", "queue", "inline"] = "auto"
-    allow_inline_worker_fallback: bool = True
     # Run inline (portable-exe) executions on a background thread so the POST
     # returns immediately and the run monitor / Stop-run control render while the
     # run is live (ITEM-4). On by default so the portable build gets it out of the
@@ -132,15 +131,9 @@ def _parse_trusted_edges(raw: str) -> dict[str, str]:
         edge_id = entry.get("edge_id")
         if not isinstance(edge_id, str) or not edge_id:
             raise ValueError("Each trusted_edges entry needs a non-empty 'edge_id'.")
-        trust_value = (
-            entry.get("public_key_fingerprint")
-            or entry.get("pem")
-            or entry.get("public_key_pem")
-        )
+        trust_value = entry.get("public_key_fingerprint") or entry.get("pem") or entry.get("public_key_pem")
         if not isinstance(trust_value, str) or not trust_value.strip():
-            raise ValueError(
-                f"trusted_edges entry for {edge_id!r} needs a 'public_key_fingerprint' or 'pem'."
-            )
+            raise ValueError(f"trusted_edges entry for {edge_id!r} needs a 'public_key_fingerprint' or 'pem'.")
         trusted[edge_id] = trust_value.strip()
     return trusted
 

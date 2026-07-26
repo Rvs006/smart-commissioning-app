@@ -32,13 +32,21 @@ from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from smart_commissioning_core.db.base import Base
 from smart_commissioning_core.db.db_run_store import DbRunStore
-from smart_commissioning_core.db.engine import create_engine_from_url, default_sqlite_url
+from smart_commissioning_core.db.engine import (
+    create_engine_from_url,
+    default_sqlite_url,
+    session_factory,
+)
 from smart_commissioning_core.db.migrate import upgrade_to_head
+from smart_commissioning_core.db.models import Run, RunIssue, RunResult, RunSeal
 from smart_commissioning_core.db.repositories import (
     DiscoveryRepository,
     SyncRepository,
 )
+from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.integrity import SigningKey, cryptography_available
+from smart_commissioning_core.run_context import RunContextV1
+from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from smart_commissioning_core.sync import (
     IngestSummary,
     SyncError,
@@ -54,7 +62,7 @@ from smart_commissioning_core.sync_identity import (
     load_or_create_edge_id,
     load_or_create_edge_identity,
 )
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
 
 _FIXED_NOW = datetime(2026, 6, 12, 8, 0, 0, tzinfo=UTC)
 
@@ -268,6 +276,100 @@ class SyncRoundTripTests(unittest.TestCase):
         self.assertEqual(len(self.hub_store.list_runs("demo-project", "demo-site")), 3)
         self.assertEqual(len(self.hub_discovery.list_devices(self.run_a)), 1)
 
+    def test_v2_result_and_seal_roundtrip_and_same_id_mutation_is_rejected(self) -> None:
+        lifecycle = RunLifecycleRepository(self.edge_engine)
+        context = RunContextV1.model_validate(
+            {
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "configuration_snapshot": {"mqtt": {"values": {"Port": 8883}}},
+                "configuration_version": 7,
+                "registers": [],
+                "imports": [],
+                "schema_versions": {"udmi": "1.5.2"},
+                "engine_parameters": {"authorized": True},
+                "network_interface": "192.0.2.10/24",
+                "connection_settings": {"broker_host": "broker.example", "broker_port": 8883},
+                "secret_references": {},
+                "requesting_principal": "sync-test",
+                "application_version": "0.1.26",
+            }
+        )
+        envelope = lifecycle.create_run_with_context(
+            job_type="mqtt_discovery",
+            context=context,
+            execution_mode="dramatiq_worker",
+            now=_FIXED_NOW,
+        )
+        lease = lifecycle.claim_run(
+            envelope.run_id,
+            envelope.dispatch_id,
+            owner_token="sync-test-owner",
+            now=_FIXED_NOW,
+        )
+        self.assertIsNotNone(lease)
+        terminal = TerminalResultV1.model_validate(
+            {
+                "status": "succeeded",
+                "stage": "engine_complete",
+                "summary": {"source": "sealed-v2", "issue_count": 1},
+                "issues": [_issue("sealed-issue")],
+                "topics": [
+                    {
+                        "topic": "demo-site/device/events",
+                        "last_payload": {"present_value": 21.5},
+                        "message_count": 1,
+                    }
+                ],
+            }
+        )
+        finalized = lifecycle.finalize_run(
+            envelope.run_id,
+            lease.owner_token,
+            terminal,
+            now=_FIXED_NOW,
+        )
+        self.assertTrue(finalized.applied)
+
+        original = self._build(run_ids=[envelope.run_id])
+        first = ingest_sync_bundle(
+            self.hub_engine, original, trusted_edges=self.trusted, now=_FIXED_NOW
+        )
+        self.assertEqual(first.inserted, 1)
+        edge_export = self.edge_sync.get_run_for_export(envelope.run_id)
+        hub_export = self.hub_sync.get_run_for_export(envelope.run_id)
+        self.assertEqual(hub_export["result"], edge_export["result"])
+        self.assertEqual(hub_export["seal"], edge_export["seal"])
+        hub_result_before = dict(hub_export["result"])
+        hub_seal_before = dict(hub_export["seal"])
+
+        # Simulate a compromised edge rewriting a coherent terminal payload and
+        # both stored digests under the same run id. The edge can sign the new
+        # bundle, but the hub must retain the first immutable seal.
+        mutated = terminal.model_copy(
+            update={"summary": {"source": "rewritten-v2", "issue_count": 1}}
+        )
+        with session_factory(self.edge_engine).begin() as session:
+            run = session.get(Run, envelope.run_id)
+            result = session.get(RunResult, envelope.run_id)
+            seal = session.get(RunSeal, envelope.run_id)
+            result.summary = dict(mutated.summary)
+            result.result_payload = mutated.model_dump(mode="json")
+            result.result_sha256 = mutated.sha256()
+            seal.result_sha256 = mutated.sha256()
+            run.result_summary = dict(mutated.summary)
+            run.result_sha256 = mutated.sha256()
+
+        rewritten = self._build(run_ids=[envelope.run_id])
+        rejected = ingest_sync_bundle(
+            self.hub_engine, rewritten, trusted_edges=self.trusted, now=_FIXED_NOW
+        )
+        self.assertTrue(rejected.accepted)
+        self.assertEqual(rejected.rejected_immutable, 1)
+        hub_after = self.hub_sync.get_run_for_export(envelope.run_id)
+        self.assertEqual(hub_after["result"], hub_result_before)
+        self.assertEqual(hub_after["seal"], hub_seal_before)
+
     def test_tampered_member_bytes_rejected_nothing_written(self) -> None:
         bundle = self._build(run_ids=[self.run_a])
         tampered = _tamper_run_member(bundle, self.run_a)
@@ -358,8 +460,23 @@ class SyncRoundTripTests(unittest.TestCase):
         ingest_sync_bundle(self.hub_engine, original, trusted_edges=self.trusted, now=_FIXED_NOW)
         hub_before = self.hub_store.get_run(self.run_a)
 
-        # Mutate run_a on the edge (rewrite issues), rebuild SAME run id.
-        self.edge_store.replace_issues(self.run_a, [_issue("iss-MUTATED")])
+        # Public terminal writers are sealed and therefore cannot perform this
+        # mutation. Corrupt the edge row directly to prove sync still detects a
+        # compromised/local-manual edit under the same immutable run id.
+        unchanged = self.edge_store.replace_issues(
+            self.run_a, [_issue("iss-WRITER-BLOCKED")]
+        )
+        self.assertEqual(
+            [issue["issue_id"] for issue in unchanged["issues"]],
+            ["iss-1", "iss-2"],
+        )
+        with session_factory(self.edge_engine).begin() as session:
+            issue = session.scalar(
+                select(RunIssue).where(
+                    RunIssue.run_id == self.run_a, RunIssue.position == 0
+                )
+            )
+            issue.issue_id = "iss-MUTATED"
         mutated = self._build(run_ids=[self.run_a])
 
         summary = ingest_sync_bundle(

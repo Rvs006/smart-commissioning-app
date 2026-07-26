@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -90,19 +91,35 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # actionable message. Only inline runs are swept — a run handed to the worker
     # queue may still be executing on a worker in the hosted deployment. Guarded
     # like every startup side-effect above: it must never block boot.
-    try:
+    maintenance_stop = threading.Event()
+
+    def maintain_lifecycle() -> None:
+        from app.services.run_dispatch import publish_pending_dispatches
         from app.services.run_service import RunService
 
-        swept = RunService().sweep_interrupted_runs()
-        if swept:
-            logger.warning(
-                "Startup swept %d interrupted run(s) to failed: %s",
-                len(swept),
-                ", ".join(swept),
-            )
-    except Exception:  # noqa: BLE001 (orphan sweep is best-effort; never block startup)
-        logger.debug("Orphan-run sweep failed.", exc_info=True)
-    yield
+        service = RunService()
+        while not maintenance_stop.is_set():
+            try:
+                recovered = service.recover_expired_leases()
+                if recovered:
+                    logger.warning("Recovered %d expired run lease(s).", len(recovered))
+                if startup_settings.job_execution_mode != "inline":
+                    publish_pending_dispatches(service)
+            except Exception:
+                logger.debug("Lifecycle maintenance pass failed.", exc_info=True)
+            maintenance_stop.wait(5.0)
+
+    maintenance_thread = threading.Thread(
+        target=maintain_lifecycle,
+        name="run-lifecycle-maintenance",
+        daemon=True,
+    )
+    maintenance_thread.start()
+    try:
+        yield
+    finally:
+        maintenance_stop.set()
+        maintenance_thread.join(timeout=6.0)
 
 
 app = FastAPI(

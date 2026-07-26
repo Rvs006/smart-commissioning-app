@@ -31,10 +31,7 @@ import unittest
 from pathlib import Path
 
 LAUNCHER_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "packaging"
-    / "windows_portable"
-    / "run_smart_commissioning_app.py"
+    Path(__file__).resolve().parents[2] / "packaging" / "windows_portable" / "run_smart_commissioning_app.py"
 )
 
 # The five variables routed through the visible-override helper.
@@ -43,14 +40,11 @@ _MANAGED_VARS = (
     "ENVIRONMENT",
     "AUTH_MODE",
     "JOB_EXECUTION_MODE",
-    "ALLOW_INLINE_WORKER_FALLBACK",
 )
 
 
 def _load_launcher():
-    spec = importlib.util.spec_from_file_location(
-        "portable_launcher_under_test", LAUNCHER_PATH
-    )
+    spec = importlib.util.spec_from_file_location("portable_launcher_under_test", LAUNCHER_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -108,9 +102,7 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         with contextlib.redirect_stdout(buffer):
             self.launcher.configure_environment(root)
 
-        expected = (
-            f"sqlite:///{(root / 'runtime' / 'smart_commissioning.db').as_posix()}"
-        )
+        expected = f"sqlite:///{(root / 'runtime' / 'smart_commissioning.db').as_posix()}"
         self.assertEqual(os.environ["DATABASE_URL"], expected)
         # Nothing overridden, so nothing is printed.
         self.assertEqual(buffer.getvalue(), "")
@@ -131,9 +123,7 @@ class ConfigureEnvironmentTests(unittest.TestCase):
             os.environ["DATABASE_URL"],
             f"sqlite:///{(stable / 'smart_commissioning.db').as_posix()}",
         )
-        self.assertEqual(
-            os.environ["SMART_COMMISSIONING_SECRETS_ROOT"], str(stable / "secrets")
-        )
+        self.assertEqual(os.environ["SMART_COMMISSIONING_SECRETS_ROOT"], str(stable / "secrets"))
         self.assertEqual(os.environ["SMART_COMMISSIONING_RUNTIME_ROOT"], str(stable))
 
 
@@ -149,9 +139,7 @@ class DataRootTests(unittest.TestCase):
 
     def test_env_override_wins(self) -> None:
         os.environ["SMART_COMMISSIONING_DATA_DIR"] = str(Path("C:/custom/state"))
-        self.assertEqual(
-            self.launcher.data_root(Path("C:/bundle")), Path("C:/custom/state")
-        )
+        self.assertEqual(self.launcher.data_root(Path("C:/bundle")), Path("C:/custom/state"))
 
     def test_dev_layout_stays_in_checkout(self) -> None:
         root = Path("C:/repo")
@@ -204,12 +192,8 @@ class MigrateLegacyRuntimeTests(unittest.TestCase):
             self.launcher.migrate_legacy_runtime(root, stable)
 
         self.assertEqual((stable / "smart_commissioning.db").read_bytes(), b"legacy-db")
-        self.assertEqual(
-            (stable / "secrets" / ".secret_store_key").read_bytes(), b"fernet-key"
-        )
-        self.assertEqual(
-            (stable / "imports" / "files" / "upload.bin").read_bytes(), b"blob"
-        )
+        self.assertEqual((stable / "secrets" / ".secret_store_key").read_bytes(), b"fernet-key")
+        self.assertEqual((stable / "imports" / "files" / "upload.bin").read_bytes(), b"blob")
         self.assertEqual((stable / "edge_id").read_text(encoding="utf-8"), "edge-1")
         self.assertFalse((stable / "logs").exists(), "crash logs are not state")
         self.assertIn("Migrated existing app data", buffer.getvalue())
@@ -225,9 +209,7 @@ class MigrateLegacyRuntimeTests(unittest.TestCase):
         with contextlib.redirect_stdout(buffer):
             self.launcher.migrate_legacy_runtime(root, stable)
 
-        self.assertEqual(
-            (stable / "smart_commissioning.db").read_bytes(), b"current-db"
-        )
+        self.assertEqual((stable / "smart_commissioning.db").read_bytes(), b"current-db")
         self.assertFalse((stable / "secrets").exists())
         self.assertEqual(buffer.getvalue(), "")
 
@@ -258,9 +240,7 @@ class MigrateLegacyRuntimeTests(unittest.TestCase):
             self.launcher.migrate_legacy_runtime(root, stable)
 
         self.assertEqual((stable / "smart_commissioning.db").read_bytes(), b"legacy-db")
-        self.assertEqual(
-            (stable / "secrets" / ".secret_store_key").read_bytes(), b"fernet-key"
-        )
+        self.assertEqual((stable / "secrets" / ".secret_store_key").read_bytes(), b"fernet-key")
         self.assertIn("Migrated existing app data", buffer.getvalue())
 
     def test_wal_sidecars_copied_with_the_database(self) -> None:
@@ -271,12 +251,8 @@ class MigrateLegacyRuntimeTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.launcher.migrate_legacy_runtime(root, stable)
 
-        self.assertEqual(
-            (stable / "smart_commissioning.db-wal").read_bytes(), b"wal"
-        )
-        self.assertEqual(
-            (stable / "smart_commissioning.db-shm").read_bytes(), b"shm"
-        )
+        self.assertEqual((stable / "smart_commissioning.db-wal").read_bytes(), b"wal")
+        self.assertEqual((stable / "smart_commissioning.db-shm").read_bytes(), b"shm")
 
     def test_same_path_dev_layout_is_a_noop(self) -> None:
         root, _ = self._make_legacy_bundle()

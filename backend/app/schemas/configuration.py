@@ -39,12 +39,10 @@ class SecretMaterialResponse(BaseModel):
 
 
 class ConfigurationSecretMaterial(BaseModel):
-    """One cert field's importable material: its ref plus the PLAIN-TEXT PEM.
+    """Legacy import material accepted for one compatibility release.
 
-    Carried in the with-secrets export so another engineer can import a working
-    configuration on their own machine (field decision 2026-07-20). The receiving
-    machine re-encrypts ``content`` into its own secret store under the same
-    ``secret_ref``.
+    v0.1.26 never emits this content in an API response. An older export may
+    still be imported, and the receiving machine immediately re-encrypts it.
     """
 
     secret_ref: str
@@ -53,26 +51,20 @@ class ConfigurationSecretMaterial(BaseModel):
 
 
 class ConfigurationExportEnvelope(BaseModel):
-    """A shareable configuration export INCLUDING its secrets (engineer action).
-
-    The ``configuration`` snapshot carries password-kind values (MQTT password,
-    tokens, key password) in PLAIN TEXT, and ``secret_material`` carries the
-    CA/client-certificate/private-key PEM material, keyed by field name. This is a
-    deliberate, engineer-gated departure from the default masked export.
-    """
+    """A compatibility export envelope containing no secret values."""
 
     kind: str = "smart-commissioning-configuration"
     version: int = 2
     exported_at: str
     project_id: str
     site_id: str
-    secrets_included: bool = True
+    secrets_included: bool = False
     configuration: ConfigurationSnapshot
     secret_material: dict[str, ConfigurationSecretMaterial] = Field(default_factory=dict)
 
 
 class ConfigurationImportRequest(BaseModel):
-    """Import a configuration, optionally restoring exported secret material."""
+    """Import configuration and, for legacy v2 envelopes, restore secret material."""
 
     configuration: ConfigurationSnapshot
     secret_material: dict[str, ConfigurationSecretMaterial] = Field(default_factory=dict)

@@ -3,6 +3,7 @@ import {
   AUTH_REQUIRED_MESSAGE,
   cancelRun,
   clearApiKey,
+  createSessionBoundApiClient,
   createReport,
   downloadFile,
   formatApiDetail,
@@ -24,9 +25,11 @@ import {
   streamRunEvents,
   validateConfiguration,
   type ConfigurationSnapshot,
+  type HealthStatus,
   type RunEvent,
   type RunEventName,
 } from "./client";
+import { createSessionScopeId, DEFAULT_WORKSPACE } from "../app/sessionScope";
 
 describe("formatApiDetail", () => {
   it("returns string details unchanged", () => {
@@ -50,6 +53,44 @@ describe("formatApiDetail", () => {
   it("falls back to a generic message for null or undefined details", () => {
     expect(formatApiDetail(null)).toBe("Unknown API error.");
     expect(formatApiDetail(undefined)).toBe("Unknown API error.");
+  });
+});
+
+describe("session-bound client", () => {
+  afterEach(() => {
+    clearApiKey();
+    vi.unstubAllGlobals();
+  });
+
+  it("captures one credential identity and aborts every request when its session ends", async () => {
+    setApiKey("session-a-key");
+    let requestSignal: AbortSignal | undefined;
+    let requestHeaders: Headers | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        requestSignal = init?.signal ?? undefined;
+        requestHeaders = new Headers(init?.headers);
+        return new Promise<Response>((_resolve, reject) => {
+          requestSignal?.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError")),
+          );
+        });
+      }),
+    );
+    const client = createSessionBoundApiClient(
+      createSessionScopeId(),
+      DEFAULT_WORKSPACE,
+      getApiKey(),
+    );
+    setApiKey("session-b-key");
+
+    const pending = client.request<HealthStatus>("/health");
+    expect(requestHeaders?.get("X-API-Key")).toBe("session-a-key");
+    client.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(requestSignal?.aborted).toBe(true);
   });
 });
 

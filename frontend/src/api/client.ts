@@ -1,3 +1,5 @@
+import type { SessionScopeId, WorkspaceRef } from "../app/sessionScope";
+
 export type HealthStatus = {
   status: string;
   timestamp: string;
@@ -513,8 +515,8 @@ export function clearApiKey(): void {
   window.localStorage.removeItem(API_KEY_STORAGE_KEY);
 }
 
-function withApiKey(init?: RequestInit): RequestInit | undefined {
-  const apiKey = getApiKey();
+function withApiKey(init?: RequestInit, apiKeyOverride?: string | null): RequestInit | undefined {
+  const apiKey = apiKeyOverride === undefined ? getApiKey() : apiKeyOverride;
   if (!apiKey) {
     return init;
   }
@@ -523,8 +525,48 @@ function withApiKey(init?: RequestInit): RequestInit | undefined {
   return { ...init, headers };
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
+export type SessionBoundApiClient = Readonly<{
+  sessionScopeId: SessionScopeId;
+  workspace: WorkspaceRef;
+  signal: AbortSignal;
+  abort: () => void;
+  fetchRaw: (path: string, init?: RequestInit) => Promise<Response>;
+  request: <T>(path: string, init?: RequestInit) => Promise<T>;
+  downloadFile: (path: string, init?: RequestInit) => Promise<DownloadedFile>;
+}>;
+
+export type ApiRequestContext = Readonly<{
+  client?: SessionBoundApiClient;
+  signal?: AbortSignal;
+}>;
+
+function combineSignals(...signals: Array<AbortSignal | null | undefined>): AbortSignal | undefined {
+  const present = signals.filter((signal): signal is AbortSignal => Boolean(signal));
+  if (present.length === 0) {
+    return undefined;
+  }
+  if (present.length === 1) {
+    return present[0];
+  }
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any(present);
+  }
+  const controller = new AbortController();
+  for (const signal of present) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      break;
+    }
+    signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true });
+  }
+  return controller.signal;
+}
+
+function withSignal(init: RequestInit | undefined, signal: AbortSignal | undefined): RequestInit | undefined {
+  return signal ? { ...init, signal } : init;
+}
+
+async function parseJsonResponse<T>(response: Response): Promise<T> {
 
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
@@ -542,6 +584,47 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export function createSessionBoundApiClient(
+  sessionScopeId: SessionScopeId,
+  workspace: WorkspaceRef,
+  apiKey: string | null = getApiKey(),
+): SessionBoundApiClient {
+  const controller = new AbortController();
+  const fetchRaw = (path: string, init?: RequestInit) => {
+    const signal = combineSignals(controller.signal, init?.signal);
+    return fetch(`${apiBaseUrl}${path}`, withApiKey({ ...init, signal }, apiKey));
+  };
+  const client: SessionBoundApiClient = {
+    sessionScopeId,
+    workspace,
+    signal: controller.signal,
+    abort: () => controller.abort(),
+    fetchRaw,
+    request: async <T>(path: string, init?: RequestInit) =>
+      parseJsonResponse<T>(await fetchRaw(path, init)),
+    downloadFile: async (path: string, init?: RequestInit) => {
+      const response = await fetchRaw(path, init);
+      return parseDownloadResponse(response);
+    },
+  };
+  return Object.freeze(client);
+}
+
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  context?: ApiRequestContext,
+): Promise<T> {
+  if (context?.client) {
+    return context.client.request<T>(path, { ...init, signal: combineSignals(init?.signal, context.signal) });
+  }
+  const response = await fetch(
+    `${apiBaseUrl}${path}`,
+    withApiKey(withSignal(init, combineSignals(init?.signal, context?.signal))),
+  );
+  return parseJsonResponse<T>(response);
+}
+
 export type DownloadedFile = {
   blob: Blob;
   filename: string | null;
@@ -554,8 +637,25 @@ export type DownloadedFile = {
  * lets a caller POST a JSON body (e.g. the multi-report export) instead of a
  * bare GET; withApiKey merges the X-API-Key header in either way.
  */
-export async function downloadFile(path: string, init?: RequestInit): Promise<DownloadedFile> {
-  const response = await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
+export async function downloadFile(
+  path: string,
+  init?: RequestInit,
+  context?: ApiRequestContext,
+): Promise<DownloadedFile> {
+  if (context?.client) {
+    return context.client.downloadFile(path, {
+      ...init,
+      signal: combineSignals(init?.signal, context.signal),
+    });
+  }
+  const response = await fetch(
+    `${apiBaseUrl}${path}`,
+    withApiKey(withSignal(init, combineSignals(init?.signal, context?.signal))),
+  );
+  return parseDownloadResponse(response);
+}
+
+async function parseDownloadResponse(response: Response): Promise<DownloadedFile> {
 
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
@@ -630,8 +730,8 @@ export function formatApiDetail(detail: unknown): string {
   return "Unknown API error.";
 }
 
-export function getHealth(): Promise<HealthStatus> {
-  return request<HealthStatus>("/health");
+export function getHealth(context?: ApiRequestContext): Promise<HealthStatus> {
+  return request<HealthStatus>("/health", undefined, context);
 }
 
 // Best-effort adapter classification from the backend. The server DOES return
@@ -661,8 +761,8 @@ export interface SystemInterface {
 
 // GET /api/v1/system/interfaces — enumerates the host's usable NICs so the
 // Source Interface selector can offer them. Viewer-gated and read-only.
-export function getSystemInterfaces(): Promise<SystemInterface[]> {
-  return request<SystemInterface[]>("/system/interfaces");
+export function getSystemInterfaces(context?: ApiRequestContext): Promise<SystemInterface[]> {
+  return request<SystemInterface[]>("/system/interfaces", undefined, context);
 }
 
 // ---------------------------------------------------------------------------
@@ -673,67 +773,80 @@ export function getSystemInterfaces(): Promise<SystemInterface[]> {
 // user-management view; non-admins never reach them (the entry is hidden).
 // ---------------------------------------------------------------------------
 
-export function getMe(): Promise<MeResponse> {
-  return request<MeResponse>("/me");
+export function getMe(context?: ApiRequestContext): Promise<MeResponse> {
+  return request<MeResponse>("/me", undefined, context);
 }
 
-export function listUsers(): Promise<UserRecord[]> {
-  return request<UserRecord[]>("/users");
+export function listUsers(context?: ApiRequestContext): Promise<UserRecord[]> {
+  return request<UserRecord[]>("/users", undefined, context);
 }
 
-export function createUser(input: { username: string; role: Role }): Promise<CreateUserResponse> {
+export function createUser(input: {
+  username: string;
+  role: Role;
+  context?: ApiRequestContext;
+}): Promise<CreateUserResponse> {
   return request<CreateUserResponse>("/users", {
     body: JSON.stringify({ role: input.role, username: input.username }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, input.context);
 }
 
-export function deactivateUser(userId: string): Promise<UserRecord> {
+export function deactivateUser(userId: string, context?: ApiRequestContext): Promise<UserRecord> {
   return request<UserRecord>(`/users/${encodeURIComponent(userId)}/deactivate`, {
     method: "POST",
-  });
+  }, context);
 }
 
 // Admin-only lost-key recovery: invalidates the user's current key immediately
 // and returns a fresh plaintext key, displayed exactly once (same shape as
 // createUser). The backend refuses (409) for deactivated users.
-export function reissueUserKey(userId: string): Promise<CreateUserResponse> {
+export function reissueUserKey(
+  userId: string,
+  context?: ApiRequestContext,
+): Promise<CreateUserResponse> {
   return request<CreateUserResponse>(`/users/${encodeURIComponent(userId)}/key`, {
     method: "POST",
-  });
+  }, context);
 }
 
-export function updateUserRole(userId: string, role: Role): Promise<UserRecord> {
+export function updateUserRole(
+  userId: string,
+  role: Role,
+  context?: ApiRequestContext,
+): Promise<UserRecord> {
   return request<UserRecord>(`/users/${encodeURIComponent(userId)}/role`, {
     body: JSON.stringify({ role }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, context);
 }
 
-export function getConfiguration(): Promise<ConfigurationSnapshot> {
-  return request<ConfigurationSnapshot>("/configuration");
+export function getConfiguration(context?: ApiRequestContext): Promise<ConfigurationSnapshot> {
+  return request<ConfigurationSnapshot>("/configuration", undefined, context);
 }
 
 export function validateConfiguration(
   configuration: ConfigurationSnapshot,
+  context?: ApiRequestContext,
 ): Promise<ConfigurationValidationResult> {
   return request<ConfigurationValidationResult>("/configuration/validate", {
     body: JSON.stringify(configuration),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, context);
 }
 
 export function updateConfiguration(
   configuration: ConfigurationSnapshot,
+  context?: ApiRequestContext,
 ): Promise<ConfigurationSnapshot> {
   return request<ConfigurationSnapshot>("/configuration", {
     body: JSON.stringify(configuration),
     headers: { "Content-Type": "application/json" },
     method: "PUT",
-  });
+  }, context);
 }
 
 // Query string for the optional project/site scoping the configuration
@@ -771,9 +884,12 @@ export type ConfigurationExport = {
 export async function exportConfiguration(
   projectId?: string,
   siteId?: string,
+  context?: ApiRequestContext,
 ): Promise<ConfigurationExport> {
   const configuration = await request<ConfigurationSnapshot>(
     `/configuration${buildConfigurationQuery(projectId, siteId)}`,
+    undefined,
+    context,
   );
   return {
     configuration,
@@ -795,6 +911,7 @@ export function importConfiguration(
   payload: ConfigurationExport | ConfigurationSnapshot,
   projectId?: string,
   siteId?: string,
+  context?: ApiRequestContext,
 ): Promise<ConfigurationSnapshot> {
   const configuration =
     "configuration" in payload && payload.configuration
@@ -807,47 +924,40 @@ export function importConfiguration(
       headers: { "Content-Type": "application/json" },
       method: "PUT",
     },
+    context,
   );
 }
 
-// Importable secret material for one certificate field (CA Certificate / Client
-// Certificate / Private Key). `content` is the PEM text in plain text so another
-// engineer can import it on their OWN machine — the receiving machine re-encrypts
-// it into its own secret store. Field decision 2026-07-20: plain text is fine for
-// now, encryption at a later date.
+// Legacy certificate material accepted on import for one compatibility release.
+// v0.1.26 never returns `content` from an API response.
 export type ConfigurationSecretMaterial = {
   secret_ref: string;
   content: string;
   file_name?: string | null;
 };
 
-// v2 export envelope that INCLUDES secret material so a shared config file
-// actually works across machines (2026-07-20 walkthrough ITEM-1). The server
-// sets exported_at and reads the UNMASKED snapshot, so password-kind values
-// (MQTT Password, Key Password, Log Upload Token) ride in `configuration` in
-// plain text; certificate material rides in `secret_material`, keyed by field
-// name. Distinct from the default masked ConfigurationExport (version 1).
+// v2 compatibility envelope. Secret values are excluded from responses.
 export type ConfigurationExportEnvelope = {
   kind: "smart-commissioning-configuration";
   version: 2;
   exported_at: string;
   project_id: string | null;
   site_id: string | null;
-  secrets_included: true;
+  secrets_included: boolean;
   configuration: ConfigurationSnapshot;
   secret_material: Record<string, ConfigurationSecretMaterial>;
 };
 
-// Engineer-gated export that carries secrets in plain text (GET
-// /configuration/export-with-secrets). Separate from exportConfiguration, whose
-// default export stays masked. The server builds the whole envelope (including
-// exported_at); this just fetches it for the UI to serialise to a file.
+// Compatibility endpoint retained for older clients. Its response is masked.
 export function exportConfigurationWithSecrets(
   projectId?: string,
   siteId?: string,
+  context?: ApiRequestContext,
 ): Promise<ConfigurationExportEnvelope> {
   return request<ConfigurationExportEnvelope>(
     `/configuration/export-with-secrets${buildConfigurationQuery(projectId, siteId)}`,
+    undefined,
+    context,
   );
 }
 
@@ -859,6 +969,7 @@ export function importConfigurationWithSecrets(
   envelope: ConfigurationExportEnvelope,
   projectId?: string,
   siteId?: string,
+  context?: ApiRequestContext,
 ): Promise<ConfigurationSnapshot> {
   return request<ConfigurationSnapshot>(
     `/configuration/import${buildConfigurationQuery(projectId, siteId)}`,
@@ -870,6 +981,7 @@ export function importConfigurationWithSecrets(
       headers: { "Content-Type": "application/json" },
       method: "POST",
     },
+    context,
   );
 }
 
@@ -888,14 +1000,15 @@ export type LogUploadResult = {
 // Uploads the masked local log bundle to the configured Log Upload URL. The
 // server reads the URL/token from the stored configuration; nothing is sent in
 // the request body here.
-export function uploadLogs(): Promise<LogUploadResult> {
-  return request<LogUploadResult>("/logs/upload", { method: "POST" });
+export function uploadLogs(context?: ApiRequestContext): Promise<LogUploadResult> {
+  return request<LogUploadResult>("/logs/upload", { method: "POST" }, context);
 }
 
 export function storeSecretMaterial(input: {
   field: string;
   content: string;
   fileName?: string | null;
+  context?: ApiRequestContext;
 }): Promise<SecretMaterialResponse> {
   return request<SecretMaterialResponse>("/configuration/secrets", {
     body: JSON.stringify({
@@ -906,11 +1019,11 @@ export function storeSecretMaterial(input: {
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, input.context);
 }
 
-export function listImportProfiles(): Promise<ImportProfileSummary[]> {
-  return request<ImportProfileSummary[]>("/imports/profiles");
+export function listImportProfiles(context?: ApiRequestContext): Promise<ImportProfileSummary[]> {
+  return request<ImportProfileSummary[]>("/imports/profiles", undefined, context);
 }
 
 export function createImport(input: {
@@ -918,6 +1031,7 @@ export function createImport(input: {
   file: File;
   projectId?: string;
   siteId?: string;
+  context?: ApiRequestContext;
 }): Promise<ImportBatchSummary> {
   const body = new FormData();
   body.append("import_type", input.importType);
@@ -928,14 +1042,17 @@ export function createImport(input: {
   return request<ImportBatchSummary>("/imports", {
     body,
     method: "POST",
-  });
+  }, input.context);
 }
 
 // Per-row rejection reasons for one import. The POST above returns only the
 // accepted/rejected counts; the reasons are persisted separately and read back
 // from here, so an operator can see WHY rows were rejected.
-export function getImportErrors(importId: string): Promise<ImportErrorReport> {
-  return request<ImportErrorReport>(`/imports/${encodeURIComponent(importId)}/errors`);
+export function getImportErrors(
+  importId: string,
+  context?: ApiRequestContext,
+): Promise<ImportErrorReport> {
+  return request<ImportErrorReport>(`/imports/${encodeURIComponent(importId)}/errors`, undefined, context);
 }
 
 // Newest usable (non-empty) import of a given type for the current project/site.
@@ -950,13 +1067,14 @@ export function getLatestImport(
   importType: ImportType,
   projectId = "demo-project",
   siteId = "demo-site",
+  context?: ApiRequestContext,
 ): Promise<ImportBatchSummary | null> {
   const query = new URLSearchParams({
     import_type: importType,
     project_id: projectId,
     site_id: siteId,
   });
-  return request<ImportBatchSummary>(`/imports/latest?${query.toString()}`).catch(
+  return request<ImportBatchSummary>(`/imports/latest?${query.toString()}`, undefined, context).catch(
     (error: unknown) => {
       if (error instanceof ApiError && error.status === 404) {
         return null;
@@ -975,8 +1093,8 @@ export type UdmiSchemaSet = {
   uploaded_at: string;
 };
 
-export function listUdmiSchemaSets(): Promise<UdmiSchemaSet[]> {
-  return request<UdmiSchemaSet[]>("/udmi/schemas");
+export function listUdmiSchemaSets(context?: ApiRequestContext): Promise<UdmiSchemaSet[]> {
+  return request<UdmiSchemaSet[]>("/udmi/schemas", undefined, context);
 }
 
 // Multipart upload mirroring createImport: version_label plus one or more
@@ -985,6 +1103,7 @@ export function listUdmiSchemaSets(): Promise<UdmiSchemaSet[]> {
 export function uploadUdmiSchemaSet(input: {
   versionLabel: string;
   files: File[];
+  context?: ApiRequestContext;
 }): Promise<UdmiSchemaSet> {
   const body = new FormData();
   body.append("version_label", input.versionLabel);
@@ -994,13 +1113,16 @@ export function uploadUdmiSchemaSet(input: {
   return request<UdmiSchemaSet>("/udmi/schemas", {
     body,
     method: "POST",
-  });
+  }, input.context);
 }
 
-export function deleteUdmiSchemaSet(versionLabel: string): Promise<void> {
+export function deleteUdmiSchemaSet(
+  versionLabel: string,
+  context?: ApiRequestContext,
+): Promise<void> {
   return request<void>(`/udmi/schemas/${encodeURIComponent(versionLabel)}`, {
     method: "DELETE",
-  });
+  }, context);
 }
 
 export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
@@ -1032,34 +1154,38 @@ export function startDiscoveryRun(input: {
   runKind: DiscoveryRunKind;
   jobType: JobType;
   parameters?: Record<string, unknown>;
+  workspace?: WorkspaceRef;
+  context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
   return request<JobAcceptedResponse>(`/discovery/${input.runKind}/runs`, {
     body: JSON.stringify({
       job_type: input.jobType,
       parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
-      project_id: "demo-project",
-      site_id: "demo-site",
+      project_id: input.workspace?.projectId ?? "demo-project",
+      site_id: input.workspace?.siteId ?? "demo-site",
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, input.context);
 }
 
 export function startValidationRun(input: {
   runKind: ValidationRunKind;
   jobType: JobType;
   parameters?: Record<string, unknown>;
+  workspace?: WorkspaceRef;
+  context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
   return request<JobAcceptedResponse>(`/validation/${input.runKind}/runs`, {
     body: JSON.stringify({
       job_type: input.jobType,
       parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
-      project_id: "demo-project",
-      site_id: "demo-site",
+      project_id: input.workspace?.projectId ?? "demo-project",
+      site_id: input.workspace?.siteId ?? "demo-site",
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, input.context);
 }
 
 export type ConfigPublishPoint = { point: string; value: string | number | boolean };
@@ -1076,6 +1202,8 @@ export function startMqttConfigPublishRun(input: {
   useLiveBroker?: boolean;
   pointsetTopic?: string;
   waitSeconds?: number;
+  workspace?: WorkspaceRef;
+  context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
   // Confirm-back must cover EVERY written point (mq9n11wi). Build the expected
   // list from expectedPoints, falling back to the single primary for
@@ -1120,20 +1248,23 @@ export function startMqttConfigPublishRun(input: {
         use_live_broker: Boolean(input.useLiveBroker),
         wait_seconds: input.waitSeconds ?? 5,
       },
-      project_id: "demo-project",
-      site_id: "demo-site",
+      project_id: input.workspace?.projectId ?? "demo-project",
+      site_id: input.workspace?.siteId ?? "demo-site",
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, input.context);
 }
 
-export function getValidationRun(runId: string): Promise<RunRecord> {
-  return request<RunRecord>(`/validation/runs/${runId}`);
+export function getValidationRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
+  return request<RunRecord>(`/validation/runs/${runId}`, undefined, context);
 }
 
-export function getValidationIssues(runId: string): Promise<ValidationIssuesResponse> {
-  return request<ValidationIssuesResponse>(`/validation/runs/${runId}/issues`);
+export function getValidationIssues(
+  runId: string,
+  context?: ApiRequestContext,
+): Promise<ValidationIssuesResponse> {
+  return request<ValidationIssuesResponse>(`/validation/runs/${runId}/issues`, undefined, context);
 }
 
 export function createReport(input: {
@@ -1142,24 +1273,26 @@ export function createReport(input: {
   sourceRunIds?: string[];
   reportTitle?: string;
   udmiScope?: UdmiReportScopeV1;
+  workspace?: WorkspaceRef;
+  context?: ApiRequestContext;
 }): Promise<ReportSummary> {
   return request<ReportSummary>("/reports", {
     body: JSON.stringify({
       output_format: input.format ?? "zip",
-      project_id: "demo-project",
+      project_id: input.workspace?.projectId ?? "demo-project",
       report_type: input.reportType,
-      site_id: "demo-site",
+      site_id: input.workspace?.siteId ?? "demo-site",
       source_run_ids: input.sourceRunIds ?? [],
       ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
       ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  });
+  }, input.context);
 }
 
-export function listReports(): Promise<ReportListResponse> {
-  return request<ReportListResponse>("/reports");
+export function listReports(context?: ApiRequestContext): Promise<ReportListResponse> {
+  return request<ReportListResponse>("/reports", undefined, context);
 }
 
 export type ListRunsParams = {
@@ -1201,26 +1334,32 @@ function buildRunsQuery(params?: ListRunsParams): string {
   return query ? `?${query}` : "";
 }
 
-export function listRuns(params?: ListRunsParams): Promise<RunListResponse> {
-  return request<RunListResponse>(`/runs${buildRunsQuery(params)}`);
+export function listRuns(params?: ListRunsParams, context?: ApiRequestContext): Promise<RunListResponse> {
+  return request<RunListResponse>(`/runs${buildRunsQuery(params)}`, undefined, context);
 }
 
-export function cancelRun(runId: string): Promise<RunRecord> {
+export function cancelRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
   return request<RunRecord>(`/runs/${encodeURIComponent(runId)}/cancel`, {
     method: "POST",
-  });
+  }, context);
 }
 
-export function getDiscoveryRun(runId: string): Promise<RunRecord> {
-  return request<RunRecord>(`/discovery/runs/${encodeURIComponent(runId)}`);
+export function getDiscoveryRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
+  return request<RunRecord>(`/discovery/runs/${encodeURIComponent(runId)}`, undefined, context);
 }
 
-export function getDiscoveryResults(runId: string): Promise<DiscoveryResultsResponse> {
-  return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`);
+export function getDiscoveryResults(
+  runId: string,
+  context?: ApiRequestContext,
+): Promise<DiscoveryResultsResponse> {
+  return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`, undefined, context);
 }
 
-export function getDiscoveryTopics(runId: string): Promise<DiscoveryTopicsResponse> {
-  return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`);
+export function getDiscoveryTopics(
+  runId: string,
+  context?: ApiRequestContext,
+): Promise<DiscoveryTopicsResponse> {
+  return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`, undefined, context);
 }
 
 // Path (display-only; download via downloadFile so the X-API-Key header rides)
@@ -1231,14 +1370,18 @@ export function getDiscoveryTopicsXlsxPath(runId: string, topicFilter?: string):
   return topicFilter ? `${base}?topic_filter=${encodeURIComponent(topicFilter)}` : base;
 }
 
-export function listValidationRuns(): Promise<RunListResponse> {
-  return request<RunListResponse>("/validation/runs");
+export function listValidationRuns(context?: ApiRequestContext): Promise<RunListResponse> {
+  return request<RunListResponse>("/validation/runs", undefined, context);
 }
 
-export function rollbackMqttConfigPublish(runId: string): Promise<JobAcceptedResponse> {
+export function rollbackMqttConfigPublish(
+  runId: string,
+  context?: ApiRequestContext,
+): Promise<JobAcceptedResponse> {
   return request<JobAcceptedResponse>(
     `/validation/mqtt-config/runs/${encodeURIComponent(runId)}/rollback`,
     { method: "POST" },
+    context,
   );
 }
 
@@ -1333,7 +1476,11 @@ export function parseSseBuffer(buffer: string): { events: { name: RunEventName; 
  * exactly like every other request. A 401 surfaces via onError as an ApiError,
  * letting the caller fall back to polling.
  */
-export function streamRunEvents(runId: string, callbacks: RunEventCallbacks): () => void {
+export function streamRunEvents(
+  runId: string,
+  callbacks: RunEventCallbacks,
+  context?: ApiRequestContext,
+): () => void {
   const controller = new AbortController();
   let reachedTerminal = false;
   let closed = false;
@@ -1351,14 +1498,14 @@ export function streamRunEvents(runId: string, callbacks: RunEventCallbacks): ()
 
   void (async () => {
     try {
-      const init = withApiKey({
+      const init = {
         headers: { Accept: "text/event-stream" },
-        signal: controller.signal,
-      });
-      const response = await fetch(
-        `${apiBaseUrl}/runs/${encodeURIComponent(runId)}/events`,
-        init,
-      );
+        signal: combineSignals(controller.signal, context?.signal),
+      };
+      const path = `/runs/${encodeURIComponent(runId)}/events`;
+      const response = context?.client
+        ? await context.client.fetchRaw(path, init)
+        : await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
 
       if (response.status === 401) {
         throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
@@ -1385,7 +1532,7 @@ export function streamRunEvents(runId: string, callbacks: RunEventCallbacks): ()
         const { events, rest } = parseSseBuffer(buffer);
         buffer = rest;
         for (const { name, data } of events) {
-          if (data) {
+          if (data && data.run_id === runId) {
             if (name === "terminal" || TERMINAL_EVENT_STATUSES.has(data.status)) {
               reachedTerminal = true;
             }

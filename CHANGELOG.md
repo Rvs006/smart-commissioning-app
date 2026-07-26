@@ -5,6 +5,58 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.26] - 2026-07-26
+
+### Added
+
+- **Runs now carry a frozen execution context.** Project, site, configuration,
+  imports, engine parameters, network settings, versioned secret references,
+  principal, and application version are sealed behind one canonical SHA-256
+  before dispatch.
+- **Run ownership is fenced in the database.** Claims include an owner token,
+  attempt, heartbeat, and lease. Expired claims are recovered by a scheduled
+  task, while GET and SSE requests remain read-only.
+- **Protocol work has active collision keys.** Concurrent MQTT profiles and
+  BACnet bind addresses return HTTP 409 with the active run ID. MQTT client IDs
+  are unique per deployment, run, attempt, and channel within the 23-byte limit.
+- **Release evidence has exact-commit gates.** Hosted images, Windows portable
+  output, CycloneDX inventories, checksums, migration evidence, and workflow
+  records must all name the release SHA.
+
+### Changed
+
+- **Every report type renders from a frozen snapshot.** Report bytes are written
+  once with atomic replacement, hashed, signed, and served without regeneration
+  or lifecycle database writes.
+- **Hosted and portable execution use the same lifecycle services.** Both paths
+  load stored context, resolve versioned secrets, claim once, and finalize one
+  complete terminal snapshot. Hosted queue publication no longer falls back to
+  a second inline execution after an uncertain publish.
+- **Frontend requests are scoped to one session, workspace, route, and run.** A
+  final evidence barrier fetches issues, results, and MQTT topics before terminal
+  metrics appear. Report dialogs retain the exact intent captured when opened.
+- **Configuration exports omit secret material.** Compatibility readers move
+  plaintext passwords and tokens into the versioned encrypted store.
+
+### Fixed
+
+- **Completed results cannot be replaced by a stale worker.** The first valid
+  terminal transaction seals status, summary, structured rows, timestamps, and
+  result hash. Later conflicting writes affect zero rows and increment the
+  conflict metric.
+- **Repeated report downloads return identical bytes.** Imports, configuration,
+  source-row edits, and renderer changes after generation cannot alter a stored
+  artifact.
+- **Navigation cannot attach delayed evidence to another run.** Session changes
+  abort old requests and clear their cache, while SSE events retain their run
+  identity through terminal synchronization.
+
+### Known limitation
+
+- Sync v2 is scheduled for v0.1.27. v0.1.26 prevents sealed terminal mutation
+  and leaves immutable conflicts visible, but exact report bytes and signed
+  manifests are not yet transferred to the hub.
+
 ## [0.1.25] - 2026-07-24
 
 ### Added

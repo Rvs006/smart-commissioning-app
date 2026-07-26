@@ -343,9 +343,10 @@ warn ("Windows protected your PC"). Choose More info -> Run anyway, or have
 your administrator allow it.
 
 Local-only profile: binds 127.0.0.1, SQLite, jobs run inline, no broker /
-Postgres / Redis / network required. Your settings, certificates, and run
-history live in %LOCALAPPDATA%\SmartCommissioning (NOT beside the exe), so
-they survive upgrading to a new release folder. Crash logs, if any, are
+Postgres / Redis / network required. SQLite, imports, encrypted secrets,
+immutable report artifacts, the report-signing key, and run history live in
+%LOCALAPPDATA%\SmartCommissioning (NOT beside the exe), so they survive
+upgrading to a new release folder. Crash logs, if any, are
 written to %LOCALAPPDATA%\SmartCommissioning\logs\crash-*.log. On first launch
 this version migrates state from an older release's runtime\ folder if it
 finds one beside the exe.

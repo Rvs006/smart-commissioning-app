@@ -1,20 +1,10 @@
-"""Worker-side MQTT configuration values provider + secret resolver.
+"""Worker-side resolver for versioned ``secret://`` material.
 
-Phase 2 carry-forward: the worker process needs broker connection defaults so
-the MQTT discovery / live UDMI capture / config-publish engines can connect when
-run via the worker (not just the API). It registers a configuration-values
-provider with ``smart_commissioning_core.mqtt_settings`` that reads the CURRENT
-configuration snapshot from the SAME database the backend writes to (via the
-shared ``ConfigurationRepository``).
+Lifecycle-v2 workers load broker and certificate references only from the
+stored RunContextV1. This module deliberately registers an EMPTY configuration
+provider so no current-configuration or demo-scope fallback can affect a run.
 
 WHAT THIS WIRES (and its honest limits):
-
-* MQTT broker host / port / client id / keep-alive / username / password are
-  read from the stored ``mqtt`` section. So an MQTT discovery run dispatched to
-  the worker WITHOUT explicit broker params in its run parameters still resolves
-  a broker host from stored configuration. Run parameters (``broker_host`` etc.)
-  always take precedence (see ``build_mqtt_connection_settings``), so a run can
-  also fully self-describe its broker without any stored configuration.
 
 * CERTIFICATE / mutual-TLS material is resolved ONLY when the worker can reach
   the SAME secret store the backend writes to:
@@ -30,18 +20,9 @@ WHAT THIS WIRES (and its honest limits):
     SSLContext loads the real CA / client-cert / private-key material and worker
     mutual-TLS becomes possible (not silently empty).
 
-  - When the secrets volume is NOT reachable (no shared volume / no key file),
-    the worker does NOT register a decrypting resolver. ``secret://`` references
-    then resolve to nothing, and cert material must instead be supplied via run
-    PARAMETERS (``ca_certificate`` / ``client_certificate`` / ``private_key`` as
-    plain filesystem paths the worker can read, or a CA via parameters). This is
-    the documented limitation: full mutual-TLS on the worker needs the shared
-    secrets volume.
-
-The provider is best-effort: any database error yields empty MQTT defaults so a
-worker without a reachable/migrated database still imports and runs jobs that
-fully self-describe their broker via run parameters. The real TLS handshake
-against a live broker stays on-site-untested.
+  - When the store is not reachable, resolution returns ``None``. Connection
+    setup then fails honestly; plaintext paths and blank-certificate fallback
+    are not accepted by the context contract.
 """
 
 import os
@@ -51,12 +32,6 @@ from smart_commissioning_core.mqtt_settings import (
     set_configuration_values_provider,
     set_secret_resolver,
 )
-
-# These mirror backend ConfigurationService.DEFAULT_PROJECT_ID / DEFAULT_SITE_ID.
-# The single-tenant edge deployment uses one project/site; if a deployment uses
-# others, the broker should instead be supplied via run parameters.
-_DEFAULT_PROJECT_ID = "demo-project"
-_DEFAULT_SITE_ID = "demo-site"
 
 # Mirrors backend ConfigurationService._SECRET_STORE_KEY_FILE: the per-install
 # Fernet key the backend used to encrypt secret material at rest. The worker
@@ -134,69 +109,22 @@ def _resolve_secret(secret_ref: str) -> bytes | None:
         return None
 
 
-def _certificate_values() -> dict[str, object]:
-    """Stored certificate references, returned ONLY when the secret store is reachable.
-
-    When the shared secrets volume is present the worker can decrypt the
-    backend's secret:// references, so it surfaces them as connection defaults and
-    worker mutual-TLS is possible. When the store is unreachable the worker
-    returns no cert defaults and relies on run-parameter cert material instead
-    (documented limitation), so it never advertises secret:// refs it cannot
-    resolve.
-    """
-    if not _secret_store_reachable():
-        return {}
-    try:
-        from smart_commissioning_core.db.repositories import ConfigurationRepository
-
-        from app.db import get_engine
-
-        payload = ConfigurationRepository(get_engine()).get_current(
-            _DEFAULT_PROJECT_ID, _DEFAULT_SITE_ID
-        )
-    except Exception:
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    section = payload.get("certificates")
-    values = section.get("values") if isinstance(section, dict) else None
-    return values if isinstance(values, dict) else {}
+def resolve_worker_secret(secret_ref: str) -> bytes | None:
+    """Resolve one stored reference in memory without logging or persistence."""
+    return _resolve_secret(secret_ref)
 
 
 def _configuration_values() -> tuple[dict[str, object], dict[str, object]]:
-    """Return (mqtt_values, certificate_values) from the stored configuration.
+    """Return no defaults; every effective setting must come from RunContextV1."""
+    return {}, {}
 
-    Certificate values are populated only when the shared secret store is
-    reachable (see _certificate_values); otherwise they are empty and cert
-    material must come from run parameters.
-    """
-    try:
-        from smart_commissioning_core.db.repositories import ConfigurationRepository
 
-        from app.db import get_engine
-
-        payload = ConfigurationRepository(get_engine()).get_current(
-            _DEFAULT_PROJECT_ID, _DEFAULT_SITE_ID
-        )
-    except Exception:
-        # Best-effort: a worker without a reachable/migrated DB still runs jobs
-        # whose run parameters carry the broker settings.
-        return {}, _certificate_values()
-
-    if not isinstance(payload, dict):
-        return {}, _certificate_values()
-    mqtt_section = payload.get("mqtt")
-    mqtt_values = mqtt_section.get("values") if isinstance(mqtt_section, dict) else None
-    return (mqtt_values if isinstance(mqtt_values, dict) else {}), _certificate_values()
+def register_worker_mqtt_secret_resolver() -> None:
+    """Install context-only defaults plus the read-only secret resolver."""
+    set_configuration_values_provider(_configuration_values)
+    set_secret_resolver(_resolve_secret)
 
 
 def register_worker_mqtt_configuration_provider() -> None:
-    """Register the worker's configuration-values provider and secret resolver.
-
-    Idempotent. The secret resolver is always registered; it self-gates on
-    whether the shared secret store is reachable (returning ``None`` when it is
-    not), so worker mutual-TLS becomes possible exactly when the secrets volume
-    is shared and stays off (cert material via run parameters) otherwise.
-    """
-    set_configuration_values_provider(_configuration_values)
-    set_secret_resolver(_resolve_secret)
+    """Compatibility alias; it no longer reads current configuration."""
+    register_worker_mqtt_secret_resolver()

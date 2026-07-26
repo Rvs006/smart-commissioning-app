@@ -29,7 +29,7 @@ from smart_commissioning_core.integrity import (
     verify_bytes,
 )
 
-from app.core.runtime import SECRETS_ROOT, ensure_runtime_directories
+from app.core.runtime import REPORT_SIGNING_ROOT, SECRETS_ROOT, ensure_runtime_directories
 
 # Reuse the secrets root so the signing key is backed up alongside the encrypted
 # PEMs (backup_service includes the whole secrets dir).
@@ -40,13 +40,23 @@ INTEGRITY_KEY = "integrity"
 
 
 def signing_key_path() -> Path:
-    """Absolute path of the persisted evidence signing key under the secrets root."""
-    return SECRETS_ROOT / _SIGNING_KEY_FILE
+    """Absolute path of the API-only evidence signing key."""
+    return REPORT_SIGNING_ROOT / _SIGNING_KEY_FILE
 
 
 def load_signing_key() -> SigningKey:
     """Load (or create on first use) the evidence signing key, owner-only."""
     ensure_runtime_directories()
+    destination = signing_key_path()
+    legacy = SECRETS_ROOT / _SIGNING_KEY_FILE
+    if not destination.exists() and legacy.is_file():
+        # Preserve verification continuity on upgrade while separating the key
+        # from connection secrets that the worker is allowed to read.
+        destination.write_bytes(legacy.read_bytes())
+        try:
+            destination.chmod(0o600)
+        except OSError:
+            pass
     return SigningKey.load_or_create(signing_key_path())
 
 

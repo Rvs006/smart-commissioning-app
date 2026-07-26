@@ -186,7 +186,7 @@ class RbacEnforcementTests(ApiTestCase):
         )
         self.assertEqual(response.status_code, 403, response.text)
 
-    def test_engineer_can_export_with_secrets_and_reimport(self) -> None:
+    def test_engineer_can_export_masked_configuration_and_reimport(self) -> None:
         exported = self.client.get(
             "/api/v1/configuration/export-with-secrets",
             headers=self._headers("engineer"),
@@ -195,7 +195,8 @@ class RbacEnforcementTests(ApiTestCase):
         self.assertEqual(exported.status_code, 200, exported.text)
         envelope = exported.json()
         self.assertEqual(envelope["version"], 2)
-        self.assertTrue(envelope["secrets_included"])
+        self.assertFalse(envelope["secrets_included"])
+        self.assertEqual(envelope["secret_material"], {})
 
         imported = self.client.post(
             "/api/v1/configuration/import",

@@ -19,6 +19,7 @@ from smart_commissioning_core.db.repositories import (
     ImportRepository,
     UdmiSchemaSetRepository,
 )
+from smart_commissioning_core.db.run_lifecycle import ProtocolConflictError
 from smart_commissioning_core.engines.comparison import process_mapping_validation_run
 from smart_commissioning_core.engines.point_validation import process_bacnet_validation_run
 from smart_commissioning_core.mqtt_config_publish_processor import (
@@ -30,7 +31,7 @@ from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 from smart_commissioning_core.udmi_validation import DEFAULT_CAPTURE_SECONDS
 
-from app.core.auth import require_role
+from app.core.auth import AuthPrincipal, get_principal, require_role
 from app.core.config import get_settings
 from app.schemas.jobs import (
     JobAcceptedResponse,
@@ -47,7 +48,7 @@ from app.services.engine_dispatch import (
     make_discovery_loader,
     make_import_loader,
 )
-from app.services.job_queue import JobQueueService, JobQueueUnavailable
+from app.services.job_queue import JobQueueService
 
 # Relocated to app.services.register_topics (shared with the MQTT discovery
 # register-comparison); imported under the original private name so the single
@@ -81,9 +82,25 @@ require_engineer = require_role(Role.ENGINEER)
 MAX_UDMI_CAPTURE_SECONDS = int(INDEFINITE_BACKSTOP_SECONDS)
 
 
-def _create_run(request: JobCreateRequest, expected_job_type: JobType) -> RunRecord:
+def _create_run(
+    request: JobCreateRequest,
+    expected_job_type: JobType,
+    principal: AuthPrincipal,
+) -> RunRecord:
     try:
-        return service.create_job_run(request, expected_job_type=expected_job_type)
+        return service.create_job_run(
+            request,
+            expected_job_type=expected_job_type,
+            requesting_principal=principal.username,
+        )
+    except ProtocolConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "A run already owns this protocol connection.",
+                "active_run_id": error.active_run_id,
+            },
+        ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -97,18 +114,14 @@ def _discovery_loader():
 
 
 def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAcceptedResponse:
-    try:
-        return dispatch_run(
-            run,
-            service=service,
-            enqueue=enqueue,
-            run_inline=run_inline,
-            inline_message=f"{label} run started (local inline execution). Follow progress in the run monitor.",
-            queued_message=f"{label} job queued for worker execution.",
-            fallback_message=f"{label} run started inline because Redis/Dramatiq was unavailable.",
-        )
-    except JobQueueUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+    return dispatch_run(
+        run,
+        service=service,
+        enqueue=enqueue,
+        run_inline=run_inline,
+        inline_message=f"{label} run started (local inline execution). Follow progress in the run monitor.",
+        queued_message=f"{label} job queued for worker execution.",
+    )
 
 
 def _expected_schedule_from_register_row(row: dict) -> dict:
@@ -278,7 +291,10 @@ def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[
 
 
 @router.post("/udmi/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
-def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
+def create_udmi_validation_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
     # When the operator hasn't pasted expected values, fill them from the imported
     # MQTT register so the workbench validates against Make/Model/GUID/points/units
     # without re-typing. Register rows always become an `assets` list (even a
@@ -337,13 +353,15 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     nonpub_schema_sets = UdmiSchemaSetRepository(service.engine).get_all_files()
     if nonpub_schema_sets:
         parameters["nonpub_schema_sets"] = nonpub_schema_sets
-    run = _create_run(request.model_copy(update={"parameters": parameters}), "udmi_validation")
+    run = _create_run(
+        request.model_copy(update={"parameters": parameters}), "udmi_validation", principal
+    )
 
-    def run_inline() -> RunRecord:
+    def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_udmi_validation_run(
             run.run_id,
-            dict(run.parameters),
-            run_store=service,
+            frozen_parameters,
+            run_store=run_store,
             execution_mode="inline_local_fallback",
             fallback_reason="JOB_EXECUTION_MODE is set to inline for local development.",
             # Synchronous inline (INLINE_RUN_ASYNC=0) blocks this request until the
@@ -365,7 +383,10 @@ def create_udmi_validation_run(request: JobCreateRequest) -> JobAcceptedResponse
     response_model=JobAcceptedResponse,
     dependencies=[Depends(require_engineer)],
 )
-def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResponse:
+def create_mqtt_config_publish_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
     # A live publish actively writes to a broker, so gate it on the same scan
     # authorization contract used by the discovery engines. The local validate-only
     # path (use_live_broker not set) is side-effect free and needs no authorization.
@@ -375,19 +396,21 @@ def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResp
     # count as an active run and pin the run monitor forever).
     _require_publish_authorization(dict(request.parameters))
 
-    run = _create_run(request, "mqtt_config_publish")
+    run = _create_run(request, "mqtt_config_publish", principal)
 
-    processed_run = process_mqtt_config_publish_run(
-        run.run_id,
-        dict(run.parameters),
-        run_store=service,
-        execution_mode="inline_local_fallback",
-    )
-    return JobAcceptedResponse(
-        run_id=processed_run.run_id,
-        job_type=processed_run.job_type,
-        status=processed_run.status,
-        message="MQTT config publish processed with labelled local inline fallback.",
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        return process_mqtt_config_publish_run(
+            run.run_id,
+            frozen_parameters,
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+        )
+
+    return _dispatch(
+        run,
+        enqueue=None,
+        run_inline=run_inline,
+        label="MQTT config publish",
     )
 
 
@@ -396,7 +419,10 @@ def create_mqtt_config_publish_run(request: JobCreateRequest) -> JobAcceptedResp
     response_model=JobAcceptedResponse,
     dependencies=[Depends(require_engineer)],
 )
-def rollback_mqtt_config_publish(run_id: str) -> JobAcceptedResponse:
+def rollback_mqtt_config_publish(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
     """Republish the previously-captured config value to roll back a publish.
 
     Re-publishes ``result_summary['previous_config']['payload']`` to the same
@@ -429,34 +455,56 @@ def rollback_mqtt_config_publish(run_id: str) -> JobAcceptedResponse:
 
     _require_publish_authorization(dict(run.parameters))
 
-    processed_run = process_mqtt_config_rollback_run(
-        run.run_id,
-        dict(run.parameters),
-        previous_config=previous,
-        run_store=service,
-        execution_mode="inline_local_fallback",
+    rollback_parameters = {
+        **dict(run.parameters),
+        "rollback_of_run_id": run.run_id,
+        "rollback_previous_config": previous,
+    }
+    rollback_run = _create_run(
+        JobCreateRequest(
+            project_id=run.project_id,
+            site_id=run.site_id,
+            job_type="mqtt_config_publish",
+            parameters=rollback_parameters,
+        ),
+        "mqtt_config_publish",
+        principal,
     )
-    return JobAcceptedResponse(
-        run_id=processed_run.run_id,
-        job_type=processed_run.job_type,
-        status=processed_run.status,
-        message="MQTT config rollback processed with labelled local inline fallback.",
+
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        frozen_previous = frozen_parameters.get("rollback_previous_config")
+        return process_mqtt_config_rollback_run(
+            rollback_run.run_id,
+            frozen_parameters,
+            previous_config=(frozen_previous if isinstance(frozen_previous, dict) else previous),
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+        )
+
+    return _dispatch(
+        rollback_run,
+        enqueue=None,
+        run_inline=run_inline,
+        label="MQTT config rollback",
     )
 
 
 @router.post("/bacnet/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
-def create_bacnet_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "bacnet_validation")
+def create_bacnet_validation_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
+    run = _create_run(request, "bacnet_validation", principal)
 
-    def run_inline() -> RunRecord:
+    def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_bacnet_validation_run(
             run.run_id,
-            dict(run.parameters),
-            run_store=service,
+            frozen_parameters,
+            run_store=run_store,
             execution_mode="inline_local_fallback",
             import_loader=_import_loader(),
             discovery_loader=_discovery_loader(),
-            is_cancelled=make_cancel_checker(service, run.run_id),
+            is_cancelled=make_cancel_checker(run_store, run.run_id),
         )
 
     return _dispatch(
@@ -468,18 +516,21 @@ def create_bacnet_validation_run(request: JobCreateRequest) -> JobAcceptedRespon
 
 
 @router.post("/mapping/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
-def create_mapping_validation_run(request: JobCreateRequest) -> JobAcceptedResponse:
-    run = _create_run(request, "mapping_validation")
+def create_mapping_validation_run(
+    request: JobCreateRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
+    run = _create_run(request, "mapping_validation", principal)
 
-    def run_inline() -> RunRecord:
+    def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_mapping_validation_run(
             run.run_id,
-            dict(run.parameters),
-            run_store=service,
+            frozen_parameters,
+            run_store=run_store,
             execution_mode="inline_local_fallback",
             import_loader=_import_loader(),
             discovery_loader=_discovery_loader(),
-            is_cancelled=make_cancel_checker(service, run.run_id),
+            is_cancelled=make_cancel_checker(run_store, run.run_id),
         )
 
     return _dispatch(
