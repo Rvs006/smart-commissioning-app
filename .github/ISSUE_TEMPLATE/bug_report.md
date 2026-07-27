@@ -49,7 +49,7 @@ What actually happened. Include any error messages or stack traces.
 <!--
 If this touches a live path (network scan, MQTT broker, Postgres/Redis, Docker,
 edge→hub sync), say which infrastructure you ran against. These paths are pending
-on-site validation — see docs/phase5-onsite-validation.md.
+on-site validation - see docs/phase5-onsite-validation.md.
 -->
 
 ## Logs / screenshots

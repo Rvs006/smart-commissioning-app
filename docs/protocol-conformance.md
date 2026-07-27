@@ -1,7 +1,7 @@
 # Protocol Conformance
 
 What the Smart Commissioning App validates and supports across UDMI, MQTT, and
-BACnet — honestly separated into **tested** (covered by in-process unit tests),
+BACnet - honestly separated into **tested** (covered by in-process unit tests),
 **simulated** (offline fixture/fake), and **live-untested** (requires on-site
 validation against real brokers/hardware). Accurate to
 `core/smart_commissioning_core/udmi_validation.py`, `mqtt_transport.py`,
@@ -27,7 +27,7 @@ the payloads. The validator then checks payloads against an operator-uploaded
 schema set with that label (same `state.json` / `metadata.json` /
 `events_pointset.json` layout as the vendored spec, uploaded on the UDMI page
 via `POST /api/v1/udmi/schemas`; labels match case-insensitively). Only
-canonical Draft 7 validation runs for nonpub payloads — the focused checks
+canonical Draft 7 validation runs for nonpub payloads - the focused checks
 encode published-1.5.2 assumptions. A declared nonpub version with no uploaded
 set is a high-severity issue telling the operator exactly what to upload,
 never a silent pass.
@@ -44,7 +44,7 @@ Validated features (each exercised by unit tests with inline/fixture payloads):
 | Timestamp notation | every schema-declared date-time remains subject to RFC 3339 validation; `Z`, `+00:00`, and `+01:00` are accepted; valid date-times inside one payload are also compared for lexical consistency in separator case, fractional precision, and timezone notation family. Seasonal signed-offset values are not required to be equal. | Tested |
 | Units | the register's expected unit must be present in metadata and **match** it after normalisation (case, `-`/`_`, and explicit shorthand aliases such as `ppb` to `parts_per_billion`); import and validation share the vendored Google Digital Buildings unit vocabulary pinned under `core/smart_commissioning_core/schemas/dbo`; `parts_per_billion` and `parts_per_million` remain different units; numeric units require numeric values. | Tested |
 | Schedule / expected-asset input | a supplied expected schedule (`expected_schedule` with `asset_id`, `manufacturer`, `model`, `guid`, `udmi_version`, `units`) drives the per-point checks; the backend fills it from the imported `mqtt_register` (including `Expected schema version` and wildcard `Expected topic` expansion, plus the legacy `…/event/pointset` capture alias). | Tested |
-| Silent / not-publishing device | devices in `DevicesNotPublishing`, and (live) an empty **or partial** capture window, raise `not_publishing` — a partial capture names each expected topic that never reported. A completed capture window with silent or partially-reporting devices is terminal `succeeded` (stage `udmi_validation_complete_with_silent_devices`) so the operator lands on Results with each silent device red as not publishing; only transport/configuration failures (`broker_unreachable`/`tls_error`/`authentication_error`/`broker_timeout`/`live_capture_unavailable`/`missing_capture_topics`) are terminal `failed` — an unreached broker can never claim a validation. Operator cancellation remains terminal `cancelled` and keeps partial evidence. | Tested (fixture/inline); live capture is live-untested |
+| Silent / not-publishing device | devices in `DevicesNotPublishing`, and (live) an empty **or partial** capture window, raise `not_publishing` - a partial capture names each expected topic that never reported. A completed capture window with silent or partially-reporting devices is terminal `succeeded` (stage `udmi_validation_complete_with_silent_devices`) so the operator lands on Results with each silent device red as not publishing; only transport/configuration failures (`broker_unreachable`/`tls_error`/`authentication_error`/`broker_timeout`/`live_capture_unavailable`/`missing_capture_topics`) are terminal `failed` - an unreached broker can never claim a validation. Operator cancellation remains terminal `cancelled` and keeps partial evidence. | Tested (fixture/inline); live capture is live-untested |
 | Unexpected publisher measurement | register-driven live validation derives a non-global parent topic scope from expected publisher roots when that can be done safely; a bounded run observes the full configured window and counts publishers in that scope which match no expected asset. Observational wildcard topics use a separate retained-topic budget, so their traffic cannot consume the cap reserved for expected validation payloads. The count stays separate from expected, observed, compliance, and validation-issue totals. If no safe scope exists, the result states that measurement was unavailable instead of subscribing to bare `#`. | Tested with fake capture; live capture is live-untested |
 | Missing vs unexpected points | expected-but-absent points and received-but-unexpected points are classified separately. | Tested |
 | Full-report fixture mode | normalizes a `full_report.json` (DeviceList, PayloadErrors, PointsetErrors, StateErrors, ...) into issues. | Tested (packaged fixture) |
@@ -72,7 +72,7 @@ against a real broker requires on-site validation.
 ## 2. MQTT
 
 MQTT support is a **hand-rolled MQTT 3.1.1 client** (`mqtt_transport.py`) over a
-raw socket — no `paho-mqtt` dependency. It implements exactly the subset the
+raw socket - no `paho-mqtt` dependency. It implements exactly the subset the
 tool needs: CONNECT/CONNACK (with the documented CONNACK return-code mapping),
 SUBSCRIBE/SUBACK, PUBLISH (send + receive), and DISCONNECT, with MQTT
 remaining-length varint encoding/decoding.
@@ -108,11 +108,11 @@ abstraction with two implementations:
   stamped `result_summary["backend"] == "simulated"`. **Tested.**
 - **`Bacpypes3Backend` (LIVE DEFAULT, UNVALIDATED).** The real BACnet/IP path using the
   optional `bacpypes3` dependency (Who-Is + ReadProperty). It has **never been
-  integration-tested** — there is no BACnet device or building network in this
+  integration-tested** - there is no BACnet device or building network in this
   environment. The `bacpypes3` import is **lazy and guarded**: importing the
   module never requires `bacpypes3`; selecting the real backend without the
   extra raises a clear `RuntimeError` with an install hint. Uncertain API
-  assumptions are flagged inline with `# UNVERIFIED:` comments. **Live-untested —
+  assumptions are flagged inline with `# UNVERIFIED:` comments. **Live-untested -
   REQUIRES on-site validation against real controllers.**
 
 | BACnet capability | Status | Notes |
@@ -125,17 +125,17 @@ abstraction with two implementations:
 | Authorization gate before a real scan | Tested | A real (non-dry-run) scan requires the authorization contract. |
 | Directed (unicast) Who-Is | Not wired in real path | The documented signature did not accept it; flagged UNVERIFIED. |
 
-**Transport modes — a BBMD is OPTIONAL; local broadcast is the default (hard
+**Transport modes - a BBMD is OPTIONAL; local broadcast is the default (hard
 requirement, field-confirmed 2026-07-17).** Not every job site has a BBMD:
 single-subnet ("flat") networks are a normal case, and the app must scan them
-with Foreign Device left Disabled — the scan then uses **local broadcast
+with Foreign Device left Disabled - the scan then uses **local broadcast
 only**, which on a flat network is the healthy state, not a degraded fallback.
 Foreign-device registration through a BBMD engages ONLY when the saved
 configuration has Foreign Device = Enabled (with a real BBMD Address), and
 exists solely to reach devices behind routers on other subnets. Operator docs
 and messages must never present "local broadcast only" as an error, and must
 never instruct enabling the BBMD fields except for sites that actually have
-one — a 2026-07-17 field session was misdirected by exactly that (see the
+one - a 2026-07-17 field session was misdirected by exactly that (see the
 correction note in `docs/field-message-v0.1.15.md`).
 
 Install the real path with the optional extra:
@@ -163,7 +163,7 @@ requires on-site/live validation, not asserted here.
 | Device class | Status | Notes |
 | --- | --- | --- |
 | Simulated AHU / VAV / chiller controllers | Simulated (tested) | Dry-run/test fixture; analog-input/value, binary-output objects. |
-| Real BACnet/IP controllers (any vendor) | Untested (live) | `Bacpypes3Backend` — UNVALIDATED, requires on-site validation. |
+| Real BACnet/IP controllers (any vendor) | Untested (live) | `Bacpypes3Backend` - UNVALIDATED, requires on-site validation. |
 | BACnet MS/TP (serial) | Not supported | Only BACnet/IP is modelled. |
 | Devices needing APDU-chunked object-list reads | Untested (live) | Flagged UNVERIFIED in the real backend. |
 
@@ -182,7 +182,7 @@ requires on-site/live validation, not asserted here.
 ## 5. Honesty summary
 
 Everything marked **Tested** runs in-process against fakes, temporary SQLite, or
-packaged fixtures — no live infra. Everything marked **Untested (live)** depends
+packaged fixtures - no live infra. Everything marked **Untested (live)** depends
 on a real broker, a real BACnet device, or a real building network that does not
 exist in this environment, and is **not** claimed to work; those paths are
 written conservatively, import-guarded so they never crash an import when a

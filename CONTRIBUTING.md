@@ -3,24 +3,24 @@
 Thanks for working on the Smart Commissioning App. This guide covers local
 setup, how to run the checks CI runs, and the conventions we follow. The most
 important rule is at the bottom: **live-infrastructure paths must stay honestly
-marked** — we do not fabricate test results for paths that have not been run
+marked** - we do not fabricate test results for paths that have not been run
 against real hardware.
 
 ## Project layout
 
-- `core/` — `smart_commissioning_core`, shared UDMI validation, MQTT logic, DB
+- `core/` - `smart_commissioning_core`, shared UDMI validation, MQTT logic, DB
   models/repositories, and Alembic migrations (Python).
-- `backend/` — FastAPI HTTP API (`smart-commissioning-api`, Python).
-- `worker/` — Dramatiq background jobs (`smart-commissioning-worker`, Python).
-- `frontend/` — React + TypeScript + Vite operator UI.
-- `infra/` — Docker Compose stack (API, worker, Postgres, Redis, object storage).
-- `docs/` — architecture, runbook, security posture, and the on-site validation
+- `backend/` - FastAPI HTTP API (`smart-commissioning-api`, Python).
+- `worker/` - Dramatiq background jobs (`smart-commissioning-worker`, Python).
+- `frontend/` - React + TypeScript + Vite operator UI.
+- `infra/` - Docker Compose stack (API, worker, Postgres, Redis, object storage).
+- `docs/` - architecture, runbook, security posture, and the on-site validation
   checklist.
 
 ## Setup
 
-Requires **Python 3.12** and **Node 22** (which ships npm 10/11 — see the
-lockfile note below).
+Requires **Python 3.12** and **Node 22.22+ or Node 24**. CI and release builds
+use Node 24; see the lockfile note below.
 
 Python (install the three editable packages):
 
@@ -62,14 +62,14 @@ cd frontend && npm test -- --run # single run, as CI runs it
 
 ## Linting and typechecking
 
-Python — Ruff is the lint gate; mypy is informational:
+Python - Ruff is the lint gate; mypy is informational:
 
 ```bash
 ruff check backend worker core
 mypy backend/app   # informational only (does not block CI)
 ```
 
-Frontend — ESLint and the TypeScript compiler:
+Frontend - ESLint and the TypeScript compiler:
 
 ```bash
 cd frontend && npm run lint
@@ -81,12 +81,12 @@ cd frontend && npm run build
 
 CI (`.github/workflows/ci.yml`) runs three jobs on every pull request and push to `main`:
 
-- **`python`** — installs `core`/`backend`/`worker`, runs `ruff check`, then the
+- **`python`** - installs `core`/`backend`/`worker`, runs `ruff check`, then the
   core and backend `unittest` suites. mypy runs per package but is
   `continue-on-error` (informational).
-- **`frontend`** — `npm ci`, `npm run lint`, `npm run typecheck`,
+- **`frontend`** - `npm ci`, `npm run lint`, `npm run typecheck`,
   `npm test -- --run`, and `npm run build`.
-- **`sbom`** — generates a CycloneDX SBOM + license inventory and runs the
+- **`sbom`** - generates a CycloneDX SBOM + license inventory and runs the
   allowlist license gate. Currently `continue-on-error` (non-blocking) because
   the inventory depends on unpinned transitive versions; treat its warnings
   seriously even though they do not turn the build red.
@@ -118,7 +118,7 @@ failures.
 ## Honesty rule: live-infrastructure paths
 
 Several paths in this project were built without access to the real
-infrastructure they target — active network scanning against a live BMS/OT
+infrastructure they target - active network scanning against a live BMS/OT
 network, a real MQTT broker, Postgres/Redis, a remote sync hub, and the Docker
 image build. These are tracked in
 [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
@@ -129,7 +129,7 @@ When you contribute:
   infrastructure.** Mark such paths as live-untested / simulated, the way the
   existing docs do (see `docs/protocol-conformance.md`).
 - **Do not fabricate test output, broker captures, or scan results.** A passing
-  unit test against a fixture is not the same as a passing live run — say which
+  unit test against a fixture is not the same as a passing live run - say which
   one you ran.
 - If you do validate a live path on real hardware, record the evidence and check
   off the corresponding item in `docs/phase5-onsite-validation.md`.

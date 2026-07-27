@@ -1,8 +1,11 @@
-# Message to field engineer — v0.1.14 (ready to send)
+# Historical field message: v0.1.14
+
+> Retained as the message sent for v0.1.14. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-16, after the v0.1.11–13 wrap-up message went out.** The
 v0.1.14 Release is published with the portable zip attached and marked latest,
-so this is true as written — paste it into Teams or email as-is.
+so this is true as written - paste it into Teams or email as-is.
 
 Context for the next session: v0.1.14 is a same-day follow-up to v0.1.13. An
 audit sweep found three placeholder leftovers that survived the v0.1.13 purge
@@ -16,7 +19,7 @@ leave main one commit ahead of the tag it describes. Release notes can carry
 it without a commit.
 
 field engineer's environment (2026-07-16): he tests on his **personal laptop**, and the
-MSI server has **no ThreatLocker/allowlisting** — so the hash-approval drill
+MSI server has **no ThreatLocker/allowlisting** - so the hash-approval drill
 does not apply to his machines (it is only the dev laptop that is locked
 down). The message therefore carries the SmartScreen note, not the IT one.
 
@@ -35,7 +38,7 @@ What's in the app:
 - Menus named properly: IP Discovery, BACnet Discovery, MQTT Discovery
 - Reports show up in the Reports tab the moment they're generated, with
   Electracom headers and footers and a list of what was actually found
-- Every page remembers its last run when you navigate away and back
+- Every page remembers its last run when you leave and return
 - Register imports explain exactly which rows were rejected and why, and
   Excel-saved files import without fuss
 - BACnet scans reach devices behind your BBMD (foreign device registration)
@@ -56,6 +59,6 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-2026-07-16.md` — the v0.1.11–13 wrap-up message (sent).
-- `docs/field-followups-2026-07-16.md` — his open questions (unchanged by this).
-- `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.
+- `docs/field-message-2026-07-16.md` - the v0.1.11–13 wrap-up message (sent).
+- `docs/field-followups-2026-07-16.md` - his open questions (unchanged by this).
+- `docs/lab-day-2026-07-20-runbook.md` - Monday's BACnet lab session.

@@ -1,5 +1,8 @@
 # Field message for v0.1.21
 
+> Historical release message. Use [field-quickstart.md](field-quickstart.md) for
+> current field work.
+
 Send this only after the v0.1.21 release page resolves and its portable ZIP is
 attached.
 

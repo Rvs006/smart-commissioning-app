@@ -1,7 +1,7 @@
-# v0.1.23: complete UDMI validation evidence and reporting
+# v0.1.23 - Complete UDMI validation evidence and reporting
 
-This release turns retained UDMI validation data into an operator-readable
-result, a portable raw record, and a consistent set of commissioning reports.
+One retained UDMI run now produces the same operator summary, portable JSON
+record, and commissioning-report data across PDF, Word, Excel, and ZIP.
 
 ## What changed
 

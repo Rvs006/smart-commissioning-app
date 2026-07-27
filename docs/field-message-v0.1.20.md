@@ -1,7 +1,10 @@
-# Message to field engineer + integration engineer — v0.1.20 (ready to send)
+# Historical field message: v0.1.20
+
+> Retained as the message prepared for v0.1.20. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-22, ahead of the tag.** Send AFTER the v0.1.20 Release is
-published with the portable zip attached and marked latest — check the link
+published with the portable zip attached and marked latest - check the link
 resolves first. This is the release that fixes everything from Monday's
 on-site day.
 
@@ -53,5 +56,5 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-v0.1.19.md` — the previous build's message.
-- `CHANGELOG.md` `[0.1.20]` — full detail.
+- `docs/field-message-v0.1.19.md` - the previous build's message.
+- `CHANGELOG.md` `[0.1.20]` - full detail.

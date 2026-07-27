@@ -1,6 +1,6 @@
 # Smart Commissioning App
 
-> Commissioning and verification platform for smart-building Master Systems Integrators (MSIs) —
+> Commissioning and verification platform for smart-building Master Systems Integrators (MSIs) -
 > configure a site, discover its devices, validate UDMI/BACnet/MQTT data against what was
 > specified, and export signed commissioning evidence.
 
@@ -14,19 +14,19 @@
 
 | You are… | Use | Time | You need |
 | --- | --- | --- | --- |
-| A field engineer on a Windows laptop | **Path 1 — Portable app** (no install) | ~2 min | Nothing installed; just the zip |
-| Setting up a shared team server, or want the identical-everywhere stack | **Path 2 — Docker Desktop** | ~10 min | Docker Desktop; ~32 GB RAM recommended; repo access |
-| Looking for the cloud/hosted deployment | Not an engineer task — see [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | — | — |
+| A field engineer on a Windows laptop | **Path 1 - Portable app** (no install) | ~2 min | Nothing installed; just the zip |
+| Setting up a shared team server, or want the identical-everywhere stack | **Path 2 - Docker Desktop** | ~10 min | Docker Desktop; ~32 GB RAM recommended; repo access |
+| Looking for the cloud/hosted deployment | Not an engineer task - see [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | - | - |
 
-### Path 1 — Windows portable app (nothing to install)
+### Path 1 - Windows portable app (nothing to install)
 
 1. Download `Smart_Commissioning_App_Windows_Portable.zip` from the
    **[latest release](https://github.com/Rvs006/smart-commissioning-app/releases/latest)**.
 2. Right-click the zip → **Extract All** to a normal folder (Desktop is fine).
 3. Double-click `SmartCommissioningApp.exe`. Keep the black console window open.
-4. Your browser opens automatically — usually <http://127.0.0.1:8000/>. If port 8000 is busy the
+4. Your browser opens automatically - usually <http://127.0.0.1:8000/>. If port 8000 is busy the
    launcher picks the next free port and prints the correct URL in the console; use that URL.
-5. That's it — no API key, no sign-in. The app trusts your own laptop (loopback), so
+5. That's it - no API key, no sign-in. The app trusts your own laptop (loopback), so
    Run / Publish / Export and the certificate/key **Replace** buttons are enabled automatically.
 
 **Check the build before use:** `README_FIRST.txt` names the packaged version and
@@ -36,18 +36,18 @@ match the version on the GitHub release page you downloaded.
 
 For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#mqttudmi-field-check-v0124-or-later) after startup. The **latest release** link above is the single supported download location; confirm that its tag and bundled `README_FIRST.txt` both name v0.1.24 or later before using this checklist.
 
-> ⚠️ **Windows SmartScreen may warn** — this is an internal unsigned build. Choose
+> ⚠️ **Windows SmartScreen may warn** - this is an internal unsigned build. Choose
 > **More info → Run anyway**, only if you got the zip from the project owner or the releases page
 > above. On a locked-down company laptop with application allow-listing (e.g. ThreatLocker), ask
-> IT to approve the exe first — its SHA-256 is pinned in the release notes.
+> IT to approve the exe first - its SHA-256 is pinned in the release notes.
 
 > **Stop the app:** press `Ctrl+C` in the console window, or just close the window.
 
-### Path 2 — Docker Desktop (recommended for team consistency)
+### Path 2 - Docker Desktop (recommended for team consistency)
 
 **Prerequisites:** Docker Desktop installed and running; ~32 GB RAM recommended for the full
 stack; the repository cloned. The repository is **public**, so no collaborator invitation is
-needed to clone it — but keep site names, real addresses, and commercial detail out of anything
+needed to clone it - but keep site names, real addresses, and commercial detail out of anything
 you push back.
 
 ```bash
@@ -56,7 +56,7 @@ cd smart-commissioning-app
 ```
 
 One command brings up frontend + API + worker + Postgres + Redis. `API_KEY` is required in this
-profile — the bootstrap script writes `infra/.env` from `infra/.env.example` with fresh random
+profile - the bootstrap script writes `infra/.env` from `infra/.env.example` with fresh random
 secrets and prints the `API_KEY` to paste into **Set API key** (it refuses to overwrite an
 existing `infra/.env`). **Use the block for your shell** (`bootstrap-env.ps1` needs
 PowerShell 7 / `pwsh`):
@@ -73,36 +73,36 @@ docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 docker compose -f infra/docker-compose.yml --env-file infra/.env up -d --build
 ```
 
-Then sign in — hosted deployments require an API key to view real data and take any action
-(without one, pages show **"Authentication required — set an API key"** and Run / Upload /
+Then sign in - hosted deployments require an API key to view real data and take any action
+(without one, pages show **"Authentication required - set an API key"** and Run / Upload /
 Generate / Export stay disabled; that is expected):
 
 1. Open **<http://127.0.0.1:8080>** (nginx serves the UI and proxies `/api` → the API).
 2. Click **"Set API key"** at the **top-right** of the header.
 3. Paste the `API_KEY` value the bootstrap script printed and click **Save**. The page reloads
-   and shows your role — Reports, runs, results, uploads, and network scans now work.
+   and shows your role - Reports, runs, results, uploads, and network scans now work.
 
-**Better than sharing the admin key — give each engineer their own:** sign in with the `API_KEY`
+**Better than sharing the admin key - give each engineer their own:** sign in with the `API_KEY`
 (it acts as **admin**), open the **Users** tab, create a user with the right role (e.g.
 `engineer`), and hand them the **one-time key** shown. They set it the same way. See
 [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md).
 
 **What works without any key:** the blank import **templates** (Download XLSX/CSV) and the
-**import-profile list** are public format helpers — column headers plus one example row, no
-project data — so an engineer can prepare a register before they have a key. See
+**import-profile list** are public format helpers - column headers plus one example row, no
+project data - so an engineer can prepare a register before they have a key. See
 [infra/README.md](infra/README.md) for the full hosted runbook.
 
-### First run (both paths) — 3 steps
+### First run (both paths) - 3 steps
 
-1. **Hosted only:** click **Set API key** (top-right) and paste your key — the portable app skips
+1. **Hosted only:** click **Set API key** (top-right) and paste your key - the portable app skips
    this step entirely.
-2. Open **Configuration** and confirm **Source Interface** — when never chosen, the tool
+2. Open **Configuration** and confirm **Source Interface** - when never chosen, the tool
    pre-selects the first up wired adapter (Ethernet/USB-Ethernet). On a multi-NIC laptop (Wi-Fi
    for internet + wired Ethernet to the BMS network) confirm the wired adapter is selected so
    scans egress on the building network.
 3. In **IP Scanner**, upload the project's IP register under **Register Import** (blank XLSX/CSV
-   templates are downloadable in the same panel — scan targets come from the register's
-   "Expected IP address" column), then tick **Dry run** and start the scan — it produces a plan
+   templates are downloadable in the same panel - scan targets come from the register's
+   "Expected IP address" column), then tick **Dry run** and start the scan - it produces a plan
    of scan targets, sends no packets, and needs no authorization.
 
 The same guide lives in the app: **Learning → Installation & Setup** (`/#/learning`).
@@ -124,13 +124,13 @@ the expected register, scan the live building network, confirm every device is p
 UDMI-compliant data that matches the design, and hand the client a tamper-evident evidence pack.
 
 Commissioning a smart building means proving that hundreds of field devices were installed,
-addressed, and configured to match the design — and producing evidence of it. This tool turns that
+addressed, and configured to match the design - and producing evidence of it. This tool turns that
 manual, error-prone checklist into a repeatable five-stage workflow:
 
 | Stage | What happens | Pages |
 | --- | --- | --- |
 | **1. Configure** | Capture the site's network, BACnet, MQTT broker (with TLS certs), time/NTP and backup settings. Export/import per-project config so the same engineer can jump between projects. | Configuration |
-| **2. Import** | Upload the *expected* register (CSV/XLSX) — the devices and points the design says should exist. Every module ships a downloadable template. Registers are flexible: asset ID *or* name, optional Notes/payload-type, `prefix/#` topic wildcards, multiple points per row, and UDMI metadata columns (make/model/GUID/serial/firmware/site/room). | each module |
+| **2. Import** | Upload the *expected* register (CSV/XLSX) - the devices and points the design says should exist. Every module ships a downloadable template. Registers are flexible: asset ID *or* name, optional Notes/payload-type, `prefix/#` topic wildcards, multiple points per row, and UDMI metadata columns (make/model/GUID/serial/firmware/site/room). | each module |
 | **3. Discover** | Scan the live network: IP sweep, BACnet device/object discovery, and MQTT topic capture (MQTT-Explorer-style wildcard subscription with latest-payload export). The IP sweep honours operator port ranges and flags **forbidden** and **unexpected-open** ports; the MQTT subscribe inherits the configured QoS, a blank per-run topic filter captures every topic (`#`), and `#` / `prefix/#` filters match the concrete publish topics returned by the broker. | IP Scanner, BACnet Discovery, MQTT Discovery |
 | **4. Validate** | Check observed data against the design: UDMI payload validation (pointset / metadata / state, expected-vs-observed) and BACnet ↔ MQTT comparison within tolerances. UDMI validates **every asset in the register in one run** and matches make/model/GUID/serial/firmware/site/room. Result is a clear **Pass / Fail** with reasons. | UDMI Validation, BACnet to MQTT Validation |
 | **5. Report** | Export a commissioning evidence pack (XLSX / DOCX / ZIP) scoped to the runs you choose, carrying the actual findings and stamped with an integrity signature. | Reports |
@@ -142,19 +142,19 @@ lets an engineer correct a device's setpoints and prove the change took effect.
 and **Run History** lists every recorded run in one sortable, filterable table with absolute
 Started/Finished timestamps and a **duration**, plus a one-click **Export CSV** of the visible rows.
 
-### In-app onboarding — Brief & Learning
+### In-app onboarding - Brief & Learning
 
 The console is branded in the **Electracom** theme with a **light/dark toggle** in the header, and
 ships two standalone onboarding surfaces (linked from the header, or reachable directly):
 
-- **Product Brief** — `/#/brief` — what the tool is and how it works, in four tabs: Basics, Key
+- **Product Brief** - `/#/brief` - what the tool is and how it works, in four tabs: Basics, Key
   Features, Section Reference, and a role-based **Guided Tour**.
-- **Learning** — `/#/learning` — an **Installation & Setup** guide (both install paths plus
+- **Learning** - `/#/learning` - an **Installation & Setup** guide (both install paths plus
   first-run steps) and pick-your-role walkthroughs of the exact modules each role (Commissioning
   Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
 
-The module tabs are grouped by workflow stage — **Configure → Discover → Validate → Report →
-Operate** — so the navigation mirrors the order of the job rather than presenting a flat row of equal
+The module tabs are grouped by workflow stage - **Configure → Discover → Validate → Report →
+Operate** - so the navigation mirrors the order of the job rather than presenting a flat row of equal
 tabs. Each module page is then organised as a **Setup → Run → Results** step flow (a segmented
 control at the top of the page), so an operator works one screen at a time rather than scrolling
 every control at once. The step advances automatically as a run is queued and completes.
@@ -163,7 +163,7 @@ every control at once. The step advances automatically as a run is queued and co
 
 ## For developers
 
-Everything below is for contributors and reviewers — a field engineer running the app does not
+Everything below is for contributors and reviewers - a field engineer running the app does not
 need any of it.
 
 ### Architecture
@@ -188,13 +188,13 @@ flowchart LR
 
 **Deployment profiles** (`DEPLOYMENT_ROLE`):
 
-- **`standalone` / portable** — a single Windows `.exe`, SQLite, jobs run inline, bound to
+- **`standalone` / portable** - a single Windows `.exe`, SQLite, jobs run inline, bound to
   `127.0.0.1`, no broker/DB/Redis required. For one engineer on one laptop, including air-gapped OT
-  networks. (A commissioning tool *must* run on the site network — central-only can't reach
+  networks. (A commissioning tool *must* run on the site network - central-only can't reach
   air-gapped sites.)
-- **`edge`** — the on-site instance that does the live scanning, then pushes signed run bundles to a
+- **`edge`** - the on-site instance that does the live scanning, then pushes signed run bundles to a
   hub (online, or offline via a carried `.scbundle` file).
-- **`hub`** — a central, multi-project instance (Postgres, company SSO/RBAC) that ingests edge runs
+- **`hub`** - a central, multi-project instance (Postgres, company SSO/RBAC) that ingests edge runs
   fail-closed (trusted-edge allowlist, signature + per-run hash verification, immutable upsert).
 
 ### Tech stack
@@ -204,14 +204,14 @@ flowchart LR
 | Frontend | React 18, TypeScript, Vite, TanStack Query/Router |
 | API | FastAPI (Python 3.12), Pydantic v2 |
 | Worker | Dramatiq on Redis |
-| Core | `smart_commissioning_core` — engines, UDMI/MQTT logic, persistence |
-| Persistence | SQLAlchemy 2 + Alembic — SQLite (local) / PostgreSQL (hosted) |
+| Core | `smart_commissioning_core` - engines, UDMI/MQTT logic, persistence |
+| Persistence | SQLAlchemy 2 + Alembic - SQLite (local) / PostgreSQL (hosted) |
 | Packaging | PyInstaller Windows portable bundle; Docker Compose hosted stack |
 
 ### Run from source (developer profile)
 
 Single-user loopback profile: SQLite, jobs inline, auth bypassed for `127.0.0.1`. Requires
-**Python 3.12** and **Node 22**. The full copy-paste steps (editable installs, uvicorn, demo seed,
+**Python 3.12** and **Node 22.22+ or Node 24**. CI and release builds use Node 24. The full copy-paste steps (editable installs, uvicorn, demo seed,
 Vite dev server, smoke one-liner) live in
 **[docs/quickstart.md §C](docs/quickstart.md#c-developer-profile--run-from-source)**.
 
@@ -233,12 +233,12 @@ set (see [docs/portable-bundle-rebuild.md](docs/portable-bundle-rebuild.md)):
 | Tool | Supported / pinned version |
 | --- | --- |
 | OS | Windows 11 Pro / Windows Server 2022 |
-| Shell | PowerShell 7+ (`pwsh`) — **not** Windows PowerShell 5.1 |
+| Shell | PowerShell 7+ (`pwsh`) - **not** Windows PowerShell 5.1 |
 | Python | 3.12.10 |
 | pip | 26.1.x |
 | setuptools | >=62 (built with 82.0.1) |
 | PyInstaller | 6.20.0 |
-| Node | 22 |
+| Node | 22.22+ or 24; CI and release builds use 24 |
 
 ### Repository layout
 
@@ -246,7 +246,7 @@ set (see [docs/portable-bundle-rebuild.md](docs/portable-bundle-rebuild.md)):
 frontend/    React + TypeScript operator UI
 backend/     FastAPI HTTP API (smart-commissioning-api)
 worker/      Dramatiq background jobs (smart-commissioning-worker)
-core/        smart_commissioning_core — engines, UDMI/MQTT logic, DB models, Alembic migrations
+core/        smart_commissioning_core - engines, UDMI/MQTT logic, DB models, Alembic migrations
 infra/       Docker Compose stack (frontend, api, worker, Postgres, Redis)
 packaging/   Windows portable bundle (launcher + build.ps1)
 scripts/     seed_demo, smoke tests, Phase 5 preflight, edge→hub sync CLI
@@ -257,53 +257,33 @@ Smart Commissioning Tool Specification.pdf
 
 ### Documentation
 
-| Document | Covers |
+The [documentation index](docs/README.md) lists every current, candidate,
+versioned, historical, generated, and contributor document. Start with the
+small set below instead of guessing from filenames.
+
+| Need | Document |
 | --- | --- |
-| [docs/what-is-this.md](docs/what-is-this.md) | Plain-English onboarding: what the app is, what it does, how to explain it |
-| [docs/field-quickstart.md](docs/field-quickstart.md) | Printable one-page card for an engineer at the panel: run the exe, pick the NIC, dry-run then scan |
-| [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) | Agent/contributor quick-reference: setup, the `unittest` test commands CI runs, lint, local run, conventions, gotchas (identical files) |
-| [docs/review-guide.md](docs/review-guide.md) | How to review this build: run it, what to look at, scope for this round |
-| [docs/windows-compatibility.md](docs/windows-compatibility.md) | Windows 11 Pro / Server 2022 support paths, CI coverage, local smoke command |
-| [docs/quickstart.md](docs/quickstart.md) | Validate a running stack in 5 minutes (smoke test) + developer run-from-source |
-| [docs/production-architecture.md](docs/production-architecture.md) | System model mapping the specification to the production build |
-| [docs/runbook.md](docs/runbook.md) | Deploy, operate, and recover (hosted compose + edge/portable profiles) |
-| [docs/security-posture.md](docs/security-posture.md) | Threat model, auth, secret handling, scan-safety, IEC 62443 alignment |
-| [docs/sync-architecture.md](docs/sync-architecture.md) | Signed edge → hub run + evidence synchronization |
-| [docs/observability.md](docs/observability.md) | Structured logs, Prometheus metrics, alerts/SLOs, crash log |
-| [docs/backup-restore.md](docs/backup-restore.md) | Backup/restore + retention, RPO/RTO guidance per profile |
-| [docs/protocol-conformance.md](docs/protocol-conformance.md) | UDMI/MQTT/BACnet support: tested vs. simulated vs. live-untested |
-| [docs/review-comments-verification.md](docs/review-comments-verification.md) | The 24 design-review comments mapped to code + localhost verify steps |
-| [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) | On-site validation checklist for live-network/infra paths |
-| [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | Safe controlled-pilot boundary + hosted setup for the team |
-| [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory |
-| [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md) | Design doc for source-interface (NIC) selection for active scans (implemented) |
-| [docs/release-notes-v0.1.27.md](docs/release-notes-v0.1.27.md) | v0.1.27 heartbeat scope, field-report interpretation, deployment impact, and release evidence |
-| [docs/inline-heartbeat-v0.1.27.md](docs/inline-heartbeat-v0.1.27.md) | Ownership, timing, cleanup, and failure semantics for portable and synchronous inline runs |
-| [docs/migration-rollback-v0.1.27.md](docs/migration-rollback-v0.1.27.md) | No-schema-change upgrade, backup, rollback, and Windows portable replacement procedure |
-| [docs/release-validation-v0.1.27.md](docs/release-validation-v0.1.27.md) | Blocking exact-SHA, test, Windows, report, and publication checklist |
-| [docs/release-notes-v0.1.28.md](docs/release-notes-v0.1.28.md) | Shared lifecycle parity, complete Sync v2 evidence, Docker publication, and release hashes |
-| [docs/migration-rollback-v0.1.28.md](docs/migration-rollback-v0.1.28.md) | Additive Sync v2 migration, backup, mixed-version operation, downgrade, and restore order |
-| [docs/release-validation-v0.1.28.md](docs/release-validation-v0.1.28.md) | Blocking lifecycle, Sync v2, Docker, Windows, provenance, and cleanup checklist |
-| [docs/release-notes-v0.1.29.md](docs/release-notes-v0.1.29.md) | Scale-aware MQTT capture, wrong-topic evidence, frozen register annotations, report deletion, and release hashes |
-| [docs/v0.1.29-field-acceptance-checklist.md](docs/v0.1.29-field-acceptance-checklist.md) | Markable 554-asset scale and longest-cadence acceptance record |
-| [docs/sync-v2-wire-format.md](docs/sync-v2-wire-format.md) | Signed bundle members, canonical item fields, verification order, and size limits |
-| [docs/sync-v2-credential-scope.md](docs/sync-v2-credential-scope.md) | Dedicated edge credentials, key binding, project/site authorization, and generic failures |
-| [docs/sync-v2-operations.md](docs/sync-v2-operations.md) | Receipt classes, retry state, lost responses, conflicts, and v2-to-v1 negotiation |
-| [docs/docker-deployment-rollback-v0.1.28.md](docs/docker-deployment-rollback-v0.1.28.md) | Immutable GHCR deployment, Compose profiles, migration, health, and rollback |
+| Understand the product | [What is this?](docs/what-is-this.md) |
+| Run the portable app at a panel | [Field quick-start](docs/field-quickstart.md) |
+| Validate a running stack | [Quickstart](docs/quickstart.md) |
+| Operate or recover a deployment | [Operations runbook](docs/runbook.md) |
+| Check protocol support and live-test gaps | [Protocol conformance](docs/protocol-conformance.md) and [Phase 5 validation](docs/phase5-onsite-validation.md) |
+| Prepare the v0.1.29 field gate | [v0.1.29 field acceptance checklist](docs/v0.1.29-field-acceptance-checklist.md) |
+| Contribute code | [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) |
 
 ### Security & safety
 
-- **Auth** — `local` (loopback-only, portable default) or `api_key` mode; per-user **RBAC**
+- **Auth** - `local` (loopback-only, portable default) or `api_key` mode; per-user **RBAC**
   (`viewer < reviewer < engineer < admin`) gates every route, with a race-safe last-admin guard.
-- **Secrets at rest** — broker passwords and TLS keys are Fernet-encrypted (`0600`), masked on read,
+- **Secrets at rest** - broker passwords and TLS keys are Fernet-encrypted (`0600`), masked on read,
   and redacted from API responses; never returned to clients.
-- **Scan safety** — live scans are **dry-run by default**, require an explicit authorization flag,
+- **Scan safety** - live scans are **dry-run by default**, require an explicit authorization flag,
   are rate-throttled, and support cooperative cancellation. No packets leave without consent.
-- **Evidence integrity** — reports and backups are hashed (SHA-256) and signed (detached Ed25519);
+- **Evidence integrity** - reports and backups are hashed (SHA-256) and signed (detached Ed25519);
   restores verify before writing (with a zip-slip guard).
 - **Sealed execution** - one database owner may execute a run, and completed
   results plus generated report bytes are immutable.
-- **Honest status** — live-infrastructure paths that have not been run against real hardware are
+- **Honest status** - live-infrastructure paths that have not been run against real hardware are
   marked as such, never faked. See the honesty rule in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Project status & roadmap
@@ -347,7 +327,7 @@ and Windows workflow evidence from its signed tag commit. A controlled team pilo
 supported boundary; see [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md)
 and [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md).
 
-**Implemented:** source-interface (NIC) selection — an operator can choose which
+**Implemented:** source-interface (NIC) selection - an operator can choose which
 network interface active scans egress from, via a **"Source Interface"** field on
 the Configuration page backed by `GET /api/v1/system/interfaces`, for multi-NIC
 commissioning laptops. Real multi-NIC egress is still verified on site. Design

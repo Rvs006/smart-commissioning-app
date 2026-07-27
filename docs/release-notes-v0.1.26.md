@@ -1,11 +1,8 @@
-# v0.1.26: completed evidence stays completed
+# v0.1.26 - Completed evidence stays completed
 
-This reliability release closes the race conditions that could let a delayed
-worker, browser request, or report download show evidence from the wrong point
-in time.
-
-The best change is deliberately boring: download the same report twice and you
-get the same bytes.
+A delayed worker or browser request could expose evidence from the wrong point
+in time. v0.1.26 seals completed runs and stores report bytes, so downloading
+the same report twice returns the same SHA-256 and the same file.
 
 ## What changed
 

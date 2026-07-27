@@ -25,7 +25,7 @@ field engineer's discovery run proves the MSI client can connect, subscribe, and
 
 ## Implementation units
 
-### U1 — Trace the live request and capture contract
+### U1 - Trace the live request and capture contract
 
 Files: `frontend/src/features/workflow/ModulePage.tsx`, `backend/app/api/routes/validation.py`, `core/smart_commissioning_core/udmi_validation.py`.
 
@@ -33,7 +33,7 @@ Confirm the exact JSON sent for a register-driven run, including `use_register`,
 
 Tests: frontend request test asserts `capture_seconds: 120`; backend route test asserts three imported rows produce the expected state/metadata/pointset filters; core test asserts the capture callback receives the same filters and timeout.
 
-### U2 — Make topic normalization and asset routing deterministic
+### U2 - Make topic normalization and asset routing deterministic
 
 Files: `backend/app/api/routes/validation.py`, `core/smart_commissioning_core/udmi_validation.py`.
 
@@ -41,7 +41,7 @@ Centralize normalization of trailing slashes, wildcard roots, singular/plural ev
 
 Tests: three assets with overlapping prefixes; explicit state-only rows; blank payload type whole-asset rows; `event/pointset` and `events/pointset` aliases; newer/older duplicate messages; malformed and scalar payloads.
 
-### U3 — Verify timeout and completion semantics
+### U3 - Verify timeout and completion semantics
 
 Files: `core/smart_commissioning_core/udmi_validation.py`, `core/smart_commissioning_core/mqtt_transport.py`.
 
@@ -49,7 +49,7 @@ Ensure positive timeout values are passed unchanged, blank means cancel/message-
 
 Tests: delayed payload at 1, 30, and 119 seconds; no payload until timeout; retained payload followed by fresh payload; early PUBLISH before SUBACK; QoS1 and QoS2; cancellation; message-cap exhaustion.
 
-### U4 — Improve evidence and failure diagnostics
+### U4 - Improve evidence and failure diagnostics
 
 Files: `core/smart_commissioning_core/udmi_validation.py`, `backend/app/api/routes/validation.py`, `frontend/src/features/workflow/ModulePage.tsx`.
 
@@ -57,7 +57,7 @@ Expose normalized subscriptions, captured topics, per-asset receipt times, retai
 
 Tests: each diagnostic status produces the expected safe result fields; credential-bearing exceptions are redacted; UI renders the mismatch without crashing and preserves the expected-vs-observed payload view.
 
-### U5 — MSI deployment and field reproduction
+### U5 - MSI deployment and field reproduction
 
 Files: `.github/workflows/windows-portable.yml`, `packaging/windows_portable/build.ps1`, `docs/phase5-onsite-validation.md`.
 

@@ -1,4 +1,4 @@
-# v0.1.27: portable runs keep their lease
+# v0.1.27 - Portable runs keep their lease
 
 A 32,400-second capture should never die at 63 seconds because its executor
 forgot to check in. v0.1.27 fixes that Windows portable failure while preserving

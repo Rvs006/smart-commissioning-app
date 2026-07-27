@@ -1,10 +1,14 @@
 ---
 title: "Fix field engineer UDMI payload mapping and result presentation"
-status: active
+status: completed
 created: 2026-07-10
 ---
 
 # Problem frame
+
+> Completed and retained as design history. Current UDMI behavior is documented
+> in [protocol-conformance.md](../protocol-conformance.md) and the versioned
+> release notes.
 
 field engineer's live broker test now captures all payload groups. The result screen still
 reports registered points as absent even though the captured metadata visibly
@@ -56,7 +60,7 @@ silently relax canonical validation.
 
 ## Implementation units
 
-### U1 — Characterise field engineer-shaped payload matching
+### U1 - Characterise field engineer-shaped payload matching
 
 Files: `core/tests/test_udmi_validation.py`, `backend/tests/test_v1_review_contracts.py`.
 
@@ -67,7 +71,7 @@ model. Cover present, missing, and mismatched fields.
 Verification: registered points shown in field engineer's screenshots match; a genuinely
 missing point/unit and missing make/model/version each emit a precise issue.
 
-### U2 — Correct shared validation lookup and missing-field handling
+### U2 - Correct shared validation lookup and missing-field handling
 
 Files: `core/smart_commissioning_core/udmi_validation.py`,
 `core/tests/test_udmi_validation.py`.
@@ -81,7 +85,7 @@ Verification: valid metadata point units no longer produce missing-point
 issues; mismatched and absent values remain failures; existing schema tests stay
 green.
 
-### U3 — Present register expectations as UDMI paths
+### U3 - Present register expectations as UDMI paths
 
 Files: `core/smart_commissioning_core/udmi_validation.py`,
 `frontend/src/features/workflow/ModulePage.tsx`,
@@ -94,7 +98,7 @@ path/value comparison representation that names `version`,
 Verification: UI tests assert that operator-visible expected labels use UDMI
 paths and never expose `manufacturer` or `udmi_version` as payload fields.
 
-### U4 — Add a local JSONCrack-style payload inspector
+### U4 - Add a local JSONCrack-style payload inspector
 
 Files: `frontend/src/features/workflow/ModulePage.tsx`,
 `frontend/src/features/workflow/ModulePage.test.tsx`.
@@ -107,7 +111,7 @@ Verification: valid nested payload expands and collapses correctly; absent or
 malformed payload has no actionable control; configuration secrets are not
 included.
 
-### U5 — Release and field verification
+### U5 - Release and field verification
 
 Files: `docs/field-quickstart.md`, `CHANGELOG.md`.
 

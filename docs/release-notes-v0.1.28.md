@@ -1,4 +1,4 @@
-# v0.1.28: one lease contract, immutable Sync v2 evidence
+# v0.1.28 - One lease contract, immutable Sync v2 evidence
 
 v0.1.27 stopped healthy Windows captures from expiring near 63 seconds. v0.1.28
 applies that ownership model to every execution profile, then completes the
@@ -99,7 +99,8 @@ remain in place. Back up the database and all runtime volumes before upgrade.
 An application rollback should keep the upgraded database when the prior version
 can read it safely. A schema downgrade removes the new Sync v2 tables and their
 audit state, so export required receipts and artifacts first. Follow
-`MIGRATION_ROLLBACK.md` and `DOCKER_DEPLOYMENT_ROLLBACK.md` for the exact order.
+`docs/migration-rollback-v0.1.28.md` and
+`docs/docker-deployment-rollback-v0.1.28.md` for the exact order.
 
 ### Known boundaries
 

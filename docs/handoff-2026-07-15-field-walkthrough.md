@@ -1,8 +1,8 @@
-# Handoff — field engineer's 2026-07-15 v0.1.10 walkthrough punch list
+# Handoff - field engineer's 2026-07-15 v0.1.10 walkthrough punch list
 
 > **✅ SPENT 2026-07-16.** Every release this document drove is shipped:
 > v0.1.11, v0.1.12, v0.1.13 and the v0.1.14 follow-up are all released with
-> portable bundles attached. This is a historical record now — do NOT work
+> portable bundles attached. This is a historical record now - do NOT work
 > from it. Current state: the status block in `AGENTS.md`, the deferred items
 > in `docs/handoff-v0.1.13-remaining-punchlist.md` §4–5, GitHub issue #4, and
 > the 2026-07-20 lab session (`docs/lab-day-2026-07-20-runbook.md`).
@@ -14,7 +14,7 @@ touching code. Everything below was verified against `main @ 82e838c`
 every claim carries file:line evidence you can re-check.
 
 **Repo state when this was written:** `main` == `origin/main` @ `82e838c`,
-working tree clean, **0 open PRs** (old remote branches are kept deliberately —
+working tree clean, **0 open PRs** (old remote branches are kept deliberately -
 do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
 
 **Model routing (also in AGENTS.md/CLAUDE.md):** plan/investigate/architect on
@@ -24,7 +24,7 @@ do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
 
 ## 1. Context
 
-- **field engineer** — the field engineer validating the app, running it on a laptop and
+- **field engineer** - the field engineer validating the app, running it on a laptop and
   on a customer server. He walked through v0.1.10 end-to-end on 2026-07-15 (IP
   discovery → BACnet → MQTT discovery → UDMI workbench → reports) and produced
   the punch list below. Other reviewers will add feedback later.
@@ -39,24 +39,24 @@ do not delete them). v0.1.10 released 2026-07-14 (~23:50) with PRs #76/#77/#78.
 - **Decision made on the call:** drop the Docker distribution; the portable exe
   is the only supported path going forward (Docker can't reach host L2 for
   scans). Do NOT remove the hosted multi-user profile code (api_key/Postgres/
-  Redis/Hub) — it is Docker-independent; only the Docker packaging/docs go.
+  Redis/Hub) - it is Docker-independent; only the Docker packaging/docs go.
 
 ### 1a. Reconciled against field engineer's own notes doc (2026-07-15)
 
 field engineer's emailed notes (24 numbered items + 16 screenshots) were checked against
 this punch list: **every item maps onto work already listed below, and the doc
 adds no new work item.** Three details it records that this handoff originally
-did not — none of which change v0.1.11 scope:
+did not - none of which change v0.1.11 scope:
 
 1. **The look-and-feel target is named.** field engineer: "use the UDMI page and apply
    this look and feel to the other pages." The UDMI workbench is the canonical
-   reference for the consistency item (§4 IP Discovery, deferred to *Later*) —
+   reference for the consistency item (§4 IP Discovery, deferred to *Later*) -
    not a fresh design.
 2. **The MQTT inspector wants message metadata, not just the payload.** field engineer:
    "can we see if it's retained, when it was published, QoS level of message."
    The §4 MQTT inspector item (small 0.5d) only planned payload + JsonTree.
    Check whether `mqtt_discovery` even captures retain/QoS/publish-time before
-   sizing this — if not, it is an engine change, not a UI wiring change, and the
+   sizing this - if not, it is an engine change, not a UI wiring change, and the
    0.5d estimate is wrong. (v0.1.12.)
 3. **"Documents at top of page in line with the changes"** is its own item; this
    handoff folded it into the placeholder-content purge. (*Later*.)
@@ -64,22 +64,22 @@ did not — none of which change v0.1.11 scope:
 Screenshot corroboration worth knowing: his rejected-import screenshot shows
 exactly `REJECTED / 0 accepted · 4 rejected` with no reasons (§3b(1) is the
 headline fix of v0.1.11), and his filename was already date-suffixed
-(`..._template150726.csv`) — he had been working around the same-filename skip
+(`..._template150726.csv`) - he had been working around the same-filename skip
 (§3b(3)) by hand. His UDMI failure screenshot shows `live_capture_timeout` →
 run status **FAILED** with "expected 4 / publishing 3", which is precisely the
 §4 "don't fail run on silent devices" fix (v0.1.12).
 
 ---
 
-## 2. Master root cause — the step-gating/state-reset flaw (explains 4 complaints)
+## 2. Master root cause - the step-gating/state-reset flaw (explains 4 complaints)
 
 The Setup/Run/Results stepper is CSS-only hiding, and route changes wipe
 in-memory state:
 
-- `.module-steps > [data-stepgroup] { display:none }` except the active step —
+- `.module-steps > [data-stepgroup] { display:none }` except the active step -
   `frontend/src/styles/electracom-theme.css:1299-1316`
 - Route-change effect resets `step` → `"setup"`, `activeRun` → `null`,
-  `reportToast` → `null` — `frontend/src/features/workflow/ModulePage.tsx:404-439`
+  `reportToast` → `null` - `frontend/src/features/workflow/ModulePage.tsx:404-439`
   (`setStep("setup")` at `:427`, `setActiveRun(null)` at `:410`)
 
 Consequences field engineer observed, none of which are data loss:
@@ -91,14 +91,14 @@ Consequences field engineer observed, none of which are data loss:
    `data-stepgroup="results"` (`ModulePage.tsx:2177-2178`) and the Reports page
    always lands on the hidden "setup" step. Clicking the "3 Results" step button
    reveals it. jsdom tests can't catch this class of bug (theme CSS not applied).
-2. **"IP discovery loses results on navigate-away."** Page state is
+2. **"IP discovery loses results after leaving the page."** Page state is
    component-local `useState` reset on remount (`app/routes.tsx:24-29` remounts
-   ModulePage per path). Server-side run persistence is fine — `GET /runs` /
+   ModulePage per path). Server-side run persistence is fine - `GET /runs` /
    `GET /discovery/runs` list runs newest-first with `job_type` filter
    (`client.ts:889` already supports the params). Fix = rehydrate the latest
    terminal run per head on mount.
 3. **"It created sample views."** Nothing was created: with `activeRun` nulled,
-   `resultRows` falls back to hardcoded fixtures —
+   `resultRows` falls back to hardcoded fixtures -
    `resultRows = discoveryView?.rows ?? udmiLiveResults?.rows ?? workspace?.rows`
    (`ModulePage.tsx:813`) with fixtures at `operatorData.ts:314-328`.
 4. **"Report button should be at the end of results."** The
@@ -108,18 +108,18 @@ Consequences field engineer observed, none of which are data loss:
 
 ---
 
-## 3. The three live bugs — root causes (all high confidence)
+## 3. The three live bugs - root causes (all high confidence)
 
-### 3a. BACnet discovery returns nothing (CONFIRMED; fix IMPLEMENTED — v0.1.12 headline)
+### 3a. BACnet discovery returns nothing (CONFIRMED; fix IMPLEMENTED - v0.1.12 headline)
 
 > **Status 2026-07-15 (later the same day):** v0.1.12 is written and committed on
 > `fix/v0.1.12-bacnet-foreign-device`. **Two of the claims in the original
 > diagnosis below were disproven** by a source-verification pass against
-> bacpypes3 — they are corrected inline and marked, not deleted, because both
+> bacpypes3 - they are corrected inline and marked, not deleted, because both
 > sent earlier reasoning down dead ends and the next reader needs to know why.
 > **The Python has not been CI-verified at time of writing** (the branch tip is
 > ahead of `origin`, so no CI run covers it) and **has never executed against a
-> real BACnet stack** — no Python on the dev machine, no BACnet hardware in CI.
+> real BACnet stack** - no Python on the dev machine, no BACnet hardware in CI.
 > Its wire behaviour is genuinely unproven. Lab-day procedure, gates and
 > fallbacks live in **`docs/lab-day-2026-07-20-runbook.md`**.
 
@@ -131,7 +131,7 @@ The live bacpypes3 path supported **only local-subnet broadcast Who-Is**:
 - The Configuration page's BBMD / Foreign Device / BBMD Address / TTL fields were
   validated and stored but **consumed nowhere**
   (`configuration_service.py:46-54,363-377`; `ConfigurationPage.tsx:146-147`)
-- The uploaded `bacnet_register` was never used for discovery targeting — there
+- The uploaded `bacnet_register` was never used for discovery targeting - there
   was no BACnet analogue of `_ensure_ip_targets`; the BACnet run route injected
   only `device."Source Interface"`
 - Empty Who-Is → run ends `status=succeeded`, `device_count=0`, silently
@@ -141,11 +141,11 @@ repeated here); a third-party BACnet browser sees that device precisely because
 it performs foreign-device registration. That reading held up and is what
 v0.1.12 is built on.
 
-#### CORRECTION 1 (2026-07-15) — "bacpypes3 can't send a directed Who-Is" was FALSE
+#### CORRECTION 1 (2026-07-15) - "bacpypes3 can't send a directed Who-Is" was FALSE
 
 The original text said `Bacpypes3Backend.who_is` "drops the directed address on
 purpose (`intentionally not passed`)", citing the code comment at
-`bacnet_discovery.py:374-391`. The implication — that the library cannot do it —
+`bacnet_discovery.py:374-391`. The implication - that the library cannot do it -
 is **wrong at every version in the pinned range** (checked at v0.0.97, v0.0.99
 and main). The real signature, from bacpypes3's `service/device.py`:
 
@@ -155,7 +155,7 @@ def who_is(self, low_limit=None, high_limit=None, address=None, timeout=WHO_IS_T
 
 `address` has been a first-class argument the whole time; omitting it is what
 makes the Who-Is a broadcast. Worse, **the engine was already passing a directed
-address in** — it reached the backend and the backend threw it away. So the only
+address in** - it reached the backend and the backend threw it away. So the only
 thing standing between this app and cross-subnet unicast discovery was an
 incorrect comment that nobody re-checked against the library.
 
@@ -166,7 +166,7 @@ library, not the folklore, and the directed branch is live at `:1087-1096`.
 **Lesson worth keeping:** a code comment asserting what a third-party API cannot
 do is a claim, not evidence. This one cost a release.
 
-#### CORRECTION 2 (2026-07-15) — the 47808-conflict hypothesis was mechanically FALSE
+#### CORRECTION 2 (2026-07-15) - the 47808-conflict hypothesis was mechanically FALSE
 
 The original secondary hypothesis was: browser holds UDP 47808 → bacpypes3 bind
 `OSError` → blanket except → sanitized generic failure. **That chain does not
@@ -177,10 +177,10 @@ is no exception for the blanket except to catch.
 The consequence is the important part, and it is worse than the original theory:
 
 > **A contended UDP 47808 and a genuinely quiet network produce the IDENTICAL
-> run record today** — `succeeded`, `device_count=0`, no error, no reason.
+> run record today** - `succeeded`, `device_count=0`, no error, no reason.
 
-So both of the candidate causes for field engineer's failed run — silent-empty broadcast,
-and a port conflict — collapse into the same artifact. **His old run cannot tell
+So both of the candidate causes for field engineer's failed run - silent-empty broadcast,
+and a port conflict - collapse into the same artifact. **His old run cannot tell
 us which it was**, retroactively, by any means. That is not a gap in our
 forensics; it is the bug.
 
@@ -192,40 +192,40 @@ mechanism behind the port-in-use message; the errno classifier that remains
 (`:650-666`) is defence-in-depth only. Known limit, stated in the code and the
 runbook: it proves the port was free a moment ago, not that it stays free.
 
-#### A latent bug found while planning — it would have wrecked Monday on its own
+#### A latent bug found while planning - it would have wrecked Monday on its own
 
 `Bacpypes3Backend.close()` had **zero call sites**. The portable exe runs engines
 inline in one long-lived process, so the first live scan's UDP 47808 socket
 leaked for the life of the app, and **the second scan of any session conflicted
-with itself** — invisibly, because of Correction 2. Every scan after the first
+with itself** - invisibly, because of Correction 2. Every scan after the first
 silently returned zero devices. Nobody ever filed it, because it does not look
 like a bug.
 
 Fixed: `close()` now runs in a `finally` on every exit path
 (`bacnet_discovery.py:2459-2466`, method at `:1306`). Note this is a
-*prerequisite* for the pre-flight message being true — a leaked socket would
+*prerequisite* for the pre-flight message being true - a leaked socket would
 otherwise produce a scan that confidently blames "another BACnet tool" for a port
 this very process is holding.
 
 #### What v0.1.12 actually does (strings copied from the shipped code)
 
 Three independent Who-Is lanes, deliberately redundant, deliberately
-non-substituting — a lane that fails is reported failed and is **never** quietly
+non-substituting - a lane that fails is reported failed and is **never** quietly
 replaced by another (`bacnet_discovery.py:3-23`):
 
 | Lane | What it is | Reaches |
 |---|---|---|
-| 1 — broadcast | local broadcast on UDP **47808**; unchanged when nothing new is configured | the laptop's own subnet |
-| 2 — directed | unicast Who-Is to `bacnet_register` addresses, **fallback-only** (sent only to devices still silent after lanes 1 and 3) | any routable address, **no BBMD involved** |
-| 3 — foreign_device | second app on UDP **47809**, registers with the BBMD; gated strictly on `bacnet_mode == 'foreign_device'` | other subnets, incl. routed MS/TP devices lane 2 structurally cannot see |
+| 1 - broadcast | local broadcast on UDP **47808**; unchanged when nothing new is configured | the laptop's own subnet |
+| 2 - directed | unicast Who-Is to `bacnet_register` addresses, **fallback-only** (sent only to devices still silent after lanes 1 and 3) | any routable address, **no BBMD involved** |
+| 3 - foreign_device | second app on UDP **47809**, registers with the BBMD; gated strictly on `bacnet_mode == 'foreign_device'` | other subnets, incl. routed MS/TP devices lane 2 structurally cannot see |
 
 **How the operator turns it on** (`configuration_service.py:333`, field names as
 they appear on the Configuration page): the trigger is **`Foreign Device` =
-`Enabled`** and nothing else. Not the `BBMD` toggle — that is now informational
+`Enabled`** and nothing else. Not the `BBMD` toggle - that is now informational
 only, and its seeded default flipped to `Disabled` (`:70`). `BBMD Address` is
 load-bearing (blank or unparseable → HTTP 400 naming the fix); `BBMD UDP Port`
 and `TTL` soft-default to 47808 / 300. **The seeded `BBMD Address` is
-`192.0.2.20` and is demo data, not a real BBMD** (`:74`) — and persisted config
+`192.0.2.20` and is demo data, not a real BBMD** (`:74`) - and persisted config
 snapshots do NOT update when defaults change, so on field engineer's machine this must be
 hand-set or the whole fix ships inert.
 
@@ -238,50 +238,50 @@ and hard-fails the run rather than scanning into a void. Outcomes recorded at
 > "The BBMD at `<ip:port>` refused foreign-device registration (BVLL result code
 > `<n>`). Ask the BBMD administrator to permit foreign-device registrations from
 > this machine's IP address, and to check the BBMD's foreign-device table has a
-> free entry." — `:778-783`
+> free entry." - `:778-783`
 
 A port conflict reads:
 
-> "UDP port `<n>` on `<ip>` is already in use by another program — usually
+> "UDP port `<n>` on `<ip>` is already in use by another program - usually
 > another BACnet tool (for example a BACnet browser) still running on this
-> machine. Close it and run the scan again." — `:675-680`
+> machine. Close it and run the scan again." - `:675-680`
 
-**Every run** stamps `result_summary["bacnet_diagnostics"]` — `interface`,
+**Every run** stamps `result_summary["bacnet_diagnostics"]` - `interface`,
 `udp_port`, `bind`, `mode`, `fd_registration`, `who_is` counters,
-`bacpypes3_version`, `transport_verified` (`:1760-1784`) — plus a `lanes`
+`bacpypes3_version`, `transport_verified` (`:1760-1784`) - plus a `lanes`
 breakdown and `expected_not_responding` (`:1785-1789`), on success **and** on
 every self-diagnosed failure. The bar: a failed Monday scan must be diagnosable
 from `GET /discovery/runs/{id}` alone, because there will be no live debugging
 session.
 
-**An empty scan stays `succeeded`** — finding nothing is a valid result — but
+**An empty scan stays `succeeded`** - finding nothing is a valid result - but
 carries `empty_scan_hint`, one authored sentence naming the real candidates
 (`:2256-2268`, builder at `:1677`). It is only called a *clean* empty once the
 transport was affirmatively verified.
 
-**Expected-but-silent is amber, never "device absent"** — issue type
+**Expected-but-silent is amber, never "device absent"** - issue type
 `bacnet_expected_device_silent` (`:183`). BACnet-135 lets a device answer a
 directed Who-Is with a local-broadcast I-Am we cannot hear from off-subnet, and
 routed MS/TP devices are invisible to lane 2 by design. Directed silence is
 **inconclusive**.
 
 **Pre-flight without sending a packet:** a dry run echoes the resolved transport
-— `foreign-device registration via BBMD <ip:port>` or `local broadcast only`
-(`:2333-2337`) — and the directed lane's target count. "0 targets" there is the
+- `foreign-device registration via BBMD <ip:port>` or `local broadcast only`
+(`:2333-2337`) - and the directed lane's target count. "0 targets" there is the
 cheapest possible catch for a register import that never reached the engine.
 The same wording appears on the results pill (`discoveryRows.ts:265,274`).
 
 Also: `bacpypes3` is now pinned **exactly** (`core/pyproject.toml:45`,
-`bacpypes3==0.0.106` — the same source the API research read), and `base.py:448`
+`bacpypes3==0.0.106` - the same source the API research read), and `base.py:448`
 finally logs the exception behind "See server logs for details", which until now
 was a lie.
 
-#### What is still unproven — the load-bearing guesses
+#### What is still unproven - the load-bearing guesses
 
 - **Whether the lab BBMD accepts foreign-device registrations at all.** This is
   THE Monday decider and no amount of code can settle it. If it refuses, lane 3
   is dead on arrival and **lane 2 (register-driven unicast) is the only route to
-  cross-subnet devices** — the day's sequence changes. The fix makes the refusal
+  cross-subnet devices** - the day's sequence changes. The fix makes the refusal
   loud and names the BVLL code; it cannot make a refusing BBMD cooperate.
 - Whether the register's IP addresses are each device's own BACnet/IP address or
   supervisor/router addresses fronting MS/TP trunks (routed devices read as
@@ -289,7 +289,7 @@ was a lie.
 - Whether cross-subnet devices answer a directed Who-Is with a unicast I-Am back
   to us, or with a local broadcast we never hear. BACnet-135 permits either.
 - Whether the BBMD replies to lane 3's source port 47809 (Annex-J-legal, but
-  nonconformant gear that hardcodes 47808 exists — fallback in the runbook).
+  nonconformant gear that hardcodes 47808 exists - fallback in the runbook).
 - The Windows errno mapping in the bind pre-flight (10048/10013) is verified **by
   design, never by execution**. field engineer's off-network smoke test is its first run.
 
@@ -298,17 +298,17 @@ laptop's IP **before Monday** (highest-value question by a distance); whether th
 register IPs are per-device or supervisor/router addresses; his current saved
 BBMD / Foreign Device / BBMD Address / TTL values; whether the BACnet browser was
 open during his failed run. Note his run *status* (succeeded-with-0 vs failed) is
-worth asking for context but **cannot** distinguish the two hypotheses — see
+worth asking for context but **cannot** distinguish the two hypotheses - see
 Correction 2.
 
-### 3b. Register import rejections (CONFIRMED; fix ~2d — in v0.1.11)
+### 3b. Register import rejections (CONFIRMED; fix ~2d - in v0.1.11)
 
 Three findings:
 
 1. **Reasons are recorded, then thrown away.** `ImportService.create_import`
    produces per-row `{row_number, field, code, message}` records, persisted
-   (`import_service.py:759-772`); the route discards them —
-   `summary, _ = service.create_import(...)` at `backend/app/api/routes/imports.py:124` —
+   (`import_service.py:759-772`); the route discards them -
+   `summary, _ = service.create_import(...)` at `backend/app/api/routes/imports.py:124` -
    and the UI renders only "N accepted · M rejected" (`ModulePage.tsx:1194-1202`).
    **`GET /imports/{import_id}/errors` already exists** (`imports.py:144-149`)
    and is never called by `client.ts`. `missing_columns` is also never rendered.
@@ -316,7 +316,7 @@ Three findings:
    `_validate_mqtt_asset_topic` (`import_service.py:187-211`) requires every
    Expected topic to end `/#`, `/state`, `/metadata`, `/event/pointset` or
    `/events/pointset` (empirically: `site/b1/fcu-04` rejects, `site/b1/fcu-04/#`
-   accepts). GUID and Serial are **never uniqueness-checked** — the dup key is
+   accepts). GUID and Serial are **never uniqueness-checked** - the dup key is
    `(Asset ID, Expected topic)` (`import_service.py:451,717-728`) plus
    `_conflicting_asset_topic_error` (`:264-307`). field engineer was fixing the wrong
    fields because no reason was shown. Also: "Expected reporting interval" must
@@ -337,9 +337,9 @@ Three findings:
    reached the server is kept verbatim at
    `%LOCALAPPDATA%\SmartCommissioning\imports\files\` on his machine.
 
-### 3c. "Report missing from Reports tab" (LIKELY→confirmed by code; fix ~0.5–1.5d — in v0.1.11)
+### 3c. "Report missing from Reports tab" (LIKELY→confirmed by code; fix ~0.5–1.5d - in v0.1.11)
 
-Pure presentation — see §2 item 1. Backend needs no change. Fix: default the
+Pure presentation - see §2 item 1. Backend needs no change. Fix: default the
 reports route to the results step (it has no run lifecycle) or ungate the table;
 show loading state instead of "No reports yet" while `reportsQuery.isLoading`
 (`ModulePage.tsx:1055-1059`, guard `:841-852`); invalidate the `reports-list`
@@ -355,12 +355,12 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 
 | Item | Effort | Key facts |
 |---|---|---|
-| Version pill on hero/brand bar | small 0.5d | Version exists only at build time (`build.ps1:91-119`; CI passes `workflow_dispatch` input). Set `$env:VITE_APP_VERSION = $BuildVersion` before `npm run build` (~`build.ps1:198`); read `import.meta.env.VITE_APP_VERSION` (precedent: `VITE_REVIEW_COMMENTS`, `App.tsx:166`); render pill in brand bar (`App.tsx:~99`). Optional: echo version in `/api/v1/health`. Risk: `-SkipFrontend` reuses a dist with old baked version — add guard like the `-SkipFreeze` one (`build.ps1:212-215`). |
+| Version pill on hero/brand bar | small 0.5d | Version exists only at build time (`build.ps1:91-119`; CI passes `workflow_dispatch` input). Set `$env:VITE_APP_VERSION = $BuildVersion` before `npm run build` (~`build.ps1:198`); read `import.meta.env.VITE_APP_VERSION` (precedent: `VITE_REVIEW_COMMENTS`, `App.tsx:166`); render pill in brand bar (`App.tsx:~99`). Optional: echo version in `/api/v1/health`. Risk: `-SkipFrontend` reuses a dist with old baked version - add guard like the `-SkipFreeze` one (`build.ps1:212-215`). |
 | ELECTRACOM logo not showing (exe) | trivial 0.25d | File ships in dist; FastAPI SPA fallback returns index.html for `/electracom-logo.png` because only `dist/assets` is mounted (`main.py:165-168`, fallback `:184-189`). Fix generically: if requested path resolves to a real file inside FRONTEND_DIST (traversal-guarded), `FileResponse` it. Covers all future `public/` files. Add a logo-200 assertion to the portable boot smoke. |
-| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `app/App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on field engineer's machines — needs migration or release note. |
+| Remove placeholder demo content | medium 1.5d | (a) "Block B Plantroom" hardcoded pill `app/App.tsx:115-118`; (b) "Current Stage" board is sample data (`operatorData.ts:254-279`, `DashboardPage.tsx:310-323`); (c) seeded fictional defaults incl. "Last Backup Status: Success" that never happened (`configuration_service.py:24-118`). NOTE: changing DEFAULT_CONFIGURATION does NOT update already-persisted snapshots on field engineer's machines - needs migration or release note. |
 | Menu naming: "BACnet" → "BACnet Discovery" | trivial 0.25d | `NAV_GROUPS` in `app/App.tsx:13-39`; also reconcile `pageTitles` (`app/App.tsx:41-53`) and `moduleData.ts` titles (three layers disagree: "IP Scanner" vs "IP Discovery" etc.). Label-only, routes unchanged (precedent `moduleData.ts:121-125`). |
-| Config tab sub-sections | small 1d | Seven flat accordion sections already exist (`ConfigurationPage.tsx:26-34`). Add group headers (Connections / System / Maintenance). Recommended extra: wire the fully-built signed backup endpoint (`POST /evidence/backup`, `backup_service.py`) to a "Download backup now" button — it currently has zero UI. |
-| Logging destinations | medium 2.5d | The whole Logging & Diagnostics config section is **decorative** — no code reads Remote Syslog Target/Port/Retention/Diagnostics Mode; no syslog handler exists. Actual logging = one JSON StreamHandler (`core/logging.py:151-173`). (a) local `RotatingFileHandler` to `RUNTIME_ROOT/logs/app.log` ~1d; (b) engineer-gated "Upload logs now" to a configured URL (httpx already frozen) ~1.5d. Secrets-masking + write-only sentinel for upload creds required. |
+| Config tab sub-sections | small 1d | Seven flat accordion sections already exist (`ConfigurationPage.tsx:26-34`). Add group headers (Connections / System / Maintenance). Recommended extra: wire the fully-built signed backup endpoint (`POST /evidence/backup`, `backup_service.py`) to a "Download backup now" button - it currently has zero UI. |
+| Logging destinations | medium 2.5d | The whole Logging & Diagnostics config section is **decorative** - no code reads Remote Syslog Target/Port/Retention/Diagnostics Mode; no syslog handler exists. Actual logging = one JSON StreamHandler (`core/logging.py:151-173`). (a) local `RotatingFileHandler` to `RUNTIME_ROOT/logs/app.log` ~1d; (b) engineer-gated "Upload logs now" to a configured URL (httpx already frozen) ~1.5d. Secrets-masking + write-only sentinel for upload creds required. |
 | Certs "Not configured" pill | small 0.5d | ALL section status pills are static seeded strings never recomputed (`configuration_service.py:86`, save persists whatever the client echoes). Derive certificates status server-side on load from resolvable `secret://` refs + stored expiry (reuse `_secret_path().exists()`, `_stored_certificate_expiry:612-629`). field engineer IS reloading keys so it may also genuinely be unconfigured. |
 
 ### IP Discovery head (~10d total)
@@ -368,47 +368,47 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 | Item | Effort | Key facts |
 |---|---|---|
 | Retain last run per head (ALL heads) | medium 2d | See §2. Seed `activeRun` from `listRuns({jobType, limit:1, status:'succeeded'})` on mount; route→jobType map; guard the reset effect. No backend change. Don't auto-jump operators to Results mid-setup. |
-| Show ALL register entries incl. non-responders | medium 2d | Engine drops silent hosts: `if not open_ports: continue` (`engines/ip_scan.py:656-658`). Emit rows for every scanned host with honest "no response on scanned ports" (a TCP-connect miss is NOT proof of absence — never render a hard "fail" for it). Frontend: add Result column + wire the existing `__tone` row shading (`.row-pass/.row-fail`) into `ipRowsFromResults` (`discoveryRows.ts:99`, columns `:13`). Verdict markers already stamped in status_detail. |
+| Show ALL register entries incl. non-responders | medium 2d | Engine drops silent hosts: `if not open_ports: continue` (`engines/ip_scan.py:656-658`). Emit rows for every scanned host with honest "no response on scanned ports" (a TCP-connect miss is NOT proof of absence - never render a hard "fail" for it). Frontend: add Result column + wire the existing `__tone` row shading (`.row-pass/.row-fail`) into `ipRowsFromResults` (`discoveryRows.ts:99`, columns `:13`). Verdict markers already stamped in status_detail. |
 | Explicit "no results found" state | trivial 0.5d | Empty-workspace block exists (`ModulePage.tsx:2356-2369`) but shows "No results yet" for a completed-empty scan. Add terminal-empty branch citing `result_summary.hosts_scanned` (`ip_scan.py:765`). |
 | nmap-style general network discovery pane | large 3.5d | The bottom "target override" already does register-less CIDR/range scans through the same engine (`ModulePage.tsx:1633-1643`, `buildDiscoveryParameters:2661-2681`; service hints `ip_scan.py:89-95`; reverse-DNS + ARP MAC included). **nmap itself cannot ship** (ThreatLocker/WDAC blocks unsigned exes). Build a dedicated pane: top-N common-ports profile, hosts/ports/service-guess/hostname/MAC results view, no register verdict columns. Do not imply OS/version detection parity. Keep throttle + MAX_HOSTS/MAX_PORTS ceilings (live OT networks). |
-| Consistent look-and-feel / unbind scroll boxes | medium 2d | All five heads already share ONE component (`ModulePage.tsx`, **3190 lines**) so ~80% consistent. The "bound window" = `.data-table-wrap` overflow box + `.data-table` min-width 680px (`styles.css:1046-1057`). Extract `<ResultsTable>`, `<RunMonitor>`, `<Inspector>` shared components; drop fixed min-width; results full-width with inspector below. Broad edit surface — regression risk on per-head custom sections. |
+| Consistent look-and-feel / unbind scroll boxes | medium 2d | All five heads already share ONE component (`ModulePage.tsx`, **3190 lines**) so ~80% consistent. The "bound window" = `.data-table-wrap` overflow box + `.data-table` min-width 680px (`styles.css:1046-1057`). Extract `<ResultsTable>`, `<RunMonitor>`, `<Inspector>` shared components; drop fixed min-width; results full-width with inspector below. Broad edit surface - regression risk on per-head custom sections. |
 
 ### MQTT Discovery head (~4.5d total)
 
 | Item | Effort | Key facts |
 |---|---|---|
 | Template compare: green=in register, red=foreign | medium 1.5d | Discovery genuinely ignores the register (route `discovery.py:368-406` inherits only topic_filter/qos from config; engine emits one row per observed topic). Stamp verdicts at **results-read time**: load newest accepted `mqtt_register` import, build expected-topic filters via existing `_capture_topics_from_expected`/`_expected_assets_from_register` (`validation.py:139-328`), match with existing wildcard matchers (`discovery.py:552`, `discoveryRows.ts:175`), color via `__tone`. Works retroactively on old runs. Agree semantics: one `#` wildcard register row can green-light dozens of topics. |
-| Long-duration timer (like UDMI 48h) | medium 2d | More exists than field engineer realizes: UI capture-seconds field with 0=indefinite + working cancel already there (`ModulePage.tsx:1692-1700`, engine `mqtt_discovery.py:226-237,328-335`). Ceilings to lift: `discover_mqtt` actor `time_limit=3_600_000` (1h) vs UDMI's 49h (`worker/app/tasks.py:205` vs `:231`); add `capture_seconds <= 172_800` guard reusing `parse_capture_seconds`; unit dropdown copied from UDMI block (`ModulePage.tsx:639-648,1986-2004`). **Physics first: retain-latest-per-topic before raising max_messages** or multi-day captures eat memory. Portable exe runs engines inline in the HTTP request (`run_dispatch.py:50-57`) — day-scale captures honestly require the hosted worker profile; same caveat as UDMI's existing inline note. |
-| Wire inspector to row selection | small 0.5d | All pieces exist: `selectedResultIndex` state (`:258`), inspector aside (`:2407-2584`), `JsonTree` (`:2765-2785`), Raw Payload already in rows. Make `<tr>` clickable, render payload + JsonTree for the selected row, suppress the sample-issues fallback on discovery routes. Non-JSON payloads stored as `{"_raw_present": true}` markers (`mqtt_discovery.py:399-401`) — handle gracefully. |
+| Long-duration timer (like UDMI 48h) | medium 2d | More exists than field engineer realizes: UI capture-seconds field with 0=indefinite + working cancel already there (`ModulePage.tsx:1692-1700`, engine `mqtt_discovery.py:226-237,328-335`). Ceilings to lift: `discover_mqtt` actor `time_limit=3_600_000` (1h) vs UDMI's 49h (`worker/app/tasks.py:205` vs `:231`); add `capture_seconds <= 172_800` guard reusing `parse_capture_seconds`; unit dropdown copied from UDMI block (`ModulePage.tsx:639-648,1986-2004`). **Physics first: retain-latest-per-topic before raising max_messages** or multi-day captures eat memory. Portable exe runs engines inline in the HTTP request (`run_dispatch.py:50-57`) - day-scale captures honestly require the hosted worker profile; same caveat as UDMI's existing inline note. |
+| Wire inspector to row selection | small 0.5d | All pieces exist: `selectedResultIndex` state (`:258`), inspector aside (`:2407-2584`), `JsonTree` (`:2765-2785`), Raw Payload already in rows. Make `<tr>` clickable, render payload + JsonTree for the selected row, suppress the sample-issues fallback on discovery routes. Non-JSON payloads stored as `{"_raw_present": true}` markers (`mqtt_discovery.py:399-401`) - handle gracefully. |
 | Report button at end of results | trivial 0.5d | Extract the existing picker+button (`ModulePage.tsx:1425-1452`) into a small component; render a second instance inside the results stepgroup (`:2273`), same `canEngineer && activeRun && activeRunTerminal` guard. One change fixes all five heads. |
 
 ### UDMI workbench (~4.6d total)
 
 | Item | Effort | Key facts |
 |---|---|---|
-| Remove top "Run UDMI Validation" control | trivial 0.25d | NOT a Docker leftover — it's the single `runActions` entry (`moduleData.ts:110-118`) that **Execute capture also findIndexes into** (`ModulePage.tsx:653-658`). Hide it from Run Controls rendering (`:1261`); do NOT delete the moduleData entry or Execute capture silently breaks (the `Math.max(0, findIndex)` fallback masks -1). |
+| Remove top "Run UDMI Validation" control | trivial 0.25d | NOT a Docker leftover - it's the single `runActions` entry (`moduleData.ts:110-118`) that **Execute capture also findIndexes into** (`ModulePage.tsx:653-658`). Hide it from Run Controls rendering (`:1261`); do NOT delete the moduleData entry or Execute capture silently breaks (the `Math.max(0, findIndex)` fallback masks -1). |
 | Snap to top when results open | trivial 0.1d | Terminal-success effect exists (`ModulePage.tsx:464-468`); add `heroRef.scrollIntoView()` when step flips to results. No scroll management exists anywhere today. |
 | Dynamic inspector on row select | small 0.5d | Same wiring as MQTT inspector: row click → `setSelectedResultIndex` + sync `setExpandedAsset`/`setExpandedPayloadKey`; render observed payload via JsonTree + shared `gatedUdmiVerdict`. `stopPropagation` on the Copy button cell. |
-| Show rejection reasons | small 0.5d | Frontend-only — see §3b(1). Add `getImportErrors(importId)` to client.ts; red panel listing "Row N — field: message (code)" + `missing_columns`, modeled on the existing warnings panel. Zero backend work. |
-| Don't fail run on silent devices | medium 1.5d | ~70% shipped in #78 (`not_publishing` issues, `result_summary.not_publishing_devices`, honest score, report rendering). Remaining: ONE decision point `udmi_run_processor.py:84-98` — keep `failed` only for transport errors (broker_unreachable/authentication_error/broker_timeout/capture_failed family, `udmi_validation.py:1229-1241`); `live_capture_timeout` → `succeeded` with distinct stage. Update pinned tests + `docs/protocol-conformance.md:46`. Transport failures MUST stay failed (honesty rule). Ship together with RAG so silent devices read RED on a succeeded run. |
+| Show rejection reasons | small 0.5d | Frontend-only - see §3b(1). Add `getImportErrors(importId)` to client.ts; red panel listing "Row N - field: message (code)" + `missing_columns`, modeled on the existing warnings panel. Zero backend work. |
+| Don't fail run on silent devices | medium 1.5d | ~70% shipped in #78 (`not_publishing` issues, `result_summary.not_publishing_devices`, honest score, report rendering). Remaining: ONE decision point `udmi_run_processor.py:84-98` - keep `failed` only for transport errors (broker_unreachable/authentication_error/broker_timeout/capture_failed family, `udmi_validation.py:1229-1241`); `live_capture_timeout` → `succeeded` with distinct stage. Update pinned tests + `docs/protocol-conformance.md:46`. Transport failures MUST stay failed (honesty rule). Ship together with RAG so silent devices read RED on a succeeded run. |
 | RAG third state (amber) | small 1d | Verdicts centralized in `operatorData.ts` (`UdmiVerdictKind:182`, `udmiPayloadVerdict:189-214`, tone `:218-223`). field engineer's definition needs NO issue weighting: red=offline/not publishing, amber=publishing but non-compliant, green=compliant. Add `warn` tone + `.row-amber` CSS + amber section-verdict branch. **Confirm with field engineer:** strict reading demotes today's green "pass with notes" (minor-only issues) to amber. |
-| Nonpub schema example set | small 0.75d | Upload machinery fully shipped (#78): `udmi_schemas.py:260-302`, strict validation incl. three roots + file: refs. Missing = a downloadable example. Add public `GET /udmi/schemas/template` zipping the vendored 1.5.2 roots + $ref closure (patterns: `imports.py:20-45` public router, `reports.py:548` in-memory zip) + README.txt + frontend download button. Watch the 2MB stored-set cap vs ~30-file canonical set — ship a trimmed minimal closure. |
+| Nonpub schema example set | small 0.75d | Upload machinery fully shipped (#78): `udmi_schemas.py:260-302`, strict validation incl. three roots + file: refs. Missing = a downloadable example. Add public `GET /udmi/schemas/template` zipping the vendored 1.5.2 roots + $ref closure (patterns: `imports.py:20-45` public router, `reports.py:548` in-memory zip) + README.txt + frontend download button. Watch the 2MB stored-set cap vs ~30-file canonical set - ship a trimmed minimal closure. |
 
 ### Reports (~6.5d total)
 
 | Item | Effort | Key facts |
 |---|---|---|
-| Per-head report content + button placement | medium 3d | Buttons + collation already exist (see §2/§3c). Real gap: discovery reports have no head-specific content — add "Discovery inventory" sections to the builders via `DiscoveryRepository.list_devices/list_points/list_topics` (pattern: `_validation_summary`). **Byte-reproducibility**: sort all rows deterministically or the Ed25519/SHA-256 verify breaks; add reproducibility tests. |
+| Per-head report content + button placement | medium 3d | Buttons + collation already exist (see §2/§3c). Real gap: discovery reports have no head-specific content - add "Discovery inventory" sections to the builders via `DiscoveryRepository.list_devices/list_points/list_topics` (pattern: `_validation_summary`). **Byte-reproducibility**: sort all rows deterministically or the Ed25519/SHA-256 verify breaks; add reproducibility tests. |
 | Reports-tab visibility bug | trivial 0.5d | See §3c. |
-| ELECTRACOM headers/footers (ITP witnessing) | medium 2d | Zero branding exists. PDF is hand-rolled (deterministic PDF 1.4; only page furniture is `_append_footers`, `report_pdf.py:339-350`; **no image XObject support** — text-branded header band first, logo embedding is the risky part, phase it). DOCX is hand-rolled 3-part OOXML with empty `<w:sectPr/>` (`reports.py:544`) — add header/footer parts + rels + Content_Types overrides. XLSX: openpyxl has native header/footer. All artifact bytes change → flag to team, keep reproducibility tests green. |
+| ELECTRACOM headers/footers (ITP witnessing) | medium 2d | Zero branding exists. PDF is hand-rolled (deterministic PDF 1.4; only page furniture is `_append_footers`, `report_pdf.py:339-350`; **no image XObject support** - text-branded header band first, logo embedding is the risky part, phase it). DOCX is hand-rolled 3-part OOXML with empty `<w:sectPr/>` (`reports.py:544`) - add header/footer parts + rels + Content_Types overrides. XLSX: openpyxl has native header/footer. All artifact bytes change → flag to team, keep reproducibility tests green. |
 | Reports page columns + remove sample rows | small 1d | Extend `ReportSummary` with `created_at` + `source_run_ids` (`reports.py:27-44`); add Generated/Source-runs columns + per-row Download (reuse `getReportDownloadPath` + `useFileDownload`); delete fabricated sample rows (`operatorData.ts:385-399`). Do together with the visibility bug (~1.5d combined). |
 
 ### Packaging / Docker removal (~2d total)
 
 | Item | Effort | Key facts |
 |---|---|---|
-| Drop Docker distribution | medium 1.5d | Docs/config only — **CI has no Docker jobs at all**. Delete: 3 Dockerfiles, `frontend/nginx.conf`, `.dockerignore`, `infra/` (compose ×2, .env.example, README), `scripts/bootstrap-env.*`. Rewrite README path-2 sections + quickstart/review-guide/runbook. **Keep the hosted multi-user profile code** — it is Docker-independent. |
-| Docker-era UI leftovers | small 0.5d | The real one: Learning page SETUP_PATHS 'docker' entry (`LearningPage.tsx:607-671`) + the ThreatLocker note at `:528` that recommends Docker as the escape hatch — replace with the IT allow-listing path (a SHA-256 approval flow already exists) **in the same change** or locked-down users lose their documented path. Update `LearningPage.test.tsx:29-51`, `docs/field-quickstart.md:86-87`. |
+| Drop Docker distribution | medium 1.5d | Docs/config only - **CI has no Docker jobs at all**. Delete: 3 Dockerfiles, `frontend/nginx.conf`, `.dockerignore`, `infra/` (compose ×2, .env.example, README), `scripts/bootstrap-env.*`. Rewrite README path-2 sections + quickstart/review-guide/runbook. **Keep the hosted multi-user profile code** - it is Docker-independent. |
+| Docker-era UI leftovers | small 0.5d | The real one: Learning page SETUP_PATHS 'docker' entry (`LearningPage.tsx:607-671`) + the ThreatLocker note at `:528` that recommends Docker as the escape hatch - replace with the IT allow-listing path (a SHA-256 approval flow already exists) **in the same change** or locked-down users lose their documented path. Update `LearningPage.test.tsx:29-51`, `docs/field-quickstart.md:86-87`. |
 
 ---
 
@@ -422,13 +422,13 @@ Effort scale: trivial <2h · small ~half-day · medium 1–3d · large >3d.
 
 **Open questions for field engineer** (ask before/while building): whether the lab BBMD
 accepts foreign-device registrations, and the register/browser questions in §3a
-(note the run-status question no longer distinguishes the two BACnet hypotheses —
+(note the run-status question no longer distinguishes the two BACnet hypotheses -
 see §3a Correction 2); RAG demotion of "pass with notes" (§4 UDMI); which browser
 he uses (confirms the same-filename no-change-event behavior).
 
 **Non-code context:** field engineer emailed his own notes doc ("smart commissioning app
-mods") — its 24 items match this punch list exactly and add no new work.
-ITP = integrated testing and planning — reports feed ITP witnessing packs,
+mods") - its 24 items match this punch list exactly and add no new work.
+ITP = integrated testing and planning - reports feed ITP witnessing packs,
 hence the branding item.
 
 ---
@@ -441,7 +441,7 @@ the repo root:
 ---
 
 > Read `AGENTS.md` and `docs/handoff-2026-07-15-field-walkthrough.md` in full
-> before doing anything — the handoff has code-verified root causes with
+> before doing anything - the handoff has code-verified root causes with
 > file:line evidence for everything below; do not re-investigate from scratch,
 > but do re-verify each cited location before editing it.
 >
@@ -452,7 +452,7 @@ the repo root:
 > Build **v0.1.11** per handoff §5. Work on a feature branch off `main`
 > (e.g. `fix/v0.1.11-walkthrough-punchlist`), conventional commits, update
 > `CHANGELOG.md` with a `[0.1.11]` section. Do NOT merge or tag without my
-> explicit authorization (repo convention). Scope — handoff §2, §3b, §3c, §4:
+> explicit authorization (repo convention). Scope - handoff §2, §3b, §3c, §4:
 >
 > 1. **Static file serving fix** (logo): generic public-file serving in the SPA
 >    fallback (`backend/app/main.py:184-189`) with path-traversal guard +
@@ -464,9 +464,9 @@ the repo root:
 >    `pageTitles` and `moduleData` titles to one canonical name per head.
 > 4. **Snap-to-top** when a run flips to results (all heads), jsdom test on
 >    scrollIntoView.
-> 5. **Hide the top "Run UDMI Validation" run-card** — hide in rendering ONLY;
+> 5. **Hide the top "Run UDMI Validation" run-card** - hide in rendering ONLY;
 >    keep the `moduleData.ts:110-118` entry (Execute capture findIndexes it).
-> 6. **Empty-scan state**: terminal-empty branch with "Scan complete — no
+> 6. **Empty-scan state**: terminal-empty branch with "Scan complete - no
 >    responsive hosts found (N hosts probed)" using `result_summary.hosts_scanned`.
 > 7. **Report controls on the Results step**: extract the existing picker+button
 >    (`ModulePage.tsx:1425-1452`) into a component rendered in BOTH the run
@@ -479,12 +479,12 @@ the repo root:
 >    `listRuns({jobType, limit:1, status:'succeeded'})` with a route→jobType
 >    map; guard the route-change reset effect so it doesn't wipe the rehydrated
 >    run; do not auto-advance an operator who is mid-setup.
-> 9. **Import UX + parser hardening** (§3b): (a) frontend — add
+> 9. **Import UX + parser hardening** (§3b): (a) frontend - add
 >    `getImportErrors(importId)` calling the existing
 >    `GET /imports/{import_id}/errors`; on rejected/partial outcomes render a
->    red panel "Row N — field: message (code)" plus `missing_columns`
+>    red panel "Row N - field: message (code)" plus `missing_columns`
 >    (scrollable/capped); clear the file input value after selection/import so
->    re-picking the same filename works in Chromium. (b) backend —
+>    re-picking the same filename works in Chromium. (b) backend -
 >    `io.StringIO(text, newline="")`; catch `csv.Error` and return a clear 400;
 >    cp1252 fallback decode; detect semicolon-delimited saves and say "file is
 >    not comma-delimited" instead of listing all columns missing; clearer
@@ -495,17 +495,17 @@ the repo root:
 >
 > Constraints: Python tests are stdlib `unittest` (match CI); frontend
 > `npm test -- --run`, lint, typecheck, build must pass; ruff on
-> backend/worker/core; engines must never fake success (honesty rule — a
+> backend/worker/core; engines must never fake success (honesty rule - a
 > non-responding host is "no response", not a fabricated fail); note that jsdom
 > cannot see the step-gating CSS, so for the visibility fixes assert on the
 > `data-step`/`data-stepgroup` attributes or component logic, and say so in the
 > PR description. When done: run the full test matrix, summarize what
-> changed per item, and stop for my review — I will authorize merge, then we
+> changed per item, and stop for my review - I will authorize merge, then we
 > cut the release with `packaging/windows_portable/build.ps1 -Version v0.1.11`
 > via the CI `workflow_dispatch` as in v0.1.9/v0.1.10.
 
 ---
 
 *Written 2026-07-15 by the analysis session (Fable). Investigation: 9 agents,
-~1.2M tokens, main @ 82e838c. Companion memory (account-local, not portable):
-`field-asks-2026-07-15.md`.*
+~1.2M tokens, main @ 82e838c. The companion memory was account-local and is not
+stored in this repository.*

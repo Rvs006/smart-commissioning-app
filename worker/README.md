@@ -32,7 +32,7 @@ pointing a worker at a fresh database.
 ## Quickstart
 
 `smart-commissioning-core` is not published to PyPI and `pyproject.toml` cannot
-declare a portable path dependency, so the install order matters — install core
+declare a portable path dependency, so the install order matters - install core
 first, then the worker:
 
 ```bash

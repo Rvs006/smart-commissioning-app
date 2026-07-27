@@ -1,7 +1,10 @@
-# Message to field engineer — v0.1.17 (ready to send)
+# Historical field message: v0.1.17
+
+> Retained as the message prepared for v0.1.17. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-17, ahead of the tag.** Send AFTER the v0.1.17 Release is
-published with the portable zip attached and marked latest — check the link
+published with the portable zip attached and marked latest - check the link
 resolves first. Assumes the v0.1.16 message has already been sent (this one
 does not repeat the BACnet fixes or the stuck-runs cleanup note).
 
@@ -60,7 +63,7 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-v0.1.16.md` — the earlier build's message (BACnet fixes).
-- `docs/lab-day-2026-07-20-runbook.md` — rewritten two-path runbook.
+- `docs/field-message-v0.1.16.md` - the earlier build's message (BACnet fixes).
+- `docs/lab-day-2026-07-20-runbook.md` - rewritten two-path runbook.
 - `docs/field-mqtt-udmi-punchlist` context lives in session memory, not repo
   docs (private walkthrough material).

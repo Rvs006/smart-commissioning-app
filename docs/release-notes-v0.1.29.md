@@ -1,10 +1,8 @@
-# v0.1.29: large MQTT registers keep capturing
+# v0.1.29 - Large MQTT registers keep capturing
 
-This release removes the fixed 500-message ceiling that could stop a shared
-register capture before every expected topic had a chance to publish. A
-554-asset register with 2,216 concrete validation filters now receives an
-automatic capacity of at least 2,216 unless an operator supplies a positive
-limit.
+A 554-asset register expands to 2,216 concrete validation filters. v0.1.29 gives
+that shared capture at least 2,216 retained-message slots unless the operator
+sets a positive limit, removing the old fixed ceiling of 500.
 
 ## What changed
 

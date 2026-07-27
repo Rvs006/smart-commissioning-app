@@ -1,11 +1,8 @@
-# v0.1.24: UDMI results and reports now share one scope
+# v0.1.24 - UDMI results and reports now share one scope
 
-This release applies the July field review to validation, filtering, and every
-generated report format.
-
-The supplied evidence included a 460-page, 108-asset report and a separate
-72-page, 22-asset report. Comparing those totals as a before-and-after pair would
-be misleading. This release makes the selected run and rows explicit instead.
+July's field review included a 460-page report covering 108 assets and a
+separate 72-page report covering 22. Those totals came from different scopes,
+so v0.1.24 records the selected run and rows explicitly in every report format.
 
 ## What changed
 

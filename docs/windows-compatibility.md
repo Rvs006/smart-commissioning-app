@@ -31,7 +31,8 @@ pwsh scripts/smoke_local.ps1 -BaseUrl http://127.0.0.1:8000
 ## Deployment guidance
 
 - Use the portable `.exe` for a single engineer laptop or site machine.
-- Use local dev mode for engineering work: Python 3.12, Node 22, SQLite, inline
+- Use local dev mode for engineering work: Python 3.12, Node 22.22+ or Node 24,
+  SQLite, inline
   jobs, no Redis/Postgres required.
 - Use Docker Compose on Windows 11 Pro through Docker Desktop.
 - On Windows Server 2022, run the hosted Compose stack on a Linux VM/host, or

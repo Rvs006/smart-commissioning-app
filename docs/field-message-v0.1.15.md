@@ -1,15 +1,18 @@
-# Message to field engineer — v0.1.15 (ready to send)
+# Historical field message: v0.1.15
+
+> Retained as the message prepared for v0.1.15. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-17, ahead of the tag.** Send AFTER the v0.1.15 Release is
-published with the portable zip attached and marked latest — check the link
+published with the portable zip attached and marked latest - check the link
 resolves first.
 
 > **CORRECTION (2026-07-17, after the live session):** steps 2 and 5 of the
 > message below assume the target network sits behind a BBMD (the 2026-07-20
 > lab premise). field engineer's own test network is a flat single subnet with **no
-> BBMD** — on such networks Foreign Device stays **Disabled**, the BBMD fields
+> BBMD** - on such networks Foreign Device stays **Disabled**, the BBMD fields
 > are left alone, and a dry-run plan saying "local broadcast only" is the
-> CORRECT, healthy state — not a failed save. Following step 2 as written
+> CORRECT, healthy state - not a failed save. Following step 2 as written
 > misdirected the 2026-07-17 session (Foreign Device enabled against a
 > non-existent BBMD fails loudly, as designed). A BBMD is optional per site;
 > the requirement is recorded in `docs/protocol-conformance.md` §3. The
@@ -18,7 +21,7 @@ resolves first.
 Context for the next session: v0.1.15 is a single fix ahead of Monday's lab
 session (2026-07-20). The "Source Interface not present / is down" errors at
 run creation, and the Configuration page's missing-adapter hint, all advised
-falling back to "Auto (OS default route)" — advice a BACnet scan cannot
+falling back to "Auto (OS default route)" - advice a BACnet scan cannot
 follow, because a real Who-Is must bind one specific adapter. All three now
 give the engine-neutral version: re-select a current adapter; Auto also works
 for IP and MQTT runs, while a BACnet scan requires a specific adapter. No
@@ -29,7 +32,7 @@ reasoning as v0.1.14: the hash is only known after the bundle builds, and a
 repo file pinning it would always trail the tag it describes).
 
 field engineer's environment (2026-07-16): personal laptop and the MSI server, no
-ThreatLocker/allowlisting — SmartScreen note applies to him, not the IT
+ThreatLocker/allowlisting - SmartScreen note applies to him, not the IT
 hash-approval drill.
 
 ## The message (simplified for a non-technical read, BACnet steps included)
@@ -73,5 +76,5 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-v0.1.14.md` — the previous build's message (sent).
-- `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.
+- `docs/field-message-v0.1.14.md` - the previous build's message (sent).
+- `docs/lab-day-2026-07-20-runbook.md` - Monday's BACnet lab session.

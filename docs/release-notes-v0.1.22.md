@@ -1,7 +1,8 @@
-# v0.1.22: database-outage-safe worker recovery
+# v0.1.22 - Database-outage-safe worker recovery
 
-This patch removes the last known false-failure race in the worker-heartbeat
-recovery added for v0.1.21.
+A short database outage could still let the API mark a healthy worker run as
+failed. v0.1.22 adds a two-minute confirmation window before that decision
+becomes terminal.
 
 ## What changed
 

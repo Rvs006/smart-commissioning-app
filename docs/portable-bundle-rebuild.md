@@ -1,6 +1,6 @@
 <!-- Runbook to rebuild + offline-smoke the Windows portable bundle after alembic-now-ships-in-the-wheel. The wheel build + offline smoke are verifiable in dev; the PyInstaller freeze + clean-box launch are on-site/release steps. -->
 
-# Runbook — Rebuild & offline-smoke the Windows portable bundle
+# Runbook - Rebuild & offline-smoke the Windows portable bundle
 
 Rebuild the `Smart Commissioning App` Windows portable bundle now that Alembic
 ships in the core wheel, then prove it migrates and smokes locally **with no
@@ -44,10 +44,10 @@ the supported build set. Verified offline on this dev box.
 | Tool | Supported / pinned version |
 | --- | --- |
 | OS | Windows 11 Pro / Windows Server 2022 |
-| Shell | PowerShell 7+ (`pwsh`) — **not** Windows PowerShell 5.1 |
+| Shell | PowerShell 7+ (`pwsh`) - **not** Windows PowerShell 5.1 |
 | Python | 3.12.10 |
 | pip | 26.1.x |
-| setuptools | >=62 (built with 82.0.1) — data-files **glob** expansion needs `setuptools>=62` |
+| setuptools | >=62 (built with 82.0.1) - data-files **glob** expansion needs `setuptools>=62` |
 | PyInstaller | 6.20.0 |
 | Node + npm | 22 |
 
@@ -57,7 +57,7 @@ the supported build set. Verified offline on this dev box.
   in the build interpreter (fastapi, uvicorn, sqlalchemy, alembic, pydantic*,
   psycopg, redis, openpyxl, prometheus_client, httpx, dramatiq, multipart,
   starlette, `bacpypes3`, and `smart_commissioning_core`). Pull `bacpypes3` via
-  core's `[bacnet]` extra — `pip install "./core[bacnet]" ./backend` — so
+  core's `[bacnet]` extra - `pip install "./core[bacnet]" ./backend` - so
   `build.ps1`'s `--collect-all bacpypes3` can freeze the real BACnet/IP backend.
   (Without it an authorized real BACnet scan honestly RuntimeErrors in the exe
   rather than faking a result.)
@@ -122,7 +122,7 @@ no-op refresh here).
 > The in-app engineer **Review Comments** widget ships in every build by default.
 > To cut a GA bundle without it, set the build-time flag:
 > `VITE_REVIEW_COMMENTS=false npm run build`. This is a Vite build-time variable
-> baked into `frontend/dist/` at build — not read at runtime, so it has no entry
+> baked into `frontend/dist/` at build - not read at runtime, so it has no entry
 > in any `.env`.
 
 ---
@@ -133,7 +133,7 @@ The launcher is **not** frozen self-contained for Alembic: in
 `run_smart_commissioning_app.py::configure_environment` it expects sibling source
 dirs `<root>/backend`, `<root>/frontend/dist`, and (if present) `<root>/core` on
 `sys.path`. Build the exe, then assemble the directory bundle. **Either** of two
-Alembic-shipping options works — pick one.
+Alembic-shipping options works - pick one.
 
 > **Turnkey:** `packaging/windows_portable/build.ps1` automates Option A
 > end-to-end (frontend build → PyInstaller freeze → bundle assembly with the
@@ -145,7 +145,7 @@ Alembic-shipping options works — pick one.
 > **Requires PowerShell 7 (the `pwsh` command).** Windows PowerShell 5.1 does not
 > provide `pwsh`; running `build.ps1` under 5.1 is unsupported.
 
-**Option A (recommended — mirrors backend/ and frontend/): ship the `core/`
+**Option A (recommended - mirrors backend/ and frontend/): ship the `core/`
 source tree next to the exe.** `migrate.py::_SOURCE_TREE_ROOT` then resolves
 `<root>/core/alembic.ini` (verified: `parents[2]` of
 `<root>/core/smart_commissioning_core/db/migrate.py` == `<root>/core`, and
@@ -165,13 +165,13 @@ cp -r frontend/dist build/Smart_Commissioning_App_Windows_Portable/frontend/dist
 ```
 
 (Trim `core/__pycache__`, `core/alembic/versions/__pycache__`, and
-`build/`/`dist`/test caches from the copied `core/` — `MANIFEST.in` already
+`build/`/`dist`/test caches from the copied `core/` - `MANIFEST.in` already
 prunes these for the wheel; mirror that here.)
 
 **Option B (wheel-into-frozen): bundle the wheel's data-files into `_internal`.**
 Add the wheel's `share/smart_commissioning_core/**` to the PyInstaller `datas`
 so they land beside the exe, and ensure the frozen `sys.prefix` (the bundle dir)
-contains `share/smart_commissioning_core/alembic.ini` — that satisfies the
+contains `share/smart_commissioning_core/alembic.ini` - that satisfies the
 data-files branch of `migrate._candidate_roots()`. This needs a spec edit
 (current `build/windows_portable_tmp/spec/SmartCommissioningApp.spec` has
 `datas=[]`, which is why the old build shipped no Alembic). Option A is simpler
@@ -189,12 +189,12 @@ and is what the launcher's `core_root` check already anticipates.
 
 Start the bundle (it sets `AUTH_MODE=local`, `JOB_EXECUTION_MODE=inline`,
 SQLite `DATABASE_URL` under `%LOCALAPPDATA%\SmartCommissioning\` for the
-frozen exe — `SMART_COMMISSIONING_DATA_DIR` overrides it; unfrozen dev runs
-keep `<repo>/runtime/` — picks a free port from 8000 via `reserve_port`, runs
+frozen exe - `SMART_COMMISSIONING_DATA_DIR` overrides it; unfrozen dev runs
+keep `<repo>/runtime/` - picks a free port from 8000 via `reserve_port`, runs
 `upgrade_to_head` on startup, opens a browser). To re-verify **first-launch**
 behavior (e.g. a missing-Alembic regression), point
 `SMART_COMMISSIONING_DATA_DIR` at an empty folder or remove
-`%LOCALAPPDATA%\SmartCommissioning` first — an existing stable-dir DB is
+`%LOCALAPPDATA%\SmartCommissioning` first - an existing stable-dir DB is
 reused and would mask it:
 
 ```
@@ -216,10 +216,10 @@ scripts/smoke_local.sh http://127.0.0.1:8000
 
 1. `PASS GET /api/v1/health -> 200 status=ok`
 2. `PASS GET /api/v1/ready -> 200 status=ready`  (local SQLite only; no Redis/PG
-   needed — a 503 here means the DB layer failed, i.e. migrations didn't run)
+   needed - a 503 here means the DB layer failed, i.e. migrations didn't run)
 3. `PASS GET /metrics -> 200 Prometheus exposition text`  (matches `# HELP`/`# TYPE`/`sct_`)
    - 3b. `PASS GET /electracom-logo.png -> 200 image/png (frontend static serving)`
-     — the bundle serves the built frontend, so this one always runs here. A
+     - the bundle serves the built frontend, so this one always runs here. A
      FAIL naming `text/html` means the SPA fallback swallowed the asset (the
      v0.1.10 logo bug). Only a backend-only stack (no dist at `/`) skips it with
      an Info line, so the footer count is 10 for the portable bundle.
@@ -247,16 +247,16 @@ Footer: `SMOKE PASSED  N/N checks OK` (exit 0). Any FAIL → exit 1.
 - `pip wheel ./core` builds and the wheel ships `alembic.ini` + env + **all 4**
   `versions/*.py` + the UDMI fixture (data-files glob works).
 - `migrate.upgrade_to_head` applies head from a **wheel-only** install (no source
-  tree) against a fresh SQLite DB — the same call the API runs at startup.
+  tree) against a fresh SQLite DB - the same call the API runs at startup.
 - `scripts/smoke_local.sh` (`bash -n`) and `scripts/smoke_local.ps1`
   (`[scriptblock]::Create`) parse clean; `scripts/seed_demo.py` byte-compiles.
 - Frontend `dist/` exists; launcher `configure_environment` requires
   `backend/`, `frontend/dist/index.html`, optional `core/`.
-- The whole smoke surface is fixture/dry-run only — it never opens a broker,
+- The whole smoke surface is fixture/dry-run only - it never opens a broker,
   socket scan, Postgres, or Redis (per `docs/quickstart.md` §B and the script
   headers).
 
-**Not verifiable in this dev env (on-site / build-box only — do NOT claim tested):**
+**Not verifiable in this dev env (on-site / build-box only - do NOT claim tested):**
 - The actual **PyInstaller freeze + bundle assembly on Windows** and a
   double-click run of the resulting `SmartCommissioningApp.exe` (I did not build
   the exe or launch a server here).
@@ -265,5 +265,5 @@ Footer: `SMOKE PASSED  N/N checks OK` (exit 0). Any FAIL → exit 1.
 - Windows SmartScreen / AV behaviour on first launch (unsigned tester build, per
   the bundle's `README_FIRST.txt`).
 - All **live** surfaces (active IP/BACnet scan, live MQTT publish, real
-  broker/Redis/Postgres, edge→hub sync) — explicitly out of scope here; see
+  broker/Redis/Postgres, edge→hub sync) - explicitly out of scope here; see
   `docs/phase5-onsite-validation.md` and `docs/runbook.md`.

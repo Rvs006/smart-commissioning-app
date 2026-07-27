@@ -19,10 +19,10 @@ See CONTRIBUTING.md for setup, the CI gates, and the live-infrastructure honesty
 
 - [ ] Tests pass locally (`python -m unittest discover` for core/backend; `npm test -- --run` for frontend)
 - [ ] Lint is clean (`ruff check backend worker core`; `npm run lint`) and typecheck passes (`npm run typecheck`)
-- [ ] **Live-infrastructure paths are honestly marked** — no fabricated test/scan/broker results; live-untested paths are labeled as such (see CONTRIBUTING.md and `docs/phase5-onsite-validation.md`)
+- [ ] **Live-infrastructure paths are honestly marked** - no fabricated test/scan/broker results; live-untested paths are labeled as such (see CONTRIBUTING.md and `docs/phase5-onsite-validation.md`)
 - [ ] Docs updated where behavior changed (`docs/`, `README.md`)
 - [ ] `CHANGELOG.md` `[Unreleased]` section updated if the change is user- or operator-visible
-- [ ] Security considered (auth, secret handling, scan-safety, input validation) — see `docs/security-posture.md`
+- [ ] Security considered (auth, secret handling, scan-safety, input validation) - see `docs/security-posture.md`
 
 ## How was this tested?
 
