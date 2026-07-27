@@ -255,8 +255,14 @@ def _conflict_bundle(bundle: bytes, key: SigningKey) -> bytes:
     item["run"]["result_summary"] = summary
     descriptor["result_sha256"] = digest
     item_bytes = canonical_json_bytes(item)
+    item_id = sha256_bytes(
+        f"{descriptor['run_id']}\0{digest}".encode()
+    )[:32]
+    descriptor["item_id"] = item_id
+    descriptor["item_member"] = f"items/{item_id}.json"
     descriptor["item_sha256"] = sha256_bytes(item_bytes)
-    members[item_member] = item_bytes
+    members.pop(item_member)
+    members[descriptor["item_member"]] = item_bytes
     manifest["bundle_id"] = sha256_bytes(
         canonical_json_bytes(
             {

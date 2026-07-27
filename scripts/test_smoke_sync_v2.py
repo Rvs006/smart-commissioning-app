@@ -2,11 +2,17 @@ import argparse
 import contextlib
 import io
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import httpx
 import smoke_sync_v2
+from smart_commissioning_core.sync_v2 import (
+    SyncV2Descriptor,
+    validate_sync_v2_item,
+)
 
 
 class SmokeSyncV2UnitTests(unittest.TestCase):
@@ -83,6 +89,34 @@ class SmokeSyncV2UnitTests(unittest.TestCase):
                 "public-test",
             ],
         )
+
+    def test_conflict_bundle_rewrites_digest_derived_item_identity(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync-smoke-conflict-") as temporary:
+            edge = smoke_sync_v2.EdgeFixture(Path(temporary))
+            try:
+                run_id = edge.report(
+                    smoke_sync_v2._PROJECT,
+                    smoke_sync_v2._SITE,
+                    "conflict-unit",
+                )
+                original = edge.bundle([run_id])
+                original_manifest, _ = smoke_sync_v2._read_bundle(original)
+
+                conflict = smoke_sync_v2._conflict_bundle(original, edge.bundle_key)
+                manifest, members = smoke_sync_v2._read_bundle(conflict)
+                descriptor = SyncV2Descriptor.model_validate(manifest["items"][0])
+
+                self.assertNotEqual(
+                    descriptor.item_id,
+                    original_manifest["items"][0]["item_id"],
+                )
+                self.assertEqual(
+                    descriptor.item_member,
+                    f"items/{descriptor.item_id}.json",
+                )
+                validate_sync_v2_item(members[descriptor.item_member], descriptor)
+            finally:
+                edge.close()
 
 
 if __name__ == "__main__":
