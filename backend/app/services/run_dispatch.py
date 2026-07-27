@@ -20,11 +20,15 @@ from smart_commissioning_core.execution_context import (
     SecretMaterialUnavailableError,
     resolve_context_parameters,
 )
-from smart_commissioning_core.owned_run_store import OwnedRunStore
+from smart_commissioning_core.owned_run_store import (
+    OwnedRunStore,
+    OwnershipLostError,
+)
 
 from app.core.config import edge_identity, get_settings
 from app.schemas.jobs import JobAcceptedResponse, RunRecord
 from app.services.configuration_service import read_secret_material
+from app.services.inline_heartbeat import InlineRunHeartbeat
 from app.services.job_queue import JobQueueService, JobQueueUnavailable, RunEnqueuer
 from app.services.run_service import RunService
 
@@ -41,6 +45,9 @@ _INLINE_RUN_CRASH_MESSAGE = (
     "This run stopped unexpectedly before it could finish, so no results were "
     "saved. Please run it again."
 )
+_INLINE_CONTEXT_ERROR_MESSAGE = "Frozen execution inputs could not be resolved."
+_INLINE_LEASE_SECONDS = 60
+_INLINE_HEARTBEAT_SECONDS = 15.0
 
 _OUTBOX_DESTINATIONS = {
     "ip_discovery": ("discover_ip_range", "discovery"),
@@ -75,12 +82,12 @@ def publish_pending_dispatches(service: RunService | None = None) -> list[str]:
 
 def _run_inline_guarded(
     service: RunService,
-    run_id: str,
+    run: RunRecord,
     run_inline: InlineFn,
     owned_store: OwnedRunStore,
-    parameters: dict[str, Any],
+    heartbeat: InlineRunHeartbeat,
 ) -> None:
-    """Execute ``run_inline`` on a background thread, never letting it strand the run.
+    """Resolve and execute one claimed inline run under heartbeat protection.
 
     The engine wrapper (engines.base.run_engine) already writes a terminal status
     on every path it reaches, so the only gap this closes is an exception raised
@@ -91,19 +98,83 @@ def _run_inline_guarded(
     so a store hiccup cannot raise out of the thread.
     """
     try:
+        dispatch = service.get_dispatch_for_run(run.run_id)
+        service.mark_dispatch_published(dispatch.dispatch_id)
+        try:
+            stored_context = service.get_execution_context(run.run_id)
+            parameters = resolve_context_parameters(
+                stored_context.context,
+                owned_store.lease,
+                deployment_id=edge_identity().edge_id,
+                channel=run.job_type,
+                secret_resolver=lambda reference: read_secret_material(
+                    reference
+                ).encode("utf-8"),
+            )
+        except (FileNotFoundError, ValueError, SecretMaterialUnavailableError):
+            if heartbeat.ownership_lost:
+                return
+            try:
+                owned_store.update_run_status(
+                    run.run_id,
+                    status="failed",
+                    stage="execution_context_unavailable",
+                    progress_percent=100,
+                    error_message=_INLINE_CONTEXT_ERROR_MESSAGE,
+                )
+            except Exception as error:
+                logger.error(
+                    "failed to seal inline context-resolution failure for run_id=%s "
+                    "exception_type=%s",
+                    run.run_id,
+                    type(error).__name__,
+                )
+            return
+        if heartbeat.ownership_lost:
+            return
         run_inline(owned_store, parameters)
-    except Exception:
-        logger.exception("background inline run %s crashed before it could finish", run_id)
+        if owned_store.ownership_lost and not heartbeat.ownership_lost:
+            logger.warning(
+                "inline processor observed ownership loss for run_id=%s; "
+                "terminal evidence was not written",
+                run.run_id,
+            )
+    except OwnershipLostError:
+        logger.warning(
+            "inline processor observed ownership loss for run_id=%s; "
+            "terminal evidence was not written",
+            run.run_id,
+        )
+    except Exception as error:
+        logger.error(
+            "background inline run %s crashed before it could finish "
+            "exception_type=%s",
+            run.run_id,
+            type(error).__name__,
+        )
+        if heartbeat.ownership_lost:
+            return
+        if owned_store.terminal_outcome is not None:
+            # The processor committed its one terminal result and then raised
+            # during cleanup. Preserve that outcome instead of recording a
+            # bogus competing finalization conflict.
+            return
         try:
             owned_store.update_run_status(
-                run_id,
+                run.run_id,
                 status="failed",
                 stage="inline_run_crashed",
                 progress_percent=100,
                 error_message=_INLINE_RUN_CRASH_MESSAGE,
             )
-        except Exception:
-            logger.exception("failed to mark crashed inline run %s as failed", run_id)
+        except Exception as write_error:
+            logger.error(
+                "failed to mark crashed inline run %s as failed exception_type=%s",
+                run.run_id,
+                type(write_error).__name__,
+            )
+    finally:
+        heartbeat.stop_and_join()
 
 
 def _inline_response(
@@ -135,9 +206,17 @@ def _inline_response(
     that read fails too, fall back to the run as created — so this path returns a
     clean accepted response carrying the run id instead of a 500.
     """
-    dispatch = service.get_dispatch_for_run(run.run_id)
-    stored_context = service.get_execution_context(run.run_id)
-    owned_store = service.claim_owned_run(run.run_id)
+    settings = get_settings()
+    lease_seconds = int(
+        getattr(settings, "run_lease_seconds", _INLINE_LEASE_SECONDS)
+    )
+    heartbeat_seconds = float(
+        getattr(settings, "run_heartbeat_seconds", _INLINE_HEARTBEAT_SECONDS)
+    )
+    owned_store = service.claim_owned_run(
+        run.run_id,
+        lease_seconds=lease_seconds,
+    )
     if owned_store is None:
         current = service.get_run(run.run_id)
         return JobAcceptedResponse(
@@ -146,23 +225,39 @@ def _inline_response(
             status=current.status,
             message=message,
         )
-    service.mark_dispatch_published(dispatch.dispatch_id)
+
+    heartbeat: InlineRunHeartbeat | None = None
     try:
-        parameters = resolve_context_parameters(
-            stored_context.context,
-            owned_store.lease,
-            deployment_id=edge_identity().edge_id,
-            channel=run.job_type,
-            secret_resolver=lambda reference: read_secret_material(reference).encode("utf-8"),
+        heartbeat = InlineRunHeartbeat(
+            owned_store,
+            lease_seconds=lease_seconds,
+            interval_seconds=heartbeat_seconds,
         )
-    except (FileNotFoundError, ValueError, SecretMaterialUnavailableError):
-        owned_store.update_run_status(
+        heartbeat.start()
+    except Exception as error:
+        logger.error(
+            "inline heartbeat could not start for run_id=%s exception_type=%s",
             run.run_id,
-            status="failed",
-            stage="execution_context_unavailable",
-            progress_percent=100,
-            error_message="Frozen execution inputs could not be resolved.",
+            type(error).__name__,
         )
+        try:
+            owned_store.update_run_status(
+                run.run_id,
+                status="failed",
+                stage="inline_heartbeat_start_failed",
+                progress_percent=100,
+                error_message=_INLINE_RUN_CRASH_MESSAGE,
+            )
+        except Exception as write_error:
+            logger.error(
+                "failed to seal heartbeat-start failure for run_id=%s "
+                "exception_type=%s",
+                run.run_id,
+                type(write_error).__name__,
+            )
+        finally:
+            if heartbeat is not None:
+                heartbeat.stop_and_join()
         current = service.get_run(run.run_id)
         return JobAcceptedResponse(
             run_id=current.run_id,
@@ -171,13 +266,46 @@ def _inline_response(
             message=message,
         )
 
-    if get_settings().inline_run_async:
-        threading.Thread(
-            target=_run_inline_guarded,
-            args=(service, run.run_id, run_inline, owned_store, parameters),
-            name=f"inline-run-{run.run_id}",
-            daemon=True,
-        ).start()
+    assert heartbeat is not None
+    if settings.inline_run_async:
+        try:
+            executor = threading.Thread(
+                target=_run_inline_guarded,
+                args=(service, run, run_inline, owned_store, heartbeat),
+                name=f"inline-run-{run.run_id}",
+                daemon=True,
+            )
+            executor.start()
+        except Exception as error:
+            logger.error(
+                "inline executor could not start for run_id=%s exception_type=%s",
+                run.run_id,
+                type(error).__name__,
+            )
+            try:
+                owned_store.update_run_status(
+                    run.run_id,
+                    status="failed",
+                    stage="inline_executor_start_failed",
+                    progress_percent=100,
+                    error_message=_INLINE_RUN_CRASH_MESSAGE,
+                )
+            except Exception as write_error:
+                logger.error(
+                    "failed to seal executor-start failure for run_id=%s "
+                    "exception_type=%s",
+                    run.run_id,
+                    type(write_error).__name__,
+                )
+            finally:
+                heartbeat.stop_and_join()
+            current = service.get_run(run.run_id)
+            return JobAcceptedResponse(
+                run_id=current.run_id,
+                job_type=current.job_type,
+                status=current.status,
+                message=message,
+            )
         return JobAcceptedResponse(
             run_id=run.run_id,
             job_type=run.job_type,
@@ -185,7 +313,7 @@ def _inline_response(
             message=message,
         )
 
-    run_inline(owned_store, parameters)
+    _run_inline_guarded(service, run, run_inline, owned_store, heartbeat)
     try:
         processed = service.get_run(run.run_id)
     except Exception:

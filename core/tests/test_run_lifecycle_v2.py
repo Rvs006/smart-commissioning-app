@@ -1,8 +1,10 @@
 import tempfile
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from smart_commissioning_core.db.base import Base
 from smart_commissioning_core.db.engine import (
@@ -25,9 +27,13 @@ from smart_commissioning_core.db.run_lifecycle import (
     ProtocolConflictError,
     RunLifecycleRepository,
 )
+from smart_commissioning_core.owned_run_store import (
+    OwnedRunStore,
+    OwnershipLostError,
+)
 from smart_commissioning_core.run_context import RunContextV1
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select, update
 
 
 def _context(protocol_key: str | None = None) -> RunContextV1:
@@ -143,6 +149,79 @@ class ClaimAndFencingTests(LifecycleTestCase):
         self.assertEqual(len(winners), 1)
         self.assertEqual(winners[0].attempt, 1)
 
+    def test_claim_waiting_on_database_lock_receives_full_lease(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        lock_connection = self.engine.connect()
+        lock_transaction = lock_connection.begin()
+        lock_connection.execute(
+            update(Run)
+            .where(Run.id == run_id)
+            .values(state_version=Run.state_version)
+        )
+
+        db_wait_started = threading.Event()
+        worker_thread_id: list[int] = []
+
+        def observe_sql(
+            _connection,
+            _cursor,
+            statement,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            if (
+                worker_thread_id
+                and threading.get_ident() == worker_thread_id[0]
+                and statement.lstrip().upper().startswith("BEGIN IMMEDIATE")
+            ):
+                db_wait_started.set()
+
+        event.listen(self.engine, "before_cursor_execute", observe_sql)
+        result: dict[str, object] = {}
+        errors: list[BaseException] = []
+
+        def claim() -> None:
+            worker_thread_id.append(threading.get_ident())
+            try:
+                result["lease"] = self.repository.claim_run(
+                    run_id,
+                    dispatch_id,
+                    lease_seconds=2,
+                )
+            except BaseException as error:  # pragma: no cover - surfaced below
+                errors.append(error)
+
+        claimant = threading.Thread(target=claim)
+        try:
+            claimant.start()
+            self.assertTrue(
+                db_wait_started.wait(2.0),
+                "claim did not reach the SQLite lock",
+            )
+            threading.Event().wait(1.2)
+            released_at = datetime.now(UTC)
+        finally:
+            if lock_transaction.is_active:
+                lock_transaction.rollback()
+            lock_connection.close()
+
+        claimant.join(5.0)
+        event.remove(self.engine, "before_cursor_execute", observe_sql)
+        self.assertFalse(claimant.is_alive())
+        if errors:
+            raise errors[0]
+        lease = result["lease"]
+        self.assertIsNotNone(lease)
+        self.assertGreaterEqual(
+            lease.claimed_at,
+            released_at - timedelta(milliseconds=100),
+        )
+        self.assertGreater(
+            (lease.lease_expires_at - datetime.now(UTC)).total_seconds(),
+            1.5,
+        )
+
     def test_every_stale_owner_write_changes_zero_lifecycle_rows(self) -> None:
         run_id, dispatch_id = self.create_run()
         lease = self.repository.claim_run(run_id, dispatch_id, lease_seconds=60)
@@ -174,6 +253,268 @@ class ClaimAndFencingTests(LifecycleTestCase):
                 )
             )
         self.assertGreaterEqual(conflict_count, 1)
+
+    def test_confirmed_loss_fences_store_before_any_more_evidence_write(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        lease = self.repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(lease)
+        store = OwnedRunStore(self.repository, lease)
+
+        store.mark_ownership_lost()
+
+        self.assertTrue(store.ownership_lost)
+        self.assertTrue(store.is_cancel_requested(run_id))
+        with self.assertRaises(OwnershipLostError):
+            store.update_result_summary(run_id, {"stale": True})
+        with self.assertRaises(OwnershipLostError):
+            store.update_run_status(
+                run_id,
+                status="failed",
+                stage="stale-finalizer",
+                progress_percent=100,
+            )
+        with session_factory(self.engine)() as session:
+            row = session.get(Run, run_id)
+            self.assertEqual(row.status, "running")
+            self.assertNotIn("stale", row.result_summary or {})
+            self.assertIsNone(session.get(RunResult, run_id))
+
+    def test_same_owner_heartbeat_version_change_does_not_reject_progress(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        lease = self.repository.claim_run(run_id, dispatch_id, lease_seconds=60)
+        self.assertIsNotNone(lease)
+        original_load = self.repository._load_run
+        injected = False
+
+        def load_with_heartbeat_version_change(session, selected_run_id, **kwargs):
+            nonlocal injected
+            row = original_load(session, selected_run_id, **kwargs)
+            if not injected:
+                injected = True
+                heartbeat_at = datetime.now(UTC)
+                session.execute(
+                    update(Run)
+                    .where(Run.id == selected_run_id)
+                    .values(
+                        heartbeat_at=heartbeat_at,
+                        lease_expires_at=heartbeat_at + timedelta(seconds=60),
+                        state_version=Run.state_version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            return row
+
+        with mock.patch.object(
+            self.repository,
+            "_load_run",
+            side_effect=load_with_heartbeat_version_change,
+        ):
+            accepted = self.repository.update_progress(
+                run_id,
+                lease.owner_token,
+                stage="capture_active",
+                progress_percent=25,
+            )
+
+        self.assertTrue(accepted)
+        with session_factory(self.engine)() as session:
+            row = session.get(Run, run_id)
+            self.assertEqual(row.stage, "capture_active")
+            self.assertEqual(row.progress_percent, 25)
+
+    def test_same_owner_heartbeat_version_change_does_not_drop_stop_request(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        lease = self.repository.claim_run(run_id, dispatch_id, lease_seconds=60)
+        self.assertIsNotNone(lease)
+        original_load = self.repository._load_run
+        injected = False
+
+        def load_with_heartbeat_version_change(session, selected_run_id, **kwargs):
+            nonlocal injected
+            row = original_load(session, selected_run_id, **kwargs)
+            if not injected:
+                injected = True
+                heartbeat_at = datetime.now(UTC)
+                session.execute(
+                    update(Run)
+                    .where(Run.id == selected_run_id)
+                    .values(
+                        heartbeat_at=heartbeat_at,
+                        lease_expires_at=heartbeat_at + timedelta(seconds=60),
+                        state_version=Run.state_version + 1,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+            return row
+
+        with mock.patch.object(
+            self.repository,
+            "_load_run",
+            side_effect=load_with_heartbeat_version_change,
+        ):
+            outcome = self.repository.request_cancel(run_id)
+
+        self.assertTrue(outcome.changed)
+        self.assertEqual(outcome.state, "cancellation_requested")
+        with session_factory(self.engine)() as session:
+            self.assertTrue(session.get(Run, run_id).cancel_requested)
+
+    def test_expired_owner_cannot_revive_lease_before_recovery_sweep(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        claimed_at = datetime(2026, 7, 27, 9, 0, tzinfo=UTC)
+        lease = self.repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=60,
+            now=claimed_at,
+        )
+        self.assertIsNotNone(lease)
+        after_expiry = claimed_at + timedelta(seconds=61)
+
+        self.assertFalse(
+            self.repository.heartbeat(
+                run_id,
+                lease.owner_token,
+                lease_seconds=60,
+                now=after_expiry,
+            )
+        )
+        self.assertFalse(
+            self.repository.update_progress(
+                run_id,
+                lease.owner_token,
+                stage="late-progress",
+                progress_percent=75,
+                now=after_expiry,
+            )
+        )
+        late_terminal = self.repository.finalize_run(
+            run_id,
+            lease.owner_token,
+            _terminal(marker="late-before-recovery"),
+            now=after_expiry,
+        )
+        self.assertTrue(late_terminal.conflict)
+        with session_factory(self.engine)() as session:
+            row = session.get(Run, run_id)
+            self.assertEqual(row.status, "running")
+            self.assertNotEqual(row.stage, "late-progress")
+            self.assertIsNone(session.get(RunResult, run_id))
+
+        self.assertEqual(
+            self.repository.recover_expired_leases(now=after_expiry),
+            [run_id],
+        )
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "failed")
+
+    def test_lifecycle_writes_blocked_across_expiry_are_rejected(self) -> None:
+        """A pre-expiry call cannot use a timestamp sampled before a DB wait."""
+
+        def exercise(operation_name: str) -> None:
+            run_id, dispatch_id = self.create_run()
+            lease = self.repository.claim_run(
+                run_id,
+                dispatch_id,
+                lease_seconds=1,
+            )
+            self.assertIsNotNone(lease)
+
+            lock_connection = self.engine.connect()
+            lock_transaction = lock_connection.begin()
+            lock_connection.execute(
+                update(Run)
+                .where(Run.id == run_id)
+                .values(state_version=Run.state_version)
+            )
+
+            db_wait_started = threading.Event()
+            worker_thread_id: list[int] = []
+
+            def observe_sql(
+                _connection,
+                _cursor,
+                statement,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                if (
+                    worker_thread_id
+                    and threading.get_ident() == worker_thread_id[0]
+                    and statement.lstrip().upper().startswith("BEGIN IMMEDIATE")
+                ):
+                    db_wait_started.set()
+
+            event.listen(self.engine, "before_cursor_execute", observe_sql)
+            result: dict[str, object] = {}
+            errors: list[BaseException] = []
+
+            def perform_write() -> None:
+                worker_thread_id.append(threading.get_ident())
+                try:
+                    if operation_name == "heartbeat":
+                        result["value"] = self.repository.heartbeat(
+                            run_id,
+                            lease.owner_token,
+                            lease_seconds=60,
+                        )
+                    elif operation_name == "progress":
+                        result["value"] = self.repository.update_progress(
+                            run_id,
+                            lease.owner_token,
+                            stage="late-progress",
+                            progress_percent=75,
+                        )
+                    else:
+                        result["value"] = self.repository.finalize_run(
+                            run_id,
+                            lease.owner_token,
+                            _terminal(marker="late-finalize"),
+                        )
+                except BaseException as error:  # pragma: no cover - surfaced below
+                    errors.append(error)
+
+            writer = threading.Thread(target=perform_write)
+            try:
+                writer.start()
+                self.assertTrue(
+                    db_wait_started.wait(2.0),
+                    "lifecycle write did not reach the SQLite lock",
+                )
+                wait_seconds = max(
+                    0.0,
+                    (lease.lease_expires_at - datetime.now(UTC)).total_seconds(),
+                )
+                threading.Event().wait(wait_seconds + 0.2)
+                self.assertGreater(datetime.now(UTC), lease.lease_expires_at)
+            finally:
+                if lock_transaction.is_active:
+                    lock_transaction.rollback()
+                lock_connection.close()
+
+            writer.join(5.0)
+            event.remove(self.engine, "before_cursor_execute", observe_sql)
+            self.assertFalse(writer.is_alive())
+            if errors:
+                raise errors[0]
+
+            if operation_name == "finalize":
+                self.assertTrue(result["value"].conflict)
+            else:
+                self.assertFalse(result["value"])
+            with session_factory(self.engine)() as session:
+                row = session.get(Run, run_id)
+                self.assertEqual(row.status, "running")
+                self.assertNotEqual(row.stage, "late-progress")
+                self.assertIsNone(session.get(RunResult, run_id))
+
+        for operation_name in ("heartbeat", "progress", "finalize"):
+            with self.subTest(operation=operation_name):
+                exercise(operation_name)
 
 
 class TerminalSealTests(LifecycleTestCase):
@@ -285,6 +626,70 @@ class TerminalSealTests(LifecycleTestCase):
                 1,
             )
 
+    def test_terminal_outcome_is_recorded_before_heartbeat_observes_terminal(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        lease = self.repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=60,
+        )
+        terminal_committed = threading.Event()
+        release_finalizer = threading.Event()
+        heartbeat_entered = threading.Event()
+
+        class PausingRepository:
+            def finalize_run(inner_self, *args, **kwargs):
+                outcome = self.repository.finalize_run(*args, **kwargs)
+                terminal_committed.set()
+                if not release_finalizer.wait(3.0):
+                    raise TimeoutError("finalizer was not released")
+                return outcome
+
+            def heartbeat(inner_self, *args, **kwargs):
+                heartbeat_entered.set()
+                return self.repository.heartbeat(*args, **kwargs)
+
+        store = OwnedRunStore(PausingRepository(), lease)
+        finalizer_result: dict[str, object] = {}
+        heartbeat_result: dict[str, object] = {}
+        heartbeat_attempted = threading.Event()
+
+        finalizer = threading.Thread(
+            target=lambda: finalizer_result.setdefault(
+                "value",
+                store.update_run_status(
+                    run_id,
+                    status="succeeded",
+                    stage="complete",
+                    progress_percent=100,
+                ),
+            )
+        )
+        finalizer.start()
+        self.assertTrue(terminal_committed.wait(3.0))
+
+        def send_heartbeat() -> None:
+            heartbeat_attempted.set()
+            heartbeat_result["value"] = store.heartbeat(lease_seconds=60)
+
+        heartbeat = threading.Thread(target=send_heartbeat)
+        heartbeat.start()
+        self.assertTrue(heartbeat_attempted.wait(3.0))
+        self.assertFalse(
+            heartbeat_entered.wait(0.05),
+            "heartbeat crossed terminal finalization before its outcome was recorded",
+        )
+
+        release_finalizer.set()
+        finalizer.join(3.0)
+        heartbeat.join(3.0)
+        self.assertFalse(finalizer.is_alive())
+        self.assertFalse(heartbeat.is_alive())
+        self.assertEqual(finalizer_result["value"]["status"], "succeeded")
+        self.assertFalse(heartbeat_result["value"])
+        self.assertTrue(store.terminal_outcome.applied)
+        self.assertFalse(store.ownership_lost)
+
 
 class CancellationAndRecoveryTests(LifecycleTestCase):
     def test_cancelling_queued_run_seals_without_claim(self) -> None:
@@ -314,6 +719,7 @@ class CancellationAndRecoveryTests(LifecycleTestCase):
         self.assertEqual(recovered, [run_id])
         seal = self.repository.get_seal(run_id)
         self.assertEqual(seal.terminal_status, "failed")
+        recovered_digest = seal.result_sha256
         self.assertFalse(
             self.repository.update_progress(
                 run_id,
@@ -322,6 +728,87 @@ class CancellationAndRecoveryTests(LifecycleTestCase):
                 progress_percent=99,
             )
         )
+        late_finalization = self.repository.finalize_run(
+            run_id,
+            lease.owner_token,
+            _terminal(marker="late-owner"),
+        )
+        self.assertTrue(late_finalization.conflict)
+        preserved = self.repository.get_seal(run_id)
+        self.assertEqual(preserved.terminal_status, "failed")
+        self.assertEqual(preserved.result_sha256, recovered_digest)
+
+    def test_conflicting_store_finalization_immediately_fences_late_writes(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        claimed_at = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+        lease = self.repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=60,
+            now=claimed_at,
+        )
+        store = OwnedRunStore(self.repository, lease)
+        self.assertEqual(
+            self.repository.recover_expired_leases(
+                now=claimed_at + timedelta(seconds=61)
+            ),
+            [run_id],
+        )
+
+        late = store.update_run_status(
+            run_id,
+            status="succeeded",
+            stage="late-success",
+            progress_percent=100,
+        )
+
+        self.assertEqual(late["status"], "ownership_lost")
+        self.assertTrue(store.terminal_outcome.conflict)
+        self.assertTrue(store.ownership_lost)
+        with self.assertRaises(OwnershipLostError):
+            store.replace_devices(run_id, [{"address": "192.0.2.90"}])
+
+    def test_heartbeat_survives_original_boundary_then_dead_owner_recovers(self) -> None:
+        run_id, dispatch_id = self.create_run(protocol_key="mqtt:" + "1" * 64)
+        claimed_at = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
+        lease = self.repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=60,
+            now=claimed_at,
+        )
+        self.assertIsNotNone(lease)
+
+        renewed_at = claimed_at + timedelta(seconds=15)
+        self.assertTrue(
+            self.repository.heartbeat(
+                run_id,
+                lease.owner_token,
+                lease_seconds=60,
+                now=renewed_at,
+            )
+        )
+
+        # Maintenance runs after the original t0+60 boundary. The live owner
+        # remains active because its independent heartbeat extended the lease.
+        self.assertEqual(
+            self.repository.recover_expired_leases(
+                now=claimed_at + timedelta(seconds=61)
+            ),
+            [],
+        )
+        with session_factory(self.engine)() as session:
+            self.assertEqual(session.get(Run, run_id).status, "running")
+
+        # No later heartbeat arrives. Recovery remains real and deterministic
+        # once the renewed t0+75 lease has expired.
+        self.assertEqual(
+            self.repository.recover_expired_leases(
+                now=claimed_at + timedelta(seconds=76)
+            ),
+            [run_id],
+        )
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "failed")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -33,17 +34,37 @@ class OwnedRunStore:
         self._points: list[dict[str, Any]] = []
         self._topics: list[dict[str, Any]] = []
         self._terminal_outcome: FinalizeOutcome | None = None
+        self._ownership_lost = threading.Event()
+        # Heartbeat and terminal finalization must not cross. Without this lock,
+        # finalization can commit, heartbeat can observe the now-terminal row,
+        # and the in-memory store can be marked stale just before the finalizer
+        # records its successful outcome.
+        self._lifecycle_lock = threading.RLock()
 
     @property
     def terminal_outcome(self) -> FinalizeOutcome | None:
-        return self._terminal_outcome
+        with self._lifecycle_lock:
+            return self._terminal_outcome
+
+    @property
+    def ownership_lost(self) -> bool:
+        return self._ownership_lost.is_set()
+
+    def mark_ownership_lost(self) -> None:
+        """Fence this in-memory executor after a heartbeat confirms loss."""
+
+        with self._lifecycle_lock:
+            self._ownership_lost.set()
 
     def heartbeat(self, *, lease_seconds: int = 60) -> bool:
-        return self._repository.heartbeat(
-            self.lease.run_id,
-            self.lease.owner_token,
-            lease_seconds=lease_seconds,
-        )
+        with self._lifecycle_lock:
+            if self.ownership_lost:
+                return False
+            return self._repository.heartbeat(
+                self.lease.run_id,
+                self.lease.owner_token,
+                lease_seconds=lease_seconds,
+            )
 
     def update_run_status(
         self,
@@ -56,20 +77,24 @@ class OwnedRunStore:
     ) -> dict[str, Any]:
         self._require_run(run_id)
         if status in _TERMINAL_STATUSES:
-            terminal = TerminalResultV1(
-                status=status,
-                stage=stage or f"engine_{status}",
-                summary=self._summary,
-                issues=self._issues,
-                devices=self._devices,
-                points=self._points,
-                topics=self._topics,
-                error_message=error_message,
-            )
-            outcome = self._repository.finalize_run(
-                run_id, self.lease.owner_token, terminal
-            )
-            self._terminal_outcome = outcome
+            with self._lifecycle_lock:
+                self._require_run(run_id)
+                terminal = TerminalResultV1(
+                    status=status,
+                    stage=stage or f"engine_{status}",
+                    summary=self._summary,
+                    issues=self._issues,
+                    devices=self._devices,
+                    points=self._points,
+                    topics=self._topics,
+                    error_message=error_message,
+                )
+                outcome = self._repository.finalize_run(
+                    run_id, self.lease.owner_token, terminal
+                )
+                self._terminal_outcome = outcome
+                if outcome.conflict:
+                    self._ownership_lost.set()
             return {
                 "run_id": run_id,
                 "status": status if not outcome.conflict else "ownership_lost",
@@ -141,7 +166,10 @@ class OwnedRunStore:
         return self._repository.request_cancel(run_id)
 
     def is_cancel_requested(self, run_id: str) -> bool:
-        self._require_run(run_id)
+        if run_id != self.lease.run_id:
+            raise ValueError("owned run store cannot read another run")
+        if self.ownership_lost:
+            return True
         return self._repository.is_cancel_requested(run_id, self.lease.owner_token)
 
     def replace_devices(self, run_id: str, records: Sequence[Mapping[str, Any]]) -> int:
@@ -176,3 +204,5 @@ class OwnedRunStore:
     def _require_run(self, run_id: str) -> None:
         if run_id != self.lease.run_id:
             raise ValueError("owned run store cannot write another run")
+        if self.ownership_lost:
+            raise OwnershipLostError(run_id)

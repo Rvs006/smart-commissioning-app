@@ -175,9 +175,15 @@ class RunService:
     def get_execution_context(self, run_id: str):
         return self._lifecycle.get_context(run_id)
 
-    def claim_owned_run(self, run_id: str) -> OwnedRunStore | None:
+    def claim_owned_run(
+        self, run_id: str, *, lease_seconds: int = 60
+    ) -> OwnedRunStore | None:
         dispatch = self._lifecycle.get_dispatch_for_run(run_id)
-        lease = self._lifecycle.claim_run(run_id, dispatch.dispatch_id, lease_seconds=60)
+        lease = self._lifecycle.claim_run(
+            run_id,
+            dispatch.dispatch_id,
+            lease_seconds=lease_seconds,
+        )
         return OwnedRunStore(self._lifecycle, lease) if lease is not None else None
 
     def mark_dispatch_published(self, dispatch_id: str) -> bool:

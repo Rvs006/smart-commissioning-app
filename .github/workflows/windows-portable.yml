@@ -1,32 +1,16 @@
-# Builds the Windows portable bundle via packaging/windows_portable/build.ps1
-# on a real windows-2022 runner, then BOOTS the produced exe and proves it
-# serves HTTP before tearing it down. windows-compat.yml only runs source-level
-# gates (pip install + ruff + unittest + npm) and never invokes build.ps1 or
-# launches anything — a gap that let two real build bugs ship to field
-# engineers: a PowerShell 5.1 -Include/-LiteralPath hazard that deleted
-# non-cache files from the bundle, and a missing --collect-all cryptography in
-# the PyInstaller freeze. Either class kills `import app.main`, so the
-# health-200 boot smoke below catches both. A third shipped bug class is
-# subtler: backend/app and core import-guard optional deps (psutil; bacpypes3,
-# the real BACnet/IP backend), so a module missing from the freeze degrades a
-# feature (NIC picker -> Auto-only) or makes an authorized real BACnet scan
-# RuntimeError on-site while health stays 200 — hence the smoke also asserts
-# psutil and bacpypes3 exist inside the frozen bundle.
-#
-# Separate workflow (not a job in windows-compat.yml) because path filters are
-# workflow-level: windows-compat.yml deliberately runs without path filters,
-# and this 15-20 min job should only run when bundle inputs change.
+# Build the real Windows portable executable, exercise it through its HTTP API,
+# and retain exact-SHA evidence only after every acceptance check succeeds.
 name: Windows Portable Bundle
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version stamped into the exe metadata, README_FIRST, and release evidence."
+        description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: "v0.1.26"
+        default: v0.1.27
       release_sha:
-        description: "Full 40-character commit SHA to build. Required for a release dispatch."
+        description: Full 40-character commit SHA to build from current main
         required: true
   pull_request:
     paths:
@@ -35,7 +19,7 @@ on:
       - "core/**"
       - "frontend/**"
       - "scripts/**"
-      - "docs/migration-rollback-v0.1.26.md"
+      - "docs/migration-rollback-v0.1.27.md"
       - ".github/workflows/windows-portable.yml"
   push:
     branches: [main]
@@ -45,74 +29,95 @@ on:
       - "core/**"
       - "frontend/**"
       - "scripts/**"
-      - "docs/migration-rollback-v0.1.26.md"
+      - "docs/migration-rollback-v0.1.27.md"
       - ".github/workflows/windows-portable.yml"
 
-# One live run per ref: follow-up pushes to a PR cancel the now-obsolete
-# 15-20 min build+boot instead of stacking windows-2022 runs.
 concurrency:
-  group: windows-portable-${{ github.ref }}
+  group: windows-portable-${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
+
+env:
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.27' }}
+  RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
   build-and-boot:
-    name: Build + boot Windows portable exe
+    name: Build + accept Windows portable exe
     runs-on: windows-2022
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.release_sha || github.sha }}
+          ref: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      - name: Prove exact checkout
+      - name: Prove PR-head candidate or exact-main release checkout
         shell: pwsh
-        env:
-          EXPECTED_SHA: ${{ inputs.release_sha || github.sha }}
         run: |
           $actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
-          $expected = $env:EXPECTED_SHA.Trim().ToLowerInvariant()
-          if ($expected -notmatch '^[0-9a-f]{40}$') { throw "Expected SHA is not a full commit: $expected" }
-          if ($actual -cne $expected) { throw "Checkout $actual does not match requested $expected" }
+          if ($env:RELEASE_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "Release SHA is not a full commit: $env:RELEASE_SHA"
+          }
+          if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
+            throw "Checkout $actual does not match requested $env:RELEASE_SHA"
+          }
+          if ($env:RELEASE_VERSION -cne 'v0.1.27') {
+            throw "This workflow is pinned to v0.1.27, not '$env:RELEASE_VERSION'."
+          }
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            git fetch origin main --no-tags
+            if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
+            $main = (git rev-parse origin/main).Trim().ToLowerInvariant()
+            if ($actual -cne $main) {
+              throw "Release dispatch must build exact origin/main $main, not $actual."
+            }
+          }
           if (git status --porcelain) { throw 'Release checkout is dirty before build.' }
 
-      - uses: actions/setup-python@v5
+      - name: Parse release publisher with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'scripts\release-portable.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            throw 'release-portable.ps1 failed the Windows PowerShell 5.1 parser.'
+          }
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      # NON-editable install on purpose: PyInstaller does not follow PEP 660
-      # editable finders reliably, and a regular install also lands core's
-      # data files in sys.prefix. Pins match the build box
-      # (docs/portable-bundle-rebuild.md section 1). core[bacnet] pulls bacpypes3
-      # (the real BACnet/IP backend) so the freeze can carry it; without the
-      # extra an authorized real BACnet scan honestly RuntimeErrors in the exe
-      # rather than ever faking a simulated result.
+      # A regular install is intentional: PyInstaller cannot reliably follow
+      # editable finders. core[bacnet] ensures the real BACnet backend is frozen.
       - name: Install Python packages + PyInstaller
         run: python -m pip install "./core[bacnet]" ./backend pyinstaller==6.20.0
 
-      # build.ps1 is `#Requires -Version 7.0`; pwsh is the runner default.
-      # The version input only exists on workflow_dispatch (release builds);
-      # PR/push runs pass an empty string and build.ps1 falls back to its
-      # git-describe / "unversioned" default (shallow checkout has no tags).
-      - name: Build portable bundle (frontend + freeze + assemble)
-        run: pwsh packaging/windows_portable/build.ps1 -Version "${{ inputs.version || '' }}"
-
-      - name: Add exact-SHA SBOM and migration evidence to release bundle
-        if: github.event_name == 'workflow_dispatch'
+      - name: Shortened real-repository heartbeat, fencing, and Stop gates
         shell: pwsh
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
-          if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
-            throw 'A release dispatch requires a version such as v0.1.26.'
-          }
+          python -m unittest discover -s core/tests -p 'test_run_lifecycle_v2.py'
+          python -m unittest discover -s backend/tests -p 'test_run_dispatch_async.py'
+          python -m unittest discover -s backend/tests -p 'test_inline_heartbeat_integration.py'
+
+      - name: Build portable bundle (frontend + freeze + assemble)
+        shell: pwsh
+        run: pwsh packaging/windows_portable/build.ps1 -Version "$env:RELEASE_VERSION"
+
+      - name: Add exact-SHA SBOM and migration payloads
+        shell: pwsh
+        run: |
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
           $pythonSbom = Join-Path $bundle 'SBOM.python.cdx.json'
           $npmSbom = Join-Path $bundle 'SBOM.npm.cdx.json'
@@ -123,198 +128,83 @@ jobs:
             npm sbom --omit=dev --sbom-format cyclonedx --sbom-type application |
               Set-Content -LiteralPath $npmSbom -Encoding utf8
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.26.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.27.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
-          python scripts/generate_release_evidence.py `
-            --version $env:RELEASE_VERSION --commit $env:RELEASE_SHA `
-            --output-dir $bundle `
-            --artifact (Join-Path $bundle 'SmartCommissioningApp.exe') `
-            --artifact (Join-Path $bundle 'MIGRATION_ROLLBACK.md') `
-            --sbom $pythonSbom --sbom $npmSbom `
-            --gate windows_build=passed
-          python scripts/validate_release_evidence.py `
-            --evidence (Join-Path $bundle 'release-evidence.json') `
-            --version $env:RELEASE_VERSION --commit $env:RELEASE_SHA `
-            --search-root $bundle --require-gate windows_build
 
-      # Upload BEFORE booting: keeps the artifact available for debugging even
-      # when the boot smoke fails. (Since the stable-data-dir change the boot
-      # writes state to LOCALAPPDATA\SmartCommissioning, not beside the exe —
-      # the pristine-artifact concern is also asserted below.)
-      - name: Upload bundle artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: SmartCommissioningApp-windows-portable
-          path: build/Smart_Commissioning_App_Windows_Portable
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Boot smoke - health, frozen dependencies, and canonical UDMI validation
+      - name: Portable acceptance path with spaces, heartbeat, Stop, report, and logs
         shell: pwsh
         run: |
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
-          $exe    = Join-Path $bundle 'SmartCommissioningApp.exe'
-          $out    = Join-Path $env:RUNNER_TEMP 'app-stdout.log'
-          $err    = Join-Path $env:RUNNER_TEMP 'app-stderr.log'
-          $stdin  = Join-Path $env:RUNNER_TEMP 'app-stdin.txt'
-          # Empty stdin: on startup failure the launcher calls input(); EOF makes
-          # it exit nonzero instead of blocking the job until timeout.
+          $launchRoot = Join-Path $env:RUNNER_TEMP "Portable acceptance path with spaces $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT"
+          $stateRoot = Join-Path $env:RUNNER_TEMP "Portable state path with spaces $env:GITHUB_RUN_ID $env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $launchRoot, $stateRoot | Out-Null
+          Copy-Item -Path (Join-Path $bundle '*') -Destination $launchRoot -Recurse
+          $exe = Join-Path $launchRoot 'SmartCommissioningApp.exe'
+          $out = Join-Path $env:RUNNER_TEMP 'app-stdout.log'
+          $err = Join-Path $env:RUNNER_TEMP 'app-stderr.log'
+          $stdin = Join-Path $env:RUNNER_TEMP 'app-stdin.txt'
+          $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
+          $env:RUN_LEASE_SECONDS = '15'
+          $env:RUN_HEARTBEAT_SECONDS = '2'
           Set-Content -LiteralPath $stdin -Value '' -NoNewline
 
-          $proc = Start-Process -FilePath $exe -WorkingDirectory $bundle -PassThru -NoNewWindow `
+          $productVersion = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
+          if ($productVersion -cne $env:RELEASE_VERSION) {
+            throw "SmartCommissioningApp.exe ProductVersion '$productVersion' is not '$env:RELEASE_VERSION'."
+          }
+          $frontendVersionPath = Join-Path $launchRoot 'frontend\dist\.app-version'
+          $frontendVersion = (Get-Content -LiteralPath $frontendVersionPath -Raw).Trim()
+          if ($frontendVersion -cne $env:RELEASE_VERSION) {
+            throw "Frontend build stamp '$frontendVersion' is not '$env:RELEASE_VERSION'."
+          }
+          $proc = Start-Process -FilePath $exe -WorkingDirectory $launchRoot -PassThru -NoNewWindow `
             -RedirectStandardOutput $out -RedirectStandardError $err -RedirectStandardInput $stdin
-
-          $deadline  = [DateTime]::UtcNow.AddSeconds(150)
           $healthUrl = $null
-          $ok        = $false
+          $deadline = [DateTime]::UtcNow.AddSeconds(150)
+          $ok = $false
           try {
             while ([DateTime]::UtcNow -lt $deadline) {
-              if ($proc.HasExited) {
-                Write-Host "exe exited early with code $($proc.ExitCode)"
-                break
-              }
-              if (-not $healthUrl) {
-                # reserve_port picks the first free port in 8000-8049, so parse
-                # the real URL from the logs instead of hardcoding 8000. The
-                # launcher prints "App URL: http://127.0.0.1:<port>/" to stdout,
-                # but that print is block-buffered while stdout is redirected
-                # (frozen exe, no flush, uvicorn.run blocks) and may not reach
-                # the file until exit — so also scan stderr, where uvicorn's
-                # logging emits "Uvicorn running on http://127.0.0.1:<port>"
-                # flushed per record once the app is actually serving.
-                $m = Select-String -LiteralPath $out, $err -Pattern 'http://127\.0\.0\.1:\d+' -ErrorAction SilentlyContinue |
-                     Select-Object -First 1
-                if ($m) {
-                  $base = $m.Matches[0].Value
-                  $healthUrl = "$base/api/v1/health"
-                  Write-Host "Polling $healthUrl"
-                }
-              }
-              if ($healthUrl) {
+              if ($proc.HasExited) { throw "exe exited early with code $($proc.ExitCode)" }
+              $match = Select-String -LiteralPath $out, $err -Pattern 'http://127\.0\.0\.1:\d+' `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($match) {
+                $healthUrl = "$($match.Matches[0].Value)/api/v1/health"
                 try {
-                  $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
-                  if ($resp.StatusCode -eq 200) {
-                    Write-Host "HEALTH OK: $healthUrl -> 200"
-                    Write-Host $resp.Content
-                    $ok = $true
-                    break
-                  }
-                } catch {
-                  # Server not accepting connections yet (Alembic migrations run
-                  # on the fresh SQLite before serving); keep polling.
-                }
+                  $health = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
+                  if ($health.StatusCode -eq 200) { break }
+                } catch { }
               }
               Start-Sleep -Seconds 2
             }
+            if (-not $healthUrl) { throw 'Could not discover the portable API URL.' }
+            $health = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
+            if ($health.StatusCode -ne 200) { throw 'Portable health endpoint did not return HTTP 200.' }
 
-            # Health proves the app serves; this proves the freeze carried
-            # psutil, the NIC-enumeration dependency. backend/app import-guards
-            # psutil, so a bundle without it degrades the NIC picker to
-            # Auto-only while health stays 200 — an exe-only regression that
-            # shipped once. Assert the frozen artifact directly.
-            if ($ok) {
-              $frozenPsutil = Join-Path $bundle '_internal\psutil'
-              if (Test-Path $frozenPsutil) {
-                Write-Host "PSUTIL FROZEN OK: $frozenPsutil"
-              } else {
-                Write-Host "PSUTIL SMOKE FAILED: $frozenPsutil missing - the freeze lost the NIC-enumeration dependency (launcher must import psutil)."
-                $ok = $false
+            $actualProcess = Get-Process -Id $proc.Id
+            if ([IO.Path]::GetFullPath($actualProcess.Path) -cne [IO.Path]::GetFullPath($exe)) {
+              throw "Running process path '$($actualProcess.Path)' is not '$exe'."
+            }
+            foreach ($requiredPath in @(
+              (Join-Path $launchRoot '_internal\psutil'),
+              (Join-Path $launchRoot '_internal\bacpypes3'),
+              (Join-Path $launchRoot '_internal\smart_commissioning_core\schemas\udmi\1.5.2\state.json')
+            )) {
+              if (-not (Test-Path -LiteralPath $requiredPath)) {
+                throw "Frozen dependency is missing: $requiredPath"
               }
             }
 
-            # Stable-data-dir contract (2026-07-14): the frozen exe must anchor
-            # state under LOCALAPPDATA\SmartCommissioning, NOT beside the exe —
-            # per-release exe folders (forced by per-hash allowlisting) were
-            # silently resetting all site configuration in the field. Assert
-            # both directions: the DB landed in the stable dir, and nothing
-            # leaked back into the bundle.
-            if ($ok) {
-              $stableDb = Join-Path $env:LOCALAPPDATA 'SmartCommissioning\smart_commissioning.db'
-              if (Test-Path $stableDb) {
-                Write-Host "STABLE DATA DIR OK: $stableDb"
-              } else {
-                Write-Host "STABLE DATA DIR SMOKE FAILED: $stableDb missing - the frozen exe did not anchor state to LOCALAPPDATA (per-release state reset would be back)."
-                $ok = $false
-              }
-              $bundleDb = Join-Path $bundle 'runtime\smart_commissioning.db'
-              if (Test-Path $bundleDb) {
-                Write-Host "STABLE DATA DIR SMOKE FAILED: $bundleDb exists - state leaked back beside the exe."
-                $ok = $false
-              }
+            $apiBase = $healthUrl -replace '/api/v1/health$', ''
+            python scripts/smoke_windows_portable_release.py `
+              --base-url $apiBase --exe-path $exe --data-dir $stateRoot `
+              --lease-seconds 15 --heartbeat-seconds 2 `
+              --stdout-log $out --stderr-log $err `
+              --output (Join-Path $bundle 'windows-acceptance.json')
+            if ($LASTEXITCODE -ne 0) { throw 'Portable release acceptance helper failed.' }
+            if (Test-Path -LiteralPath (Join-Path $launchRoot 'runtime\smart_commissioning.db')) {
+              throw 'Portable state leaked beside the executable.'
             }
-
-            # Same failure class as psutil, one layer deeper: bacpypes3 (the real
-            # BACnet/IP backend) is import-guarded and imported lazily, so a
-            # freeze that dropped it stays health-200 while an authorized real
-            # scan RuntimeErrors on-site (health can't see it). Assert the frozen
-            # module directly. (See --collect-all bacpypes3 in build.ps1 and the
-            # core[bacnet] install above.)
-            if ($ok) {
-              $frozenBacpypes3 = Join-Path $bundle '_internal\bacpypes3'
-              if (Test-Path $frozenBacpypes3) {
-                Write-Host "BACPYPES3 FROZEN OK: $frozenBacpypes3"
-              } else {
-                Write-Host "BACPYPES3 SMOKE FAILED: $frozenBacpypes3 missing - the freeze lost the real BACnet backend (build box must install core[bacnet]; build.ps1 must --collect-all bacpypes3)."
-                $ok = $false
-              }
-            }
-
-            # The canonical validator depends on jsonschema + referencing and
-            # 34 runtime JSON schema files. A health-only smoke can stay green
-            # when PyInstaller drops those data files, so assert the frozen
-            # root and execute a nested-schema rejection through the live exe.
-            if ($ok) {
-              $frozenUdmiSchema = Join-Path $bundle '_internal\smart_commissioning_core\schemas\udmi\1.5.2\state.json'
-              if (Test-Path -LiteralPath $frozenUdmiSchema) {
-                Write-Host "UDMI SCHEMA FROZEN OK: $frozenUdmiSchema"
-              } else {
-                Write-Host "UDMI SCHEMA SMOKE FAILED: $frozenUdmiSchema missing."
-                $ok = $false
-              }
-            }
-
-            if ($ok) {
-              $apiBase = $healthUrl -replace '/health$', ''
-              $validationBody = @{
-                project_id = 'portable-smoke-project'
-                site_id = 'portable-smoke-site'
-                job_type = 'udmi_validation'
-                parameters = @{
-                  requested_from = 'windows_portable_ci'
-                  expected_schedule = @{ asset_id = 'SMOKE-1'; udmi_version = '1.5.2'; units = @{} }
-                  state_payload = @{
-                    version = '1.5.2'
-                    timestamp = '2026-07-10T00:00:00Z'
-                    system = @{
-                      serial_no = 'SMOKE-1'
-                      last_config = '2026-07-10T00:00:00Z'
-                      hardware = @{ make = 'Smoke'; model = 'Portable' }
-                      software = @{}
-                      operation = @{ operational = $true }
-                      not_in_udmi_schema = $true
-                    }
-                  }
-                }
-              } | ConvertTo-Json -Depth 10 -Compress
-              try {
-                $created = Invoke-RestMethod -Uri "$apiBase/validation/udmi/runs" -Method Post `
-                  -ContentType 'application/json' -Body $validationBody -TimeoutSec 15
-                if (-not $created.run_id) { throw 'validation response omitted run_id' }
-                $issues = Invoke-RestMethod -Uri "$apiBase/validation/runs/$($created.run_id)/issues" `
-                  -TimeoutSec 15
-                $canonicalIssue = @($issues.issues) | Where-Object {
-                  $_.description -match 'canonical UDMI 1\.5\.2 state schema'
-                }
-                if ($canonicalIssue.Count -gt 0) {
-                  Write-Host 'UDMI CANONICAL VALIDATION OK: running exe rejected nested extra property.'
-                } else {
-                  throw 'running exe returned no canonical nested-schema issue'
-                }
-              } catch {
-                Write-Host "UDMI CANONICAL VALIDATION FAILED: $($_.Exception.Message)"
-                $ok = $false
-              }
-            }
+            $ok = $true
           }
           finally {
             if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
@@ -322,17 +212,90 @@ jobs:
             Get-Content -LiteralPath $out -ErrorAction SilentlyContinue
             Write-Host '--- exe stderr ---'
             Get-Content -LiteralPath $err -ErrorAction SilentlyContinue
-            Write-Host '--- crash logs (LOCALAPPDATA\SmartCommissioning\logs), if any ---'
-            Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'SmartCommissioning\logs') -Filter '*.log' -ErrorAction SilentlyContinue |
+            Write-Host '--- isolated portable acceptance logs ---'
+            Get-ChildItem -Path (Join-Path $stateRoot 'logs') -Filter '*.log*' -ErrorAction SilentlyContinue |
               ForEach-Object { Write-Host "== $($_.Name) =="; Get-Content -LiteralPath $_.FullName }
           }
-          if (-not $ok) {
-            Write-Error 'Boot smoke failed: health, frozen dependency, or canonical UDMI validation check failed.'
-            exit 1
-          }
+          if (-not $ok) { throw 'Portable acceptance failed.' }
 
-      # Belt and braces: the finally block above kills by PID, but a cancelled
-      # step can skip it — sweep by process name so the runner is left clean.
+      - name: Generate and validate enriched Windows evidence
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
+          $exe = Join-Path $bundle 'SmartCommissioningApp.exe'
+          $productVersion = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          python scripts/generate_release_evidence.py `
+            --version $env:RELEASE_VERSION --product-version $productVersion `
+            --commit $env:RELEASE_SHA --evidence-kind windows --output-dir $bundle `
+            --repository $env:GITHUB_REPOSITORY `
+            --workflow-artifact-name SmartCommissioningApp-windows-portable `
+            --workflow-name "$env:GITHUB_WORKFLOW" --workflow-run-id $env:GITHUB_RUN_ID `
+            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT --workflow-run-url $runUrl `
+            --workflow-event $env:GITHUB_EVENT_NAME `
+            --artifact $exe --artifact (Join-Path $bundle 'MIGRATION_ROLLBACK.md') `
+            --artifact (Join-Path $bundle 'windows-acceptance.json') `
+            --sbom (Join-Path $bundle 'SBOM.python.cdx.json') `
+            --sbom (Join-Path $bundle 'SBOM.npm.cdx.json') `
+            --gate windows_build=passed --gate windows_readiness=passed `
+            --gate windows_long_heartbeat=passed --gate windows_cancellation=passed `
+            --gate report_provenance=passed --gate report_byte_equality=passed `
+            --gate path_with_spaces=passed --gate log_thread_inspection=passed `
+            --gate app_root=passed --gate frontend_build_stamp=passed `
+            --gate sqlite_lease_configuration=passed --gate sqlite_heartbeat_renewals=passed `
+            --test release_heartbeat_integration=passed --test portable_readiness=passed `
+            --test portable_long_heartbeat=passed --test portable_cancellation=passed `
+            --test canonical_udmi=passed --test portable_report_provenance=passed `
+            --test portable_report_byte_equality=passed --test portable_path_with_spaces=passed `
+            --test portable_log_thread_inspection=passed --test portable_app_root=passed `
+            --test portable_frontend_build_stamp=passed `
+            --test portable_sqlite_lease_configuration=passed `
+            --test portable_sqlite_heartbeat_renewals=passed
+          python scripts/validate_v0127_release_evidence.py `
+            --evidence (Join-Path $bundle 'release-evidence.json') `
+            --version $env:RELEASE_VERSION --product-version $productVersion `
+            --commit $env:RELEASE_SHA --evidence-kind windows `
+            --repository $env:GITHUB_REPOSITORY `
+            --workflow-artifact-name SmartCommissioningApp-windows-portable `
+            --workflow-name "$env:GITHUB_WORKFLOW" --workflow-run-id $env:GITHUB_RUN_ID `
+            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --workflow-event $env:GITHUB_EVENT_NAME --search-root $bundle `
+            --require-gate windows_build --require-gate windows_readiness `
+            --require-gate windows_long_heartbeat --require-gate windows_cancellation `
+            --require-gate report_provenance --require-gate report_byte_equality `
+            --require-gate path_with_spaces --require-gate log_thread_inspection `
+            --require-gate app_root --require-gate frontend_build_stamp `
+            --require-gate sqlite_lease_configuration --require-gate sqlite_heartbeat_renewals `
+            --require-test release_heartbeat_integration --require-test portable_readiness `
+            --require-test portable_long_heartbeat --require-test portable_cancellation `
+            --require-test canonical_udmi --require-test portable_report_provenance `
+            --require-test portable_report_byte_equality --require-test portable_path_with_spaces `
+            --require-test portable_log_thread_inspection --require-test portable_app_root `
+            --require-test portable_frontend_build_stamp `
+            --require-test portable_sqlite_lease_configuration `
+            --require-test portable_sqlite_heartbeat_renewals
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: SmartCommissioningApp-windows-portable
+          path: build/Smart_Commissioning_App_Windows_Portable
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload failed bundle and acceptance diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: SmartCommissioningApp-windows-portable-failed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/Smart_Commissioning_App_Windows_Portable
+            ${{ runner.temp }}/app-stdout.log
+            ${{ runner.temp }}/app-stderr.log
+            ${{ runner.temp }}/Portable state path with spaces ${{ github.run_id }} ${{ github.run_attempt }}/logs
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Kill leftover exe
         if: always()
         shell: pwsh

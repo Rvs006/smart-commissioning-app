@@ -11,7 +11,7 @@
     artifact 'SmartCommissioningApp-windows-portable'. This script downloads THAT
     artifact archive, verifies it, and attaches it to a GitHub Release - so the
     bytes field engineers download are the exact bytes CI built and booted. For
-    v0.1.26 and later it also verifies and publishes the exact-SHA SBOMs,
+    v0.1.27 and later it also verifies and publishes the exact-SHA SBOMs,
     migration guide, release evidence, and checksum manifest carried by the
     artifact.
 
@@ -64,12 +64,13 @@
     Optional workflow run id to publish from. When omitted, the newest completed
     + successful "Windows Portable Bundle" workflow_dispatch run on main is used.
     In verify mode, pass the original run id to prove the published tag points
-    at the exact commit that produced the asset.
+    at the exact commit that produced the asset. Mandatory for v0.1.27 and later
+    in both publish and verify modes; automatic selection is legacy-only.
 
 .PARAMETER ReleaseGateRunId
-    Successful "v0.1.26 Release Gates" workflow run that built the hosted
-    images and image SBOMs. Required when publishing v0.1.26 or later. Its
-    40-character head SHA must equal the Windows run and release tag SHA.
+    Successful "v0.1.27 Release Gates" workflow run that built the hosted
+    images and image SBOMs. Required when publishing or verifying v0.1.27 or
+    later. Its 40-character head SHA must equal the Windows run and release tag.
 
 .PARAMETER NotesFile
     Markdown release-notes template (required for publishing). Tokens
@@ -87,8 +88,8 @@
     hash. A harmless, read-only way to exercise this script end to end.
 
 .EXAMPLE
-    # Publish v0.1.26 from matching Windows and hosted release-gate runs:
-    powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.26 -RunId 123456789 -ReleaseGateRunId 123456790 -NotesFile docs\release-notes-v0.1.26.md
+    # Publish v0.1.27 from matching Windows and hosted release-gate runs:
+    powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.27 -RunId 123456789 -ReleaseGateRunId 123456790 -NotesFile docs\release-notes-v0.1.27.md
 
 .EXAMPLE
     # Re-verify what is already published (no mutations):
@@ -129,7 +130,7 @@ $ErrorActionPreference = 'Stop'
 # --- constants tied to the workflow + build.ps1 output ---
 $WorkflowName = 'Windows Portable Bundle'                       # windows-portable.yml `name:`
 $ArtifactName = 'SmartCommissioningApp-windows-portable'        # upload-artifact `name:`
-$ReleaseGateWorkflowName = 'v0.1.26 Release Gates'
+$ReleaseGateWorkflowName = 'v0.1.27 Release Gates'
 $ZipName      = 'Smart_Commissioning_App_Windows_Portable.zip'  # release asset filename
 $ExeEntry     = 'SmartCommissioningApp.exe'                     # root entry in the bundle zip
 $ReadmeEntry  = 'README_FIRST.txt'                             # root entry carrying "Version: <v>"
@@ -142,6 +143,8 @@ $ChecksumsEntry = 'SHA256SUMS.txt'
 $ImageApiSbomEntry = 'SBOM.image-api.cdx.json'
 $ImageWorkerSbomEntry = 'SBOM.image-worker.cdx.json'
 $ImageFrontendSbomEntry = 'SBOM.image-frontend.cdx.json'
+$WindowsAcceptanceEntry = 'windows-acceptance.json'
+$FrontendVersionEntry = 'frontend/dist/.app-version'
 $EntryFloor   = 1000                                           # sanity floor: a real bundle has thousands of entries
 
 if ([string]::IsNullOrWhiteSpace($Title)) { $Title = $Version }
@@ -176,7 +179,7 @@ function Invoke-Gh {
 }
 
 function Get-RunInfo {
-    # Returns @{ Id; HeadSha } for the run to publish from. Auto-locate uses the
+    # Returns exact run identity for the run to publish from. Auto-locate uses the
     # run list; an explicit -RunId is validated + its head sha fetched via the API
     # (run list does not include an arbitrary run we did not list).
     param(
@@ -202,13 +205,13 @@ function Get-RunInfo {
         if ($null -eq $match) {
             throw "No completed+successful '$WorkflowName' workflow_dispatch run found on main. Dispatch the workflow for $Version first, or pass -RunId explicitly."
         }
-        return [pscustomobject]@{ Id = [long]$match.databaseId; HeadSha = [string]$match.headSha }
+        return Get-RunInfo -RepoSlug $RepoSlug -RunId ([long]$match.databaseId) -AutoLocate $false
     }
 
     # Explicit run: fetch + validate. --jq reshapes to the same field names.
     $raw = Invoke-Gh @(
         'api', "repos/$RepoSlug/actions/runs/$RunId",
-        '--jq', '{databaseId: .id, status: .status, conclusion: .conclusion, headSha: .head_sha, name: .name, path: .path, event: .event, headBranch: .head_branch}'
+        '--jq', '{databaseId: .id, status: .status, conclusion: .conclusion, headSha: .head_sha, name: .name, path: .path, event: .event, headBranch: .head_branch, runAttempt: .run_attempt, htmlUrl: .html_url}'
     ) "gh api run $RunId"
     $run = ($raw -join "`n") | ConvertFrom-Json
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
@@ -220,7 +223,16 @@ function Get-RunInfo {
     if ($run.event -ne 'workflow_dispatch' -or $run.headBranch -ne 'main') {
         throw "Run $RunId used event='$($run.event)' branch='$($run.headBranch)'; publishing requires a workflow_dispatch run from main."
     }
-    return [pscustomobject]@{ Id = [long]$run.databaseId; HeadSha = [string]$run.headSha }
+    $expectedUrl = "https://github.com/$RepoSlug/actions/runs/$RunId"
+    if ([int]$run.runAttempt -lt 1 -or [string]$run.htmlUrl -cne $expectedUrl) {
+        throw "Run $RunId has invalid attempt or URL identity ('$($run.runAttempt)', '$($run.htmlUrl)')."
+    }
+    return [pscustomobject]@{
+        Id = [long]$run.databaseId
+        HeadSha = ([string]$run.headSha).ToLowerInvariant()
+        RunAttempt = [int]$run.runAttempt
+        HtmlUrl = [string]$run.htmlUrl
+    }
 }
 
 function Get-ArtifactInfo {
@@ -231,12 +243,16 @@ function Get-ArtifactInfo {
         [Parameter(Mandatory)][long]$RunId,
         [string]$Name = $ArtifactName
     )
-    $raw = Invoke-Gh @('api', "repos/$RepoSlug/actions/runs/$RunId/artifacts") "gh api artifacts for run $RunId"
+    $raw = Invoke-Gh @('api', "repos/$RepoSlug/actions/runs/$RunId/artifacts?per_page=100") "gh api artifacts for run $RunId"
     $data = ($raw -join "`n") | ConvertFrom-Json
-    $art = $data.artifacts | Where-Object { $_.name -eq $Name } | Select-Object -First 1
-    if ($null -eq $art) {
-        throw "Run $RunId has no artifact named '$Name'. Wrong run, or the build failed before the upload step."
+    if ([int]$data.total_count -gt @($data.artifacts).Count) {
+        throw "Run $RunId has more than 100 artifacts; uniqueness cannot be proven from one fail-closed API page."
     }
+    $matches = @($data.artifacts | Where-Object { $_.name -ceq $Name })
+    if ($matches.Count -ne 1) {
+        throw "Run $RunId has $($matches.Count) artifacts named '$Name'; exactly one is required."
+    }
+    $art = $matches[0]
     if ($art.expired) {
         throw "Artifact '$Name' on run $RunId has EXPIRED (retention lapsed). Re-run the workflow to produce a fresh artifact."
     }
@@ -251,7 +267,7 @@ function Get-ReleaseGateRunInfo {
     )
     $raw = Invoke-Gh @(
         'api', "repos/$RepoSlug/actions/runs/$RunId",
-        '--jq', '{databaseId: .id, status: .status, conclusion: .conclusion, headSha: .head_sha, name: .name, path: .path, event: .event, headBranch: .head_branch}'
+        '--jq', '{databaseId: .id, status: .status, conclusion: .conclusion, headSha: .head_sha, name: .name, path: .path, event: .event, headBranch: .head_branch, runAttempt: .run_attempt, htmlUrl: .html_url}'
     ) "gh api release-gates run $RunId"
     $run = ($raw -join "`n") | ConvertFrom-Json
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
@@ -267,7 +283,16 @@ function Get-ReleaseGateRunInfo {
     if ($headSha -ine $ExpectedSha) {
         throw "Release-gates run $RunId built $headSha, not exact release SHA $ExpectedSha."
     }
-    return [pscustomobject]@{ Id = [long]$run.databaseId; HeadSha = $headSha }
+    $expectedUrl = "https://github.com/$RepoSlug/actions/runs/$RunId"
+    if ([int]$run.runAttempt -lt 1 -or [string]$run.htmlUrl -cne $expectedUrl) {
+        throw "Release-gates run $RunId has invalid attempt or URL identity ('$($run.runAttempt)', '$($run.htmlUrl)')."
+    }
+    return [pscustomobject]@{
+        Id = [long]$run.databaseId
+        HeadSha = $headSha
+        RunAttempt = [int]$run.runAttempt
+        HtmlUrl = [string]$run.htmlUrl
+    }
 }
 
 function Resolve-CommitSha {
@@ -290,11 +315,72 @@ function Resolve-CommitSha {
     return $sha.ToLowerInvariant()
 }
 
+function Resolve-LocalCommitSha {
+    param([Parameter(Mandatory)][string]$Reference)
+    $sha = (& git rev-parse $Reference 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $sha -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "Local reference '$Reference' is missing or invalid."
+    }
+    return $sha.Trim().ToLowerInvariant()
+}
+
+function Assert-SignedAnnotatedTag {
+    # Publication is allowed only after the exact tag has been signed and
+    # verified twice: by the local git trust store and by GitHub's tag-object
+    # verification. Requiring a tag object (not a commit ref) rejects lightweight
+    # tags, and matching object ids proves GitHub received the locally verified
+    # annotation unchanged.
+    param(
+        [Parameter(Mandatory)][string]$RepoSlug,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$ExpectedSha
+    )
+
+    $localTagObject = (& git rev-parse "refs/tags/$Version^{tag}" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $localTagObject -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "Local tag $Version is missing or lightweight; create a signed annotated tag first."
+    }
+    & git verify-tag $Version 2>&1 | ForEach-Object { Write-Host "    $_" }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Local signature verification failed for annotated tag $Version."
+    }
+    $localTarget = (& git rev-parse "$Version^{commit}").Trim().ToLowerInvariant()
+    if ($LASTEXITCODE -ne 0 -or $localTarget -ine $ExpectedSha) {
+        throw "Local tag $Version targets $localTarget, not exact release SHA $ExpectedSha."
+    }
+
+    $refRaw = Invoke-Gh @('api', "repos/$RepoSlug/git/ref/tags/$Version") `
+        "resolve GitHub tag ref '$Version'"
+    $ref = ($refRaw -join "`n") | ConvertFrom-Json
+    if ([string]$ref.object.type -cne 'tag') {
+        throw "GitHub tag $Version is lightweight; a signed annotated tag is required."
+    }
+    if ([string]$ref.object.sha -ine $localTagObject.Trim()) {
+        throw "GitHub tag object '$($ref.object.sha)' does not match locally verified '$($localTagObject.Trim())'."
+    }
+    $tagRaw = Invoke-Gh @('api', "repos/$RepoSlug/git/tags/$($ref.object.sha)") `
+        "read GitHub annotated tag '$Version'"
+    $tag = ($tagRaw -join "`n") | ConvertFrom-Json
+    if ([string]$tag.tag -cne $Version -or [string]$tag.object.type -cne 'commit') {
+        throw "GitHub tag object is not the expected annotated commit tag $Version."
+    }
+    if ([string]$tag.object.sha -ine $ExpectedSha) {
+        throw "GitHub annotated tag $Version targets '$($tag.object.sha)', not '$ExpectedSha'."
+    }
+    if ($null -eq $tag.verification -or $tag.verification.verified -ne $true) {
+        $reason = if ($null -eq $tag.verification) { 'missing verification' } else { [string]$tag.verification.reason }
+        throw "GitHub has not verified the signature for $Version ($reason). Publish the signing key to GitHub before release publication."
+    }
+    Write-Host "    signed tag : locally verified and GitHub verified"
+}
+
 function Assert-ReleaseBodyDigests {
     param(
         [Parameter(Mandatory)][string]$Body,
         [Parameter(Mandatory)][string]$ExeSha256,
-        [Parameter(Mandatory)][string]$ZipSha256
+        [Parameter(Mandatory)][string]$ZipSha256,
+        [Parameter(Mandatory)][string]$CommitSha,
+        [AllowEmptyString()][string]$ExpectedBody
     )
     foreach ($expected in @($ExeSha256, $ZipSha256)) {
         if ($expected -notmatch '^[0-9a-fA-F]{64}$') {
@@ -302,6 +388,17 @@ function Assert-ReleaseBodyDigests {
         }
         if ($Body.IndexOf($expected, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
             throw "Release notes do not contain verified SHA-256 $expected."
+        }
+    }
+    if ($CommitSha -notmatch '^[0-9a-fA-F]{40}$' -or
+        $Body.IndexOf($CommitSha, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        throw "Release notes do not contain the exact verified 40-character commit $CommitSha."
+    }
+    if ($PSBoundParameters.ContainsKey('ExpectedBody')) {
+        $actualText = $Body.Replace("`r`n", "`n").TrimEnd([char[]]"`r`n")
+        $expectedText = $ExpectedBody.Replace("`r`n", "`n").TrimEnd([char[]]"`r`n")
+        if ($actualText -cne $expectedText) {
+            throw "Release notes body is not the exact resolved notes content."
         }
     }
 }
@@ -324,8 +421,15 @@ function Get-ArtifactArchive {
     # it answers 302 to a signed Azure blob URL.
     param(
         [Parameter(Mandatory)][string]$ArchiveUrl,
-        [Parameter(Mandatory)][string]$OutFile
+        [Parameter(Mandatory)][string]$OutFile,
+        [string]$Accept = 'application/vnd.github+json'
     )
+    $apiUri = $null
+    if (-not [Uri]::TryCreate($ArchiveUrl, [UriKind]::Absolute, [ref]$apiUri) -or
+        $apiUri.Scheme -cne 'https' -or $apiUri.DnsSafeHost -cne 'api.github.com' -or
+        -not $apiUri.IsDefaultPort -or -not [string]::IsNullOrEmpty($apiUri.UserInfo)) {
+        throw "Refusing to attach a GitHub token to non-api.github.com URL '$ArchiveUrl'."
+    }
     $token = (& $script:Gh auth token)
     if ($LASTEXITCODE -ne 0) { throw "gh auth token failed (exit $LASTEXITCODE) - is gh logged in?" }
     $token = "$token".Trim()
@@ -341,7 +445,7 @@ function Get-ArtifactArchive {
     $req = [System.Net.WebRequest]::CreateHttp($ArchiveUrl)
     $req.Method = 'GET'
     $req.AllowAutoRedirect = $false
-    $req.Accept = 'application/vnd.github+json'
+    $req.Accept = $Accept
     $req.UserAgent = 'smart-commissioning-release-portable'
     $req.Headers.Add('Authorization', "Bearer $token")
     $resp = $req.GetResponse()
@@ -374,6 +478,11 @@ function Get-ArtifactArchive {
     if ($location) {
         # Signed URL already carries its SAS token - send NO auth header, and use
         # -OutFile (never `>`, failure #1) so the binary lands byte-exact.
+        $redirectUri = $null
+        if (-not [Uri]::TryCreate($location, [UriKind]::Absolute, [ref]$redirectUri) -or
+            $redirectUri.Scheme -cne 'https') {
+            throw "GitHub download endpoint returned a non-HTTPS redirect."
+        }
         Write-Host "    following signed redirect to blob storage (no auth header)"
         Invoke-WebRequest -Uri $location -UseBasicParsing -OutFile $OutFile -ErrorAction Stop
     }
@@ -381,6 +490,83 @@ function Get-ArtifactArchive {
     if (-not (Test-Path -LiteralPath $OutFile)) {
         throw "Download reported success but $OutFile is missing."
     }
+}
+
+function Assert-ArtifactArchive {
+    param(
+        [Parameter(Mandatory)]$Artifact,
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [switch]$RequireMetadata
+    )
+    $actualSize = [int64](Get-Item -LiteralPath $ArchivePath).Length
+    $actualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash
+    $hasSize = ($Artifact.PSObject.Properties['size_in_bytes'] -and
+        [int64]$Artifact.size_in_bytes -gt 0)
+    if ($RequireMetadata -and -not $hasSize) {
+        throw "Actions artifact '$($Artifact.name)' has no positive size_in_bytes metadata."
+    }
+    if ($hasSize -and [int64]$Artifact.size_in_bytes -ne $actualSize) {
+        throw "Actions artifact '$($Artifact.name)' archive size $actualSize does not match GitHub size $($Artifact.size_in_bytes)."
+    }
+    $hasDigest = ($Artifact.PSObject.Properties['digest'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$Artifact.digest))
+    if ($RequireMetadata -and -not $hasDigest) {
+        throw "Actions artifact '$($Artifact.name)' has no SHA-256 digest metadata."
+    }
+    if ($hasDigest) {
+        $digest = [string]$Artifact.digest
+        if ($digest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
+            throw "Actions artifact '$($Artifact.name)' has invalid digest '$digest'."
+        }
+        if (($digest -replace '^sha256:', '') -ine $actualHash) {
+            throw "Actions artifact '$($Artifact.name)' archive SHA-256 does not match GitHub digest."
+        }
+    }
+}
+
+function Get-UniqueReleaseAsset {
+    param(
+        [Parameter(Mandatory)][object[]]$Assets,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $matches = @($Assets | Where-Object { $_.name -ceq $Name })
+    if ($matches.Count -ne 1) {
+        throw "Release has $($matches.Count) assets named '$Name'; exactly one is required."
+    }
+    return $matches[0]
+}
+
+function Assert-ReleaseAssetMatchesFile {
+    param(
+        [Parameter(Mandatory)]$Asset,
+        [Parameter(Mandatory)][string]$LocalFile,
+        [Parameter(Mandatory)][string]$DownloadDirectory
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Asset.apiUrl)) {
+        throw "Release asset '$($Asset.name)' has no authenticated API URL."
+    }
+    $downloaded = Join-Path $DownloadDirectory ("release-asset-{0}-{1}" -f $Asset.id, $Asset.name)
+    Get-ArtifactArchive -ArchiveUrl ([string]$Asset.apiUrl) -OutFile $downloaded `
+        -Accept 'application/octet-stream'
+    $localSize = [int64](Get-Item -LiteralPath $LocalFile).Length
+    $actualSize = [int64](Get-Item -LiteralPath $downloaded).Length
+    $localHash = (Get-FileHash -LiteralPath $LocalFile -Algorithm SHA256).Hash
+    $actualHash = (Get-FileHash -LiteralPath $downloaded -Algorithm SHA256).Hash
+    if ($actualSize -ne $localSize -or $actualHash -ine $localHash) {
+        throw "Downloaded release asset '$($Asset.name)' is not byte-identical to the verified upload."
+    }
+    if ([int64]$Asset.size -ne $actualSize) {
+        throw "Release asset '$($Asset.name)' size does not match its downloaded bytes."
+    }
+    if ($Asset.PSObject.Properties['digest'] -and
+        -not [string]::IsNullOrWhiteSpace([string]$Asset.digest)) {
+        $digest = [string]$Asset.digest
+        if ($digest -notmatch '^sha256:[0-9a-fA-F]{64}$' -or
+            ($digest -replace '^sha256:', '') -ine $actualHash) {
+            throw "Release asset '$($Asset.name)' digest does not match its downloaded bytes."
+        }
+    }
+    return $downloaded
 }
 
 function Test-BundleZip {
@@ -391,7 +577,11 @@ function Test-BundleZip {
         [Parameter(Mandatory)][string]$ZipPath,
         [Parameter(Mandatory)][string]$Version,
         [Parameter(Mandatory)][string]$CommitSha,
-        [Parameter(Mandatory)][string]$StageDir
+        [Parameter(Mandatory)][string]$StageDir,
+        [long]$WorkflowRunId,
+        [int]$WorkflowRunAttempt,
+        [string]$WorkflowArtifactName,
+        [string]$Repository
     )
     Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -425,12 +615,16 @@ function Test-BundleZip {
             throw "Bundle zip is missing root entry '$ExeEntry'."
         }
         $requireEvidence = ([version]($Version.TrimStart('v')) -ge [version]'0.1.26')
+        $requireV0127Evidence = ([version]($Version.TrimStart('v')) -ge [version]'0.1.27')
         $requiredNames = @($ReadmeEntry)
         if ($requireEvidence) {
             $requiredNames += @(
                 $PythonSbomEntry, $NpmSbomEntry, $MigrationEntry,
                 $EvidenceEntry, $ChecksumsEntry
             )
+        }
+        if ($requireV0127Evidence) {
+            $requiredNames += @($WindowsAcceptanceEntry, $FrontendVersionEntry)
         }
         $requiredEntries = @{}
         foreach ($requiredName in $requiredNames) {
@@ -446,6 +640,10 @@ function Test-BundleZip {
         [System.IO.Compression.ZipFileExtensions]::ExtractToFile($exe, $exePath, $true)
         foreach ($requiredName in $requiredEntries.Keys) {
             $target = Join-Path $StageDir $requiredName
+            $targetDirectory = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $targetDirectory)) {
+                New-Item -ItemType Directory -Path $targetDirectory -Force | Out-Null
+            }
             [System.IO.Compression.ZipFileExtensions]::ExtractToFile(
                 $requiredEntries[$requiredName], $target, $true
             )
@@ -470,6 +668,13 @@ function Test-BundleZip {
         if ($exeProductVersion -cne $Version) {
             throw "SmartCommissioningApp.exe ProductVersion '$exeProductVersion' does not equal '$Version'."
         }
+        if ($requireV0127Evidence) {
+            $frontendVersionPath = Join-Path $StageDir $FrontendVersionEntry
+            $frontendVersion = (Get-Content -LiteralPath $frontendVersionPath -Raw).Trim()
+            if ($frontendVersion -cne $Version) {
+                throw "Frontend build stamp '$frontendVersion' does not equal '$Version'."
+            }
+        }
 
         $exeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
         $evidencePath = $null
@@ -484,6 +689,53 @@ function Test-BundleZip {
             }
             if ([string]$evidence.gates.windows_build -cne 'passed') {
                 throw "Release evidence does not record windows_build=passed."
+            }
+            if ($requireV0127Evidence) {
+                if ([string]$evidence.schema_version -cne '1.1' -or
+                    [string]$evidence.evidence_kind -cne 'windows' -or
+                    [string]$evidence.product_version -cne $Version) {
+                    throw "Windows evidence lacks v0.1.27 schema, kind, or ProductVersion metadata."
+                }
+                $expectedRunUrl = "https://github.com/$Repository/actions/runs/$WorkflowRunId"
+                if ([string]$evidence.workflow.name -cne $WorkflowName -or
+                    [string]$evidence.workflow.event -cne 'workflow_dispatch' -or
+                    [string]$evidence.workflow.repository -cne $Repository -or
+                    [string]$evidence.workflow.artifact_name -cne $WorkflowArtifactName -or
+                    [int]$evidence.workflow.run_attempt -ne $WorkflowRunAttempt -or
+                    [string]$evidence.workflow.run_url -cne $expectedRunUrl) {
+                    throw "Windows evidence was not produced by a release dispatch of '$WorkflowName'."
+                }
+                if ($WorkflowRunId -le 0 -or $WorkflowRunAttempt -le 0 -or
+                    [string]::IsNullOrWhiteSpace($WorkflowArtifactName) -or
+                    [string]::IsNullOrWhiteSpace($Repository) -or
+                    [long]$evidence.workflow.run_id -ne $WorkflowRunId) {
+                    throw "Windows evidence run '$($evidence.workflow.run_id)' is not selected run '$WorkflowRunId'."
+                }
+                foreach ($gate in @(
+                    'windows_readiness', 'windows_long_heartbeat', 'windows_cancellation',
+                    'report_provenance', 'report_byte_equality', 'path_with_spaces',
+                    'log_thread_inspection', 'app_root', 'frontend_build_stamp',
+                    'sqlite_lease_configuration', 'sqlite_heartbeat_renewals'
+                )) {
+                    $property = $evidence.gates.PSObject.Properties[$gate]
+                    if ($null -eq $property -or [string]$property.Value -cne 'passed') {
+                        throw "Windows evidence does not record $gate=passed."
+                    }
+                }
+                foreach ($test in @(
+                    'release_heartbeat_integration', 'portable_readiness',
+                    'portable_long_heartbeat', 'portable_cancellation', 'canonical_udmi',
+                    'portable_report_provenance', 'portable_report_byte_equality',
+                    'portable_path_with_spaces', 'portable_log_thread_inspection',
+                    'portable_app_root', 'portable_frontend_build_stamp',
+                    'portable_sqlite_lease_configuration',
+                    'portable_sqlite_heartbeat_renewals'
+                )) {
+                    $property = $evidence.tests.PSObject.Properties[$test]
+                    if ($null -eq $property -or [string]$property.Value -cne 'passed') {
+                        throw "Windows evidence does not record test $test=passed."
+                    }
+                }
             }
             $exeRecord = $evidence.files | Where-Object { $_.name -eq $ExeEntry } | Select-Object -First 1
             if ($null -eq $exeRecord -or [string]$exeRecord.sha256 -ine $exeHash) {
@@ -533,6 +785,9 @@ function Test-BundleZip {
                 $MigrationEntry = $migrationPath
                 $EvidenceEntry = $evidencePath
             }
+            if ($requireV0127Evidence) {
+                $internalPayloads[$WindowsAcceptanceEntry] = Join-Path $StageDir $WindowsAcceptanceEntry
+            }
             if ($internalChecksums.Count -ne $internalPayloads.Count) {
                 throw "$ChecksumsEntry contains an unexpected number of entries."
             }
@@ -555,6 +810,8 @@ function Test-BundleZip {
             MigrationPath = (Join-Path $StageDir $MigrationEntry)
             EvidencePath = $evidencePath
             ChecksumsPath = (Join-Path $StageDir $ChecksumsEntry)
+            AcceptancePath = (Join-Path $StageDir $WindowsAcceptanceEntry)
+            FrontendVersionPath = (Join-Path $StageDir $FrontendVersionEntry)
         }
     }
     finally {
@@ -566,7 +823,11 @@ function Test-HostedEvidence {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Version,
-        [Parameter(Mandatory)][string]$CommitSha
+        [Parameter(Mandatory)][string]$CommitSha,
+        [long]$WorkflowRunId,
+        [int]$WorkflowRunAttempt,
+        [string]$WorkflowArtifactName,
+        [string]$Repository
     )
     $evidenceMatches = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Filter $EvidenceEntry)
     if ($evidenceMatches.Count -ne 1) {
@@ -580,6 +841,38 @@ function Test-HostedEvidence {
     }
     if ([string]$evidence.source_commit -ine $CommitSha) {
         throw "Hosted evidence commit '$($evidence.source_commit)' does not equal '$CommitSha'."
+    }
+    if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27') {
+        if ([string]$evidence.schema_version -cne '1.1' -or
+            [string]$evidence.evidence_kind -cne 'hosted' -or
+            [string]$evidence.product_version -cne $Version) {
+            throw "Hosted evidence lacks v0.1.27 schema, kind, or ProductVersion metadata."
+        }
+        $expectedRunUrl = "https://github.com/$Repository/actions/runs/$WorkflowRunId"
+        if ([string]$evidence.workflow.name -cne $ReleaseGateWorkflowName -or
+            [string]$evidence.workflow.event -cne 'workflow_dispatch' -or
+            [string]$evidence.workflow.repository -cne $Repository -or
+            [string]$evidence.workflow.artifact_name -cne $WorkflowArtifactName -or
+            [int]$evidence.workflow.run_attempt -ne $WorkflowRunAttempt -or
+            [string]$evidence.workflow.run_url -cne $expectedRunUrl) {
+            throw "Hosted evidence was not produced by a release dispatch of '$ReleaseGateWorkflowName'."
+        }
+        if ($WorkflowRunId -le 0 -or $WorkflowRunAttempt -le 0 -or
+            [string]::IsNullOrWhiteSpace($WorkflowArtifactName) -or
+            [string]::IsNullOrWhiteSpace($Repository) -or
+            [long]$evidence.workflow.run_id -ne $WorkflowRunId) {
+            throw "Hosted evidence run '$($evidence.workflow.run_id)' is not selected run '$WorkflowRunId'."
+        }
+        foreach ($test in @(
+            'ruff', 'core_unittest', 'backend_unittest', 'worker_unittest',
+            'frontend_lint', 'frontend_typecheck', 'frontend_vitest',
+            'frontend_build', 'migration_rollback', 'hosted_queue_smoke'
+        )) {
+            $property = $evidence.tests.PSObject.Properties[$test]
+            if ($null -eq $property -or [string]$property.Value -cne 'passed') {
+                throw "Hosted evidence does not record test $test=passed."
+            }
+        }
     }
     foreach ($gate in @('python', 'frontend', 'hosted_compose', 'backup_rollback')) {
         $property = $evidence.gates.PSObject.Properties[$gate]
@@ -664,10 +957,29 @@ function Test-HostedEvidence {
 function New-StageDir {
     # Fresh, SHORT staging dir under %TEMP% (short so extraction stays clear of
     # the 260-char path limit). Recreated each run.
-    param([Parameter(Mandatory)][string]$Path)
-    if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
-    New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    return $Path
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Version
+    )
+    $separators = [char[]]"\/"
+    $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd($separators)
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd($separators)
+    $parent = [IO.Directory]::GetParent($fullPath)
+    $expectedName = "release-$Version"
+    if ($null -eq $parent -or
+        -not $parent.FullName.Equals($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [IO.Path]::GetFileName($fullPath) -cne $expectedName) {
+        throw "Refusing to manage unsafe staging path '$fullPath'; expected direct TEMP child '$expectedName'."
+    }
+    if (Test-Path -LiteralPath $fullPath) {
+        $existing = Get-Item -LiteralPath $fullPath -Force
+        if (($existing.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to recursively delete reparse-point staging path '$fullPath'."
+        }
+        Remove-Item -LiteralPath $fullPath -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
+    return $fullPath
 }
 
 # ---------------------------------------------------------------------------
@@ -675,6 +987,9 @@ function New-StageDir {
 # ---------------------------------------------------------------------------
 
 $stage = Join-Path $env:TEMP "release-$Version"
+$draftCreated = $false
+$draftPublished = $false
+$publishCommandSucceeded = $false
 
 try {
     $script:Gh = Resolve-Gh
@@ -683,21 +998,47 @@ try {
     Write-Host "version  : $Version"
     Write-Host "mode     : $(if ($VerifyExisting) { 'VERIFY (read-only)' } else { 'PUBLISH' })"
 
+    $requireV0127 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.27')
+    if ($requireV0127 -and
+        (-not $PSBoundParameters.ContainsKey('RunId') -or $RunId -le 0 -or
+         -not $PSBoundParameters.ContainsKey('ReleaseGateRunId') -or $ReleaseGateRunId -le 0)) {
+        throw "$Version requires both -RunId and -ReleaseGateRunId; automatic workflow selection is forbidden for publish and verification."
+    }
+
     if ($VerifyExisting) {
         # ------------------------- VERIFY EXISTING -------------------------
         # Download the already-published asset (public, no auth), re-hash it, and
         # confirm it matches the release's recorded digest. No mutations.
-        New-StageDir -Path $stage | Out-Null
+        $stage = New-StageDir -Path $stage -Version $Version
 
         $viewRaw = Invoke-Gh @(
             'release', 'view', $Version,
             '--repo', $RepoSlug,
-            '--json', 'assets,body,url,targetCommitish'
+            '--json', 'assets,body,url,targetCommitish,isDraft'
         ) "gh release view $Version"
         $view = ($viewRaw -join "`n") | ConvertFrom-Json
+        if ($requireV0127 -and $view.isDraft -eq $true) {
+            throw "Release $Version is still a draft; VerifyExisting requires the published release."
+        }
 
         $tagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
+        if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27') {
+            $mainSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+            if ($mainSha -ine $tagSha) {
+                throw "Remote main is $mainSha, but release tag $Version targets $tagSha."
+            }
+            foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
+                $localSha = Resolve-LocalCommitSha -Reference $localReference
+                if ($localSha -ine $tagSha) {
+                    throw "Local reference $localReference is $localSha, not release SHA $tagSha."
+                }
+            }
+            Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $tagSha
+        }
         $verifiedRun = $null
+        $verifiedHostedRun = $null
+        $claimedWindowsArchive = $null
+        $claimedHostedEvidence = $null
         if ($PSBoundParameters.ContainsKey('RunId')) {
             $verifiedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $false
             if ($tagSha -ine $verifiedRun.HeadSha) {
@@ -705,10 +1046,34 @@ try {
             }
         }
 
-        $asset = $view.assets | Where-Object { $_.name -eq $ZipName } | Select-Object -First 1
-        if ($null -eq $asset) {
-            throw "Release $Version has no asset named '$ZipName'."
+        if ($requireV0127) {
+            $windowsArtifact = Get-ArtifactInfo -RepoSlug $RepoSlug -RunId $verifiedRun.Id -Name $ArtifactName
+            $claimedWindowsArchive = Join-Path $stage 'claimed-windows-workflow-artifact.zip'
+            Get-ArtifactArchive -ArchiveUrl $windowsArtifact.archive_download_url -OutFile $claimedWindowsArchive
+            Assert-ArtifactArchive -Artifact $windowsArtifact -ArchivePath $claimedWindowsArchive `
+                -RequireMetadata:$requireV0127
+
+            $verifiedHostedRun = Get-ReleaseGateRunInfo `
+                -RepoSlug $RepoSlug -RunId $ReleaseGateRunId -ExpectedSha $tagSha
+            $hostedArtifactName = "$Version-release-evidence-$tagSha"
+            $hostedArtifact = Get-ArtifactInfo `
+                -RepoSlug $RepoSlug -RunId $verifiedHostedRun.Id -Name $hostedArtifactName
+            $claimedHostedArchive = Join-Path $stage 'claimed-hosted-workflow-artifact.zip'
+            $claimedHostedRoot = Join-Path $stage 'claimed-hosted-workflow-artifact'
+            New-Item -ItemType Directory -Path $claimedHostedRoot -Force | Out-Null
+            Get-ArtifactArchive -ArchiveUrl $hostedArtifact.archive_download_url -OutFile $claimedHostedArchive
+            Assert-ArtifactArchive -Artifact $hostedArtifact -ArchivePath $claimedHostedArchive `
+                -RequireMetadata:$requireV0127
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::ExtractToDirectory($claimedHostedArchive, $claimedHostedRoot)
+            $claimedHostedEvidence = Test-HostedEvidence `
+                -Root $claimedHostedRoot -Version $Version -CommitSha $tagSha `
+                -WorkflowRunId $verifiedHostedRun.Id `
+                -WorkflowRunAttempt $verifiedHostedRun.RunAttempt `
+                -WorkflowArtifactName $hostedArtifactName -Repository $RepoSlug
         }
+
+        $asset = Get-UniqueReleaseAsset -Assets @($view.assets) -Name $ZipName
 
         $zipPath = Join-Path $stage $ZipName
         Write-Host ""
@@ -719,6 +1084,20 @@ try {
 
         $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
         $zipLen  = (Get-Item -LiteralPath $zipPath).Length
+        $repeatZipPath = Join-Path $stage 'repeat-download.zip'
+        Invoke-WebRequest -Uri $asset.url -UseBasicParsing -OutFile $repeatZipPath -ErrorAction Stop
+        $repeatZipHash = (Get-FileHash -LiteralPath $repeatZipPath -Algorithm SHA256).Hash
+        $repeatZipLen = (Get-Item -LiteralPath $repeatZipPath).Length
+        if ($repeatZipHash -ine $zipHash -or [int64]$repeatZipLen -ne [int64]$zipLen) {
+            throw "Repeated downloads of '$ZipName' were not byte-identical."
+        }
+        if ($requireV0127) {
+            $claimedHash = (Get-FileHash -LiteralPath $claimedWindowsArchive -Algorithm SHA256).Hash
+            $claimedSize = [int64](Get-Item -LiteralPath $claimedWindowsArchive).Length
+            if ($claimedHash -ine $zipHash -or $claimedSize -ne [int64]$zipLen) {
+                throw "Published Windows zip is not byte-identical to run $($verifiedRun.Id) artifact '$ArtifactName'."
+            }
+        }
 
         # Compare against the release-recorded digest (format "sha256:<hex>").
         $assetDigest = $null
@@ -737,13 +1116,18 @@ try {
         }
 
         # Open the zip and hash the contained exe (also re-proves the version).
-        $bundle = Test-BundleZip -ZipPath $zipPath -Version $Version -CommitSha $tagSha -StageDir $stage
+        $bundle = Test-BundleZip -ZipPath $zipPath -Version $Version -CommitSha $tagSha `
+            -StageDir $stage -WorkflowRunId $RunId `
+            -WorkflowRunAttempt $(if ($verifiedRun) { $verifiedRun.RunAttempt } else { 0 }) `
+            -WorkflowArtifactName $(if ($verifiedRun) { $ArtifactName } else { '' }) `
+            -Repository $(if ($verifiedRun) { $RepoSlug } else { '' })
         Assert-ReleaseBodyDigests `
             -Body ([string]$view.body) `
             -ExeSha256 $bundle.ExeSha256 `
-            -ZipSha256 $zipHash
+            -ZipSha256 $zipHash `
+            -CommitSha $tagSha
         if ($bundle.EvidencePath) {
-            if ($PSBoundParameters.ContainsKey('ReleaseGateRunId')) {
+            if (-not $requireV0127 -and $PSBoundParameters.ContainsKey('ReleaseGateRunId')) {
                 Get-ReleaseGateRunInfo `
                     -RepoSlug $RepoSlug -RunId $ReleaseGateRunId -ExpectedSha $tagSha | Out-Null
             }
@@ -752,12 +1136,14 @@ try {
                 $ImageApiSbomEntry, $ImageWorkerSbomEntry, $ImageFrontendSbomEntry,
                 $MigrationEntry, $EvidenceEntry, $WindowsEvidenceEntry
             )
-            $checksumsAsset = $view.assets |
-                Where-Object { $_.name -eq $ChecksumsEntry } |
-                Select-Object -First 1
-            if ($null -eq $checksumsAsset) {
-                throw "Release $Version has no required asset '$ChecksumsEntry'."
+            $expectedAssetNames = @($payloadNames + $ChecksumsEntry)
+            if (@($view.assets).Count -ne $expectedAssetNames.Count) {
+                throw "Release $Version has an unexpected number of assets."
             }
+            foreach ($expectedName in $expectedAssetNames) {
+                Get-UniqueReleaseAsset -Assets @($view.assets) -Name $expectedName | Out-Null
+            }
+            $checksumsAsset = Get-UniqueReleaseAsset -Assets @($view.assets) -Name $ChecksumsEntry
             $publishedDir = Join-Path $stage 'published-evidence'
             New-Item -ItemType Directory -Path $publishedDir -Force | Out-Null
             $publishedChecksumsPath = Join-Path $publishedDir $ChecksumsEntry
@@ -788,12 +1174,7 @@ try {
             }
             $publishedFiles = @{ $ZipName = $zipPath }
             foreach ($name in $payloadNames | Where-Object { $_ -ne $ZipName }) {
-                $evidenceAsset = $view.assets |
-                    Where-Object { $_.name -eq $name } |
-                    Select-Object -First 1
-                if ($null -eq $evidenceAsset) {
-                    throw "Release $Version has no required asset '$name'."
-                }
+                $evidenceAsset = Get-UniqueReleaseAsset -Assets @($view.assets) -Name $name
                 $downloaded = Join-Path $publishedDir $name
                 Invoke-WebRequest -Uri $evidenceAsset.url -UseBasicParsing `
                     -OutFile $downloaded -ErrorAction Stop
@@ -815,12 +1196,44 @@ try {
             if (-not $checksumRecords.ContainsKey($ZipName) -or $checksumRecords[$ZipName] -ine $zipHash) {
                 throw "Published $ChecksumsEntry does not match '$ZipName'."
             }
+            if ($requireV0127) {
+                $claimedHostedFiles = @{
+                    $PythonSbomEntry = $claimedHostedEvidence.PythonSbomPath
+                    $NpmSbomEntry = $claimedHostedEvidence.NpmSbomPath
+                    $ImageApiSbomEntry = $claimedHostedEvidence.ImageApiSbomPath
+                    $ImageWorkerSbomEntry = $claimedHostedEvidence.ImageWorkerSbomPath
+                    $ImageFrontendSbomEntry = $claimedHostedEvidence.ImageFrontendSbomPath
+                    $MigrationEntry = $claimedHostedEvidence.MigrationPath
+                    $EvidenceEntry = $claimedHostedEvidence.EvidencePath
+                    $WindowsEvidenceEntry = $bundle.EvidencePath
+                }
+                foreach ($name in $claimedHostedFiles.Keys) {
+                    $workflowHash = (Get-FileHash -LiteralPath $claimedHostedFiles[$name] -Algorithm SHA256).Hash
+                    $publishedHash = (Get-FileHash -LiteralPath $publishedFiles[$name] -Algorithm SHA256).Hash
+                    if ($workflowHash -ine $publishedHash) {
+                        throw "Published '$name' is not byte-identical to the claimed workflow artifact payload."
+                    }
+                }
+            }
 
             $hostedEvidence = Get-Content -LiteralPath $publishedFiles[$EvidenceEntry] -Raw |
                 ConvertFrom-Json
             if ([string]$hostedEvidence.release_version -cne $Version -or
                 [string]$hostedEvidence.source_commit -ine $tagSha) {
                 throw "Published hosted evidence does not match $Version at $tagSha."
+            }
+            if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27' -and
+                ([string]$hostedEvidence.schema_version -cne '1.1' -or
+                 [string]$hostedEvidence.evidence_kind -cne 'hosted' -or
+                 [string]$hostedEvidence.product_version -cne $Version -or
+                 [string]$hostedEvidence.workflow.name -cne $ReleaseGateWorkflowName -or
+                 [string]$hostedEvidence.workflow.event -cne 'workflow_dispatch' -or
+                 [string]$hostedEvidence.workflow.repository -cne $RepoSlug -or
+                 [string]$hostedEvidence.workflow.artifact_name -cne $hostedArtifactName -or
+                 [long]$hostedEvidence.workflow.run_id -ne $verifiedHostedRun.Id -or
+                 [int]$hostedEvidence.workflow.run_attempt -ne $verifiedHostedRun.RunAttempt -or
+                 [string]$hostedEvidence.workflow.run_url -cne $verifiedHostedRun.HtmlUrl)) {
+                throw "Published hosted evidence lacks required v0.1.27 workflow/ProductVersion metadata."
             }
             foreach ($gate in @('python', 'frontend', 'hosted_compose', 'backup_rollback')) {
                 $property = $hostedEvidence.gates.PSObject.Properties[$gate]
@@ -845,6 +1258,19 @@ try {
                 [string]$windowsEvidence.source_commit -ine $tagSha -or
                 [string]$windowsEvidence.gates.windows_build -cne 'passed') {
                 throw "Published Windows evidence does not match $Version at $tagSha."
+            }
+            if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27' -and
+                ([string]$windowsEvidence.schema_version -cne '1.1' -or
+                 [string]$windowsEvidence.evidence_kind -cne 'windows' -or
+                 [string]$windowsEvidence.product_version -cne $Version -or
+                 [string]$windowsEvidence.workflow.name -cne $WorkflowName -or
+                 [string]$windowsEvidence.workflow.event -cne 'workflow_dispatch' -or
+                 [string]$windowsEvidence.workflow.repository -cne $RepoSlug -or
+                 [string]$windowsEvidence.workflow.artifact_name -cne $ArtifactName -or
+                 [long]$windowsEvidence.workflow.run_id -ne $verifiedRun.Id -or
+                 [int]$windowsEvidence.workflow.run_attempt -ne $verifiedRun.RunAttempt -or
+                 [string]$windowsEvidence.workflow.run_url -cne $verifiedRun.HtmlUrl)) {
+                throw "Published Windows evidence lacks required v0.1.27 workflow/ProductVersion metadata."
             }
         }
 
@@ -888,6 +1314,15 @@ try {
     if ($mainShaBefore -ine $run.HeadSha) {
         throw "Remote main is $mainShaBefore, but workflow run $($run.Id) built $($run.HeadSha). Dispatch a fresh bundle from current main."
     }
+    if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27') {
+        foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
+            $localSha = Resolve-LocalCommitSha -Reference $localReference
+            if ($localSha -ine $run.HeadSha) {
+                throw "Local reference $localReference is $localSha, not release SHA $($run.HeadSha)."
+            }
+        }
+        Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha
+    }
     $shortSha = if ($run.HeadSha.Length -ge 7) { $run.HeadSha.Substring(0, 7) } else { $run.HeadSha }
     Write-Host "    run id     : $($run.Id)"
     Write-Host "    head sha   : $($run.HeadSha) (short $shortSha)"
@@ -897,16 +1332,20 @@ try {
     Write-Host "    artifact   : $($art.name) (id $($art.id), $($art.size_in_bytes) bytes)"
 
     # 4. Download the artifact archive into a fresh short staging dir.
-    New-StageDir -Path $stage | Out-Null
+    $stage = New-StageDir -Path $stage -Version $Version
     $zipPath = Join-Path $stage $ZipName
     Write-Host ""
     Write-Host "Downloading artifact archive..."
     Get-ArtifactArchive -ArchiveUrl $art.archive_download_url -OutFile $zipPath
+    Assert-ArtifactArchive -Artifact $art -ArchivePath $zipPath `
+        -RequireMetadata:$requireV0127
 
     # 5. Verify the archive before it can reach Releases.
     Write-Host ""
     Write-Host "Verifying bundle zip..."
-    $bundle  = Test-BundleZip -ZipPath $zipPath -Version $Version -CommitSha $run.HeadSha -StageDir $stage
+    $bundle  = Test-BundleZip -ZipPath $zipPath -Version $Version -CommitSha $run.HeadSha `
+        -StageDir $stage -WorkflowRunId $run.Id -WorkflowRunAttempt $run.RunAttempt `
+        -WorkflowArtifactName $ArtifactName -Repository $RepoSlug
     $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
     $zipLen  = (Get-Item -LiteralPath $zipPath).Length
     $releasePayloads = @($zipPath)
@@ -923,9 +1362,13 @@ try {
         $hostedRoot = Join-Path $stage 'hosted-release-evidence'
         New-Item -ItemType Directory -Path $hostedRoot -Force | Out-Null
         Get-ArtifactArchive -ArchiveUrl $hostedArtifact.archive_download_url -OutFile $hostedArchive
+        Assert-ArtifactArchive -Artifact $hostedArtifact -ArchivePath $hostedArchive `
+            -RequireMetadata:$requireV0127
         [System.IO.Compression.ZipFile]::ExtractToDirectory($hostedArchive, $hostedRoot)
         $hostedEvidence = Test-HostedEvidence `
-            -Root $hostedRoot -Version $Version -CommitSha $run.HeadSha
+            -Root $hostedRoot -Version $Version -CommitSha $run.HeadSha `
+            -WorkflowRunId $hostedRun.Id -WorkflowRunAttempt $hostedRun.RunAttempt `
+            -WorkflowArtifactName $hostedArtifactName -Repository $RepoSlug
 
         $windowsEvidencePath = Join-Path $stage $WindowsEvidenceEntry
         Copy-Item -LiteralPath $bundle.EvidencePath -Destination $windowsEvidencePath
@@ -942,6 +1385,10 @@ try {
         Write-ReleaseChecksums -Path $bundle.ChecksumsPath -Files $releasePayloads
         $releasePayloads += $bundle.ChecksumsPath
     }
+    $payloadNames = @($releasePayloads | ForEach-Object { [IO.Path]::GetFileName($_) })
+    if (@($payloadNames | Select-Object -Unique).Count -ne $payloadNames.Count) {
+        throw "Release payload filenames are not unique."
+    }
     Write-Host "    exe SHA-256 : $($bundle.ExeSha256)"
     Write-Host "    zip SHA-256 : $zipHash"
 
@@ -953,82 +1400,211 @@ try {
     $notes = $notes.Replace('{{EXE_SHA256}}', $bundle.ExeSha256)
     $notes = $notes.Replace('{{ZIP_SHA256}}', $zipHash)
     $notes = $notes.Replace('{{COMMIT}}', $run.HeadSha)
+    foreach ($unresolvedToken in @('{{COMMIT}}', '{{EXE_SHA256}}', '{{ZIP_SHA256}}')) {
+        if ($notes.Contains($unresolvedToken)) {
+            throw "Release notes still contain unresolved token $unresolvedToken."
+        }
+    }
     $resolvedNotes = Join-Path $stage 'release-notes-resolved.md'
-    Set-Content -LiteralPath $resolvedNotes -Value $notes -Encoding UTF8
+    [IO.File]::WriteAllText(
+        $resolvedNotes,
+        $notes,
+        (New-Object Text.UTF8Encoding($false))
+    )
     Write-Host "    wrote $resolvedNotes"
 
-    # 7. Create the release with the verified archive attached.
+    # 7. Create a non-public draft. Every release-side byte is downloaded and
+    #    verified while the release is still a draft; publication is the final
+    #    mutation only after all identities have been rechecked.
     Write-Host ""
-    Write-Host "Creating release $Version..."
+    Write-Host "Creating non-public draft release $Version..."
     $releaseArgs = @(
         'release', 'create', $Version,
         '--repo', $RepoSlug,
+        '--verify-tag',
+        '--draft',
         '--target', $run.HeadSha,
         '--title', $Title,
         '--notes-file', $resolvedNotes
     )
     $releaseArgs += $releasePayloads
     Invoke-Gh $releaseArgs "gh release create $Version" | ForEach-Object { Write-Host "    $_" }
+    $draftCreated = $true
 
-    # 8. Post-verify: the release-side asset must match what we uploaded. Never
-    #    leave a silent bad asset.
+    # 8. Download every draft asset through the authenticated release-asset API
+    #    and compare it byte-for-byte with its already-validated workflow input.
     Write-Host ""
-    Write-Host "Post-verifying published asset..."
+    Write-Host "Verifying every draft asset before publication..."
     $viewRaw = Invoke-Gh @(
         'release', 'view', $Version,
         '--repo', $RepoSlug,
-        '--json', 'assets,body,targetCommitish,url'
+        '--json', 'assets,body,targetCommitish,url,isDraft'
     ) "gh release view $Version"
     $view = ($viewRaw -join "`n") | ConvertFrom-Json
-
-    $asset = $view.assets | Where-Object { $_.name -eq $ZipName } | Select-Object -First 1
-    if ($null -eq $asset) {
-        throw "Post-verify: release $Version has no asset '$ZipName' after create. DELETE the release (gh release delete $Version --repo $RepoSlug) and investigate."
+    if ($view.isDraft -ne $true) {
+        throw "Release $Version became public before verification completed."
     }
-
-    $assetDigest = $null
-    if ($asset.PSObject.Properties['digest']) { $assetDigest = $asset.digest }
-    if ([string]::IsNullOrWhiteSpace($assetDigest)) {
-        Write-Warning "Post-verify: asset has no digest field (older gh?) - relying on size + the pre-upload hash. Consider re-verifying with -VerifyExisting."
+    if (@($view.assets).Count -ne $payloadNames.Count) {
+        throw "Draft release contains an unexpected number of assets."
     }
-    else {
-        $assetHex = $assetDigest -replace '^sha256:', ''
-        if ($assetHex -ine $zipHash) {
-            throw "Post-verify MISMATCH: published asset digest ($assetDigest) != uploaded zip SHA-256 ($zipHash). DELETE the release (gh release delete $Version --repo $RepoSlug) and investigate before anyone downloads it."
-        }
-    }
-    if ([int64]$asset.size -ne [int64]$zipLen) {
-        throw "Post-verify MISMATCH: published asset size ($($asset.size)) != uploaded size ($zipLen). DELETE the release (gh release delete $Version --repo $RepoSlug) and investigate."
-    }
-    if ($bundle.EvidencePath) {
-        foreach ($localFile in @($releasePayloads | Where-Object { $_ -ne $zipPath })) {
-            $name = [IO.Path]::GetFileName($localFile)
-            $evidenceAsset = $view.assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
-            if ($null -eq $evidenceAsset) {
-                throw "Post-verify: release $Version has no required evidence asset '$name'."
-            }
-            $localHash = (Get-FileHash -LiteralPath $localFile -Algorithm SHA256).Hash
-            if ([int64]$evidenceAsset.size -ne [int64](Get-Item -LiteralPath $localFile).Length) {
-                throw "Post-verify size mismatch for $name."
-            }
-            if ($evidenceAsset.PSObject.Properties['digest'] -and $evidenceAsset.digest) {
-                $recordedHash = ([string]$evidenceAsset.digest) -replace '^sha256:', ''
-                if ($recordedHash -ine $localHash) { throw "Post-verify digest mismatch for $name." }
-            }
-        }
+    $draftVerifyDir = Join-Path $stage 'draft-asset-verification'
+    New-Item -ItemType Directory -Path $draftVerifyDir -Force | Out-Null
+    foreach ($localFile in $releasePayloads) {
+        $name = [IO.Path]::GetFileName($localFile)
+        $draftAsset = Get-UniqueReleaseAsset -Assets @($view.assets) -Name $name
+        Assert-ReleaseAssetMatchesFile `
+            -Asset $draftAsset -LocalFile $localFile -DownloadDirectory $draftVerifyDir | Out-Null
     }
     Assert-ReleaseBodyDigests `
         -Body ([string]$view.body) `
         -ExeSha256 $bundle.ExeSha256 `
-        -ZipSha256 $zipHash
+        -ZipSha256 $zipHash `
+        -CommitSha $run.HeadSha `
+        -ExpectedBody $notes
+
+    # Re-fetch every mutable identity immediately before publication. The
+    # workflow artifacts themselves are immutable; matching IDs prove the bytes
+    # validated above are still the unique named artifacts on those exact runs.
+    $recheckedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $run.Id -AutoLocate $false
+    if ($recheckedRun.HeadSha -ine $run.HeadSha -or
+        $recheckedRun.RunAttempt -ne $run.RunAttempt -or
+        $recheckedRun.HtmlUrl -cne $run.HtmlUrl) {
+        throw "Windows workflow identity changed during draft verification."
+    }
+    $recheckedArtifact = Get-ArtifactInfo -RepoSlug $RepoSlug -RunId $run.Id -Name $ArtifactName
+    if ([long]$recheckedArtifact.id -ne [long]$art.id -or
+        [int64]$recheckedArtifact.size_in_bytes -ne [int64]$art.size_in_bytes -or
+        [string]$recheckedArtifact.digest -cne [string]$art.digest) {
+        throw "Windows workflow artifact identity changed during draft verification."
+    }
+    if ($bundle.EvidencePath) {
+        $recheckedHostedRun = Get-ReleaseGateRunInfo `
+            -RepoSlug $RepoSlug -RunId $hostedRun.Id -ExpectedSha $run.HeadSha
+        if ($recheckedHostedRun.RunAttempt -ne $hostedRun.RunAttempt -or
+            $recheckedHostedRun.HtmlUrl -cne $hostedRun.HtmlUrl) {
+            throw "Hosted workflow identity changed during draft verification."
+        }
+        $recheckedHostedArtifact = Get-ArtifactInfo `
+            -RepoSlug $RepoSlug -RunId $hostedRun.Id -Name $hostedArtifactName
+        if ([long]$recheckedHostedArtifact.id -ne [long]$hostedArtifact.id -or
+            [int64]$recheckedHostedArtifact.size_in_bytes -ne [int64]$hostedArtifact.size_in_bytes -or
+            [string]$recheckedHostedArtifact.digest -cne [string]$hostedArtifact.digest) {
+            throw "Hosted workflow artifact identity changed during draft verification."
+        }
+    }
     $tagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
     if ($tagSha -ine $run.HeadSha) {
-        throw "Post-verify MISMATCH: release tag $Version resolves to $tagSha, not workflow commit $($run.HeadSha). DELETE the release and investigate."
+        throw "Draft verification mismatch: tag $Version resolves to $tagSha, not workflow commit $($run.HeadSha)."
     }
     $mainShaAfter = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
     if ($mainShaAfter -ine $run.HeadSha) {
-        throw "Post-verify MISMATCH: remote main moved to $mainShaAfter while release $Version was created from $($run.HeadSha). The release is pinned correctly, but final main/tag alignment is not satisfied."
+        throw "Draft verification mismatch: remote main is $mainShaAfter, not $($run.HeadSha)."
     }
+    foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
+        $localSha = Resolve-LocalCommitSha -Reference $localReference
+        if ($localSha -ine $run.HeadSha) {
+            throw "Draft verification mismatch: $localReference is $localSha, not $($run.HeadSha)."
+        }
+    }
+    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha
+
+    $finalViewRaw = Invoke-Gh @(
+        'release', 'view', $Version,
+        '--repo', $RepoSlug,
+        '--json', 'assets,body,targetCommitish,url,isDraft'
+    ) "final read of draft release $Version"
+    $finalView = ($finalViewRaw -join "`n") | ConvertFrom-Json
+    if ($finalView.isDraft -ne $true -or @($finalView.assets).Count -ne $payloadNames.Count) {
+        throw "Draft release state or asset count changed before publication."
+    }
+    Assert-ReleaseBodyDigests `
+        -Body ([string]$finalView.body) `
+        -ExeSha256 $bundle.ExeSha256 `
+        -ZipSha256 $zipHash `
+        -CommitSha $run.HeadSha `
+        -ExpectedBody $notes
+    $finalDraftVerifyDir = Join-Path $stage 'final-draft-asset-verification'
+    New-Item -ItemType Directory -Path $finalDraftVerifyDir -Force | Out-Null
+    foreach ($localFile in $releasePayloads) {
+        $name = [IO.Path]::GetFileName($localFile)
+        $finalAsset = Get-UniqueReleaseAsset -Assets @($finalView.assets) -Name $name
+        Assert-ReleaseAssetMatchesFile `
+            -Asset $finalAsset -LocalFile $localFile -DownloadDirectory $finalDraftVerifyDir | Out-Null
+    }
+    $view = $finalView
+
+    # Publication is the last mutation. The read-only verification immediately
+    # after it proves that GitHub actually published the draft without changing
+    # its body or asset identities.
+    Invoke-Gh @('release', 'edit', $Version, '--repo', $RepoSlug, '--draft=false') `
+        "publish verified draft $Version" | ForEach-Object { Write-Host "    $_" }
+    $publishCommandSucceeded = $true
+    $publishedViewRaw = Invoke-Gh @(
+        'release', 'view', $Version,
+        '--repo', $RepoSlug,
+        '--json', 'assets,body,targetCommitish,url,isDraft'
+    ) "verify published release $Version"
+    $publishedView = ($publishedViewRaw -join "`n") | ConvertFrom-Json
+    if ($publishedView.isDraft -ne $false -or
+        @($publishedView.assets).Count -ne $payloadNames.Count) {
+        throw "PUBLICATION VERIFICATION FAILED: release is still draft or its asset count changed."
+    }
+    Assert-ReleaseBodyDigests `
+        -Body ([string]$publishedView.body) `
+        -ExeSha256 $bundle.ExeSha256 `
+        -ZipSha256 $zipHash `
+        -CommitSha $run.HeadSha `
+        -ExpectedBody $notes
+    foreach ($name in $payloadNames) {
+        $draftAsset = Get-UniqueReleaseAsset -Assets @($finalView.assets) -Name $name
+        $publishedAsset = Get-UniqueReleaseAsset -Assets @($publishedView.assets) -Name $name
+        if ([long]$publishedAsset.id -ne [long]$draftAsset.id -or
+            [int64]$publishedAsset.size -ne [int64]$draftAsset.size -or
+            [string]$publishedAsset.digest -cne [string]$draftAsset.digest) {
+            throw "PUBLICATION VERIFICATION FAILED: asset identity changed for '$name'."
+        }
+    }
+    $publishedTagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
+    $publishedMainSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+    if ($publishedTagSha -ine $run.HeadSha -or $publishedMainSha -ine $run.HeadSha) {
+        throw "PUBLICATION VERIFICATION FAILED: remote main/tag no longer match the workflow SHA."
+    }
+    foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
+        $localSha = Resolve-LocalCommitSha -Reference $localReference
+        if ($localSha -ine $run.HeadSha) {
+            throw "PUBLICATION VERIFICATION FAILED: $localReference no longer matches the workflow SHA."
+        }
+    }
+    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha
+    $publishedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $run.Id -AutoLocate $false
+    if ($publishedRun.HeadSha -ine $run.HeadSha -or
+        $publishedRun.RunAttempt -ne $run.RunAttempt -or
+        $publishedRun.HtmlUrl -cne $run.HtmlUrl) {
+        throw "PUBLICATION VERIFICATION FAILED: Windows workflow identity changed."
+    }
+    $publishedArtifact = Get-ArtifactInfo -RepoSlug $RepoSlug -RunId $run.Id -Name $ArtifactName
+    if ([long]$publishedArtifact.id -ne [long]$art.id -or
+        [int64]$publishedArtifact.size_in_bytes -ne [int64]$art.size_in_bytes -or
+        [string]$publishedArtifact.digest -cne [string]$art.digest) {
+        throw "PUBLICATION VERIFICATION FAILED: Windows artifact identity changed."
+    }
+    if ($bundle.EvidencePath) {
+        $publishedHostedRun = Get-ReleaseGateRunInfo `
+            -RepoSlug $RepoSlug -RunId $hostedRun.Id -ExpectedSha $run.HeadSha
+        if ($publishedHostedRun.RunAttempt -ne $hostedRun.RunAttempt -or
+            $publishedHostedRun.HtmlUrl -cne $hostedRun.HtmlUrl) {
+            throw "PUBLICATION VERIFICATION FAILED: hosted workflow identity changed."
+        }
+        $publishedHostedArtifact = Get-ArtifactInfo `
+            -RepoSlug $RepoSlug -RunId $hostedRun.Id -Name $hostedArtifactName
+        if ([long]$publishedHostedArtifact.id -ne [long]$hostedArtifact.id -or
+            [int64]$publishedHostedArtifact.size_in_bytes -ne [int64]$hostedArtifact.size_in_bytes -or
+            [string]$publishedHostedArtifact.digest -cne [string]$hostedArtifact.digest) {
+            throw "PUBLICATION VERIFICATION FAILED: hosted artifact identity changed."
+        }
+    }
+    $view = $publishedView
+    $draftPublished = $true
 
     # 9. Summary + cleanup.
     Write-Host ""
@@ -1043,7 +1619,7 @@ try {
     Write-Host "  release URL    : $($view.url)"
     Write-Host "=========================================================="
 
-    Remove-Item -LiteralPath $stage -Recurse -Force
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     Write-Host ""
     Write-Host "PUBLISH OK."
     exit 0
@@ -1051,6 +1627,12 @@ try {
 catch {
     Write-Host ""
     Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    if ($publishCommandSucceeded -and -not $draftPublished) {
+        Write-Host "CRITICAL: GitHub accepted publication, but final public-state verification failed. Inspect or withdraw $Version immediately." -ForegroundColor Red
+    }
+    elseif ($draftCreated -and -not $draftPublished) {
+        Write-Host "Draft $Version remains non-public for inspection or deletion." -ForegroundColor Yellow
+    }
     if ($stage -and (Test-Path -LiteralPath $stage)) {
         # Leave the staging dir for forensics on failure (partial download,
         # extracted files, resolved notes).

@@ -129,13 +129,29 @@ def check(repo: Path) -> list[str]:
             ("git rev-parse HEAD", "release workflow does not verify checkout SHA"),
             ("commits/$RELEASE_SHA/pulls", "release workflow does not bind the SHA to a merged PR"),
             ("docker compose", "release workflow does not validate hosted Compose"),
-            ("anchore/sbom-action@v0", "release workflow does not generate image SBOMs"),
             ("backup_rollback_smoke.py", "release workflow does not smoke backup/rollback"),
             ("SBOM.image-worker.cdx.json", "release workflow omits hosted image SBOMs"),
             ("http://127.0.0.1:8080/", "release workflow does not smoke the hosted frontend"),
         ):
             if fragment not in workflow:
                 failures.append(description)
+        _require(
+            workflow,
+            r"uses:\s*anchore/sbom-action@[0-9a-f]{40}\b",
+            "release workflow does not invoke Anchore from an immutable commit",
+            failures,
+        )
+        for line_number, line in enumerate(workflow.splitlines(), start=1):
+            match = re.search(r"\buses:\s*([^\s#]+)", line)
+            if match is None or match.group(1).startswith("./"):
+                continue
+            action = match.group(1)
+            if "@" not in action or re.fullmatch(
+                r"[0-9a-f]{40}", action.rsplit("@", 1)[1]
+            ) is None:
+                failures.append(
+                    f"release workflow line {line_number} uses a mutable action ref"
+                )
 
     publisher = (repo / "scripts" / "release-portable.ps1").read_text(encoding="utf-8")
     for fragment, description in (

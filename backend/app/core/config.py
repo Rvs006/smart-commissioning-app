@@ -1,8 +1,10 @@
 import json
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from smart_commissioning_core.db.engine import default_sqlite_url
 from smart_commissioning_core.sync_identity import (
@@ -44,6 +46,11 @@ class Settings(BaseSettings):
     # box; the API test suite forces it off (INLINE_RUN_ASYNC=0) because those
     # tests POST a run then assert its terminal status synchronously.
     inline_run_async: bool = True
+    # All claimed inline runs renew an independent ownership lease. Defaults
+    # match hosted workers. Environment overrides support deterministic release
+    # acceptance and constrained deployments, but unsafe timing is rejected.
+    run_lease_seconds: int = 60
+    run_heartbeat_seconds: float = 15.0
     # Edge->hub synchronization role (smart_commissioning_core.sync). Determines
     # which sync features are active for this instance:
     #   - "standalone" (default): today's single-instance behavior. No sync; the
@@ -88,6 +95,23 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @model_validator(mode="after")
+    def validate_run_heartbeat_timing(self) -> "Settings":
+        if self.run_lease_seconds < 15:
+            raise ValueError("run_lease_seconds must be at least 15")
+        if self.run_lease_seconds > 300:
+            raise ValueError("run_lease_seconds must be no more than 300")
+        if not math.isfinite(self.run_heartbeat_seconds):
+            raise ValueError("run_heartbeat_seconds must be finite")
+        if self.run_heartbeat_seconds < 1:
+            raise ValueError("run_heartbeat_seconds must be at least 1")
+        if self.run_heartbeat_seconds * 3 > self.run_lease_seconds:
+            raise ValueError(
+                "run_heartbeat_seconds must be no more than one third of "
+                "run_lease_seconds"
+            )
+        return self
 
     def load_trusted_edges(self) -> dict[str, str]:
         """Return the hub's trusted-edges map: edge_id -> fingerprint OR PEM.

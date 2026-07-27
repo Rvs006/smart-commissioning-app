@@ -1,4 +1,9 @@
-# Sync v2 plan for v0.1.27
+# Historical Sync v2 plan for v0.1.27
+
+Status: superseded by `docs/sync-v2-v0.1.28.md`. v0.1.27 was narrowed to the
+urgent Windows portable inline-heartbeat fix. The v0.1.26 compatibility boundary
+below remains accurate; the full protocol, storage, credential-scope, and receipt
+work now belongs to v0.1.28.
 
 Full immutable evidence synchronization is deferred from v0.1.26. The current
 v1 wire format remains readable, which avoids breaking an existing edge and hub
@@ -19,13 +24,13 @@ different report bytes.
   artifact bytes. Operators must not treat a hub-regenerated report as the same
   signed edge artifact.
 
-## v0.1.27 acceptance plan
+## Original acceptance plan, moved to v0.1.28
 
-Sync v2 will transfer the sealed run digest, frozen report snapshot, signed
-manifest, and exact content-addressed artifact bytes. The hub will bind each edge
-credential to allowed project and site pairs, return acknowledged run IDs, and
-store per-item receipts. The edge will mark only acknowledged or byte-identical
-IDs as synchronized.
+Sync v2 in v0.1.28 will transfer the sealed run digest, frozen report snapshot,
+signed manifest, and exact content-addressed artifact bytes. The hub will bind
+each edge credential to allowed project and site pairs, return acknowledged run
+IDs, and store per-item receipts. The edge will mark only acknowledged or
+byte-identical IDs as synchronized.
 
 Required tests cover interrupted uploads, repeated uploads, out-of-scope
 credentials, mixed acknowledgements, manifest signature failure, artifact hash

@@ -234,15 +234,20 @@ class RunLifecycleRepository:
         now: datetime | None = None,
         owner_token: str | None = None,
     ) -> RunLeaseV1 | None:
-        claimed_at = now or _utcnow()
         lease_seconds = max(1, int(lease_seconds))
         token = owner_token or token_urlsafe(32)
-        expires_at = claimed_at + timedelta(seconds=lease_seconds)
         with self._session_factory.begin() as session:
+            # A new owner must receive the full requested lease after any row
+            # lock wait. Sampling before the lock could create a lease that was
+            # already partly, or completely, spent when the claim committed.
+            run = session.scalar(
+                select(Run).where(Run.id == run_id).with_for_update()
+            )
             dispatch = session.get(RunDispatch, dispatch_id)
             context = session.get(RunExecutionContext, run_id)
             if (
-                dispatch is None
+                run is None
+                or dispatch is None
                 or dispatch.run_id != run_id
                 or context is None
             ):
@@ -254,6 +259,8 @@ class RunLifecycleRepository:
                     owner_token=token,
                 )
                 return None
+            claimed_at = now or _utcnow()
+            expires_at = claimed_at + timedelta(seconds=lease_seconds)
             result = session.execute(
                 update(Run)
                 .where(
@@ -282,7 +289,8 @@ class RunLifecycleRepository:
                 .where(ActiveProtocolSlot.run_id == run_id)
                 .values(owner_token=token)
             )
-            run = session.get(Run, run_id)
+            session.expire(run)
+            run = self._load_run(session, run_id)
             return RunLeaseV1(
                 run_id=run_id,
                 dispatch_id=dispatch_id,
@@ -302,9 +310,20 @@ class RunLifecycleRepository:
         lease_seconds: int = 60,
         now: datetime | None = None,
     ) -> bool:
-        heartbeat_at = now or _utcnow()
-        expires_at = heartbeat_at + timedelta(seconds=max(1, int(lease_seconds)))
         with self._session_factory.begin() as session:
+            # Acquire the lifecycle row before sampling wall time. SQLite's
+            # BEGIN IMMEDIATE and PostgreSQL's FOR UPDATE can both wait behind
+            # another writer. A timestamp captured before that wait could let
+            # an already-expired owner renew after the lease deadline.
+            run = session.scalar(
+                select(Run).where(Run.id == run_id).with_for_update()
+            )
+            if run is None:
+                return False
+            heartbeat_at = now or _utcnow()
+            expires_at = heartbeat_at + timedelta(
+                seconds=max(1, int(lease_seconds))
+            )
             result = session.execute(
                 update(Run)
                 .where(
@@ -312,6 +331,8 @@ class RunLifecycleRepository:
                     Run.status == "running",
                     Run.owner_token == owner_token,
                     Run.terminal_at.is_(None),
+                    Run.lease_expires_at.is_not(None),
+                    Run.lease_expires_at > heartbeat_at,
                 )
                 .values(
                     heartbeat_at=heartbeat_at,
@@ -343,9 +364,12 @@ class RunLifecycleRepository:
         error_message: str | None = None,
         now: datetime | None = None,
     ) -> bool:
-        updated_at = now or _utcnow()
         with self._session_factory.begin() as session:
-            run = self._load_run(session, run_id)
+            # Lock first, then decide whether the lease is still valid. This
+            # prevents a progress write begun before expiry from committing
+            # after a database-lock wait carried it across the deadline.
+            run = self._load_run(session, run_id, for_update=True)
+            updated_at = now or _utcnow()
             if (
                 run.status != "running"
                 or run.owner_token != owner_token
@@ -361,7 +385,7 @@ class RunLifecycleRepository:
                 return False
             values: dict[str, Any] = {
                 "error_message": error_message,
-                "state_version": run.state_version + 1,
+                "state_version": Run.state_version + 1,
                 "updated_at": updated_at,
             }
             if stage is not None:
@@ -382,7 +406,8 @@ class RunLifecycleRepository:
                     Run.status == "running",
                     Run.owner_token == owner_token,
                     Run.terminal_at.is_(None),
-                    Run.state_version == run.state_version,
+                    Run.lease_expires_at.is_not(None),
+                    Run.lease_expires_at > updated_at,
                 )
                 .values(**values)
                 .execution_options(synchronize_session=False)
@@ -474,7 +499,7 @@ class RunLifecycleRepository:
                     Run.id == run_id,
                     Run.status == "running",
                     Run.terminal_at.is_(None),
-                    Run.state_version == run.state_version,
+                    Run.cancel_requested.is_(False),
                 )
                 .values(
                     cancel_requested=True,
@@ -508,8 +533,12 @@ class RunLifecycleRepository:
             else TerminalResultV1.model_validate(result)
         )
         result_sha256 = terminal.sha256()
-        terminal_at = now or _utcnow()
         with self._session_factory.begin() as session:
+            # First finalization is lease-fenced at the instant the lifecycle
+            # row becomes writable, not when the caller began waiting for it.
+            # Identical terminal replay remains idempotent below.
+            self._load_run(session, run_id, for_update=True)
+            terminal_at = now or _utcnow()
             existing = session.get(RunResult, run_id)
             if existing is None:
                 guarded = session.execute(
@@ -520,6 +549,8 @@ class RunLifecycleRepository:
                         Run.owner_token == owner_token,
                         Run.terminal_at.is_(None),
                         Run.result_sha256.is_(None),
+                        Run.lease_expires_at.is_not(None),
+                        Run.lease_expires_at > terminal_at,
                     )
                     .values(status=terminal.status)
                     .execution_options(synchronize_session=False)
