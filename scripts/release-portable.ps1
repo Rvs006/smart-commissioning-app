@@ -340,8 +340,24 @@ function Assert-SignedAnnotatedTag {
     if ($LASTEXITCODE -ne 0 -or $localTagObject -notmatch '^[0-9a-fA-F]{40}$') {
         throw "Local tag $Version is missing or lightweight; create a signed annotated tag first."
     }
-    & git verify-tag $Version 2>&1 | ForEach-Object { Write-Host "    $_" }
-    if ($LASTEXITCODE -ne 0) {
+    # A successful SSH signature check writes "Good git signature" to stderr.
+    # Windows PowerShell 5.1 promotes native stderr records according to
+    # $ErrorActionPreference, so the script-wide Stop setting would throw before
+    # we could inspect git's successful exit code. Relax it only around this
+    # native call, capture both streams, then restore the fail-closed preference.
+    $savedVerificationPreference = $ErrorActionPreference
+    $verificationOutput = @()
+    $verificationExitCode = 1
+    try {
+        $ErrorActionPreference = 'Continue'
+        $verificationOutput = @(& git verify-tag $Version 2>&1)
+        $verificationExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedVerificationPreference
+    }
+    $verificationOutput | ForEach-Object { Write-Host "    $_" }
+    if ($verificationExitCode -ne 0) {
         throw "Local signature verification failed for annotated tag $Version."
     }
     $localTarget = (& git rev-parse "$Version^{commit}").Trim().ToLowerInvariant()

@@ -186,6 +186,14 @@ def check(repo: Path) -> list[str]:
     for value, description in (
         ("Assert-SignedAnnotatedTag", "publisher does not enforce a signed annotated tag"),
         ("git verify-tag", "publisher does not verify the tag locally"),
+        (
+            "$verificationExitCode = $LASTEXITCODE",
+            "publisher does not judge git verify-tag by its native exit code",
+        ),
+        (
+            "$ErrorActionPreference = $savedVerificationPreference",
+            "publisher does not restore fail-closed PowerShell error handling",
+        ),
         ("verification.verified", "publisher does not require GitHub tag verification"),
         ("workflow_dispatch", "publisher does not retain release-workflow event protection"),
         ("remote main", "publisher does not retain exact-main protection"),
@@ -317,6 +325,19 @@ def check(repo: Path) -> list[str]:
             "$draftPublished = $true",
         ),
         "publisher does not create, verify, publish, then verify public state in order",
+        failures,
+    )
+    _ordered(
+        publisher,
+        (
+            "$savedVerificationPreference = $ErrorActionPreference",
+            "$ErrorActionPreference = 'Continue'",
+            "$verificationOutput = @(& git verify-tag $Version 2>&1)",
+            "$verificationExitCode = $LASTEXITCODE",
+            "$ErrorActionPreference = $savedVerificationPreference",
+            "if ($verificationExitCode -ne 0)",
+        ),
+        "publisher can treat git verify-tag's successful stderr as a PS5.1 failure",
         failures,
     )
     _ordered(
