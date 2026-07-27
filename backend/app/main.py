@@ -124,7 +124,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="Smart Commissioning Tool API",
-    version="0.1.0",
+    version="0.1.27",
     summary="Production scaffold for commissioning configuration, discovery, validation, and reporting.",
     lifespan=lifespan,
 )
@@ -285,7 +285,7 @@ def root():
 
     return {
         "service": app.title,
-        "version": app.version or "0.1.0",
+        "version": app.version or "0.1.27",
         "environment": settings.environment,
     }
 

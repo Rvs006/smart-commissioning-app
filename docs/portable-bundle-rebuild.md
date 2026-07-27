@@ -64,40 +64,49 @@ the supported build set. Verified offline on this dev box.
 
 ---
 
-## 2. Build the core wheel (VERIFIED OFFLINE HERE)
+## 2. Build the core wheel
 
 ```sh
 python -m pip wheel ./core --no-deps -w dist/wheels
 ```
 
-I ran this in the dev env and confirmed the wheel
-(`smart_commissioning_core-0.1.0-py3-none-any.whl`) ships **all four** migration
+The release check must confirm that the wheel
+(`smart_commissioning_core-<version>-py3-none-any.whl`) ships **all six** migration
 scripts plus the Alembic env under
-`smart_commissioning_core-0.1.0.data/data/share/smart_commissioning_core/`:
-`alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, and
-`alembic/versions/{c9663f90f68a_initial_schema, c4a7ced176a9_engine_framework…,
-c998144d98d4_edge_hub_sync_columns, d1f2a3b4c5d6_users_table_rbac}.py`, plus the
-fixture `smart_commissioning_core/fixtures/udmi_full_report.json`.
+`smart_commissioning_core-<version>.data/data/share/smart_commissioning_core/`:
+`alembic.ini`, `alembic/env.py`, `alembic/script.py.mako`, and these revision
+files:
+
+- `c9663f90f68a_initial_schema.py`
+- `c4a7ced176a9_engine_framework_discovery_tables_and_.py`
+- `c998144d98d4_edge_hub_sync_columns.py`
+- `d1f2a3b4c5d6_users_table_rbac.py`
+- `e5f6a7b8c9d0_udmi_schema_sets_table.py`
+- `f6a7b8c9d0e1_reliability_lifecycle_v2.py`
+
+The wheel also contains
+`smart_commissioning_core/fixtures/udmi_full_report.json`.
 
 > `dist/` is git-ignored, so the wheel won't dirty the tree.
 
-### 2a. Prove the wheel migrates a fresh DB with NO source tree (VERIFIED OFFLINE)
+### 2a. Prove the wheel migrates a fresh DB with no source tree
 
 ```sh
 python -m venv .venv-wheelcheck
 .venv-wheelcheck/Scripts/python -m pip install --no-index --find-links dist/wheels --no-deps dist/wheels/*.whl
 .venv-wheelcheck/Scripts/python -m pip install alembic==1.18.4 sqlalchemy==2.0.49 pydantic==2.12.5
 .venv-wheelcheck/Scripts/python -c "from smart_commissioning_core.db.migrate import upgrade_to_head; upgrade_to_head('sqlite:///./wheelcheck.db'); print('migrated OK')"
+.venv-wheelcheck/Scripts/python -c "import sqlite3; value=sqlite3.connect('wheelcheck.db').execute('select version_num from alembic_version').fetchone()[0]; assert value == 'f6a7b8c9d0e1', value; print('head', value)"
 ```
 
-I ran exactly this. With **only the wheel** on the path (no editable `core/`),
-`migrate.ALEMBIC_INI_PATH` resolved to
+With **only the wheel** on the path (no editable `core/`),
+`migrate.ALEMBIC_INI_PATH` must resolve to
 `<venv>/share/smart_commissioning_core/alembic.ini` and `upgrade_to_head`
-applied all four revisions, creating tables `projects, sites, runs, run_issues,
-import_records, configuration_snapshots, discovered_devices, discovered_points,
-discovered_topics, users, alembic_version` and stamping
-`alembic_version = d1f2a3b4c5d6` (head). This is the same call the API makes at
-startup (`backend/app/main.py` lifespan, gated on `AUTO_MIGRATE`, default true).
+must apply all six revisions and stamp
+`alembic_version = f6a7b8c9d0e1` (head). The explicit assertion fails when a
+stale wheel omits either of the two newest migrations. This is the same upgrade
+call the API makes at startup (`backend/app/main.py` lifespan, gated on
+`AUTO_MIGRATE`, default true).
 
 ---
 

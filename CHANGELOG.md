@@ -5,6 +5,55 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.27] - 2026-07-27
+
+### Fixed
+
+- **Long inline runs renew their execution lease.** Every claimed inline job
+  starts an independent heartbeat before frozen-context resolution or engine
+  work. The default 60-second lease is renewed every 15 seconds for both
+  asynchronous portable execution and synchronous inline execution.
+- **A quiet broker no longer looks like a dead executor.** Lease renewal is
+  independent of MQTT traffic and progress writes, so a silent 32,400-second
+  capture can remain owned while it waits for evidence.
+- **Brief database contention no longer abandons healthy work.** Credential-free
+  heartbeat errors are retried within the remaining lease window. A confirmed
+  ownership loss fences the stale executor from progress and terminal writes.
+- **Unsafe timing overrides fail at startup.** Inline leases stay between 15 and
+  300 seconds, non-finite heartbeat values are rejected, and an expired owner
+  cannot revive or write before the recovery sweep.
+- **Heartbeat threads finish with their run.** Owner-held success, failure,
+  cancellation, context-resolution failure, and processor exceptions stop and
+  join after terminal finalization. Confirmed stale owners stop without writing
+  another terminal result, then join their renewal thread.
+
+### Changed
+
+- **Release provenance advances to v0.1.27.** Frozen execution contexts,
+  write-once report manifests, Python package metadata, the API surface, the
+  frontend package, and the portable build now carry the same release version.
+- **The field-report boundary is explicit.** Metrics retained before a failed or
+  cancelled source run are partial observations. A report job ID remains
+  separate from its validation source-run ID by design.
+- **The upgrade is application-only.** v0.1.27 adds no Alembic revision, schema
+  backfill, or secret-store change. Existing v0.1.26 state remains readable.
+
+### Security
+
+- **Heartbeat logs exclude exception text and credentials.** They record the run
+  and exception class needed for diagnosis without copying database URLs,
+  certificates, tokens, or broker credentials.
+
+### Known limitations
+
+- Full immutable-evidence Sync v2, shared API/worker heartbeat infrastructure,
+  and Docker lifecycle parity are scheduled for v0.1.28. v0.1.27 retains the v1
+  sync compatibility boundary and does not transfer exact report bytes or signed
+  manifests to the hub.
+- A separately reported v0.1.25 launch problem has no confirmed connection to
+  this lease defect. Diagnose that startup path from its own Windows error and
+  application log.
+
 ## [0.1.26] - 2026-07-26
 
 ### Added
@@ -1517,6 +1566,7 @@ validation before production rollout:
 See [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) for the
 full checklist.
 
+[0.1.27]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.27
 [0.1.13]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.13
 [0.1.12]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.12
 [0.1.11]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.11

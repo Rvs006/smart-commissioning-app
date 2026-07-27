@@ -23,7 +23,8 @@ a version-pinning burden):
 ```bash
 # CycloneDX JSON + run the allowlist gate (exit 2 on a disallowed license)
 python scripts/generate_sbom.py --json deliverables/SBOM.python.cdx.json \
-  --application-version v0.1.26 --source-commit "$(git rev-parse HEAD)" --check
+  --application-version "<release-version>" \
+  --source-commit "$(git rev-parse HEAD)" --check
 
 # Refresh the generated markdown table block (committed alongside this file)
 python scripts/generate_sbom.py --markdown docs/SBOM.generated.md
@@ -139,5 +140,8 @@ The React frontend's dependency licenses are governed by `frontend/package.json`
 / `package-lock.json` and are out of scope for `scripts/generate_sbom.py`.
 Generate that inventory with
 `npm sbom --omit=dev --sbom-format cyclonedx --sbom-type application` from
-`frontend/`. `scripts/validate_release_evidence.py` checks the CycloneDX shape
-and recorded digests; the release gate also reviews runtime license output.
+`frontend/`. `scripts/validate_release_evidence.py` checks the common CycloneDX
+shape and recorded digests. For v0.1.27, the release gate also runs
+`scripts/validate_v0127_release_evidence.py`, which requires the exact evidence
+inventory, workflow identity, run attempt, ProductVersion, and release payload
+names.

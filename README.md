@@ -277,6 +277,10 @@ Smart Commissioning Tool Specification.pdf
 | [docs/team-pilot-deployment.md](docs/team-pilot-deployment.md) | Safe controlled-pilot boundary + hosted setup for the team |
 | [docs/SBOM.md](docs/SBOM.md) | Python dependency + license inventory |
 | [docs/proposals/nic-interface-selection.md](docs/proposals/nic-interface-selection.md) | Design doc for source-interface (NIC) selection for active scans (implemented) |
+| [docs/release-notes-v0.1.27.md](docs/release-notes-v0.1.27.md) | v0.1.27 heartbeat scope, field-report interpretation, deployment impact, and release evidence |
+| [docs/inline-heartbeat-v0.1.27.md](docs/inline-heartbeat-v0.1.27.md) | Ownership, timing, cleanup, and failure semantics for portable and synchronous inline runs |
+| [docs/migration-rollback-v0.1.27.md](docs/migration-rollback-v0.1.27.md) | No-schema-change upgrade, backup, rollback, and Windows portable replacement procedure |
+| [docs/release-validation-v0.1.27.md](docs/release-validation-v0.1.27.md) | Blocking exact-SHA, test, Windows, report, and publication checklist |
 
 ### Security & safety
 
@@ -295,8 +299,8 @@ Smart Commissioning Tool Specification.pdf
 
 ### Project status & roadmap
 
-> **Repo status - reviewed 2026-07-26:** GitHub Releases is authoritative for
-> publication state. Use v0.1.26 only after its matching signed tag,
+> **Repo status - reviewed 2026-07-27:** GitHub Releases is authoritative for
+> publication state. Use v0.1.27 only after its matching signed tag,
 > workflow-built and boot-smoked portable bundle, hosted release-gate record,
 > SBOMs, and release-body SHA-256 values are present. Check
 > the live workflow badges rather than inferring CI status from this source file.
@@ -308,11 +312,19 @@ Smart Commissioning Tool Specification.pdf
 > remaining production-gating items are tracked in
 > [issue #4](https://github.com/Rvs006/smart-commissioning-app/issues/4).
 
-v0.1.26 adds database-fenced run ownership, sealed terminal results, frozen
-execution context, write-once reports, protocol collision keys, and session-bound
-frontend state. Deployment order and rollback stop conditions are documented in
-[the migration guide](docs/migration-rollback-v0.1.26.md); observable changes and
-the v0.1.27 sync limit are in [the release notes](docs/release-notes-v0.1.26.md).
+v0.1.27 adds an independent heartbeat to every claimed inline run. A portable
+capture can now stay owned beyond the original 60-second lease even when no MQTT
+message arrives. The field report that motivated the fix was generated from a
+failed source run after roughly 63 seconds; its missing evidence and compliance
+figures describe that short partial window, not the requested 32,400-second
+validation. Report-generation IDs and validation source-run IDs remain different
+by design.
+
+The upgrade has no schema migration. Follow
+[the v0.1.27 migration and rollback guide](docs/migration-rollback-v0.1.27.md),
+then complete [the release validation record](docs/release-validation-v0.1.27.md)
+against the exact workflow-built commit. Sync v2 and Docker lifecycle parity are
+scheduled for v0.1.28; see [the scoped plan](docs/sync-v2-v0.1.28.md).
 
 Production approval still requires Phase 5 on-site validation. Active scans
 against real BMS/OT hardware, live MQTT, Postgres/Redis at scale, and a remote hub
