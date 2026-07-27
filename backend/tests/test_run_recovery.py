@@ -414,7 +414,7 @@ class InlineDispatchStoreFailureTests(ApiTestCase):
     env = _ENV
     client_headers = {"X-API-Key": _API_KEY}
 
-    def test_none_from_run_inline_does_not_500_and_reports_running(self) -> None:
+    def test_none_from_run_inline_does_not_500_and_seals_failure(self) -> None:
         from app.services.run_dispatch import dispatch_run
 
         run_service, run_id = _new_bacnet_run()
@@ -436,12 +436,16 @@ class InlineDispatchStoreFailureTests(ApiTestCase):
             queued_message="queued",
         )
 
-        # The owner claim put the run into its real running state, and a missing
-        # terminal return cannot erase the created run identity.
+        # The created run identity is preserved and a processor that omits its
+        # terminal result is sealed consistently with the worker execution path.
         self.assertEqual(response.run_id, run_id)
         self.assertEqual(response.job_type, "bacnet_discovery")
-        self.assertEqual(response.status, "running")
+        self.assertEqual(response.status, "failed")
         self.assertEqual(response.message, "inline")
+        self.assertEqual(
+            run_service.get_run(run_id).stage,
+            "executor_missing_terminal_result",
+        )
 
     def test_none_and_unreadable_store_falls_back_to_created_run(self) -> None:
         from app.services.run_dispatch import dispatch_run
@@ -564,6 +568,82 @@ class QueueDispatchOutboxTests(ApiTestCase):
         self.assertEqual(response.status, "queued")
         self.assertFalse(inline_called)
         self.assertEqual(run_service.get_dispatch_for_run(run_id).state, "pending")
+
+    def test_uncertain_redis_acceptance_never_starts_inline_executor(self) -> None:
+        from app.services.job_queue import JobQueueUnavailable
+        from app.services.run_dispatch import dispatch_run
+
+        run_service, run_id = _new_bacnet_run()
+        run = run_service.get_run(run_id)
+        accepted_dispatches: list[str] = []
+        inline_called = False
+
+        class _UncertainEnqueuer:
+            def __call__(self, _run, dispatch_id: str):
+                # Model the server accepting the message before the client loses
+                # the acknowledgement and reports an uncertain publication.
+                accepted_dispatches.append(dispatch_id)
+                raise JobQueueUnavailable("publication acknowledgement was lost")
+
+        def run_inline(_store, _parameters):
+            nonlocal inline_called
+            inline_called = True
+
+        response = dispatch_run(
+            run,
+            service=run_service,
+            enqueue=_UncertainEnqueuer(),
+            run_inline=run_inline,
+            inline_message="inline",
+            queued_message="queued",
+        )
+
+        dispatch = run_service.get_dispatch_for_run(run_id)
+        self.assertEqual(accepted_dispatches, [dispatch.dispatch_id])
+        self.assertEqual(dispatch.state, "pending")
+        self.assertFalse(inline_called)
+        self.assertIn("pending automatic retry", response.message)
+
+    def test_enqueue_success_with_outbox_ack_failure_returns_accepted(self) -> None:
+        from app.services.job_queue import JobDispatch
+        from app.services.run_dispatch import dispatch_run
+
+        run_service, run_id = _new_bacnet_run()
+        run = run_service.get_run(run_id)
+        enqueued: list[str] = []
+        inline_called = False
+
+        class _SuccessfulEnqueuer:
+            def __call__(self, _run, dispatch_id: str) -> JobDispatch:
+                enqueued.append(dispatch_id)
+                return JobDispatch(actor_name="discover_bacnet", queue_name="discovery")
+
+        class _AckFailsService:
+            def __getattr__(self, name: str):
+                return getattr(run_service, name)
+
+            def mark_dispatch_published(self, _dispatch_id: str) -> bool:
+                raise RuntimeError("database acknowledgement unavailable")
+
+        def run_inline(_store, _parameters):
+            nonlocal inline_called
+            inline_called = True
+
+        response = dispatch_run(
+            run,
+            service=_AckFailsService(),
+            enqueue=_SuccessfulEnqueuer(),
+            run_inline=run_inline,
+            inline_message="inline",
+            queued_message="queued",
+        )
+
+        dispatch = run_service.get_dispatch_for_run(run_id)
+        self.assertEqual(enqueued, [dispatch.dispatch_id])
+        self.assertEqual(dispatch.state, "pending")
+        self.assertFalse(inline_called)
+        self.assertEqual(response.run_id, run_id)
+        self.assertIn("pending automatic retry", response.message)
 
 
 class JobQueueBrokerConstructionTests(unittest.TestCase):

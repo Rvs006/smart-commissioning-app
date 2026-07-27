@@ -91,6 +91,16 @@ class EvidenceVerifyApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["report_id"]
 
+    def test_created_report_manifest_uses_local_edge_identity(self) -> None:
+        from app.core.config import edge_identity
+        from app.services.run_service import RunService
+
+        report_id = self._create_report("pdf")
+        run = RunService().get_run(report_id)
+        manifest = run.result_summary.get("artifact_manifest")
+        self.assertIsInstance(manifest, dict)
+        self.assertEqual(manifest["origin"], edge_identity().edge_id)
+
     def test_verify_succeeds_before_first_download(self) -> None:
         report_id = self._create_report()
         response = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")

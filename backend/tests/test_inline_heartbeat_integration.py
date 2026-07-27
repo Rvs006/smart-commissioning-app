@@ -20,7 +20,12 @@ from smart_commissioning_core.db.engine import (
     default_sqlite_url,
     session_factory,
 )
-from smart_commissioning_core.db.models import Run, RunResult, RunSeal
+from smart_commissioning_core.db.models import (
+    Run,
+    RunExecutionContext,
+    RunResult,
+    RunSeal,
+)
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.owned_run_store import (
     OwnedRunStore,
@@ -28,7 +33,7 @@ from smart_commissioning_core.owned_run_store import (
 )
 from smart_commissioning_core.run_context import RunContextV1
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 _WAIT = 5.0
 
@@ -64,7 +69,7 @@ def _context(parameters: dict[str, object]) -> RunContextV1:
             "connection_settings": {},
             "secret_references": {},
             "requesting_principal": "integration-test",
-            "application_version": "0.1.27",
+            "application_version": "0.1.28",
             "protocol_key": None,
         }
     )
@@ -95,6 +100,50 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
             edge_id="edge-heartbeat-test",
         )
         return self.service.get_run(envelope.run_id)
+
+    def test_tampered_context_is_rejected_before_inline_processor(self) -> None:
+        run = self._create_run(
+            job_type="mqtt_discovery",
+            parameters={"capture_seconds": 60},
+        )
+        with self.engine.begin() as connection:
+            stored = connection.execute(
+                RunExecutionContext.__table__.select().where(
+                    RunExecutionContext.run_id == run.run_id
+                )
+            ).mappings().one()
+            tampered = dict(stored["context_json"])
+            tampered["engine_parameters"] = {"capture_seconds": 61}
+            connection.execute(
+                update(RunExecutionContext)
+                .where(RunExecutionContext.run_id == run.run_id)
+                .values(context_json=tampered)
+            )
+        processor = mock.Mock()
+        settings = SimpleNamespace(
+            inline_run_async=False,
+            job_execution_mode="inline",
+            run_lease_seconds=15,
+            run_heartbeat_seconds=2,
+            deployment_id="smart-commissioning-local",
+        )
+
+        with mock.patch.object(run_dispatch, "get_settings", return_value=settings):
+            response = run_dispatch.dispatch_run(
+                run,
+                service=self.service,
+                enqueue=None,
+                run_inline=processor,
+                inline_message="inline",
+                queued_message="queued",
+            )
+
+        processor.assert_not_called()
+        self.assertEqual(response.status, "failed")
+        self.assertEqual(
+            self.service.get_run(run.run_id).stage,
+            "execution_context_unavailable",
+        )
 
     def test_udmi_nine_hour_quiet_capture_renews_and_finalizes_once(self) -> None:
         parameters = {
@@ -145,20 +194,12 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
         settings = SimpleNamespace(
             inline_run_async=True,
             job_execution_mode="inline",
+            run_lease_seconds=1,
+            run_heartbeat_seconds=0.02,
+            deployment_id="smart-commissioning-local",
         )
         with (
             mock.patch.object(run_dispatch, "get_settings", return_value=settings),
-            mock.patch.object(run_dispatch, "_INLINE_LEASE_SECONDS", 1),
-            mock.patch.object(
-                run_dispatch,
-                "_INLINE_HEARTBEAT_SECONDS",
-                0.02,
-            ),
-            mock.patch.object(
-                run_dispatch,
-                "edge_identity",
-                return_value=SimpleNamespace(edge_id="edge-heartbeat-test"),
-            ),
             mock.patch.object(
                 OwnedRunStore,
                 "heartbeat",
@@ -294,20 +335,12 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
         settings = SimpleNamespace(
             inline_run_async=True,
             job_execution_mode="inline",
+            run_lease_seconds=1,
+            run_heartbeat_seconds=0.05,
+            deployment_id="smart-commissioning-local",
         )
         with (
             mock.patch.object(run_dispatch, "get_settings", return_value=settings),
-            mock.patch.object(run_dispatch, "_INLINE_LEASE_SECONDS", 1),
-            mock.patch.object(
-                run_dispatch,
-                "_INLINE_HEARTBEAT_SECONDS",
-                0.05,
-            ),
-            mock.patch.object(
-                run_dispatch,
-                "edge_identity",
-                return_value=SimpleNamespace(edge_id="edge-heartbeat-test"),
-            ),
             mock.patch.object(
                 OwnedRunStore,
                 "mark_ownership_lost",
@@ -413,16 +446,12 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
         settings = SimpleNamespace(
             inline_run_async=True,
             job_execution_mode="inline",
+            run_lease_seconds=60,
+            run_heartbeat_seconds=15,
+            deployment_id="smart-commissioning-local",
         )
         with (
             mock.patch.object(run_dispatch, "get_settings", return_value=settings),
-            mock.patch.object(run_dispatch, "_INLINE_LEASE_SECONDS", 60),
-            mock.patch.object(run_dispatch, "_INLINE_HEARTBEAT_SECONDS", 15),
-            mock.patch.object(
-                run_dispatch,
-                "edge_identity",
-                return_value=SimpleNamespace(edge_id="edge-heartbeat-test"),
-            ),
             self.assertLogs("app.services.run_dispatch", level="WARNING") as captured,
         ):
             run_dispatch.dispatch_run(
@@ -518,20 +547,12 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
         settings = SimpleNamespace(
             inline_run_async=True,
             job_execution_mode="inline",
+            run_lease_seconds=1,
+            run_heartbeat_seconds=0.02,
+            deployment_id="smart-commissioning-local",
         )
         with (
             mock.patch.object(run_dispatch, "get_settings", return_value=settings),
-            mock.patch.object(run_dispatch, "_INLINE_LEASE_SECONDS", 1),
-            mock.patch.object(
-                run_dispatch,
-                "_INLINE_HEARTBEAT_SECONDS",
-                0.02,
-            ),
-            mock.patch.object(
-                run_dispatch,
-                "edge_identity",
-                return_value=SimpleNamespace(edge_id="edge-heartbeat-test"),
-            ),
             mock.patch.object(
                 OwnedRunStore,
                 "heartbeat",

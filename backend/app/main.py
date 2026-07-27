@@ -40,6 +40,7 @@ from app.services.log_service import (
 )
 
 logger = logging.getLogger(__name__)
+APP_VERSION = "0.1.28"
 
 settings = get_settings()
 
@@ -119,12 +120,22 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         maintenance_stop.set()
+        from smart_commissioning_core.owned_run_heartbeat import (
+            abandon_active_owned_run_heartbeats,
+        )
+
+        abandoned = abandon_active_owned_run_heartbeats()
+        if abandoned:
+            logger.warning(
+                "Abandoned %d active owned-run heartbeat(s) during API shutdown.",
+                abandoned,
+            )
         maintenance_thread.join(timeout=6.0)
 
 
 app = FastAPI(
     title="Smart Commissioning Tool API",
-    version="0.1.27",
+    version=APP_VERSION,
     summary="Production scaffold for commissioning configuration, discovery, validation, and reporting.",
     lifespan=lifespan,
 )
@@ -285,7 +296,7 @@ def root():
 
     return {
         "service": app.title,
-        "version": app.version or "0.1.27",
+        "version": app.version or APP_VERSION,
         "environment": settings.environment,
     }
 

@@ -1,0 +1,94 @@
+# Release-gate-only Sync v2 destination. This keeps hub state physically
+# separate from the accepted edge stack while using the exact same API image.
+services:
+  hub-postgres:
+    image: postgres:16.9-alpine
+    restart: "no"
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is required}_hub"
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+    volumes:
+      - hub_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  hub-runtime-init:
+    image: "${API_IMAGE:-smart-commissioning-api:local}"
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      args:
+        APP_VERSION: "${APP_VERSION:-dev}"
+        SOURCE_COMMIT: "${SOURCE_COMMIT:-unknown}"
+        SOURCE_REPOSITORY: "${SOURCE_REPOSITORY:-https://github.com/Rvs006/smart-commissioning-app}"
+    user: "0:0"
+    restart: "no"
+    environment:
+      SMART_COMMISSIONING_RUNTIME_ROOT: "/app/runtime"
+      SMART_COMMISSIONING_SECRETS_ROOT: "/app/runtime/secrets"
+      SMART_COMMISSIONING_ARTIFACTS_ROOT: "/app/runtime/artifacts"
+      SMART_COMMISSIONING_REPORT_SIGNING_ROOT: "/app/runtime/report-signing"
+    volumes:
+      - hub_api_runtime:/app/runtime
+      - hub_secret_store:/app/runtime/secrets
+      - hub_report_artifacts:/app/runtime/artifacts
+      - hub_report_signing:/app/runtime/report-signing
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        python -c "from app.services.configuration_service import _secret_store_key; _secret_store_key()"
+        chown -R app:app /app/runtime
+
+  hub-api:
+    image: "${API_IMAGE:-smart-commissioning-api:local}"
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+      args:
+        APP_VERSION: "${APP_VERSION:-dev}"
+        SOURCE_COMMIT: "${SOURCE_COMMIT:-unknown}"
+        SOURCE_REPOSITORY: "${SOURCE_REPOSITORY:-https://github.com/Rvs006/smart-commissioning-app}"
+    restart: "no"
+    environment:
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@hub-postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}_hub"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/1"
+      JOB_EXECUTION_MODE: "inline"
+      INLINE_RUN_ASYNC: "1"
+      DEPLOYMENT_ROLE: "hub"
+      AUTH_MODE: "api_key"
+      API_KEY: "${API_KEY:?API_KEY is required}"
+      SMART_COMMISSIONING_DEPLOYMENT_ID: "release-acceptance-hub"
+      SMART_COMMISSIONING_RUNTIME_ROOT: "/app/runtime"
+      SMART_COMMISSIONING_SECRETS_ROOT: "/app/runtime/secrets"
+      SMART_COMMISSIONING_ARTIFACTS_ROOT: "/app/runtime/artifacts"
+      SMART_COMMISSIONING_REPORT_SIGNING_ROOT: "/app/runtime/report-signing"
+    ports:
+      - "127.0.0.1:18080:8000"
+    volumes:
+      - hub_api_runtime:/app/runtime
+      - hub_secret_store:/app/runtime/secrets
+      - hub_report_artifacts:/app/runtime/artifacts
+      - hub_report_signing:/app/runtime/report-signing
+    depends_on:
+      hub-runtime-init:
+        condition: service_completed_successfully
+      hub-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  hub_postgres_data:
+  hub_api_runtime:
+  hub_secret_store:
+  hub_report_artifacts:
+  hub_report_signing:

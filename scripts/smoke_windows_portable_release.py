@@ -626,12 +626,19 @@ def _assert_log_cleanup(
             path.read_text(encoding="utf-8", errors="replace")
             for path in app_log_paths
         )
-        if all(f"inline heartbeat stopped for run_id={run_id}" in log_text for run_id in run_ids):
+        if all(
+            f"owned-run heartbeat stopped for run_id={run_id} executor=inline" in log_text
+            for run_id in run_ids
+        ):
             break
         time.sleep(0.1)
     for run_id in run_ids:
-        started = log_text.count(f"inline heartbeat started for run_id={run_id}")
-        stopped = log_text.count(f"inline heartbeat stopped for run_id={run_id}")
+        started = log_text.count(
+            f"owned-run heartbeat started for run_id={run_id} executor=inline"
+        )
+        stopped = log_text.count(
+            f"owned-run heartbeat stopped for run_id={run_id} executor=inline"
+        )
         if started != 1 or stopped != 1:
             raise RuntimeError(
                 f"heartbeat log lifecycle for {run_id} was started={started}, stopped={stopped}"
@@ -639,8 +646,8 @@ def _assert_log_cleanup(
     forbidden = (
         _PASSWORD_MARKER,
         "Traceback (most recent call last)",
-        "inline heartbeat did not stop promptly",
-        "inline heartbeat refresh failed",
+        "owned-run heartbeat did not stop promptly",
+        "owned-run heartbeat refresh failed",
         "database is locked",
         "execution owner lease expired",
     )

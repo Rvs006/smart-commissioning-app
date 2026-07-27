@@ -26,6 +26,7 @@ from smart_commissioning_core.db.models import (
     DiscoveredTopic,
     ImportRecord,
     Run,
+    RunExecutionContext,
     RunIssue,
     RunResult,
     RunSeal,
@@ -822,6 +823,7 @@ class SyncRepository:
             edge_id = run.edge_id
             result = session.get(RunResult, run_id)
             seal = session.get(RunSeal, run_id)
+            context = session.get(RunExecutionContext, run_id)
         discovery = self._discovery
         return {
             "run": record,
@@ -832,6 +834,7 @@ class SyncRepository:
             "topics": discovery.list_topics(run_id),
             "result": self._result_payload(result),
             "seal": self._seal_payload(seal),
+            "context": self._context_payload(context),
         }
 
     # -- hub: immutable insert -----------------------------------------------
@@ -917,6 +920,17 @@ class SyncRepository:
             created_at=_parse_dt(run.get("created_at")),
             updated_at=_parse_dt(run.get("updated_at")),
         )
+
+    @staticmethod
+    def _context_payload(context: RunExecutionContext | None) -> dict[str, object] | None:
+        if context is None:
+            return None
+        return {
+            "schema_version": context.schema_version,
+            "context_json": dict(context.context_json or {}),
+            "context_sha256": context.context_sha256,
+            "created_at": context.created_at.isoformat(),
+        }
 
     @staticmethod
     def _result_payload(result: RunResult | None) -> dict[str, object] | None:

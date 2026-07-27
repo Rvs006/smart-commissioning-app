@@ -281,6 +281,13 @@ Smart Commissioning Tool Specification.pdf
 | [docs/inline-heartbeat-v0.1.27.md](docs/inline-heartbeat-v0.1.27.md) | Ownership, timing, cleanup, and failure semantics for portable and synchronous inline runs |
 | [docs/migration-rollback-v0.1.27.md](docs/migration-rollback-v0.1.27.md) | No-schema-change upgrade, backup, rollback, and Windows portable replacement procedure |
 | [docs/release-validation-v0.1.27.md](docs/release-validation-v0.1.27.md) | Blocking exact-SHA, test, Windows, report, and publication checklist |
+| [docs/release-notes-v0.1.28.md](docs/release-notes-v0.1.28.md) | Shared lifecycle parity, complete Sync v2 evidence, Docker publication, and release hashes |
+| [docs/migration-rollback-v0.1.28.md](docs/migration-rollback-v0.1.28.md) | Additive Sync v2 migration, backup, mixed-version operation, downgrade, and restore order |
+| [docs/release-validation-v0.1.28.md](docs/release-validation-v0.1.28.md) | Blocking lifecycle, Sync v2, Docker, Windows, provenance, and cleanup checklist |
+| [docs/sync-v2-wire-format.md](docs/sync-v2-wire-format.md) | Signed bundle members, canonical item fields, verification order, and size limits |
+| [docs/sync-v2-credential-scope.md](docs/sync-v2-credential-scope.md) | Dedicated edge credentials, key binding, project/site authorization, and generic failures |
+| [docs/sync-v2-operations.md](docs/sync-v2-operations.md) | Receipt classes, retry state, lost responses, conflicts, and v2-to-v1 negotiation |
+| [docs/docker-deployment-rollback-v0.1.28.md](docs/docker-deployment-rollback-v0.1.28.md) | Immutable GHCR deployment, Compose profiles, migration, health, and rollback |
 
 ### Security & safety
 
@@ -300,9 +307,9 @@ Smart Commissioning Tool Specification.pdf
 ### Project status & roadmap
 
 > **Repo status - reviewed 2026-07-27:** GitHub Releases is authoritative for
-> publication state. Use v0.1.27 only after its matching signed tag,
+> publication state. Use v0.1.28 only after its matching signed tag,
 > workflow-built and boot-smoked portable bundle, hosted release-gate record,
-> SBOMs, and release-body SHA-256 values are present. Check
+> immutable GHCR digests, SBOMs, and release-body SHA-256 values are present. Check
 > the live workflow badges rather than inferring CI status from this source file.
 > Public fixtures use neutral demo identities. The July field review covers the
 > Results view and generated UDMI reports; live MQTT broker capture remains
@@ -312,19 +319,17 @@ Smart Commissioning Tool Specification.pdf
 > remaining production-gating items are tracked in
 > [issue #4](https://github.com/Rvs006/smart-commissioning-app/issues/4).
 
-v0.1.27 adds an independent heartbeat to every claimed inline run. A portable
-capture can now stay owned beyond the original 60-second lease even when no MQTT
-message arrives. The field report that motivated the fix was generated from a
-failed source run after roughly 63 seconds; its missing evidence and compliance
-figures describe that short partial window, not the requested 32,400-second
-validation. Report-generation IDs and validation source-run IDs remain different
-by design.
+v0.1.28 applies one owned-run heartbeat guard to portable inline, Docker inline,
+and queued worker execution. It also transfers sealed terminal evidence, signed
+artifact metadata, and exact report bytes through Sync v2. Per-item receipts
+advance only accepted or byte-identical items, while project/site scope failures
+remain generic and unsynchronized.
 
-The upgrade has no schema migration. Follow
-[the v0.1.27 migration and rollback guide](docs/migration-rollback-v0.1.27.md),
-then complete [the release validation record](docs/release-validation-v0.1.27.md)
-against the exact workflow-built commit. Sync v2 and Docker lifecycle parity are
-scheduled for v0.1.28; see [the scoped plan](docs/sync-v2-v0.1.28.md).
+The upgrade adds five Sync v2 tables. Follow
+[the v0.1.28 migration and rollback guide](docs/migration-rollback-v0.1.28.md),
+then complete [the release validation record](docs/release-validation-v0.1.28.md)
+against the exact merged commit. Hosted deployments should pull API, worker, and
+frontend by the immutable references in the public Docker image evidence.
 
 Production approval still requires Phase 5 on-site validation. Active scans
 against real BMS/OT hardware, live MQTT, Postgres/Redis at scale, and a remote hub

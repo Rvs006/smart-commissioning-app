@@ -2,6 +2,15 @@
 #   docker build -f backend/Dockerfile .
 FROM python:3.12.11-slim
 
+ARG APP_VERSION=dev
+ARG SOURCE_COMMIT=unknown
+ARG SOURCE_REPOSITORY=https://github.com/Rvs006/smart-commissioning-app
+
+LABEL org.opencontainers.image.title="Smart Commissioning API" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.source="${SOURCE_REPOSITORY}"
+
 # Run as a non-root user; only the runtime tree below is writable.
 RUN groupadd --system app && useradd --system --gid app --create-home app
 

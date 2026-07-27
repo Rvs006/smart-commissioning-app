@@ -22,6 +22,11 @@ from smart_commissioning_core.db.engine import (  # noqa: E402
     default_sqlite_url,
 )
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository  # noqa: E402
+from smart_commissioning_core.owned_run_heartbeat import (  # noqa: E402
+    OWNED_CONTEXT_FAILURE_MESSAGE,
+    OWNED_CONTEXT_FAILURE_STAGE,
+)
+from smart_commissioning_core.owned_run_store import OwnedRunStore  # noqa: E402
 from smart_commissioning_core.run_context import RunContextV1  # noqa: E402
 
 
@@ -69,6 +74,18 @@ class WorkerDeliveryTestCase(unittest.TestCase):
 
 
 class DuplicateDeliveryTests(WorkerDeliveryTestCase):
+    def test_duplicate_delivery_log_names_the_run(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        with (
+            mock.patch.object(self.repository, "claim_run", return_value=None),
+            self.assertLogs(tasks.logger.name, level="INFO") as captured,
+        ):
+            tasks.discover_ip_range(run_id, dispatch_id)
+        self.assertIn(
+            f"Skipping duplicate or stale delivery run_id={run_id}",
+            "\n".join(captured.output),
+        )
+
     def test_one_hundred_duplicate_messages_invoke_engine_once(self) -> None:
         run_id, dispatch_id = self.create_run()
         calls = 0
@@ -95,6 +112,26 @@ class DuplicateDeliveryTests(WorkerDeliveryTestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(self.repository.get_seal(run_id).terminal_status, "succeeded")
+        with self.repository._session_factory() as session:
+            from smart_commissioning_core.db.models import RunResult, RunSeal
+            from sqlalchemy import func, select
+
+            self.assertEqual(
+                session.scalar(
+                    select(func.count())
+                    .select_from(RunResult)
+                    .where(RunResult.run_id == run_id)
+                ),
+                1,
+            )
+            self.assertEqual(
+                session.scalar(
+                    select(func.count())
+                    .select_from(RunSeal)
+                    .where(RunSeal.run_id == run_id)
+                ),
+                1,
+            )
 
     def test_wrong_dispatch_exits_before_processor(self) -> None:
         run_id, _ = self.create_run()
@@ -159,12 +196,238 @@ class FrozenContextAndSecretTests(WorkerDeliveryTestCase):
         with (
             mock.patch.object(tasks, "resolve_worker_secret", return_value=None),
             mock.patch.object(tasks, "process_ip_discovery_run", processor),
-            self.assertRaisesRegex(RuntimeError, "secret material"),
         ):
             tasks.discover_ip_range(run_id, dispatch_id)
 
         processor.assert_not_called()
         self.assertEqual(self.repository.get_seal(run_id).terminal_status, "failed")
+
+    def test_parameter_resolution_failure_is_sealed_as_context_failure(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        processor = mock.Mock()
+
+        with (
+            mock.patch.object(
+                tasks,
+                "resolve_context_parameters",
+                side_effect=ValueError("malformed frozen parameter"),
+            ),
+            mock.patch.object(tasks, "process_ip_discovery_run", processor),
+        ):
+            tasks.discover_ip_range(run_id, dispatch_id)
+
+        processor.assert_not_called()
+        seal = self.repository.get_seal(run_id)
+        self.assertEqual(seal.terminal_status, "failed")
+        with self.repository._session_factory() as session:
+            from smart_commissioning_core.db.models import Run
+
+            run = session.get(Run, run_id)
+            self.assertIsNotNone(run)
+            self.assertEqual(run.stage, OWNED_CONTEXT_FAILURE_STAGE)
+            self.assertEqual(run.error_message, OWNED_CONTEXT_FAILURE_MESSAGE)
+
+    def test_tampered_context_json_is_rejected_before_processor(self) -> None:
+        from smart_commissioning_core.db.models import RunExecutionContext
+        from sqlalchemy import update
+
+        run_id, dispatch_id = self.create_run()
+        with self.engine.begin() as connection:
+            stored = connection.execute(
+                RunExecutionContext.__table__.select().where(
+                    RunExecutionContext.run_id == run_id
+                )
+            ).mappings().one()
+            tampered = dict(stored["context_json"])
+            tampered["engine_parameters"] = {"authorized": False, "dry_run": True}
+            connection.execute(
+                update(RunExecutionContext)
+                .where(RunExecutionContext.run_id == run_id)
+                .values(context_json=tampered)
+            )
+        processor = mock.Mock()
+
+        with mock.patch.object(tasks, "process_ip_discovery_run", processor):
+            tasks.discover_ip_range(run_id, dispatch_id)
+
+        processor.assert_not_called()
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "failed")
+
+    def test_mqtt_config_uses_canonical_context_channel(self) -> None:
+        run_id, dispatch_id = self.create_run(
+            _context(
+                engine_parameters={
+                    "topic": "sample/device/config",
+                    "payload": "{}",
+                    "confirmed": True,
+                },
+                connection_settings={},
+                protocol_key=None,
+            )
+        )
+        channels: list[str] = []
+        deployment_ids: list[str] = []
+
+        def resolve(context, lease, *, deployment_id, channel, secret_resolver):
+            del context, lease, secret_resolver
+            channels.append(channel)
+            deployment_ids.append(deployment_id)
+            return {"topic": "sample/device/config", "payload": "{}", "confirmed": True}
+
+        def processor(run_id, _parameters, *, run_store, **_kwargs):
+            return run_store.update_run_status(
+                run_id,
+                status="succeeded",
+                stage="mqtt_config_publish_complete",
+                progress_percent=100,
+            )
+
+        with (
+            mock.patch.object(tasks, "resolve_context_parameters", side_effect=resolve),
+            mock.patch.object(
+                tasks,
+                "process_mqtt_config_publish_run",
+                side_effect=processor,
+            ),
+        ):
+            tasks.publish_mqtt_config(run_id, dispatch_id)
+
+        self.assertEqual(channels, ["mqtt_config_publish"])
+        self.assertEqual(deployment_ids, ["smart-commissioning-local"])
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "succeeded")
+
+
+class SharedWorkerHeartbeatTests(WorkerDeliveryTestCase):
+    def test_heartbeat_starts_before_context_load_and_retries_db_error(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        context_loading = threading.Event()
+        release_context = threading.Event()
+        multiple_heartbeats = threading.Event()
+        processor_called = threading.Event()
+        actor_errors: list[BaseException] = []
+        calls = 0
+        calls_lock = threading.Lock()
+        original_get_context = self.repository.get_context
+        original_heartbeat = OwnedRunStore.heartbeat
+
+        def blocked_context(value: str):
+            context_loading.set()
+            if not release_context.wait(3.0):
+                raise TimeoutError("context load was not released")
+            return original_get_context(value)
+
+        def transient_heartbeat(store: OwnedRunStore, *, lease_seconds: int) -> bool:
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+                current = calls
+            if current == 1:
+                raise RuntimeError("credential-canary-must-not-reach-logs")
+            renewed = original_heartbeat(store, lease_seconds=lease_seconds)
+            if current >= 2:
+                multiple_heartbeats.set()
+            return renewed
+
+        def processor(run_id, _parameters, *, run_store, **_kwargs):
+            processor_called.set()
+            return run_store.update_run_status(
+                run_id,
+                status="succeeded",
+                stage="engine_complete",
+                progress_percent=100,
+            )
+
+        def run_actor() -> None:
+            try:
+                tasks.discover_ip_range(run_id, dispatch_id)
+            except BaseException as error:  # pragma: no cover - surfaced below
+                actor_errors.append(error)
+
+        with (
+            mock.patch.object(self.repository, "get_context", side_effect=blocked_context),
+            mock.patch.object(OwnedRunStore, "heartbeat", transient_heartbeat),
+            mock.patch.object(tasks, "_WORKER_LEASE_SECONDS", 1),
+            mock.patch.object(tasks, "_WORKER_HEARTBEAT_SECONDS", 0.02),
+            mock.patch.object(tasks, "process_ip_discovery_run", side_effect=processor),
+            self.assertLogs(
+                "smart_commissioning_core.owned_run_heartbeat", level="INFO"
+            ) as captured,
+        ):
+            actor = threading.Thread(target=run_actor, name="worker-context-test")
+            actor.start()
+            self.assertTrue(context_loading.wait(3.0))
+            self.assertTrue(multiple_heartbeats.wait(3.0))
+            self.assertFalse(processor_called.is_set())
+            release_context.set()
+            actor.join(3.0)
+
+        self.assertFalse(actor.is_alive())
+        if actor_errors:
+            raise actor_errors[0]
+        self.assertTrue(processor_called.is_set())
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "succeeded")
+        logs = "\n".join(captured.output)
+        self.assertNotIn("credential-canary-must-not-reach-logs", logs)
+        self.assertIn("retrying", logs)
+        self.assertIn("recovered", logs)
+        self.assertFalse(
+            any(
+                thread.name == f"run-heartbeat-{run_id}"
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_confirmed_worker_ownership_loss_fences_terminal_write(self) -> None:
+        from datetime import timedelta
+
+        from smart_commissioning_core.db.models import Run
+
+        run_id, dispatch_id = self.create_run()
+        processor_started = threading.Event()
+        release_processor = threading.Event()
+        actor_errors: list[BaseException] = []
+
+        def processor(run_id, _parameters, *, run_store, **_kwargs):
+            processor_started.set()
+            if not release_processor.wait(3.0):
+                raise TimeoutError("processor was not released")
+            return run_store.update_run_status(
+                run_id,
+                status="succeeded",
+                stage="late_success",
+                progress_percent=100,
+            )
+
+        def run_actor() -> None:
+            try:
+                tasks.discover_ip_range(run_id, dispatch_id)
+            except BaseException as error:  # pragma: no cover - surfaced below
+                actor_errors.append(error)
+
+        with (
+            mock.patch.object(OwnedRunStore, "heartbeat", return_value=False),
+            mock.patch.object(tasks, "_WORKER_LEASE_SECONDS", 1),
+            mock.patch.object(tasks, "_WORKER_HEARTBEAT_SECONDS", 0.02),
+            mock.patch.object(tasks, "process_ip_discovery_run", side_effect=processor),
+        ):
+            actor = threading.Thread(target=run_actor, name="worker-owner-loss-test")
+            actor.start()
+            self.assertTrue(processor_started.wait(3.0))
+            with self.repository._session_factory() as session:
+                row = session.get(Run, run_id)
+                recovery_at = row.lease_expires_at + timedelta(milliseconds=1)
+            self.assertEqual(
+                self.repository.recover_expired_leases(now=recovery_at),
+                [run_id],
+            )
+            release_processor.set()
+            actor.join(3.0)
+
+        self.assertFalse(actor.is_alive())
+        if actor_errors:
+            raise actor_errors[0]
+        seal = self.repository.get_seal(run_id)
+        self.assertEqual(seal.terminal_status, "failed")
 
 
 class InterruptTests(WorkerDeliveryTestCase):

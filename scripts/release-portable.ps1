@@ -68,13 +68,13 @@
     in both publish and verify modes; automatic selection is legacy-only.
 
 .PARAMETER ReleaseGateRunId
-    Successful "v0.1.27 Release Gates" workflow run that built the hosted
-    images and image SBOMs. Required when publishing or verifying v0.1.27 or
-    later. Its 40-character head SHA must equal the Windows run and release tag.
+    Successful "<version> Release Gates" workflow run that built and tested the
+    hosted images. v0.1.28 also binds immutable GHCR digests and their SBOMs.
+    Its 40-character head SHA must equal the Windows run and release tag.
 
 .PARAMETER NotesFile
-    Markdown release-notes template (required for publishing). Tokens
-    {{EXE_SHA256}}, {{ZIP_SHA256}} and {{COMMIT}} are substituted before upload.
+    Markdown release-notes template (required for publishing). Commit, Windows
+    hashes, and (for v0.1.28) immutable container image tokens are substituted.
 
 .PARAMETER Title
     Release title. Defaults to $Version.
@@ -88,8 +88,8 @@
     hash. A harmless, read-only way to exercise this script end to end.
 
 .EXAMPLE
-    # Publish v0.1.27 from matching Windows and hosted release-gate runs:
-    powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.27 -RunId 123456789 -ReleaseGateRunId 123456790 -NotesFile docs\release-notes-v0.1.27.md
+    # Publish v0.1.28 from matching Windows and hosted release-gate runs:
+    powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.28 -RunId 123456789 -ReleaseGateRunId 123456790 -NotesFile docs\release-notes-v0.1.28.md
 
 .EXAMPLE
     # Re-verify what is already published (no mutations):
@@ -130,7 +130,7 @@ $ErrorActionPreference = 'Stop'
 # --- constants tied to the workflow + build.ps1 output ---
 $WorkflowName = 'Windows Portable Bundle'                       # windows-portable.yml `name:`
 $ArtifactName = 'SmartCommissioningApp-windows-portable'        # upload-artifact `name:`
-$ReleaseGateWorkflowName = 'v0.1.27 Release Gates'
+$ReleaseGateWorkflowName = "$Version Release Gates"
 $ZipName      = 'Smart_Commissioning_App_Windows_Portable.zip'  # release asset filename
 $ExeEntry     = 'SmartCommissioningApp.exe'                     # root entry in the bundle zip
 $ReadmeEntry  = 'README_FIRST.txt'                             # root entry carrying "Version: <v>"
@@ -143,6 +143,11 @@ $ChecksumsEntry = 'SHA256SUMS.txt'
 $ImageApiSbomEntry = 'SBOM.image-api.cdx.json'
 $ImageWorkerSbomEntry = 'SBOM.image-worker.cdx.json'
 $ImageFrontendSbomEntry = 'SBOM.image-frontend.cdx.json'
+$DockerImageEvidenceEntry = 'docker-image-evidence.json'
+$SyncWireEntry = 'SYNC_V2_WIRE_FORMAT.md'
+$SyncCredentialEntry = 'SYNC_V2_CREDENTIAL_SCOPE.md'
+$SyncOperationsEntry = 'SYNC_V2_OPERATIONS.md'
+$DockerDeploymentEntry = 'DOCKER_DEPLOYMENT_ROLLBACK.md'
 $WindowsAcceptanceEntry = 'windows-acceptance.json'
 $FrontendVersionEntry = 'frontend/dist/.app-version'
 $EntryFloor   = 1000                                           # sanity floor: a real bundle has thousands of entries
@@ -217,7 +222,7 @@ function Get-RunInfo {
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
         throw "Run $RunId is status='$($run.status)' conclusion='$($run.conclusion)' - refusing to publish from a run that did not complete successfully."
     }
-    if ($run.name -ne $WorkflowName -or $run.path -notlike '.github/workflows/windows-portable.yml*') {
+    if ($run.name -ne $WorkflowName -or $run.path -cne '.github/workflows/windows-portable.yml') {
         throw "Run $RunId is '$($run.name)' at '$($run.path)', not the $WorkflowName workflow."
     }
     if ($run.event -ne 'workflow_dispatch' -or $run.headBranch -ne 'main') {
@@ -273,7 +278,7 @@ function Get-ReleaseGateRunInfo {
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
         throw "Release-gates run $RunId is status='$($run.status)' conclusion='$($run.conclusion)'."
     }
-    if ($run.name -ne $ReleaseGateWorkflowName -or $run.path -notlike '.github/workflows/release-gates.yml*') {
+    if ($run.name -ne $ReleaseGateWorkflowName -or $run.path -cne '.github/workflows/release-gates.yml') {
         throw "Run $RunId is '$($run.name)' at '$($run.path)', not $ReleaseGateWorkflowName."
     }
     if ($run.event -ne 'workflow_dispatch' -or $run.headBranch -ne 'main') {
@@ -322,6 +327,77 @@ function Resolve-LocalCommitSha {
         throw "Local reference '$Reference' is missing or invalid."
     }
     return $sha.Trim().ToLowerInvariant()
+}
+
+function Assert-CleanReleaseRepository {
+    $root = (& git rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$root)) {
+        throw 'release-portable.ps1 must run inside the release Git repository.'
+    }
+    $root = [IO.Path]::GetFullPath(([string]$root).Trim())
+    $expectedScript = [IO.Path]::GetFullPath((Join-Path $root 'scripts\release-portable.ps1'))
+    $actualScript = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $PSCommandPath).Path)
+    if (-not $actualScript.Equals($expectedScript, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The running publisher is '$actualScript', not the tracked repository publisher '$expectedScript'."
+    }
+    $status = @(& git status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not prove the release repository worktree is clean.'
+    }
+    if ($status.Count -ne 0) {
+        throw 'Release publication and verification require a clean worktree, including no untracked files.'
+    }
+    return $root
+}
+
+function Assert-ReleaseCheckoutAtCommit {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][string]$CommitSha
+    )
+    $headSha = Resolve-LocalCommitSha -Reference 'HEAD'
+    if ($headSha -ine $CommitSha) {
+        throw "The publisher checkout HEAD is $headSha, not exact release SHA $CommitSha."
+    }
+    $relative = 'scripts/release-portable.ps1'
+    $actualPath = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $PSCommandPath).Path)
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $relative))
+    if (-not $actualPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The running publisher is not the canonical tracked '$relative'."
+    }
+    $commitBlob = (& git rev-parse "$CommitSha`:$relative" 2>$null)
+    $workingBlob = (& git hash-object "--path=$relative" -- $actualPath 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $commitBlob -notmatch '^[0-9a-fA-F]{40}$' -or
+        $workingBlob -notmatch '^[0-9a-fA-F]{40}$' -or
+        $workingBlob.Trim() -ine $commitBlob.Trim()) {
+        throw "The running publisher is not byte-equivalent to '$relative' at $CommitSha."
+    }
+}
+
+function Assert-TrackedReleaseNotes {
+    param(
+        [Parameter(Mandatory)][string]$RepositoryRoot,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$CommitSha
+    )
+    $relative = "docs/release-notes-$Version.md"
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $relative))
+    $actualPath = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Path).Path)
+    if (-not $actualPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "NotesFile must be the canonical tracked release notes '$expectedPath'."
+    }
+    $commitBlob = (& git rev-parse "$CommitSha`:$relative" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $commitBlob -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "Release commit $CommitSha has no tracked release-notes blob at '$relative'."
+    }
+    # --path applies normal clean filters before hashing, so a clean Windows
+    # checkout with CRLF still compares to the reviewed Git blob.
+    $workingBlob = (& git hash-object "--path=$relative" -- $actualPath 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $workingBlob -notmatch '^[0-9a-fA-F]{40}$' -or
+        $workingBlob.Trim() -ine $commitBlob.Trim()) {
+        throw "NotesFile is not byte-equivalent to '$relative' at exact release SHA $CommitSha."
+    }
 }
 
 function Assert-SignedAnnotatedTag {
@@ -396,7 +472,8 @@ function Assert-ReleaseBodyDigests {
         [Parameter(Mandatory)][string]$ExeSha256,
         [Parameter(Mandatory)][string]$ZipSha256,
         [Parameter(Mandatory)][string]$CommitSha,
-        [AllowEmptyString()][string]$ExpectedBody
+        [AllowEmptyString()][string]$ExpectedBody,
+        [string[]]$ExpectedImageReferences = @()
     )
     foreach ($expected in @($ExeSha256, $ZipSha256)) {
         if ($expected -notmatch '^[0-9a-fA-F]{64}$') {
@@ -410,6 +487,12 @@ function Assert-ReleaseBodyDigests {
         $Body.IndexOf($CommitSha, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
         throw "Release notes do not contain the exact verified 40-character commit $CommitSha."
     }
+    foreach ($expectedReference in $ExpectedImageReferences) {
+        if ($expectedReference -notmatch '^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$' -or
+            $Body.IndexOf($expectedReference, [StringComparison]::Ordinal) -lt 0) {
+            throw "Release notes do not contain the exact immutable image reference $expectedReference."
+        }
+    }
     if ($PSBoundParameters.ContainsKey('ExpectedBody')) {
         $actualText = $Body.Replace("`r`n", "`n").TrimEnd([char[]]"`r`n")
         $expectedText = $ExpectedBody.Replace("`r`n", "`n").TrimEnd([char[]]"`r`n")
@@ -417,6 +500,160 @@ function Assert-ReleaseBodyDigests {
             throw "Release notes body is not the exact resolved notes content."
         }
     }
+}
+
+function Get-TrackedReleaseNotesTemplate {
+    param(
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$CommitSha
+    )
+    $relative = "docs/release-notes-$Version.md"
+    $blob = (& git rev-parse "$CommitSha`:$relative" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $blob -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "Release commit $CommitSha has no reviewed release-notes blob at '$relative'."
+    }
+    # Read the blob through an explicitly UTF-8 native-process stream. Windows
+    # PowerShell 5.1 otherwise decodes native stdout through the console code
+    # page, which can corrupt reviewed curly quotes or non-ASCII punctuation.
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = 'git.exe'
+    $startInfo.Arguments = "cat-file blob $($blob.Trim())"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = New-Object Text.UTF8Encoding($false, $true)
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw "Could not start git to read reviewed release notes."
+        }
+        $template = $process.StandardOutput.ReadToEnd()
+        $process.StandardError.ReadToEnd() | Out-Null
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "Could not read reviewed release notes '$relative' from $CommitSha."
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+    return $template
+}
+
+function Resolve-ReleaseNotesBody {
+    param(
+        [Parameter(Mandatory)][string]$Template,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$CommitSha,
+        [Parameter(Mandatory)][string]$ExeSha256,
+        [Parameter(Mandatory)][string]$ZipSha256,
+        $DockerImageEvidence
+    )
+    $replacements = @(
+        [pscustomobject]@{ Token = '{{COMMIT}}'; Value = $CommitSha },
+        [pscustomobject]@{ Token = '{{EXE_SHA256}}'; Value = $ExeSha256 },
+        [pscustomobject]@{ Token = '{{ZIP_SHA256}}'; Value = $ZipSha256 }
+    )
+    $imageReferences = @()
+    if ([version]($Version.TrimStart('v')) -ge [version]'0.1.28') {
+        if ($null -eq $DockerImageEvidence) {
+            throw "$Version release notes require verified Docker image evidence."
+        }
+        foreach ($role in @('api', 'worker', 'frontend')) {
+            $property = $DockerImageEvidence.images.PSObject.Properties[$role]
+            if ($null -eq $property) {
+                throw "Docker image evidence has no '$role' record for release notes."
+            }
+            $image = $property.Value
+            $upperRole = $role.ToUpperInvariant()
+            $replacements += @(
+                [pscustomobject]@{ Token = "{{$upperRole`_IMAGE}}"; Value = [string]$image.name },
+                [pscustomobject]@{ Token = "{{$upperRole`_IMAGE_DIGEST}}"; Value = [string]$image.digest }
+            )
+            $imageReferences += "$([string]$image.name)@$([string]$image.digest)"
+        }
+    }
+
+    $resolved = $Template
+    foreach ($replacement in $replacements) {
+        if (-not $Template.Contains([string]$replacement.Token)) {
+            throw "Release notes template is missing required token $($replacement.Token)."
+        }
+        $resolved = $resolved.Replace(
+            [string]$replacement.Token,
+            [string]$replacement.Value
+        )
+        if ($resolved.Contains([string]$replacement.Token)) {
+            throw "Release notes still contain unresolved token $($replacement.Token)."
+        }
+    }
+    if ($resolved -match '\{\{[A-Z0-9_]+\}\}') {
+        throw "Release notes still contain an unknown unresolved token '$($Matches[0])'."
+    }
+    return [pscustomobject]@{
+        Body = $resolved
+        ImageReferences = @($imageReferences)
+    }
+}
+
+function Test-DockerImageEvidence {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$CommitSha,
+        [Parameter(Mandatory)][string]$Repository
+    )
+    $document = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $rootKeys = @($document.PSObject.Properties.Name | Sort-Object) -join ','
+    if ($rootKeys -cne 'images,registry,release_version,schema_version,source_commit') {
+        throw 'Docker image evidence root contains missing or unknown fields.'
+    }
+    if ([string]$document.schema_version -cne '1.0' -or
+        [string]$document.release_version -cne $Version -or
+        [string]$document.source_commit -ine $CommitSha -or
+        [string]$document.registry -cne 'ghcr.io') {
+        throw "Docker image evidence does not identify $Version at $CommitSha in GHCR."
+    }
+    $imageRoleKeys = @($document.images.PSObject.Properties.Name | Sort-Object) -join ','
+    if ($imageRoleKeys -cne 'api,frontend,worker') {
+        throw 'Docker image evidence must contain exactly api, worker, and frontend.'
+    }
+    $seenImageNames = @{}
+    foreach ($role in @('api', 'worker', 'frontend')) {
+        $entryProperty = $document.images.PSObject.Properties[$role]
+        if ($null -eq $entryProperty) {
+            throw "Docker image evidence is missing '$role'."
+        }
+        $entry = $entryProperty.Value
+        $entryKeys = @($entry.PSObject.Properties.Name | Sort-Object) -join ','
+        if ($entryKeys -cne 'digest,immutable_reference,labels,name') {
+            throw "Docker image evidence '$role' contains missing or unknown fields."
+        }
+        $name = [string]$entry.name
+        $digest = [string]$entry.digest
+        $expectedName = "ghcr.io/$($Repository.ToLowerInvariant())-$role"
+        if ($name -notmatch '^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+$' -or $name.Contains('@') -or
+            $digest -notmatch '^sha256:[0-9a-f]{64}$' -or
+            [string]$entry.immutable_reference -cne "$name@$digest") {
+            throw "Docker image evidence has an invalid immutable reference for '$role'."
+        }
+        if ($name -cne $expectedName -or $seenImageNames.ContainsKey($name)) {
+            throw "Docker image evidence does not bind '$role' to its unique canonical image name '$expectedName'."
+        }
+        $seenImageNames[$name] = $true
+        $labelKeys = @($entry.labels.PSObject.Properties.Name | Sort-Object) -join ','
+        if ($labelKeys -cne 'org.opencontainers.image.revision,org.opencontainers.image.source,org.opencontainers.image.version') {
+            throw "Docker image '$role' labels contain missing or unknown fields."
+        }
+        if ([string]$entry.labels.'org.opencontainers.image.version' -cne $Version -or
+            [string]$entry.labels.'org.opencontainers.image.revision' -ine $CommitSha -or
+            [string]$entry.labels.'org.opencontainers.image.source' -cne "https://github.com/$Repository") {
+            throw "Docker image '$role' lacks exact version, revision, or source OCI labels."
+        }
+    }
+    return $document
 }
 
 function Write-ReleaseChecksums {
@@ -552,6 +789,35 @@ function Get-UniqueReleaseAsset {
     return $matches[0]
 }
 
+function Assert-ReleaseViewUnchanged {
+    param(
+        [Parameter(Mandatory)]$Initial,
+        [Parameter(Mandatory)]$Current,
+        [Parameter(Mandatory)][string[]]$ExpectedAssetNames
+    )
+    if ([string]$Current.body -cne [string]$Initial.body -or
+        [string]$Current.url -cne [string]$Initial.url -or
+        [string]$Current.targetCommitish -cne [string]$Initial.targetCommitish -or
+        [bool]$Current.isDraft -ne [bool]$Initial.isDraft) {
+        throw 'Release body or release identity changed during verification.'
+    }
+    if (@($Initial.assets).Count -ne $ExpectedAssetNames.Count -or
+        @($Current.assets).Count -ne $ExpectedAssetNames.Count) {
+        throw 'Release asset count changed during verification.'
+    }
+    foreach ($name in $ExpectedAssetNames) {
+        $before = Get-UniqueReleaseAsset -Assets @($Initial.assets) -Name $name
+        $after = Get-UniqueReleaseAsset -Assets @($Current.assets) -Name $name
+        if ([string]::IsNullOrWhiteSpace([string]$before.id) -or
+            [string]::IsNullOrWhiteSpace([string]$after.id) -or
+            [string]$after.id -cne [string]$before.id -or
+            [int64]$after.size -ne [int64]$before.size -or
+            [string]$after.digest -cne [string]$before.digest) {
+            throw "Release asset identity changed during verification for '$name'."
+        }
+    }
+}
+
 function Assert-ReleaseAssetMatchesFile {
     param(
         [Parameter(Mandatory)]$Asset,
@@ -622,6 +888,30 @@ function Test-BundleZip {
         $forwardSlashSeen = $entries | Where-Object { $_.FullName -like '*/*' } | Select-Object -First 1
         if ($null -eq $forwardSlashSeen) {
             throw "Bundle zip has no nested entries at all - not a portable bundle."
+        }
+
+        # Reject archive names that extract ambiguously or outside the target.
+        # Windows treats names case-insensitively, so even byte-distinct ZIP
+        # entries such as App.exe and app.exe are a collision.
+        $seenEntryNames = @{}
+        foreach ($entry in $entries) {
+            $entryName = [string]$entry.FullName
+            if ([string]::IsNullOrWhiteSpace($entryName) -or
+                $entryName.StartsWith('/') -or
+                $entryName.Contains(':') -or
+                $entryName.Contains('//')) {
+                throw "Bundle zip contains an unsafe entry name ('$entryName')."
+            }
+            $segments = @($entryName.Split('/'))
+            $pathSegments = @($segments | Where-Object { $_ -cne '' })
+            if (@($pathSegments | Where-Object { $_ -ceq '.' -or $_ -ceq '..' }).Count -gt 0) {
+                throw "Bundle zip contains a dot-segment entry name ('$entryName')."
+            }
+            $entryKey = $entryName.ToLowerInvariant()
+            if ($seenEntryNames.ContainsKey($entryKey)) {
+                throw "Bundle zip contains duplicate or case-colliding entry names ('$entryName')."
+            }
+            $seenEntryNames[$entryKey] = $true
         }
 
         # Root entries (no folder prefix) must be present - the bundle contents
@@ -710,7 +1000,7 @@ function Test-BundleZip {
                 if ([string]$evidence.schema_version -cne '1.1' -or
                     [string]$evidence.evidence_kind -cne 'windows' -or
                     [string]$evidence.product_version -cne $Version) {
-                    throw "Windows evidence lacks v0.1.27 schema, kind, or ProductVersion metadata."
+                    throw "Windows evidence lacks the strict schema, kind, or ProductVersion metadata."
                 }
                 $expectedRunUrl = "https://github.com/$Repository/actions/runs/$WorkflowRunId"
                 if ([string]$evidence.workflow.name -cne $WorkflowName -or
@@ -862,7 +1152,7 @@ function Test-HostedEvidence {
         if ([string]$evidence.schema_version -cne '1.1' -or
             [string]$evidence.evidence_kind -cne 'hosted' -or
             [string]$evidence.product_version -cne $Version) {
-            throw "Hosted evidence lacks v0.1.27 schema, kind, or ProductVersion metadata."
+            throw "Hosted evidence lacks the strict schema, kind, or ProductVersion metadata."
         }
         $expectedRunUrl = "https://github.com/$Repository/actions/runs/$WorkflowRunId"
         if ([string]$evidence.workflow.name -cne $ReleaseGateWorkflowName -or
@@ -897,11 +1187,19 @@ function Test-HostedEvidence {
         }
     }
 
+    $requireV0128Evidence = ([version]($Version.TrimStart('v')) -ge [version]'0.1.28')
     $requiredNames = @(
         $PythonSbomEntry, $NpmSbomEntry,
         $ImageApiSbomEntry, $ImageWorkerSbomEntry, $ImageFrontendSbomEntry,
         $MigrationEntry
     )
+    if ($requireV0128Evidence) {
+        $requiredNames += @(
+            $DockerImageEvidenceEntry,
+            $SyncWireEntry, $SyncCredentialEntry, $SyncOperationsEntry,
+            $DockerDeploymentEntry
+        )
+    }
     $paths = @{}
     foreach ($name in $requiredNames) {
         $path = Join-Path $base $name
@@ -926,6 +1224,12 @@ function Test-HostedEvidence {
             }
         }
         $paths[$name] = $path
+    }
+    $dockerImageEvidence = $null
+    if ($requireV0128Evidence) {
+        $dockerImageEvidence = Test-DockerImageEvidence `
+            -Path $paths[$DockerImageEvidenceEntry] -Version $Version `
+            -CommitSha $CommitSha -Repository $Repository
     }
 
     $hostedChecksumsPath = Join-Path $base $ChecksumsEntry
@@ -966,6 +1270,12 @@ function Test-HostedEvidence {
         ImageWorkerSbomPath = $paths[$ImageWorkerSbomEntry]
         ImageFrontendSbomPath = $paths[$ImageFrontendSbomEntry]
         MigrationPath = $paths[$MigrationEntry]
+        DockerImageEvidencePath = $(if ($requireV0128Evidence) { $paths[$DockerImageEvidenceEntry] } else { $null })
+        SyncWirePath = $(if ($requireV0128Evidence) { $paths[$SyncWireEntry] } else { $null })
+        SyncCredentialPath = $(if ($requireV0128Evidence) { $paths[$SyncCredentialEntry] } else { $null })
+        SyncOperationsPath = $(if ($requireV0128Evidence) { $paths[$SyncOperationsEntry] } else { $null })
+        DockerDeploymentPath = $(if ($requireV0128Evidence) { $paths[$DockerDeploymentEntry] } else { $null })
+        DockerImageEvidence = $dockerImageEvidence
         EvidencePath = $evidencePath
     }
 }
@@ -1015,6 +1325,11 @@ try {
     Write-Host "mode     : $(if ($VerifyExisting) { 'VERIFY (read-only)' } else { 'PUBLISH' })"
 
     $requireV0127 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.27')
+    $requireV0128 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.28')
+    $repositoryRoot = $null
+    if ($requireV0127) {
+        $repositoryRoot = Assert-CleanReleaseRepository
+    }
     if ($requireV0127 -and
         (-not $PSBoundParameters.ContainsKey('RunId') -or $RunId -le 0 -or
          -not $PSBoundParameters.ContainsKey('ReleaseGateRunId') -or $ReleaseGateRunId -le 0)) {
@@ -1039,22 +1354,18 @@ try {
 
         $tagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
         if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27') {
-            $mainSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
-            if ($mainSha -ine $tagSha) {
-                throw "Remote main is $mainSha, but release tag $Version targets $tagSha."
-            }
-            foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
-                $localSha = Resolve-LocalCommitSha -Reference $localReference
-                if ($localSha -ine $tagSha) {
-                    throw "Local reference $localReference is $localSha, not release SHA $tagSha."
-                }
-            }
+            # Historical releases remain independently verifiable after main
+            # advances. The immutable tag, claimed workflow runs, evidence, and
+            # public bytes must still agree; current main is intentionally not
+            # part of a read-only historical verification.
             Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $tagSha
         }
         $verifiedRun = $null
         $verifiedHostedRun = $null
         $claimedWindowsArchive = $null
         $claimedHostedEvidence = $null
+        $publishedDockerEvidence = $null
+        $expectedAssetNames = @($ZipName)
         if ($PSBoundParameters.ContainsKey('RunId')) {
             $verifiedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $false
             if ($tagSha -ine $verifiedRun.HeadSha) {
@@ -1152,6 +1463,13 @@ try {
                 $ImageApiSbomEntry, $ImageWorkerSbomEntry, $ImageFrontendSbomEntry,
                 $MigrationEntry, $EvidenceEntry, $WindowsEvidenceEntry
             )
+            if ($requireV0128) {
+                $payloadNames += @(
+                    $DockerImageEvidenceEntry,
+                    $SyncWireEntry, $SyncCredentialEntry, $SyncOperationsEntry,
+                    $DockerDeploymentEntry
+                )
+            }
             $expectedAssetNames = @($payloadNames + $ChecksumsEntry)
             if (@($view.assets).Count -ne $expectedAssetNames.Count) {
                 throw "Release $Version has an unexpected number of assets."
@@ -1223,6 +1541,13 @@ try {
                     $EvidenceEntry = $claimedHostedEvidence.EvidencePath
                     $WindowsEvidenceEntry = $bundle.EvidencePath
                 }
+                if ($requireV0128) {
+                    $claimedHostedFiles[$DockerImageEvidenceEntry] = $claimedHostedEvidence.DockerImageEvidencePath
+                    $claimedHostedFiles[$SyncWireEntry] = $claimedHostedEvidence.SyncWirePath
+                    $claimedHostedFiles[$SyncCredentialEntry] = $claimedHostedEvidence.SyncCredentialPath
+                    $claimedHostedFiles[$SyncOperationsEntry] = $claimedHostedEvidence.SyncOperationsPath
+                    $claimedHostedFiles[$DockerDeploymentEntry] = $claimedHostedEvidence.DockerDeploymentPath
+                }
                 foreach ($name in $claimedHostedFiles.Keys) {
                     $workflowHash = (Get-FileHash -LiteralPath $claimedHostedFiles[$name] -Algorithm SHA256).Hash
                     $publishedHash = (Get-FileHash -LiteralPath $publishedFiles[$name] -Algorithm SHA256).Hash
@@ -1249,7 +1574,7 @@ try {
                  [long]$hostedEvidence.workflow.run_id -ne $verifiedHostedRun.Id -or
                  [int]$hostedEvidence.workflow.run_attempt -ne $verifiedHostedRun.RunAttempt -or
                  [string]$hostedEvidence.workflow.run_url -cne $verifiedHostedRun.HtmlUrl)) {
-                throw "Published hosted evidence lacks required v0.1.27 workflow/ProductVersion metadata."
+                throw "Published hosted evidence lacks required workflow/ProductVersion metadata."
             }
             foreach ($gate in @('python', 'frontend', 'hosted_compose', 'backup_rollback')) {
                 $property = $hostedEvidence.gates.PSObject.Properties[$gate]
@@ -1257,16 +1582,28 @@ try {
                     throw "Published hosted evidence does not record $gate=passed."
                 }
             }
-            foreach ($name in @(
+            $hostedFileNames = @(
                 $PythonSbomEntry, $NpmSbomEntry,
                 $ImageApiSbomEntry, $ImageWorkerSbomEntry, $ImageFrontendSbomEntry,
                 $MigrationEntry
-            )) {
+            )
+            if ($requireV0128) {
+                $hostedFileNames += @(
+                    $DockerImageEvidenceEntry, $SyncWireEntry, $SyncCredentialEntry,
+                    $SyncOperationsEntry, $DockerDeploymentEntry
+                )
+            }
+            foreach ($name in $hostedFileNames) {
                 $record = @($hostedEvidence.files | Where-Object { $_.name -eq $name })
                 $actualHash = (Get-FileHash -LiteralPath $publishedFiles[$name] -Algorithm SHA256).Hash
                 if ($record.Count -ne 1 -or [string]$record[0].sha256 -ine $actualHash) {
                     throw "Published hosted evidence does not match '$name'."
                 }
+            }
+            if ($requireV0128) {
+                $publishedDockerEvidence = Test-DockerImageEvidence `
+                    -Path $publishedFiles[$DockerImageEvidenceEntry] `
+                    -Version $Version -CommitSha $tagSha -Repository $RepoSlug
             }
             $windowsEvidence = Get-Content -LiteralPath $publishedFiles[$WindowsEvidenceEntry] -Raw |
                 ConvertFrom-Json
@@ -1286,9 +1623,55 @@ try {
                  [long]$windowsEvidence.workflow.run_id -ne $verifiedRun.Id -or
                  [int]$windowsEvidence.workflow.run_attempt -ne $verifiedRun.RunAttempt -or
                  [string]$windowsEvidence.workflow.run_url -cne $verifiedRun.HtmlUrl)) {
-                throw "Published Windows evidence lacks required v0.1.27 workflow/ProductVersion metadata."
+                throw "Published Windows evidence lacks required workflow/ProductVersion metadata."
             }
         }
+
+        $resolvedVerificationNotes = $null
+        if ($requireV0127) {
+            if (-not $bundle.EvidencePath) {
+                throw "$Version has no retained Windows evidence for exact release-body verification."
+            }
+            $reviewedTemplate = Get-TrackedReleaseNotesTemplate `
+                -Version $Version -CommitSha $tagSha
+            $resolvedVerificationNotes = Resolve-ReleaseNotesBody `
+                -Template $reviewedTemplate `
+                -Version $Version `
+                -CommitSha $tagSha `
+                -ExeSha256 $bundle.ExeSha256 `
+                -ZipSha256 $zipHash `
+                -DockerImageEvidence $publishedDockerEvidence
+            Assert-ReleaseBodyDigests `
+                -Body ([string]$view.body) `
+                -ExeSha256 $bundle.ExeSha256 `
+                -ZipSha256 $zipHash `
+                -CommitSha $tagSha `
+                -ExpectedBody ([string]$resolvedVerificationNotes.Body) `
+                -ExpectedImageReferences @($resolvedVerificationNotes.ImageReferences)
+        }
+
+        # Re-fetch mutable release state after all downloads and validation.
+        # A concurrent body edit or asset replacement must not be reported as a
+        # successful verification of the stale snapshot read at the start.
+        $finalVerifyRaw = Invoke-Gh @(
+            'release', 'view', $Version,
+            '--repo', $RepoSlug,
+            '--json', 'assets,body,url,targetCommitish,isDraft'
+        ) "final read-only verification of release $Version"
+        $finalVerifyView = ($finalVerifyRaw -join "`n") | ConvertFrom-Json
+        Assert-ReleaseViewUnchanged `
+            -Initial $view -Current $finalVerifyView `
+            -ExpectedAssetNames $expectedAssetNames
+        if ($requireV0127) {
+            Assert-ReleaseBodyDigests `
+                -Body ([string]$finalVerifyView.body) `
+                -ExeSha256 $bundle.ExeSha256 `
+                -ZipSha256 $zipHash `
+                -CommitSha $tagSha `
+                -ExpectedBody ([string]$resolvedVerificationNotes.Body) `
+                -ExpectedImageReferences @($resolvedVerificationNotes.ImageReferences)
+        }
+        $view = $finalVerifyView
 
         Write-Host ""
         Write-Host "===================== VERIFY SUMMARY ====================="
@@ -1338,6 +1721,11 @@ try {
             }
         }
         Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha
+        Assert-ReleaseCheckoutAtCommit `
+            -RepositoryRoot $repositoryRoot -CommitSha $run.HeadSha
+        Assert-TrackedReleaseNotes `
+            -RepositoryRoot $repositoryRoot -Path $NotesFile `
+            -Version $Version -CommitSha $run.HeadSha
     }
     $shortSha = if ($run.HeadSha.Length -ge 7) { $run.HeadSha.Substring(0, 7) } else { $run.HeadSha }
     Write-Host "    run id     : $($run.Id)"
@@ -1398,6 +1786,15 @@ try {
             $hostedEvidence.EvidencePath,
             $windowsEvidencePath
         )
+        if ($requireV0128) {
+            $releasePayloads += @(
+                $hostedEvidence.DockerImageEvidencePath,
+                $hostedEvidence.SyncWirePath,
+                $hostedEvidence.SyncCredentialPath,
+                $hostedEvidence.SyncOperationsPath,
+                $hostedEvidence.DockerDeploymentPath
+            )
+        }
         Write-ReleaseChecksums -Path $bundle.ChecksumsPath -Files $releasePayloads
         $releasePayloads += $bundle.ChecksumsPath
     }
@@ -1411,16 +1808,16 @@ try {
     # 6. Resolve notes tokens.
     Write-Host ""
     Write-Host "Resolving release notes tokens..."
-    $notes = Get-Content -LiteralPath $NotesFile -Raw
-    # .Replace (literal), not -replace (regex) - the {{...}} braces are literal.
-    $notes = $notes.Replace('{{EXE_SHA256}}', $bundle.ExeSha256)
-    $notes = $notes.Replace('{{ZIP_SHA256}}', $zipHash)
-    $notes = $notes.Replace('{{COMMIT}}', $run.HeadSha)
-    foreach ($unresolvedToken in @('{{COMMIT}}', '{{EXE_SHA256}}', '{{ZIP_SHA256}}')) {
-        if ($notes.Contains($unresolvedToken)) {
-            throw "Release notes still contain unresolved token $unresolvedToken."
-        }
-    }
+    $notesTemplate = Get-Content -LiteralPath $NotesFile -Raw
+    $resolvedNotesResult = Resolve-ReleaseNotesBody `
+        -Template $notesTemplate `
+        -Version $Version `
+        -CommitSha $run.HeadSha `
+        -ExeSha256 $bundle.ExeSha256 `
+        -ZipSha256 $zipHash `
+        -DockerImageEvidence $(if ($requireV0128) { $hostedEvidence.DockerImageEvidence } else { $null })
+    $notes = [string]$resolvedNotesResult.Body
+    $expectedImageReferences = @($resolvedNotesResult.ImageReferences)
     $resolvedNotes = Join-Path $stage 'release-notes-resolved.md'
     [IO.File]::WriteAllText(
         $resolvedNotes,
@@ -1476,7 +1873,8 @@ try {
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
         -CommitSha $run.HeadSha `
-        -ExpectedBody $notes
+        -ExpectedBody $notes `
+        -ExpectedImageReferences $expectedImageReferences
 
     # Re-fetch every mutable identity immediately before publication. The
     # workflow artifacts themselves are immutable; matching IDs prove the bytes
@@ -1538,7 +1936,8 @@ try {
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
         -CommitSha $run.HeadSha `
-        -ExpectedBody $notes
+        -ExpectedBody $notes `
+        -ExpectedImageReferences $expectedImageReferences
     $finalDraftVerifyDir = Join-Path $stage 'final-draft-asset-verification'
     New-Item -ItemType Directory -Path $finalDraftVerifyDir -Force | Out-Null
     foreach ($localFile in $releasePayloads) {
@@ -1570,7 +1969,8 @@ try {
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
         -CommitSha $run.HeadSha `
-        -ExpectedBody $notes
+        -ExpectedBody $notes `
+        -ExpectedImageReferences $expectedImageReferences
     foreach ($name in $payloadNames) {
         $draftAsset = Get-UniqueReleaseAsset -Assets @($finalView.assets) -Name $name
         $publishedAsset = Get-UniqueReleaseAsset -Assets @($publishedView.assets) -Name $name

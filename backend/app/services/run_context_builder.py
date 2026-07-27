@@ -21,7 +21,7 @@ from app.services.configuration_service import (
     write_secret_material,
 )
 
-_APP_VERSION = "0.1.27"
+_APP_VERSION = "0.1.28"
 _SENSITIVE_KEYS = {
     "password",
     "broker_password",

@@ -1,4 +1,4 @@
-# Smart Commissioning App — hosted deployment (Docker Compose)
+# Smart Commissioning App: hosted deployment (Docker Compose)
 
 This compose stack is the **hosted profile**: nginx-served frontend, FastAPI
 backend, Dramatiq worker, Postgres, and password-protected Redis. The
@@ -9,7 +9,7 @@ when several users share a server; use the portable exe on a technician laptop.
 
 ## Required environment
 
-Generate `.env` from the template with the bootstrap script — it fills every
+Generate `.env` from the template with the bootstrap script. It fills every
 `CHANGE_ME` with a fresh crypto-random secret, prints the `API_KEY`, and
 refuses to overwrite an existing `.env`:
 
@@ -31,16 +31,24 @@ are missing:
 | `SMART_COMMISSIONING_DEPLOYMENT_ID` | Stable non-secret name used when deriving unique MQTT client IDs. |
 | `FRONTEND_PORT` (optional, default 8080) | Loopback host port for the frontend + `/api` proxy. |
 | `API_PORT` (optional, default 8000) | Loopback host port for direct API debugging. |
+| `POSTGRES_PORT` (optional, default 5432) | Loopback host port for direct Postgres debugging. |
 | `CORS_ORIGINS` (optional) | Comma-separated origins for direct cross-origin API access. |
 
 `DATABASE_URL` and `REDIS_URL` are assembled inside `docker-compose.yml` from
-the values above — do not define them separately.
+the values above. Do not define them separately.
 
 ## First start
 
 ```sh
 docker compose -f infra/docker-compose.yml up -d --build
 ```
+
+Release deployments use the immutable `name@sha256` references from
+`docker-image-evidence.json`. Put them in `API_IMAGE`, `WORKER_IMAGE`, and
+`FRONTEND_IMAGE`, then use `pull` followed by `up -d --no-build`. This prevents
+Compose from replacing a verified registry image with a local build. See
+`docs/docker-deployment-rollback-v0.1.28.md` for the complete deployment,
+verification, backup, and rollback procedure.
 
 Startup order is explicit. `runtime-init` creates the encrypted-store key and
 sets named-volume ownership. Postgres and Redis must be healthy before the API
@@ -52,8 +60,13 @@ Hosted execution is always `JOB_EXECUTION_MODE=queue`. If Redis publication is
 unavailable, the durable outbox keeps the dispatch pending for automatic retry.
 The API never starts a second inline copy of a queued job.
 
+`infra/docker-compose.inline.yml` is the explicit parity profile. It sets the
+API to asynchronous inline execution and keeps the worker behind a non-default
+profile so only one executor lane is active. Do not add that override to a
+normal queued deployment.
+
 Open the app at `http://127.0.0.1:8080` (or your `FRONTEND_PORT`). Everything
-binds to loopback only — to expose the app beyond the host, put a
+binds to loopback only. To expose the app beyond the host, put a
 TLS-terminating reverse proxy in front of the frontend port.
 
 ## Verifying health
@@ -89,7 +102,7 @@ worker. Both processes use `/app/runtime/secrets`, including the same
 which is never mounted in the worker. Immutable report bytes use the
 `report_artifacts` volume and stay API-owned.
 
-**API_KEY** — generate a new value (`openssl rand -hex 32`), update `.env`,
+**API_KEY:** generate a new value (`openssl rand -hex 32`), update `.env`,
 then recreate the api so it picks up the new environment:
 
 ```sh
@@ -101,9 +114,9 @@ new key. No data is affected.
 
 To rotate **all** secrets at once, move `infra/.env` aside and re-run
 `scripts/bootstrap-env.sh` / `.ps1` (it refuses to overwrite an existing
-`.env`) — note the `POSTGRES_PASSWORD` in-place caveat below still applies.
+`.env`). The `POSTGRES_PASSWORD` in-place caveat below still applies.
 
-**REDIS_PASSWORD** — update `.env`, then recreate redis, api, and worker
+**REDIS_PASSWORD:** update `.env`, then recreate redis, api, and worker
 together (all three embed the password in their environment):
 
 ```sh
@@ -113,7 +126,7 @@ docker compose -f infra/docker-compose.yml up -d redis api worker
 In-flight queued jobs survive (Redis persists to the `redis_data` volume with
 appendonly enabled).
 
-**POSTGRES_PASSWORD** — the postgres image only applies `POSTGRES_PASSWORD` on
+**POSTGRES_PASSWORD:** the postgres image only applies `POSTGRES_PASSWORD` on
 first initialization, so change the role password in place first, then update
 `.env` and recreate the dependents:
 
@@ -134,9 +147,10 @@ docker compose -f infra/docker-compose.yml up -d api worker
   on-site gate.
 - Set broker ACLs for dynamic client IDs before rollout. See
   `docs/mqtt-client-id-and-acl.md`.
-- Back up all four runtime volumes with Postgres before migration. Follow
-  `docs/migration-rollback-v0.1.26.md`; a database-only backup is incomplete.
-- Postgres publishes `127.0.0.1:5432` for host `psql` access during
-  development; remove that mapping in locked-down deployments.
+- Back up all four runtime volumes with Postgres before migration. Follow the
+  migration guide for the version being deployed; a database-only backup is
+  incomplete.
+- Postgres publishes `127.0.0.1:${POSTGRES_PORT:-5432}` for host `psql` access
+  during development; remove that mapping in locked-down deployments.
 - The former MinIO/object-storage service was removed: nothing in
   `backend/`, `worker/`, or `core/` ever used it.

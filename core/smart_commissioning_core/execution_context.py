@@ -5,8 +5,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from smart_commissioning_core.run_context import RunContextV1, mqtt_client_id
-from smart_commissioning_core.run_lifecycle import RunLeaseV1
+from smart_commissioning_core.run_context import (
+    RunContextV1,
+    canonical_context_sha256,
+    mqtt_client_id,
+)
+from smart_commissioning_core.run_lifecycle import (
+    RunLeaseV1,
+    StoredRunContextV1,
+)
 
 SecretMaterialResolver = Callable[[str], bytes | None]
 
@@ -31,6 +38,29 @@ _TEXT_SECRET_DESTINATIONS = frozenset(
 
 class SecretMaterialUnavailableError(RuntimeError):
     """A required versioned secret could not be resolved before engine entry."""
+
+
+class ExecutionContextIntegrityError(RuntimeError):
+    """The insert-once stored context no longer matches its claimed digest."""
+
+
+def verify_stored_context(
+    stored: StoredRunContextV1,
+    lease: RunLeaseV1,
+) -> RunContextV1:
+    """Verify one stored context against its row and claimed lease digests."""
+
+    if stored.run_id != lease.run_id:
+        raise ExecutionContextIntegrityError("stored execution context belongs to another run")
+    actual_sha256 = canonical_context_sha256(stored.context)
+    if (
+        actual_sha256 != stored.context_sha256
+        or stored.context_sha256 != lease.context_sha256
+    ):
+        raise ExecutionContextIntegrityError(
+            "stored execution context failed integrity verification"
+        )
+    return stored.context
 
 
 def resolve_context_parameters(

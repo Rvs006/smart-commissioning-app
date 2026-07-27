@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.27
+        default: v0.1.28
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -17,9 +17,10 @@ on:
       - "packaging/**"
       - "backend/**"
       - "core/**"
+      - "worker/**"
       - "frontend/**"
       - "scripts/**"
-      - "docs/migration-rollback-v0.1.27.md"
+      - "docs/migration-rollback-v0.1.28.md"
       - ".github/workflows/windows-portable.yml"
   push:
     branches: [main]
@@ -27,17 +28,21 @@ on:
       - "packaging/**"
       - "backend/**"
       - "core/**"
+      - "worker/**"
       - "frontend/**"
       - "scripts/**"
-      - "docs/migration-rollback-v0.1.27.md"
+      - "docs/migration-rollback-v0.1.28.md"
       - ".github/workflows/windows-portable.yml"
+
+permissions:
+  contents: read
 
 concurrency:
   group: windows-portable-${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.27' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.28' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -50,6 +55,7 @@ jobs:
         with:
           ref: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prove PR-head candidate or exact-main release checkout
         shell: pwsh
@@ -61,8 +67,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.27') {
-            throw "This workflow is pinned to v0.1.27, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.28') {
+            throw "This workflow is pinned to v0.1.28, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -72,7 +78,9 @@ jobs:
               throw "Release dispatch must build exact origin/main $main, not $actual."
             }
           }
-          if (git status --porcelain) { throw 'Release checkout is dirty before build.' }
+          $checkoutStatus = @(git status --porcelain=v1 --untracked-files=all)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not inspect the release checkout.' }
+          if ($checkoutStatus.Count -ne 0) { throw 'Release checkout is dirty before build.' }
 
       - name: Parse release publisher with Windows PowerShell 5.1
         shell: powershell
@@ -88,6 +96,10 @@ jobs:
             $errors | ForEach-Object { Write-Error $_ }
             throw 'release-portable.ps1 failed the Windows PowerShell 5.1 parser.'
           }
+
+      - name: Reject missing immutable image references under Windows PowerShell 5.1
+        shell: powershell
+        run: .\scripts\test_release_portable_ps51.ps1
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -108,8 +120,15 @@ jobs:
         shell: pwsh
         run: |
           python -m unittest discover -s core/tests -p 'test_run_lifecycle_v2.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s core/tests -p 'test_owned_run_heartbeat.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s backend/tests -p 'test_run_dispatch_async.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s backend/tests -p 'test_inline_heartbeat_integration.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s worker/tests -p 'test_tasks_interrupt.py'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build portable bundle (frontend + freeze + assemble)
         shell: pwsh
@@ -123,12 +142,14 @@ jobs:
           $npmSbom = Join-Path $bundle 'SBOM.npm.cdx.json'
           python scripts/generate_sbom.py --json $pythonSbom `
             --application-version $env:RELEASE_VERSION --source-commit $env:RELEASE_SHA --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location frontend
           try {
             npm sbom --omit=dev --sbom-format cyclonedx --sbom-type application |
               Set-Content -LiteralPath $npmSbom -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.27.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.28.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
 
       - name: Portable acceptance path with spaces, heartbeat, Stop, report, and logs
@@ -251,7 +272,8 @@ jobs:
             --test portable_frontend_build_stamp=passed `
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
-          python scripts/validate_v0127_release_evidence.py `
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/validate_v0128_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `

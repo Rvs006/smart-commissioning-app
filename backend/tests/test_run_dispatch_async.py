@@ -90,10 +90,18 @@ def _dispatch(
     settings = SimpleNamespace(
         inline_run_async=inline_run_async,
         job_execution_mode="inline",
+        run_lease_seconds=1,
+        run_heartbeat_seconds=0.01,
+        deployment_id="deployment-under-test",
     )
     case.enterContext(mock.patch.object(run_dispatch, "get_settings", return_value=settings))
-    case.enterContext(mock.patch.object(run_dispatch, "_INLINE_LEASE_SECONDS", 1))
-    case.enterContext(mock.patch.object(run_dispatch, "_INLINE_HEARTBEAT_SECONDS", 0.01))
+    case.enterContext(
+        mock.patch.object(
+            run_dispatch,
+            "verify_stored_context",
+            return_value=SimpleNamespace(engine_parameters={}),
+        )
+    )
     if resolver is None:
         case.enterContext(
             mock.patch.object(run_dispatch, "resolve_context_parameters", return_value={})
@@ -138,8 +146,47 @@ def _wait_for_thread_exit(prefix: str) -> None:
 
 
 class BackgroundInlineDispatchTests(unittest.TestCase):
+    def test_inline_resolution_uses_shared_deployment_identity(self) -> None:
+        service = _FakeService()
+        resolved: dict[str, object] = {}
+
+        def resolver(
+            _context,
+            _lease,
+            *,
+            deployment_id,
+            channel,
+            secret_resolver,
+        ):
+            resolved.update(
+                deployment_id=deployment_id,
+                channel=channel,
+                secret_resolver=secret_resolver,
+            )
+            return {}
+
+        def run_inline(run_store, _parameters):
+            run_store.update_run_status(
+                "run_abc",
+                status="succeeded",
+                stage="engine_complete",
+                progress_percent=100,
+            )
+
+        _dispatch(
+            self,
+            service,
+            run_inline,
+            inline_run_async=False,
+            resolver=resolver,
+        )
+
+        self.assertEqual(resolved["deployment_id"], "deployment-under-test")
+        self.assertEqual(resolved["channel"], "mqtt_discovery")
+        self.assertTrue(callable(resolved["secret_resolver"]))
+
     def test_exhausted_lease_retry_never_becomes_a_tight_loop(self) -> None:
-        heartbeat = run_dispatch.InlineRunHeartbeat(
+        heartbeat = run_dispatch.OwnedRunHeartbeat(
             _FakeService(),
             lease_seconds=60,
             interval_seconds=15,
@@ -150,21 +197,21 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         self.assertEqual(heartbeat._retry_delay(10), 1.0)
 
     def test_heartbeat_constructor_rejects_non_finite_or_excessive_timing(self) -> None:
-        with self.assertRaisesRegex(ValueError, "positive and below"):
-            run_dispatch.InlineRunHeartbeat(
+        with self.assertRaisesRegex(ValueError, "positive and no more than"):
+            run_dispatch.OwnedRunHeartbeat(
                 _FakeService(),
                 lease_seconds=60,
                 interval_seconds=float("nan"),
             )
         with self.assertRaisesRegex(ValueError, "no more than 300"):
-            run_dispatch.InlineRunHeartbeat(
+            run_dispatch.OwnedRunHeartbeat(
                 _FakeService(),
                 lease_seconds=32_400,
                 interval_seconds=15,
             )
 
     def test_heartbeat_start_failure_clears_unstarted_thread(self) -> None:
-        heartbeat = run_dispatch.InlineRunHeartbeat(
+        heartbeat = run_dispatch.OwnedRunHeartbeat(
             _FakeService(),
             lease_seconds=60,
             interval_seconds=15,
@@ -184,7 +231,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         service = _FakeService()
         with mock.patch.object(
             run_dispatch,
-            "InlineRunHeartbeat",
+            "OwnedRunHeartbeat",
             side_effect=ValueError("invalid heartbeat timing"),
         ):
             response = _dispatch(
@@ -197,7 +244,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         self.assertEqual(response.status, "failed")
         self.assertEqual(
             service.status_calls[-1]["stage"],
-            "inline_heartbeat_start_failed",
+            "owned_heartbeat_start_failed",
         )
 
     def test_async_returns_before_run_finishes_then_writes_terminal(self) -> None:
@@ -245,7 +292,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         self.assertTrue(service.status_written.wait(_WAIT), "crash guard never wrote a terminal status")
         crash = service.status_calls[-1]
         self.assertEqual(crash["status"], "failed")
-        self.assertEqual(crash["stage"], "inline_run_crashed")
+        self.assertEqual(crash["stage"], "executor_unhandled_failure")
         self.assertIn("run it again", crash["error_message"])
         _wait_for_thread_exit("inline-heartbeat-run_abc")
 
@@ -452,7 +499,9 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
             )
             finished.set()
 
-        with self.assertLogs("app.services.inline_heartbeat", level="INFO") as captured:
+        with self.assertLogs(
+            "smart_commissioning_core.owned_run_heartbeat", level="INFO"
+        ) as captured:
             _dispatch(self, service, run_inline, inline_run_async=True)
             self.assertTrue(started.wait(_WAIT))
             _wait_for_heartbeat_calls(service, 3)
@@ -491,7 +540,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         with (
             mock.patch.object(
                 run_dispatch,
-                "InlineRunHeartbeat",
+                "OwnedRunHeartbeat",
                 TrackingHeartbeat,
             ),
             mock.patch.object(
@@ -542,7 +591,7 @@ class BackgroundInlineDispatchTests(unittest.TestCase):
         with (
             mock.patch.object(
                 run_dispatch,
-                "InlineRunHeartbeat",
+                "OwnedRunHeartbeat",
                 TrackingHeartbeat,
             ),
             mock.patch.object(

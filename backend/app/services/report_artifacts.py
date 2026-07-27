@@ -5,8 +5,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import tempfile
-from pathlib import Path
+from datetime import datetime
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from smart_commissioning_core.integrity import (
@@ -16,11 +18,11 @@ from smart_commissioning_core.integrity import (
 )
 
 from app.core.runtime import ARTIFACTS_ROOT, ensure_runtime_directories
-from app.services.reports_integrity import load_signing_key
+from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.0"
-REPORT_RENDERER_VERSION = "0.1.27"
+REPORT_RENDERER_VERSION = "0.1.28"
 
 _SIGNED_MANIFEST_FIELDS = (
     "schema_version",
@@ -36,6 +38,20 @@ _SIGNED_MANIFEST_FIELDS = (
     "signing_key_id",
     "signed_at",
 )
+_COMPLETE_MANIFEST_FIELDS = frozenset(
+    {
+        *_SIGNED_MANIFEST_FIELDS,
+        "signature_algorithm",
+        "signature",
+        "public_key_pem",
+        "signed_manifest_sha256",
+    }
+)
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_KEY_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
+_MEDIA_TYPE_RE = re.compile(
+    r"^[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+$"
+)
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -46,6 +62,7 @@ def canonical_json_bytes(value: object) -> bytes:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8", errors="backslashreplace")
 
 
@@ -139,19 +156,136 @@ def load_report_artifact(manifest: dict[str, Any]) -> bytes:
     return artifact
 
 
+def store_content_addressed_artifact(artifact: bytes, artifact_sha256: str) -> str:
+    """Store verified sync bytes under a hub-owned SHA-256 path."""
+
+    if not artifact or sha256_bytes(artifact) != artifact_sha256:
+        raise ValueError("Artifact bytes do not match the supplied SHA-256.")
+    ensure_runtime_directories()
+    root = ARTIFACTS_ROOT.resolve()
+    relative = Path("sha256") / artifact_sha256[:2] / artifact_sha256
+    target = (root / relative).resolve()
+    if root not in target.parents:
+        raise ValueError("Content-addressed artifact path escaped the artifact root.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if target.read_bytes() != artifact:
+            raise RuntimeError("Content-addressed artifact contains different bytes.")
+    else:
+        _atomic_write(target, artifact)
+    return relative.as_posix()
+
+
+def load_content_addressed_artifact(
+    storage_relpath: str,
+    *,
+    expected_hash: str,
+    expected_size: int,
+) -> bytes:
+    """Read exact hub-owned sync bytes and verify size plus SHA-256."""
+
+    relative = Path(storage_relpath)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RuntimeError("Stored synchronized artifact path is invalid.")
+    root = ARTIFACTS_ROOT.resolve()
+    target = (root / relative).resolve()
+    if root not in target.parents or not target.is_file():
+        raise FileNotFoundError(storage_relpath)
+    artifact = target.read_bytes()
+    if len(artifact) != expected_size:
+        raise RuntimeError("Stored synchronized artifact size does not match its record.")
+    if sha256_bytes(artifact) != expected_hash:
+        raise RuntimeError("Stored synchronized artifact hash does not match its record.")
+    return artifact
+
+
 def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
     """Verify the embedded public key and detached manifest signature."""
 
     if not cryptography_available():
         return False
+    if set(manifest) != _COMPLETE_MANIFEST_FIELDS:
+        return False
+    if manifest.get("schema_version") != ARTIFACT_MANIFEST_SCHEMA_VERSION:
+        return False
+    if manifest.get("signature_algorithm") != "ed25519":
+        return False
     try:
+        report_id = manifest["report_id"]
+        snapshot_hash = manifest["snapshot_sha256"]
+        file_name = manifest["file_name"]
+        media_type = manifest["media_type"]
+        byte_size = manifest["byte_size"]
+        renderer_version = manifest["renderer_version"]
+        artifact_hash = manifest["artifact_sha256"]
+        artifact_relpath = manifest["artifact_relpath"]
+        origin = manifest["origin"]
+        signing_key_id = manifest["signing_key_id"]
+        signed_at = manifest["signed_at"]
+        if not isinstance(report_id, str) or not 1 <= len(report_id) <= 64:
+            return False
+        if not isinstance(snapshot_hash, str) or not _SHA256_RE.fullmatch(snapshot_hash):
+            return False
+        if (
+            not isinstance(file_name, str)
+            or not 1 <= len(file_name) <= 512
+            or "/" in file_name
+            or "\\" in file_name
+            or file_name in {".", ".."}
+        ):
+            return False
+        if (
+            not isinstance(media_type, str)
+            or len(media_type) > 255
+            or not _MEDIA_TYPE_RE.fullmatch(media_type)
+        ):
+            return False
+        if type(byte_size) is not int or byte_size < 1:
+            return False
+        if not isinstance(renderer_version, str) or not 1 <= len(renderer_version) <= 64:
+            return False
+        if not isinstance(artifact_hash, str) or not _SHA256_RE.fullmatch(artifact_hash):
+            return False
+        if not isinstance(artifact_relpath, str) or not 1 <= len(artifact_relpath) <= 1024:
+            return False
+        relative = PurePosixPath(artifact_relpath)
+        if (
+            "\\" in artifact_relpath
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or "." in relative.parts
+        ):
+            return False
+        if not isinstance(origin, str) or not 1 <= len(origin) <= 255:
+            return False
+        if not isinstance(signing_key_id, str) or not _KEY_FINGERPRINT_RE.fullmatch(
+            signing_key_id
+        ):
+            return False
+        if not isinstance(signed_at, str):
+            return False
+        signed_timestamp = datetime.fromisoformat(signed_at)
+        if signed_timestamp.tzinfo is None:
+            return False
         unsigned = {field: manifest[field] for field in _SIGNED_MANIFEST_FIELDS}
-        signature = base64.b64decode(str(manifest["signature"]), validate=True)
-        public_key = str(manifest["public_key_pem"])
+        raw_signature = manifest["signature"]
+        public_key = manifest["public_key_pem"]
+        if not isinstance(raw_signature, str) or len(raw_signature) > 1024:
+            return False
+        if not isinstance(public_key, str) or not 1 <= len(public_key) <= 8192:
+            return False
+        signature = base64.b64decode(raw_signature, validate=True)
+        signed_manifest_hash = manifest["signed_manifest_sha256"]
+        if not isinstance(signed_manifest_hash, str) or not _SHA256_RE.fullmatch(
+            signed_manifest_hash
+        ):
+            return False
     except (KeyError, TypeError, ValueError):
         return False
     signed_body = canonical_json_bytes(unsigned)
-    if manifest.get("signed_manifest_sha256") != sha256_bytes(signed_body):
+    if signed_manifest_hash != sha256_bytes(signed_body):
+        return False
+    if fingerprint_for_pem(public_key) != signing_key_id:
         return False
     return verify_bytes(signed_body, signature, public_key)
 

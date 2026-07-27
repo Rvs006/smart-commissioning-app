@@ -3,8 +3,10 @@ import unittest
 
 from pydantic import ValidationError
 from smart_commissioning_core.execution_context import (
+    ExecutionContextIntegrityError,
     SecretMaterialUnavailableError,
     resolve_context_parameters,
+    verify_stored_context,
 )
 from smart_commissioning_core.run_context import (
     ContextResourceV1,
@@ -16,7 +18,11 @@ from smart_commissioning_core.run_context import (
     canonical_mqtt_protocol_key,
     mqtt_client_id,
 )
-from smart_commissioning_core.run_lifecycle import RunLeaseV1, TerminalResultV1
+from smart_commissioning_core.run_lifecycle import (
+    RunLeaseV1,
+    StoredRunContextV1,
+    TerminalResultV1,
+)
 
 
 def _context(**overrides: object) -> RunContextV1:
@@ -216,6 +222,43 @@ class SharedContextResolutionTests(unittest.TestCase):
 
         self.assertEqual(parameters["password"], "ephemeral-password")
         self.assertEqual(context.connection_settings["password"], "secret://mqtt-password-v3")
+
+    def test_stored_context_digest_is_recomputed_against_claimed_lease(self) -> None:
+        context = _context()
+        digest = context.sha256()
+        lease = self._lease().model_copy(update={"context_sha256": digest})
+        stored = StoredRunContextV1(
+            run_id=lease.run_id,
+            context=context,
+            context_sha256=digest,
+            created_at=lease.claimed_at,
+        )
+
+        self.assertIs(verify_stored_context(stored, lease), context)
+
+        tampered = stored.model_copy(
+            update={
+                "context": context.model_copy(
+                    update={"engine_parameters": {"authorized": False}}
+                )
+            }
+        )
+        with self.assertRaises(ExecutionContextIntegrityError):
+            verify_stored_context(tampered, lease)
+
+    def test_stored_context_must_belong_to_claimed_run(self) -> None:
+        context = _context()
+        digest = context.sha256()
+        lease = self._lease().model_copy(update={"context_sha256": digest})
+        stored = StoredRunContextV1(
+            run_id="run-other",
+            context=context,
+            context_sha256=digest,
+            created_at=lease.claimed_at,
+        )
+
+        with self.assertRaises(ExecutionContextIntegrityError):
+            verify_stored_context(stored, lease)
 
     def test_offline_config_publish_does_not_inherit_broker_defaults(self) -> None:
         context = _context(
