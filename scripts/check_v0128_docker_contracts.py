@@ -26,6 +26,9 @@ def main() -> int:
     generator = (root / "scripts/generate_docker_image_evidence.py").read_text(encoding="utf-8")
     publisher = (root / "scripts/publish_docker_images.sh").read_text(encoding="utf-8")
     promoter = (root / "scripts/promote_docker_images.sh").read_text(encoding="utf-8")
+    local_image_verifier = (root / "scripts/verify_local_docker_image.py").read_text(
+        encoding="utf-8"
+    )
     tag_verifier = (root / "scripts/verify_signed_release_tag.py").read_text(encoding="utf-8")
     windows_workflow = (root / ".github/workflows/windows-portable.yml").read_text(
         encoding="utf-8"
@@ -141,7 +144,7 @@ def main() -> int:
             "promote_docker_images.sh",
             "verify_signed_release_tag.py",
             'BUILDX_NO_DEFAULT_ATTESTATIONS: "1"',
-            'index .Descriptor "mediaType"',
+            "verify_local_docker_image.py",
             "docker-image-evidence.json",
             "SYNC_V2_WIRE_FORMAT.md",
             "SYNC_V2_CREDENTIAL_SCOPE.md",
@@ -208,7 +211,7 @@ def main() -> int:
             "application/vnd.oci.image.manifest.v1+json",
             "application/vnd.docker.distribution.manifest.v2+json",
             "Unsupported or empty manifest mediaType",
-            'index .Descriptor "mediaType"',
+            "verify_local_docker_image.py",
             "docker push",
             "docker pull",
             "candidate_id",
@@ -218,6 +221,20 @@ def main() -> int:
         label="Docker image publisher",
         failures=failures,
     )
+    _require(
+        local_image_verifier,
+        [
+            "ALLOWED_MANIFEST_MEDIA_TYPES",
+            'rootfs.get("Type") != "layers"',
+            'media_type = "docker-engine-single-platform"',
+            "did not resolve to exactly one local image",
+        ],
+        label="local Docker image verifier",
+        failures=failures,
+    )
+    for label, text in (("release workflow", workflow), ("Docker image publisher", publisher)):
+        if 'index .Descriptor "mediaType"' in text:
+            failures.append(f"{label} uses the non-portable Docker Descriptor template")
     _require(
         promoter,
         [

@@ -77,11 +77,7 @@ for index in "${!roles[@]}"; do
 
   test "$(docker image inspect "$local_image" --format '{{.Id}}')" = "$candidate_id"
   verify_labels "$local_image"
-  media_type="$(docker image inspect "$local_image" --format '{{ index .Descriptor "mediaType" }}')"
-  case "$media_type" in
-    application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;
-    *) echo "::error::Accepted local image is not a single image manifest: $local_image ($media_type)" >&2; exit 1 ;;
-  esac
+  docker image inspect "$local_image" | python scripts/verify_local_docker_image.py --reference "$local_image"
 
   if sha_digests[index]="$(remote_digest "${sha_references[index]}")"; then
     sha_present[index]=1

@@ -76,7 +76,7 @@ jobs:
 
       - name: Ruff and complete Python suites
         run: |
-          ruff check backend worker core scripts/backup_rollback_smoke.py scripts/check_v0126_release_contracts.py scripts/check_v0127_release_contracts.py scripts/check_v0128_docker_contracts.py scripts/check_v0128_release_contracts.py scripts/check_hosted_frontend.py scripts/check_hosted_mtls.py scripts/check_hosted_release_logs.py scripts/check_hosted_terminal_evidence.py scripts/generate_docker_image_evidence.py scripts/generate_release_evidence.py scripts/generate_sbom.py scripts/hosted_release_acceptance.py scripts/smoke_hosted_queue.py scripts/smoke_sync_v2.py scripts/smoke_windows_portable_release.py scripts/test_check_hosted_frontend.py scripts/test_check_hosted_mtls.py scripts/test_check_hosted_release_logs.py scripts/test_check_hosted_terminal_evidence.py scripts/test_generate_docker_image_evidence.py scripts/test_hosted_release_acceptance.py scripts/test_smoke_sync_v2.py scripts/test_v0127_release_evidence.py scripts/test_v0128_release_evidence.py scripts/test_verify_signed_release_tag.py scripts/test_windows_portable_release_smoke.py scripts/validate_release_evidence.py scripts/validate_v0127_release_evidence.py scripts/validate_v0128_release_evidence.py scripts/verify_signed_release_tag.py
+          ruff check backend worker core scripts/backup_rollback_smoke.py scripts/check_v0126_release_contracts.py scripts/check_v0127_release_contracts.py scripts/check_v0128_docker_contracts.py scripts/check_v0128_release_contracts.py scripts/check_hosted_frontend.py scripts/check_hosted_mtls.py scripts/check_hosted_release_logs.py scripts/check_hosted_terminal_evidence.py scripts/generate_docker_image_evidence.py scripts/generate_release_evidence.py scripts/generate_sbom.py scripts/hosted_release_acceptance.py scripts/smoke_hosted_queue.py scripts/smoke_sync_v2.py scripts/smoke_windows_portable_release.py scripts/test_check_hosted_frontend.py scripts/test_check_hosted_mtls.py scripts/test_check_hosted_release_logs.py scripts/test_check_hosted_terminal_evidence.py scripts/test_generate_docker_image_evidence.py scripts/test_hosted_release_acceptance.py scripts/test_smoke_sync_v2.py scripts/test_v0127_release_evidence.py scripts/test_v0128_release_evidence.py scripts/test_verify_local_docker_image.py scripts/test_verify_signed_release_tag.py scripts/test_windows_portable_release_smoke.py scripts/validate_release_evidence.py scripts/validate_v0127_release_evidence.py scripts/validate_v0128_release_evidence.py scripts/verify_local_docker_image.py scripts/verify_signed_release_tag.py
           python -m unittest discover -s core/tests
           (cd backend && python -m unittest discover -s tests)
           (cd worker && python -m unittest discover -s tests)
@@ -89,6 +89,7 @@ jobs:
           python scripts/test_check_hosted_release_logs.py
           python scripts/test_check_hosted_terminal_evidence.py
           python scripts/test_smoke_sync_v2.py
+          python scripts/test_verify_local_docker_image.py
           python scripts/test_verify_signed_release_tag.py
           python scripts/test_windows_portable_release_smoke.py
 
@@ -207,11 +208,7 @@ jobs:
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$RELEASE_VERSION"
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
             test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = "https://github.com/$GITHUB_REPOSITORY"
-            media_type="$(docker image inspect "$image" --format '{{ index .Descriptor "mediaType" }}')"
-            case "$media_type" in
-              application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;
-              *) echo "::error::Accepted image is not a single image manifest: $image ($media_type)"; exit 1 ;;
-            esac
+            docker image inspect "$image" | python scripts/verify_local_docker_image.py --reference "$image"
             printf '%s=%s\n' "$id_name" "$(docker image inspect "$image" --format '{{.Id}}')" >> build/release-evidence/candidate-image-ids.env
           done
 

@@ -393,8 +393,8 @@ class PortableReleaseSmokeTests(unittest.TestCase):
                 "\n".join(
                     json.dumps({"level": "INFO", "message": message})
                     for message in (
-                        "inline heartbeat started for run_id=run-1",
-                        "inline heartbeat stopped for run_id=run-1",
+                        "owned-run heartbeat started for run_id=run-1 executor=inline",
+                        "owned-run heartbeat stopped for run_id=run-1 executor=inline",
                     )
                 )
                 + "\n",
@@ -404,6 +404,77 @@ class PortableReleaseSmokeTests(unittest.TestCase):
             stderr = root / "stderr.log"
             stdout.write_text(_PASSWORD_MARKER, encoding="utf-8")
             stderr.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "forbidden marker"):
+                _assert_log_cleanup(
+                    root,
+                    ["run-1"],
+                    stdout_log=stdout,
+                    stderr_log=stderr,
+                )
+
+    def test_accepts_shared_inline_heartbeat_log_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "app.log").write_text(
+                "\n".join(
+                    json.dumps({"level": "INFO", "message": message})
+                    for message in (
+                        "owned-run heartbeat started for run_id=run-1 executor=inline",
+                        "owned-run heartbeat stopped for run_id=run-1 executor=inline",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stdout = root / "stdout.log"
+            stderr = root / "stderr.log"
+            stdout.write_text("", encoding="utf-8")
+            stderr.write_text("", encoding="utf-8")
+
+            result = _assert_log_cleanup(
+                root,
+                ["run-1"],
+                stdout_log=stdout,
+                stderr_log=stderr,
+            )
+
+            self.assertEqual(result["heartbeat_started"], 1)
+            self.assertEqual(result["heartbeat_stopped"], 1)
+
+    def test_rejects_shared_heartbeat_refresh_failure_log(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "app.log").write_text(
+                "\n".join(
+                    json.dumps({"level": level, "message": message})
+                    for level, message in (
+                        (
+                            "INFO",
+                            "owned-run heartbeat started for run_id=run-1 executor=inline",
+                        ),
+                        (
+                            "WARNING",
+                            "owned-run heartbeat refresh failed for run_id=run-1 "
+                            "executor=inline exception_type=OperationalError; retrying",
+                        ),
+                        (
+                            "INFO",
+                            "owned-run heartbeat stopped for run_id=run-1 executor=inline",
+                        ),
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stdout = root / "stdout.log"
+            stderr = root / "stderr.log"
+            stdout.write_text("", encoding="utf-8")
+            stderr.write_text("", encoding="utf-8")
+
             with self.assertRaisesRegex(RuntimeError, "forbidden marker"):
                 _assert_log_cleanup(
                     root,
