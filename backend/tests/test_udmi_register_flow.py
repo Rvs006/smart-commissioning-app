@@ -5,7 +5,9 @@ validating the packaged sample fixture.
 """
 
 import io
+import json
 import unittest
+from zipfile import ZipFile
 
 from harness import ApiTestCase
 
@@ -115,8 +117,102 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(validation_summary["system_metrics"][0]["system"], "BMS")
         self.assertEqual(validation_summary["asset_results"][0]["system"], "BMS")
         self.assertEqual(run["result_summary"]["payload_views"][0]["system"], "BMS")
+        # The exact input register is frozen with this run so a later import can
+        # never change which rows a report annotates.
+        self.assertEqual(run["parameters"]["register_import_id"], upload.json()["import_id"])
+        self.assertEqual(run["parameters"]["register_import_filename"], "register.csv")
+        self.assertEqual(
+            run["parameters"]["register_columns"],
+            [
+                "Project/site",
+                "System",
+                "Asset ID",
+                "Expected topic",
+                "Expected schema version",
+                "Expected points",
+                "Expected units",
+                "Expected reporting interval",
+                "Source protocol",
+            ],
+        )
+        self.assertEqual(run["parameters"]["register_rows"], [
+            {
+                "Project/site": "Site A",
+                "System": "BMS",
+                "Asset ID": "EM-1",
+                "Expected topic": "hv/ems/01/em/EM-1/#",
+                "Expected schema version": "1.5.2",
+                "Expected points": "energy_sensor,status_flag,power_sensor",
+                "Expected units": "kwh,,kw",
+                "Expected reporting interval": "60",
+                "Source protocol": "MQTT",
+            }
+        ])
+        # No pointset payload was supplied. Its absence is one neutral state,
+        # not one invented high-severity issue per expected point.
         descriptions = " ".join(issue["description"] for issue in run["issues"])
-        self.assertIn("Expected point energy_sensor was not received", descriptions)
+        self.assertNotIn("Expected point energy_sensor was not received", descriptions)
+
+    def test_source_header_variants_remain_exact_in_annotated_register(self) -> None:
+        project, site = f"{_PROJECT}-source-headings", f"{_SITE}-source-headings"
+        source_columns = [
+            "project/site",
+            "system",
+            "asset id",
+            "expected  topic",
+            "expected schema version",
+            "expected points",
+            "expected units",
+            "expected reporting interval",
+            "source protocol",
+        ]
+        source_csv = (
+            ",".join(source_columns)
+            + "\n"
+            + "Site A,BMS,ASSET-021,site/a/ASSET-021/#,1.5.2,energy_sensor,kwh,60,MQTT\n"
+        )
+        upload = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={"file": ("source-headings.csv", io.BytesIO(source_csv.encode()), "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        self.assertEqual(upload.json()["status"], "accepted", upload.text)
+
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 200, response.text)
+        run_id = response.json()["run_id"]
+        run = self.client.get(f"/api/v1/validation/runs/{run_id}").json()
+        self.assertEqual(run["parameters"]["register_columns"], source_columns)
+        frozen_row = run["parameters"]["register_rows"][0]
+        self.assertEqual(list(frozen_row), source_columns)
+        self.assertNotIn("Asset ID", frozen_row)
+        self.assertEqual(frozen_row["asset id"], "ASSET-021")
+
+        report = self.client.post(
+            "/api/v1/reports",
+            json={
+                "project_id": project,
+                "site_id": site,
+                "report_type": "udmi_validation",
+                "output_format": "zip",
+                "source_run_ids": [run_id],
+            },
+        )
+        self.assertEqual(report.status_code, 200, report.text)
+        download = self.client.get(
+            f"/api/v1/reports/{report.json()['report_id']}/download"
+        )
+        self.assertEqual(download.status_code, 200, download.text)
+        with ZipFile(io.BytesIO(download.content)) as archive:
+            annotated = json.loads(archive.read("annotated_input_register.json"))
+        self.assertEqual(annotated["columns"][: len(source_columns)], source_columns)
+        exported_row = annotated["rows"][0]
+        self.assertEqual(
+            {column: exported_row[column] for column in source_columns},
+            frozen_row,
+        )
+        self.assertNotIn("Asset ID", exported_row)
 
     def test_register_mode_without_register_import_is_refused(self) -> None:
         response = self._post_run("project-with-no-register", "site-with-no-register")

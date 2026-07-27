@@ -7,7 +7,7 @@ in time.
 The best change is deliberately boring: download the same report twice and you
 get the same bytes.
 
-## What you will notice
+## What changed
 
 - A completed run is sealed. Delayed queue messages and stale workers cannot
   change its status, counts, devices, points, topics, or issues.
@@ -52,7 +52,11 @@ but does not mark an immutable conflict as synchronized or let sync replace a
 sealed terminal result. Exact report bytes and signed manifests are not yet
 transferred to a hub. See `docs/sync-v2-v0.1.27.md`.
 
-## Windows portable evidence
+## Windows portable download
+
+Download `Smart_Commissioning_App_Windows_Portable.zip`, extract it into a new
+empty directory, and run `SmartCommissioningApp.exe`. Existing settings and run
+history remain under `%LOCALAPPDATA%\SmartCommissioning`.
 
 - Source commit: `{{COMMIT}}`
 - EXE SHA-256: `{{EXE_SHA256}}`

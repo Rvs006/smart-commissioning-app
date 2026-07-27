@@ -51,6 +51,18 @@ def _system_name(value: object) -> str:
     return text or UNSPECIFIED_SYSTEM
 
 
+def _timestamp_sort_key(value: object) -> tuple[int, datetime, str]:
+    raw = str(value or "").strip()
+    candidate = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return (0, datetime.min.replace(tzinfo=UTC), raw)
+    if parsed.tzinfo is None:
+        return (0, datetime.min.replace(tzinfo=UTC), raw)
+    return (1, parsed.astimezone(UTC), raw)
+
+
 def _unexpected_devices(parameters: dict[str, object]) -> list[dict[str, object]]:
     """Return a stable, report-safe projection of measured unregistered publishers."""
 
@@ -80,6 +92,77 @@ def _unexpected_devices(parameters: dict[str, object]) -> list[dict[str, object]
     return [devices[key] for key in sorted(devices, key=str.casefold)]
 
 
+def _wrong_topic_assets(parameters: dict[str, object]) -> list[dict[str, object]]:
+    """Return stable expected-vs-actual rows for registered wrong-topic assets."""
+    raw_rows = parameters.get("wrong_topic_assets")
+    if not isinstance(raw_rows, list):
+        return []
+    payload_order = {"state": 0, "metadata": 1, "pointset": 2}
+    rows: dict[str, dict[str, object]] = {}
+    payloads_by_asset: dict[
+        str, dict[tuple[str, str, str], dict[str, str]]
+    ] = {}
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        asset_id = str(raw.get("asset_id") or "").strip()
+        if not asset_id:
+            continue
+        raw_payloads = raw.get("payloads")
+        asset_payloads = payloads_by_asset.setdefault(asset_id, {})
+        for payload in raw_payloads if isinstance(raw_payloads, list) else []:
+            if not isinstance(payload, dict):
+                continue
+            payload_type = str(payload.get("payload_type") or "").strip()
+            expected_topic = str(payload.get("expected_topic") or "").strip()
+            actual_topic = str(payload.get("actual_topic") or "").strip()
+            if payload_type not in _PAYLOAD_TYPES or not actual_topic:
+                continue
+            key = (payload_type, expected_topic, actual_topic)
+            asset_payloads[key] = {
+                "payload_type": payload_type,
+                "expected_topic": expected_topic,
+                "actual_topic": actual_topic,
+            }
+        row: dict[str, object] = {
+            "asset_id": asset_id,
+            "system": _system_name(raw.get("system")),
+            "expected_topic_root": str(
+                raw.get("expected_topic_root") or ""
+            ).strip(),
+            "actual_topic_root": str(raw.get("actual_topic_root") or "").strip(),
+            "last_seen": str(raw.get("last_seen") or "").strip() or None,
+        }
+        existing = rows.get(asset_id)
+        row_rank = (
+            *_timestamp_sort_key(row["last_seen"]),
+            str(row["system"]),
+            str(row["expected_topic_root"]),
+            str(row["actual_topic_root"]),
+        )
+        existing_rank = (
+            *_timestamp_sort_key(existing["last_seen"]),
+            str(existing["system"]),
+            str(existing["expected_topic_root"]),
+            str(existing["actual_topic_root"]),
+        ) if existing is not None else None
+        if existing_rank is None or row_rank > existing_rank:
+            rows[asset_id] = row
+    for asset_id, row in rows.items():
+        row["payloads"] = sorted(
+            payloads_by_asset.get(asset_id, {}).values(),
+            key=lambda payload: (
+                payload_order.get(payload["payload_type"], 99),
+                payload["actual_topic"],
+                payload["expected_topic"],
+            ),
+        )
+    return [
+        rows[key]
+        for key in sorted(rows, key=lambda item: (item.casefold(), item))
+    ]
+
+
 def _payload_type_from_topic(value: object) -> str | None:
     topic = str(value or "").casefold().rstrip("/")
     if topic.endswith("/state"):
@@ -94,6 +177,11 @@ def _payload_type_from_topic(value: object) -> str | None:
 def payload_type_for_issue(issue: object) -> str | None:
     """Return the payload facet an issue belongs to, when structured evidence allows it."""
     issue_type = str(_issue_value(issue, "issue_type") or "").casefold()
+    # Topic compliance is tracked separately from the validity of the JSON
+    # content received on that topic. Do not let the actual topic suffix attach
+    # this finding to the state/metadata/pointset content result.
+    if issue_type == "topic_mismatch":
+        return None
     direct = {
         "state_validation": "state",
         "metadata_validation": "metadata",
@@ -178,9 +266,13 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
         payload_type: {
             "received": False,
             "topic": str(source.get(f"{payload_type}_topic") or "") or None,
+            "topics": [],
             "received_at": None,
         }
         for payload_type in _PAYLOAD_TYPES
+    }
+    observed_topics: dict[str, set[str]] = {
+        payload_type: set() for payload_type in _PAYLOAD_TYPES
     }
     for payload_type in _PAYLOAD_TYPES:
         key = f"{payload_type}_payload"
@@ -204,12 +296,23 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
         if message_payload_type is None:
             continue
         observations[message_payload_type]["received"] = True
-        observations[message_payload_type]["topic"] = (
-            str(message.get("topic") or "") or None
-        )
+        observed_topic = str(message.get("topic") or "")
+        if observed_topic:
+            observed_topics[message_payload_type].add(observed_topic)
         if message.get("received_at"):
             observations[message_payload_type]["received_at"] = str(
                 message["received_at"]
+            )
+    for payload_type in _PAYLOAD_TYPES:
+        topics = sorted(
+            observed_topics[payload_type],
+            key=lambda topic: (topic.casefold(), topic),
+        )
+        observations[payload_type]["topics"] = topics
+        if topics:
+            expected_topic = str(source.get(f"{payload_type}_topic") or "")
+            observations[payload_type]["topic"] = (
+                expected_topic if expected_topic in topics else topics[0]
             )
     return observations
 
@@ -244,6 +347,7 @@ def _empty_asset_metrics() -> dict[str, int]:
         "with_issues": 0,
         "successfully_validated": 0,
         "unexpected": 0,
+        "wrong_topic": 0,
     }
 
 
@@ -286,7 +390,13 @@ def _latest_observed_at(payloads: Iterable[dict[str, object]]) -> str | None:
 
 def _fault_row(issue: object, system_by_asset: dict[str, str]) -> dict[str, object]:
     asset_id = str(_issue_value(issue, "asset_id") or "") or None
-    return {
+    issue_type = str(_issue_value(issue, "issue_type") or "").casefold()
+    topic_compliance_payload_type = None
+    if issue_type == "topic_mismatch":
+        candidate = str(_issue_value(issue, "match_basis") or "").casefold()
+        if candidate in _PAYLOAD_TYPES:
+            topic_compliance_payload_type = candidate
+    row = {
         "issue_id": str(_issue_value(issue, "issue_id") or ""),
         "asset_id": asset_id,
         "system": system_by_asset.get(str(asset_id), UNSPECIFIED_SYSTEM),
@@ -300,6 +410,9 @@ def _fault_row(issue: object, system_by_asset: dict[str, str]) -> dict[str, obje
         "suggested_action": _issue_value(issue, "suggested_action"),
         "raw_evidence_uri": _issue_value(issue, "raw_evidence_uri"),
     }
+    if topic_compliance_payload_type is not None:
+        row["topic_compliance_payload_type"] = topic_compliance_payload_type
+    return row
 
 
 def build_validation_summary_v1(
@@ -325,6 +438,10 @@ def build_validation_summary_v1(
         fallback_expected_asset_ids,
         fallback_observed_asset_ids,
     )
+    wrong_topic_assets = _wrong_topic_assets(parameters)
+    wrong_topic_asset_ids = {
+        str(row["asset_id"]) for row in wrong_topic_assets
+    }
 
     system_by_asset: dict[str, str] = {}
     for source, _synthetic, _synthetic_observed in sources:
@@ -362,6 +479,7 @@ def build_validation_summary_v1(
                     "blocking_issue_count": payload_blocking,
                     "successfully_validated": received and payload_blocking == 0,
                     "topic": observations[payload_type]["topic"],
+                    "topics": observations[payload_type]["topics"],
                     "received_at": observations[payload_type]["received_at"],
                 }
             )
@@ -407,6 +525,9 @@ def build_validation_summary_v1(
         metrics["not_observed"] = metrics["expected"] - metrics["observed"]
         metrics["with_issues"] = sum(bool(row["issue_count"]) for row in rows)
         metrics["successfully_validated"] = sum(bool(row["successfully_validated"]) for row in rows)
+        metrics["wrong_topic"] = sum(
+            str(row["asset_id"]) in wrong_topic_asset_ids for row in rows
+        )
         return metrics
 
     def aggregate_payloads(rows: list[dict[str, object]]) -> dict[str, int]:
@@ -466,6 +587,7 @@ def build_validation_summary_v1(
     unexpected_devices = _unexpected_devices(parameters)
     asset_metrics = aggregate_assets(asset_results)
     asset_metrics["unexpected"] = len(unexpected_devices)
+    asset_metrics["wrong_topic"] = len(wrong_topic_assets)
     return {
         "schema_version": VALIDATION_SUMMARY_SCHEMA_VERSION,
         "asset_metrics": asset_metrics,
@@ -480,4 +602,5 @@ def build_validation_summary_v1(
         "unexpected_devices_measurement_scope": (
             str(parameters.get("unexpected_devices_measurement_scope") or "").strip() or None
         ),
+        "wrong_topic_assets": wrong_topic_assets,
     }

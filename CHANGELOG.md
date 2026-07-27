@@ -5,6 +5,38 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.29] - 2026-07-27
+
+### Added
+
+- Registered assets found on a wrong but safely scoped MQTT topic are linked
+  back to their register identity, content-validated, counted, and listed with
+  expected and actual topic evidence.
+- UDMI XLSX exports add `Wrong Topic Assets` and `Annotated Input Register`;
+  ZIP exports add `wrong_topic_assets.json` and
+  `annotated_input_register.json`. The annotated copy preserves the exact
+  register rows frozen on the source validation run. Word and PDF reports
+  include the compact wrong-topic detail table.
+- Engineers can delete one generated report or a validated multi-report
+  selection without deleting source runs or shared content-addressed sync bytes.
+- Payload sections with eight or more findings provide a keyboard-accessible
+  jump to the matching expected-versus-observed control.
+- The report format picker can generate PDF, Word, Excel, and evidence-pack
+  outputs together from one frozen run scope and report title.
+
+### Fixed
+
+- Shared MQTT capture now sizes its default retained-topic ceiling to the
+  concrete register subscription. A 554-asset register gets 2,216 expected
+  topic slots instead of stopping at the previous fixed 500-topic ceiling.
+- A pointset that did not arrive no longer creates one missing-point issue for
+  every expected register point. It is shown as `Not received`, while a received
+  empty or malformed payload still runs through validation.
+- Observation, topic match, and payload compliance remain separate states, so a
+  wrong-topic publisher is no longer described as silent.
+- An expanded asset drill-down has one continuous outline around its header and
+  payload detail, making the active group clear in long inspector views.
+
 ## [0.1.28] - 2026-07-27
 
 ### Added
@@ -1638,6 +1670,8 @@ validation before production rollout:
 See [docs/phase5-onsite-validation.md](docs/phase5-onsite-validation.md) for the
 full checklist.
 
+[0.1.29]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.29
+[0.1.28]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.28
 [0.1.27]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.27
 [0.1.13]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.13
 [0.1.12]: https://github.com/Rvs006/smart-commissioning-app/releases/tag/v0.1.12

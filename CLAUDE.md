@@ -70,32 +70,22 @@ collection order is alphabetical — keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** — switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-23. **Verify v0.1.24 publication on
-  GitHub.** Call it released only after the matching tag, workflow-built portable
-  bundle, and release-body digests exist and are verified. The v0.1.24 source
-  applies the July UDMI report review: the Results table,
-  headline metrics, Inspector, and generated report share one server-validated
-  payload selection; an active zero-match filter stays empty. Unexpected MQTT
-  publishers are measured only inside a safe register-derived scope and remain
-  outside expected, observed, compliance, Fault Matrix, and issue totals.
-  Payloads With Issues counts received expected payloads only; Not Received is
-  separate. Validation uses a pinned Google Digital Buildings unit vocabulary,
-  keeps ppm and ppb distinct, checks timestamp notation without rejecting
-  seasonal offsets, and continues required-field checks when the register
-  supplies the supported version. The nested validation summary is schema 1.1;
-  stored 1.0 summaries remain readable. Their Payloads With Issues count is
-  recomputed from complete retained rows, or capped at Received for compact
-  summaries. UDMI reports created on v0.1.24 freeze either the derived model or
-  the redacted records needed by pre-contract renderers, so later downloads
-  cannot drift if source records change. Pre-upgrade report jobs retain the
-  legacy rebuild-from-source fallback.
-  Human-readable PDF, DOCX, and XLSX outputs omit Source Run, Severity, and
-  Evidence URI; scoped `findings.json` retains audit provenance. The supplied
-  field review covers the Results view and generated UDMI reports. Live MQTT
-  transport, real BACnet hardware, hosted scale, and hub validation remain open
-  under GitHub issue #4. A BBMD remains optional per site; see
-  `docs/protocol-conformance.md`. UDMI 1.5.2 stays pinned. Secrets export is an
-  explicit engineer-only plaintext workflow; encryption remains deferred.
+- **Current handoff**: status as of 2026-07-27. v0.1.28 is published from signed
+  tag commit `ba11496`. The dirty working tree prepares v0.1.29 and must be
+  preserved. Shared MQTT capture now keeps an explicit positive
+  `max_messages`; otherwise it uses the larger of 500 or the number of concrete
+  validation filters. Registered assets on wrong topics are matched only by one
+  exact, case-sensitive topic segment inside a bounded parent scope. Their
+  payload content is still validated and reported with expected and actual
+  topics. The exact imported register is frozen with the run and annotated in
+  XLSX and ZIP outputs. Missing payloads read Not Received and do not create
+  synthetic point-card fan-out. Generate All, report deletion, the eight-issue
+  focus jump, and the continuous expanded-asset outline are implemented with
+  tests. Before a v0.1.29 release, rerun all suites, build with an existing Node
+  22 runtime, visually inspect DOCX pagination on a release machine, and complete
+  both the unfiltered 554-asset scale run and the longest-cadence field run. Do
+  not claim field acceptance before both runs pass
+  `docs/v0.1.29-field-acceptance-checklist.md`.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational

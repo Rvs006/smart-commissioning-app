@@ -258,22 +258,102 @@ class UdmiValidationExportApiTests(ApiTestCase):
                         "expected_schedule": {"asset_id": "AHU-1", "system": "BMS"},
                         "state_topic": "demo-site/AHU-1/state",
                         "state_payload": {"timestamp": "2026-07-20T10:00:00Z"},
+                        "messages": [
+                            {
+                                "topic": "demo-site/AHU-1/state",
+                                "payload": {"timestamp": "2026-07-20T10:00:00Z"},
+                            },
+                            {
+                                "topic": "demo-site/wrong/AHU-1/state",
+                                "payload": {"timestamp": "2026-07-20T10:00:01Z"},
+                            },
+                        ],
                     }
                 ]
             },
             [],
         )
+        self.assertEqual(
+            summary["asset_results"][0]["payload_results"][0]["topics"],
+            [
+                "demo-site/AHU-1/state",
+                "demo-site/wrong/AHU-1/state",
+            ],
+        )
         validator.validate(summary)
+
+        with_wrong_topic = copy.deepcopy(summary)
+        with_wrong_topic["asset_metrics"]["wrong_topic"] = 1
+        with_wrong_topic["system_metrics"][0]["asset_metrics"]["wrong_topic"] = 1
+        with_wrong_topic["wrong_topic_assets"] = [
+            {
+                "asset_id": "AHU-1",
+                "system": "BMS",
+                "expected_topic_root": "demo-site/floor-1/AHU-1",
+                "actual_topic_root": "demo-site/floor-0/AHU-1",
+                "payloads": [
+                    {
+                        "payload_type": "state",
+                        "expected_topic": "demo-site/floor-1/AHU-1/state",
+                        "actual_topic": "demo-site/floor-0/AHU-1/state",
+                    }
+                ],
+                "last_seen": "2026-07-20T10:00:00Z",
+            }
+        ]
+        with_wrong_topic["fault_rows"].append(
+            {
+                "issue_id": "topic-mismatch-1",
+                "asset_id": "AHU-1",
+                "system": "BMS",
+                "payload_type": None,
+                "topic_compliance_payload_type": "state",
+                "category": "other_issues",
+                "severity": "high",
+                "description": "Registered state payload used the wrong topic.",
+                "point_name": None,
+                "expected_value": "demo-site/floor-1/AHU-1/state",
+                "observed_value": "demo-site/floor-0/AHU-1/state",
+                "suggested_action": "Correct the publisher topic.",
+                "raw_evidence_uri": None,
+            }
+        )
+        validator.validate(with_wrong_topic)
+
+        malformed_wrong_topic = copy.deepcopy(with_wrong_topic)
+        malformed_wrong_topic["wrong_topic_assets"][0]["payloads"][0][
+            "actual_topic"
+        ] = ""
+        self.assertTrue(list(validator.iter_errors(malformed_wrong_topic)))
+        malformed_topic_facet = copy.deepcopy(with_wrong_topic)
+        malformed_topic_facet["fault_rows"][0][
+            "topic_compliance_payload_type"
+        ] = "config"
+        self.assertTrue(list(validator.iter_errors(malformed_topic_facet)))
+
+        count_only_wrong_topic = copy.deepcopy(summary)
+        count_only_wrong_topic["asset_metrics"]["wrong_topic"] = 1
+        count_only_wrong_topic["system_metrics"][0]["asset_metrics"][
+            "wrong_topic"
+        ] = 1
+        count_only_wrong_topic.pop("wrong_topic_assets")
+        validator.validate(count_only_wrong_topic)
 
         legacy = copy.deepcopy(summary)
         legacy["schema_version"] = "1.0"
         legacy["asset_metrics"].pop("unexpected")
+        legacy["asset_metrics"].pop("wrong_topic")
         legacy["payload_metrics"].pop("not_received")
         legacy.pop("unexpected_devices")
         legacy.pop("unexpected_devices_measured")
         legacy.pop("unexpected_devices_measurement_scope")
+        legacy.pop("wrong_topic_assets")
+        for asset in legacy["asset_results"]:
+            for payload in asset["payload_results"]:
+                payload.pop("topics", None)
         for system in legacy["system_metrics"]:
             system["asset_metrics"].pop("unexpected")
+            system["asset_metrics"].pop("wrong_topic")
             system["payload_metrics"].pop("not_received")
         validator.validate(legacy)
 

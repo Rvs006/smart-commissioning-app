@@ -284,6 +284,8 @@ Smart Commissioning Tool Specification.pdf
 | [docs/release-notes-v0.1.28.md](docs/release-notes-v0.1.28.md) | Shared lifecycle parity, complete Sync v2 evidence, Docker publication, and release hashes |
 | [docs/migration-rollback-v0.1.28.md](docs/migration-rollback-v0.1.28.md) | Additive Sync v2 migration, backup, mixed-version operation, downgrade, and restore order |
 | [docs/release-validation-v0.1.28.md](docs/release-validation-v0.1.28.md) | Blocking lifecycle, Sync v2, Docker, Windows, provenance, and cleanup checklist |
+| [docs/release-notes-v0.1.29.md](docs/release-notes-v0.1.29.md) | Scale-aware MQTT capture, wrong-topic evidence, frozen register annotations, report deletion, and release hashes |
+| [docs/v0.1.29-field-acceptance-checklist.md](docs/v0.1.29-field-acceptance-checklist.md) | Markable 554-asset scale and longest-cadence acceptance record |
 | [docs/sync-v2-wire-format.md](docs/sync-v2-wire-format.md) | Signed bundle members, canonical item fields, verification order, and size limits |
 | [docs/sync-v2-credential-scope.md](docs/sync-v2-credential-scope.md) | Dedicated edge credentials, key binding, project/site authorization, and generic failures |
 | [docs/sync-v2-operations.md](docs/sync-v2-operations.md) | Receipt classes, retry state, lost responses, conflicts, and v2-to-v1 negotiation |
@@ -324,6 +326,12 @@ and queued worker execution. It also transfers sealed terminal evidence, signed
 artifact metadata, and exact report bytes through Sync v2. Per-item receipts
 advance only accepted or byte-identical items, while project/site scope failures
 remain generic and unsynchronized.
+
+The v0.1.29 candidate removes the fixed 500-message shared MQTT capture ceiling
+and corrects reporting for absent payloads and registered assets on wrong topics.
+It remains field-pending until an unfiltered 554-asset run and a second run
+covering the longest expected payload cadence both pass the
+[field acceptance checklist](docs/v0.1.29-field-acceptance-checklist.md).
 
 The upgrade adds five Sync v2 tables. Follow
 [the v0.1.28 migration and rollback guide](docs/migration-rollback-v0.1.28.md),

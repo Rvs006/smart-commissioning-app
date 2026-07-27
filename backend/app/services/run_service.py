@@ -506,6 +506,41 @@ class RunService:
         # recovery belong to the periodic recovery task, never to GET or SSE.
         return RunRecord.model_validate(self._store.get_run(run_id))
 
+    def delete_report_runs(
+        self,
+        report_ids: list[str],
+    ) -> list[tuple[str, dict[str, object] | None]]:
+        """Delete validated generated-report rows in one transaction.
+
+        Every requested id is resolved and checked before the first mutation.
+        Source runs therefore cannot be removed through the report API, and a
+        mixed valid/invalid batch leaves all reports intact. The returned signed
+        manifests let the route remove report-owned local bytes after commit;
+        shared content-addressed sync bytes are deliberately outside this method.
+        """
+
+        ordered_ids = list(dict.fromkeys(report_id.strip() for report_id in report_ids))
+        with session_factory(self._engine).begin() as session:
+            rows = session.execute(
+                select(Run).where(Run.id.in_(ordered_ids)).with_for_update()
+            ).scalars().all()
+            rows_by_id = {row.id: row for row in rows}
+            for report_id in ordered_ids:
+                row = rows_by_id.get(report_id)
+                if row is None or row.job_type != "report_generation":
+                    raise FileNotFoundError(report_id)
+
+            deleted: list[tuple[str, dict[str, object] | None]] = []
+            for report_id in ordered_ids:
+                row = rows_by_id[report_id]
+                summary = row.result_summary if isinstance(row.result_summary, dict) else {}
+                raw_manifest = summary.get("artifact_manifest")
+                manifest = dict(raw_manifest) if isinstance(raw_manifest, dict) else None
+                deleted.append((report_id, manifest))
+                session.delete(row)
+        logger.info("report runs deleted count=%s", len(deleted))
+        return deleted
+
     def list_runs(
         self,
         *,

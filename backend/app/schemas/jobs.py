@@ -354,3 +354,20 @@ class ReportSummary(BaseModel):
 
 class ReportListResponse(BaseModel):
     reports: list[ReportSummary] = Field(default_factory=list)
+
+
+class ReportDeleteRequest(BaseModel):
+    report_ids: list[str] = Field(min_length=1)
+
+    @field_validator("report_ids")
+    @classmethod
+    def validate_report_ids(cls, value: list[str]) -> list[str]:
+        if any(not report_id.strip() for report_id in value):
+            raise ValueError("Report IDs must not be blank.")
+        return value
+
+
+class ReportDeleteResponse(BaseModel):
+    deleted_report_ids: list[str]
+    deleted_count: int
+    artifact_cleanup_warnings: list[str] = Field(default_factory=list)

@@ -270,6 +270,20 @@ def _register_rejection_info(record: dict) -> dict:
     }
 
 
+def _register_row_value(row: dict, *headings: str) -> object:
+    """Read a canonical register field from an exact-source row."""
+
+    lookup = {
+        " ".join(str(key).strip().casefold().split()): value
+        for key, value in row.items()
+    }
+    for heading in headings:
+        key = " ".join(heading.strip().casefold().split())
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
 def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[dict], dict]:
     """(assets, register_info) from the newest mqtt_register import.
 
@@ -284,6 +298,47 @@ def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[
         if rows:
             entries, duplicate_records = _merge_asset_rows(rows)
             register_info = _register_rejection_info(record)
+            # Freeze the exact accepted register evidence on the validation run.
+            # Reports must never look up whichever import happens to be newest at
+            # render time, because that could annotate a different register from
+            # the one the validator actually used. Dict insertion order preserves
+            # the imported column order; the union handles defensive legacy rows
+            # whose optional columns differ.
+            raw_summary = record.get("summary")
+            summary = raw_summary if isinstance(raw_summary, dict) else {}
+            raw_source_columns = summary.get("source_columns")
+            raw_source_rows = summary.get("accepted_source_rows")
+            source_rows = (
+                [dict(row) for row in raw_source_rows if isinstance(row, dict)]
+                if isinstance(raw_source_rows, list)
+                else []
+            )
+            # The source and canonical lists were stored in lockstep. Fall back
+            # to legacy accepted rows if older data is incomplete.
+            if len(source_rows) != len(rows):
+                source_rows = [dict(row) for row in rows if isinstance(row, dict)]
+                raw_source_columns = []
+            register_columns = (
+                [str(column) for column in raw_source_columns]
+                if isinstance(raw_source_columns, list)
+                else []
+            )
+            register_rows = [
+                {str(key): value for key, value in source_row.items()}
+                for source_row in source_rows
+            ]
+            for row in register_rows:
+                for column in row:
+                    if column not in register_columns:
+                        register_columns.append(column)
+            register_info.update(
+                {
+                    "register_import_id": record.get("import_id"),
+                    "register_import_filename": record.get("original_filename"),
+                    "register_columns": register_columns,
+                    "register_rows": register_rows,
+                }
+            )
             if duplicate_records:
                 register_info["register_duplicate_asset_ids"] = duplicate_records
             return entries, register_info
@@ -320,6 +375,16 @@ def create_udmi_validation_run(
         if asset_id and assets:
             chosen = next((a for a in assets if asset_id == a["expected_schedule"].get("asset_id")), assets[0])
             assets = [chosen]
+            chosen_asset_id = str(chosen["expected_schedule"].get("asset_id") or "")
+            register_rows = register_info.get("register_rows")
+            if isinstance(register_rows, list):
+                register_info["register_rows"] = [
+                    row
+                    for row in register_rows
+                    if isinstance(row, dict)
+                    and chosen_asset_id
+                    == str(_register_row_value(row, "Asset ID", "Asset name") or "")
+                ]
         if assets:
             if len(assets) == 1:
                 # A caller may pair the single register row with directly

@@ -229,12 +229,30 @@ export type UdmiAssetMetrics = {
   // Added to the 1.0 snapshot contract after initial release. Optional keeps
   // stored pre-upgrade runs readable; the UI normalises an absent value to 0.
   unexpected?: number;
+  // Registered assets observed on a topic root that differs from the register.
+  // Optional keeps summaries stored before wrong-topic classification readable.
+  wrong_topic?: number;
 };
 
 export type UdmiUnexpectedDevice = {
   id: string;
   topic_root: string;
   topics: string[];
+  last_seen: string | null;
+};
+
+export type UdmiWrongTopicPayload = {
+  payload_type: "state" | "metadata" | "pointset";
+  expected_topic: string;
+  actual_topic: string;
+};
+
+export type UdmiWrongTopicAsset = {
+  asset_id: string;
+  system: string;
+  expected_topic_root: string;
+  actual_topic_root: string;
+  payloads: UdmiWrongTopicPayload[];
   last_seen: string | null;
 };
 
@@ -325,6 +343,9 @@ export type UdmiValidationSummaryV1 = {
   unexpected_devices?: UdmiUnexpectedDevice[];
   unexpected_devices_measured?: boolean;
   unexpected_devices_measurement_scope?: string | null;
+  // Registered assets found outside their expected topic roots remain expected
+  // assets. They are separate from truly unexpected publishers.
+  wrong_topic_assets?: UdmiWrongTopicAsset[];
 };
 
 export type UdmiReportScopeV1 = {
@@ -384,6 +405,12 @@ export type ReportSummary = {
 
 export type ReportListResponse = {
   reports: ReportSummary[];
+};
+
+export type DeleteReportsResponse = {
+  deleted_report_ids: string[];
+  deleted_count: number;
+  artifact_cleanup_warnings: string[];
 };
 
 // Mirrors backend app.schemas.jobs.JobSummary. Run lists return summaries only;
@@ -1293,6 +1320,17 @@ export function createReport(input: {
 
 export function listReports(context?: ApiRequestContext): Promise<ReportListResponse> {
   return request<ReportListResponse>("/reports", undefined, context);
+}
+
+export function deleteReports(input: {
+  reportIds: string[];
+  context?: ApiRequestContext;
+}): Promise<DeleteReportsResponse> {
+  return request<DeleteReportsResponse>("/reports/delete", {
+    body: JSON.stringify({ report_ids: input.reportIds }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+  }, input.context);
 }
 
 export type ListRunsParams = {

@@ -156,6 +156,36 @@ def load_report_artifact(manifest: dict[str, Any]) -> bytes:
     return artifact
 
 
+def delete_report_artifact(manifest: dict[str, Any], *, report_id: str) -> bool:
+    """Remove one report-owned local artifact without touching shared sync bytes.
+
+    The local writer stores a single basename shaped ``{report_id}-{sha256}.ext``.
+    Requiring that exact ownership boundary prevents a forged or stale manifest
+    from traversing directories or deleting another report's file. Missing bytes
+    are already clean and return ``False``.
+    """
+
+    if manifest.get("report_id") != report_id:
+        raise RuntimeError("Stored report artifact ownership does not match the report.")
+    relative = manifest.get("artifact_relpath")
+    if not isinstance(relative, str) or not relative or Path(relative).name != relative:
+        raise RuntimeError("Stored report artifact path is invalid.")
+    if not relative.startswith(f"{report_id}-"):
+        raise RuntimeError("Stored report artifact path is not owned by the report.")
+    root = ARTIFACTS_ROOT.resolve()
+    target = root / relative
+    if target.parent.resolve() != root:
+        raise RuntimeError("Stored report artifact path escaped the artifact root.")
+    try:
+        # Unlink the owned directory entry, not its resolved target. A stale or
+        # malicious same-directory symlink must never delete another report's
+        # bytes, and a dangling symlink still needs to be removed.
+        target.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def store_content_addressed_artifact(artifact: bytes, artifact_sha256: str) -> str:
     """Store verified sync bytes under a hub-owned SHA-256 path."""
 

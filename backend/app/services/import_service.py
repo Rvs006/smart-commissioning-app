@@ -77,10 +77,6 @@ class ImportProfile:
         return (*self.required_columns, *self.optional_columns)
 
 
-def _normalize_header(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip())
-
-
 def _normalize_key(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip().casefold())
 
@@ -804,6 +800,7 @@ class ImportService:
         errors: list[ImportErrorRecord] = []
         warnings: list[ImportErrorRecord] = []
         accepted_rows: list[dict[str, str]] = []
+        accepted_source_rows: list[dict[str, str]] = []
 
         if missing_columns:
             errors.extend(
@@ -819,7 +816,10 @@ class ImportService:
             # Cross-row mqtt_register state: identity -> topic roots of its
             # first errorless row (per batch, so nothing leaks across imports).
             mqtt_roots_by_identity: dict[str, frozenset[str]] = {}
-            for row_number, row in enumerate(mapped_rows, start=2):
+            for row_number, (row, source_row) in enumerate(
+                zip(mapped_rows, rows, strict=True),
+                start=2,
+            ):
                 row_errors = profile.validate_row(row, row_number)
                 # Warnings never affect acceptance and are collected even for
                 # rejected rows, so one re-upload can fix everything at once.
@@ -844,6 +844,7 @@ class ImportService:
                     errors.extend(row_errors)
                 else:
                     accepted_rows.append(row)
+                    accepted_source_rows.append(dict(source_row))
 
         status = self._status(
             total_rows=len(mapped_rows),
@@ -868,6 +869,18 @@ class ImportService:
         )
         error_report = ImportErrorReport(import_id=import_id, errors=errors)
 
+        stored_summary = summary.model_dump(mode="json")
+        source_columns: list[str] = []
+        for source_row in rows:
+            for column in source_row:
+                if column not in source_columns:
+                    source_columns.append(column)
+        # Internal evidence metadata. ImportBatchSummary intentionally ignores
+        # these keys at the API boundary, while ImportRepository.list retains
+        # them for the exact register snapshot captured by validation runs.
+        stored_summary["source_columns"] = source_columns
+        stored_summary["accepted_source_rows"] = accepted_source_rows
+
         self._repository.create(
             import_id=import_id,
             import_type=import_type,
@@ -875,7 +888,7 @@ class ImportService:
             site_id=site_id,
             original_filename=Path(file_name).name,
             stored_file_path=str(stored_path),
-            summary=summary.model_dump(mode="json"),
+            summary=stored_summary,
             accepted_rows=accepted_rows,
             errors=[error.model_dump(mode="json") for error in errors],
             created_at=summary.created_at,
@@ -947,7 +960,15 @@ class ImportService:
                     "Excel CSV save). Re-save it as 'CSV UTF-8 (comma delimited)'."
                 )
             for raw_row in reader:
-                row = {_normalize_header(key): str(value or "").strip() for key, value in raw_row.items() if key is not None}
+                # Preserve the source headings for report evidence. Header
+                # matching is normalised later by ``_canonicalize_rows``; doing
+                # that here erased the exact input structure before a
+                # validation run could freeze it.
+                row = {
+                    str(key): str(value or "").strip()
+                    for key, value in raw_row.items()
+                    if key is not None
+                }
                 if any(value.strip() for value in row.values()):
                     rows.append(row)
         except csv.Error as error:
@@ -962,7 +983,9 @@ class ImportService:
         sheet = workbook.active
         iterator = sheet.iter_rows(values_only=True)
         try:
-            headers = [_normalize_header(value) for value in next(iterator)]
+            # As with CSV, keep the workbook's headings verbatim. Canonical
+            # matching remains whitespace- and case-insensitive downstream.
+            headers = [str(value or "") for value in next(iterator)]
         except StopIteration as error:
             raise ValueError("XLSX file is empty.") from error
         rows: list[dict[str, str]] = []

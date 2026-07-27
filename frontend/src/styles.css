@@ -675,10 +675,17 @@ label {
 .home-actions,
 .topbar-actions,
 .hero-actions,
-.chip-row {
+.chip-row,
+.report-list-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.report-list-heading:focus-visible {
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 
 .primary-button,
@@ -723,6 +730,23 @@ label {
   border-color: var(--accent-hover);
   background: var(--accent-bg);
   color: var(--accent-hover);
+}
+
+.secondary-button.destructive {
+  color: var(--red);
+}
+
+.secondary-button.destructive:not(:disabled):hover {
+  border-color: var(--red);
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.secondary-button.destructive:disabled,
+.secondary-button.destructive:disabled:hover {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--muted);
 }
 
 .primary-button:not(:disabled):hover {
@@ -2031,6 +2055,12 @@ input.field-expired {
   background: var(--surface-2);
 }
 
+.asset-group.open {
+  border-color: color-mix(in srgb, var(--ink) 42%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--ink) 42%, transparent);
+  outline-offset: -1px;
+}
+
 .asset-group-toggle {
   display: flex;
   flex-direction: column;
@@ -2102,6 +2132,18 @@ input.field-expired {
   font-size: 11px;
   font-weight: 760;
   text-transform: uppercase;
+}
+
+.payload-type-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.payload-type-heading .secondary-button {
+  flex: 0 0 auto;
 }
 
 /* Row shading for live result rows: pass/fail for UDMI verdicts AND IP
@@ -2281,6 +2323,10 @@ input.field-expired {
 
 .payload-verdict.fail {
   color: var(--red);
+}
+
+.payload-verdict.neutral {
+  color: var(--muted);
 }
 
 /* Expected-vs-observed payload panels sit side by side wherever there's room

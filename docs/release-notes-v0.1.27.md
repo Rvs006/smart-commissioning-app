@@ -84,6 +84,10 @@ warning. Check the ZIP and EXE SHA-256 values against this release, then choose
 Company application allow-listing may require IT approval for the recorded EXE
 hash.
 
+- Source commit: `{{COMMIT}}`
+- EXE SHA-256: `{{EXE_SHA256}}`
+- ZIP SHA-256: `{{ZIP_SHA256}}`
+
 ## Known boundary
 
 Sync v2 is scheduled for v0.1.28 together with shared API/worker heartbeat
@@ -91,12 +95,6 @@ infrastructure and Docker lifecycle parity. v0.1.27 keeps the compatible v1 sync
 path. It leaves digest conflicts visible and unsynchronized, and it does not send
 the exact report bytes or signed artifact manifest to a hub. See
 `docs/sync-v2-v0.1.28.md`.
-
-## Windows portable evidence
-
-- Source commit: `{{COMMIT}}`
-- EXE SHA-256: `{{EXE_SHA256}}`
-- ZIP SHA-256: `{{ZIP_SHA256}}`
 
 Publication also carries `SHA256SUMS.txt`, Windows and hosted release-evidence
 JSON, the migration and rollback guide, and CycloneDX inventories for Python,

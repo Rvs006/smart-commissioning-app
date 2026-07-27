@@ -4,7 +4,9 @@ v0.1.27 stopped healthy Windows captures from expiring near 63 seconds. v0.1.28
 applies that ownership model to every execution profile, then completes the
 deferred Sync v2 evidence path for hosted deployments.
 
-## Shared run ownership
+## What changed
+
+### Shared run ownership
 
 - Backend asynchronous inline, backend synchronous inline, and queued workers use
   one owned-run heartbeat guard and one timing policy.
@@ -26,7 +28,7 @@ deferred Sync v2 evidence path for hosted deployments.
   starts an inline copy, even when the broker accepted a message before the client
   observed an error.
 
-## Sync v2
+### Sync v2
 
 Sync v2 sends complete, immutable evidence rather than a mutable run projection:
 
@@ -60,7 +62,7 @@ cannot set a v2 acknowledgement.
 Wire format, credential scope, retry receipts, and mixed-version behavior ship as
 separate release documents.
 
-## Docker parity and publication
+### Docker parity and publication
 
 The final hosted gate uses real Compose containers for API, worker, frontend,
 Postgres, and password-protected Redis. It covers queued and deliberate inline
@@ -79,7 +81,7 @@ immutable references, never a mutable tag by itself:
 revision, and source labels. The three image CycloneDX SBOMs are generated after
 pulling those published digests.
 
-## Windows portable
+### Windows portable changes
 
 The complete v0.1.27 portable suite runs again against a fresh workflow-built
 v0.1.28 ZIP. It checks a path containing spaces, root page, health, readiness,
@@ -88,12 +90,7 @@ successful repeat completion, report provenance, byte-identical repeat download,
 logs, and thread cleanup. The public acceptance also launches the exact extracted
 EXE from File Explorer.
 
-The portable bundle remains unsigned. Verify the GitHub release source, ZIP hash,
-and EXE hash before choosing Windows SmartScreen's **More info** and **Run
-anyway**. Managed laptops may need the recorded EXE hash added to an application
-allow-list.
-
-## Migration and rollback
+### Migration and rollback
 
 v0.1.28 adds only Sync v2 credential, scope, artifact, receipt, and delivery-state
 storage. Existing run, context, result, seal, report, secret, and v1 Sync records
@@ -104,7 +101,7 @@ can read it safely. A schema downgrade removes the new Sync v2 tables and their
 audit state, so export required receipts and artifacts first. Follow
 `MIGRATION_ROLLBACK.md` and `DOCKER_DEPLOYMENT_ROLLBACK.md` for the exact order.
 
-## Known boundaries
+### Known boundaries
 
 - Legacy report runs that lack a v0.1.28 terminal result, seal, frozen snapshot,
   or exact signed artifact are not relabelled as Sync v2 evidence.
@@ -113,7 +110,15 @@ audit state, so export required receipts and artifacts first. Follow
 - Real controller, broker ACL, certificate-chain, and site-network validation
   still belongs in the commissioning environment.
 
-## Release evidence
+## Windows portable download
+
+Download `Smart_Commissioning_App_Windows_Portable.zip`, extract it into a new
+empty directory, and run `SmartCommissioningApp.exe`. Existing settings and run
+history remain under `%LOCALAPPDATA%\SmartCommissioning`.
+
+The bundle is unsigned. Confirm the ZIP and EXE SHA-256 values below before
+choosing Windows SmartScreen's **More info** and **Run anyway**. Managed laptops
+may need the recorded EXE hash added to an application allow-list.
 
 - Source commit: `{{COMMIT}}`
 - EXE SHA-256: `{{EXE_SHA256}}`

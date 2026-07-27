@@ -5,6 +5,7 @@ import {
   clearApiKey,
   createSessionBoundApiClient,
   createReport,
+  deleteReports,
   downloadFile,
   formatApiDetail,
   getApiKey,
@@ -507,6 +508,26 @@ describe("run and discovery API functions", () => {
     const fetchMock = stubFetch(jsonResponse({ reports: [] }));
     await listReports();
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/reports");
+  });
+
+  it("deletes one or more reports through the batch endpoint", async () => {
+    const fetchMock = stubFetch(
+      jsonResponse({
+        deleted_report_ids: ["report-1", "report-2"],
+        deleted_count: 2,
+        artifact_cleanup_warnings: [],
+      }),
+    );
+
+    await deleteReports({ reportIds: ["report-1", "report-2"] });
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/reports/delete");
+    expect(init?.method).toBe("POST");
+    expect(init?.headers).toMatchObject({ "Content-Type": "application/json" });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      report_ids: ["report-1", "report-2"],
+    });
   });
 
   it("startMqttConfigPublishRun authorizes a live-broker publish so the backend gate passes", async () => {

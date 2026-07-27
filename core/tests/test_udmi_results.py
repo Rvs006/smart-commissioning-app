@@ -4,6 +4,7 @@ from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_results import (
     build_validation_summary_v1,
     fault_category_for_issue,
+    payload_type_for_issue,
 )
 
 
@@ -15,8 +16,10 @@ def _issue(
     description: str,
     *,
     point_name: str | None = None,
+    topic: str | None = None,
     expected_value: str | None = None,
     observed_value: str | None = None,
+    match_basis: str | None = None,
 ) -> ValidationIssueRecord:
     return ValidationIssueRecord(
         issue_id=issue_id,
@@ -25,8 +28,10 @@ def _issue(
         severity=severity,
         description=description,
         point_name=point_name,
+        topic=topic,
         expected_value=expected_value,
         observed_value=observed_value,
+        match_basis=match_basis,
     )
 
 
@@ -110,6 +115,7 @@ class UdmiResultsTests(unittest.TestCase):
                 "with_issues": 2,
                 "successfully_validated": 0,
                 "unexpected": 0,
+                "wrong_topic": 0,
             },
         )
         self.assertEqual(
@@ -274,6 +280,152 @@ class UdmiResultsTests(unittest.TestCase):
         )
         self.assertTrue(summary["unexpected_devices_measured"])
         self.assertEqual(summary["unexpected_devices_measurement_scope"], "site/#")
+
+    def test_wrong_topic_assets_are_additive_versioned_supporting_evidence(self) -> None:
+        summary = build_validation_summary_v1(
+            {
+                "assets": [
+                    {
+                        "expected_schedule": {
+                            "asset_id": "ASSET-001",
+                            "system": "BMS",
+                        },
+                        "state_topic": "hv/bms/floor-01/ASSET-001/state",
+                        "state_payload": {"timestamp": "2026-07-27T10:00:00Z"},
+                    }
+                ],
+                "wrong_topic_assets": [
+                    {
+                        "asset_id": "ASSET-001",
+                        "system": "BMS",
+                        "expected_topic_root": "hv/bms/floor-01/ASSET-001",
+                        "actual_topic_root": "hv/bms/floor-99/ASSET-001",
+                        "payloads": [
+                            {
+                                "payload_type": "state",
+                                "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                                "actual_topic": "hv/bms/floor-99/ASSET-001/state",
+                            }
+                        ],
+                        "last_seen": "2026-07-27T11:00:01+02:00",
+                    },
+                    {
+                        "asset_id": "ASSET-001",
+                        "system": "BMS",
+                        "expected_topic_root": "hv/bms/floor-01/ASSET-001",
+                        "actual_topic_root": "hv/bms/floor-00/ASSET-001",
+                        "payloads": [
+                            {
+                                "payload_type": "state",
+                                "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                                "actual_topic": "hv/bms/floor-00/ASSET-001/state",
+                            }
+                        ],
+                        "last_seen": "2026-07-27T10:00:01+00:00",
+                    }
+                ],
+            },
+            [],
+        )
+
+        self.assertEqual(summary["schema_version"], "1.1")
+        self.assertEqual(summary["asset_metrics"]["wrong_topic"], 1)
+        self.assertEqual(
+            summary["system_metrics"][0]["asset_metrics"]["wrong_topic"], 1
+        )
+        self.assertEqual(
+            summary["wrong_topic_assets"],
+            [
+                {
+                    "asset_id": "ASSET-001",
+                    "system": "BMS",
+                    "expected_topic_root": "hv/bms/floor-01/ASSET-001",
+                    "actual_topic_root": "hv/bms/floor-00/ASSET-001",
+                    "payloads": [
+                        {
+                            "payload_type": "state",
+                            "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                            "actual_topic": "hv/bms/floor-00/ASSET-001/state",
+                        },
+                        {
+                            "payload_type": "state",
+                            "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                            "actual_topic": "hv/bms/floor-99/ASSET-001/state",
+                        }
+                    ],
+                    "last_seen": "2026-07-27T10:00:01+00:00",
+                }
+            ],
+        )
+
+    def test_topic_mismatch_blocks_asset_without_failing_valid_payload_content(self) -> None:
+        mismatch = _issue(
+            "UDMI-TP-0001",
+            "ASSET-001",
+            "topic_mismatch",
+            "high",
+            "Registered asset published state on the wrong topic.",
+            topic="hv/bms/floor-00/ASSET-001/state",
+            expected_value="hv/bms/floor-01/ASSET-001/state",
+            observed_value="hv/bms/floor-00/ASSET-001/state",
+            match_basis="state",
+        )
+        correct_message = {
+            "topic": "hv/bms/floor-01/ASSET-001/state",
+            "payload": {"timestamp": "2026-07-27T10:00:00Z"},
+        }
+        wrong_message = {
+            "topic": "hv/bms/floor-00/ASSET-001/state",
+            "payload": {"timestamp": "2026-07-27T10:00:00Z"},
+        }
+
+        def summary_for(messages: list[dict[str, object]]) -> dict[str, object]:
+            return build_validation_summary_v1(
+                {
+                    "assets": [
+                        {
+                            "expected_schedule": {
+                                "asset_id": "ASSET-001",
+                                "system": "BMS",
+                            },
+                            "state_topic": "hv/bms/floor-01/ASSET-001/state",
+                            "state_payload": {
+                                "timestamp": "2026-07-27T10:00:00Z"
+                            },
+                            "messages": messages,
+                        }
+                    ]
+                },
+                [mismatch],
+            )
+
+        summary = summary_for([correct_message, wrong_message])
+        reverse = summary_for([wrong_message, correct_message])
+
+        self.assertIsNone(payload_type_for_issue(mismatch))
+        self.assertEqual(fault_category_for_issue(mismatch), "other_issues")
+        mismatch_fault = summary["fault_rows"][0]
+        self.assertIsNone(mismatch_fault["payload_type"])
+        self.assertEqual(
+            mismatch_fault["topic_compliance_payload_type"], "state"
+        )
+        state = summary["asset_results"][0]["payload_results"][0]
+        reverse_state = reverse["asset_results"][0]["payload_results"][0]
+        self.assertEqual(state, reverse_state)
+        self.assertEqual(
+            state["topics"],
+            [
+                "hv/bms/floor-00/ASSET-001/state",
+                "hv/bms/floor-01/ASSET-001/state",
+            ],
+        )
+        self.assertEqual(state["topic"], "hv/bms/floor-01/ASSET-001/state")
+        self.assertFalse(state["has_issues"])
+        self.assertTrue(state["successfully_validated"])
+        self.assertFalse(summary["asset_results"][0]["successfully_validated"])
+        self.assertEqual(summary["issue_metrics"], {"blocking": 1, "warning": 0})
+        self.assertEqual(summary["fault_metrics"]["payload_formatting_issues"], 0)
+        self.assertEqual(summary["fault_metrics"]["other_issues"], 1)
 
     def test_legacy_unexpected_issue_cannot_enter_validation_metrics(self) -> None:
         summary = build_validation_summary_v1(
