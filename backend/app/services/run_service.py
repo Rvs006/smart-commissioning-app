@@ -886,15 +886,16 @@ class RunService:
             parameters=parameters,
         )
         # Run attribution: stamp the local edge_id so a run's origin is recorded
-        # before it ever syncs. edge_id is kept OUT of the public _run_to_dict
-        # record (like cancel_requested), so the API response shape is unchanged;
-        # the hub reads it via SyncRepository when a bundle is built/ingested.
-        self._stamp_local_edge_id(str(record["run_id"]))
+        # before it ever syncs. DbRunStore's public record projection omits this
+        # column, so carry the same resolved value in the immediate RunRecord.
+        # Report materialization uses it to bind the signed artifact manifest to
+        # the edge identity that will later sign the outer Sync v2 bundle.
+        local_edge_id = self._stamp_local_edge_id(str(record["run_id"]))
         # Run-lifecycle breadcrumb (run created) — see update_run_status.
         logger.info("run created run_id=%s job_type=%s", record["run_id"], job_type)
-        return RunRecord.model_validate(record)
+        return RunRecord.model_validate({**record, "edge_id": local_edge_id})
 
-    def _stamp_local_edge_id(self, run_id: str) -> None:
+    def _stamp_local_edge_id(self, run_id: str) -> str | None:
         """Record the originating (local) edge id on a freshly created run.
 
         Best-effort and non-fatal: edge_id is provenance metadata, not part of
@@ -906,8 +907,9 @@ class RunService:
         try:
             local_edge_id = edge_identity().edge_id
         except Exception:  # pragma: no cover - identity I/O is best effort
-            return
+            return None
         with self._engine.begin() as connection:
             connection.execute(
                 update(Run).where(Run.id == run_id).values(edge_id=local_edge_id)
             )
+        return local_edge_id

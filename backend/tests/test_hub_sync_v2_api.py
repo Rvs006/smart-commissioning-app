@@ -435,7 +435,10 @@ class HubSyncV2ApiTests(ApiTestCase):
             "renderer_version": "0.1.28",
             "artifact_sha256": sha256_bytes(artifact),
             "artifact_relpath": f"edge-{marker}.{output_format}",
-            "origin": cls.identity.edge_id,
+            # Match POST /reports exactly: the signed artifact takes its origin
+            # from the RunRecord returned by normal report creation. This keeps
+            # the end-to-end accepted receipt sensitive to stale attribution.
+            "origin": str(run.edge_id or "api"),
             "signing_key_id": cls.artifact_key.public_key_fingerprint(),
             "signed_at": run.parameters["report_generated_at"],
         }
