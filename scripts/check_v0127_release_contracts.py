@@ -217,6 +217,14 @@ def check(repo: Path) -> list[str]:
             "$ErrorActionPreference = $savedVerificationPreference",
             "publisher does not restore fail-closed PowerShell error handling",
         ),
+        (
+            "$publishedAssetId = [string]$publishedAsset.id",
+            "publisher does not treat release asset node IDs as strings",
+        ),
+        (
+            "$draftAssetId = [string]$draftAsset.id",
+            "publisher does not retain the draft release asset node ID as a string",
+        ),
         ("verification.verified", "publisher does not require GitHub tag verification"),
         ("workflow_dispatch", "publisher does not retain release-workflow event protection"),
         ("remote main", "publisher does not retain exact-main protection"),
@@ -363,6 +371,27 @@ def check(repo: Path) -> list[str]:
         "publisher can treat git verify-tag's successful stderr as a PS5.1 failure",
         failures,
     )
+    _ordered(
+        publisher,
+        (
+            "$publishedAsset = Get-UniqueReleaseAsset",
+            "$publishedAssetId = [string]$publishedAsset.id",
+            "$draftAssetId = [string]$draftAsset.id",
+            "[string]::IsNullOrWhiteSpace($publishedAssetId)",
+            "[string]::IsNullOrWhiteSpace($draftAssetId)",
+            "$publishedAssetId -cne $draftAssetId",
+            "[int64]$publishedAsset.size",
+        ),
+        "publisher does not compare GraphQL release asset IDs as non-empty strings",
+        failures,
+    )
+    for numeric_type in ("[long]", "[int64]", "[System.Int64]"):
+        if any(
+            f"{numeric_type}${role}Asset.id" in publisher
+            for role in ("published", "draft")
+        ):
+            failures.append("publisher casts GraphQL release asset IDs to integers")
+            break
     _ordered(
         publisher,
         (

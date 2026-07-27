@@ -1574,7 +1574,15 @@ try {
     foreach ($name in $payloadNames) {
         $draftAsset = Get-UniqueReleaseAsset -Assets @($finalView.assets) -Name $name
         $publishedAsset = Get-UniqueReleaseAsset -Assets @($publishedView.assets) -Name $name
-        if ([long]$publishedAsset.id -ne [long]$draftAsset.id -or
+        # `gh release view --json assets` exposes GraphQL node IDs such as
+        # RA_kwDOS4_ANM4dQnKb. They are stable identity strings, not the numeric
+        # REST asset IDs embedded in apiUrl. A numeric cast would reject a valid
+        # publication before the remaining public-state checks can run.
+        $publishedAssetId = [string]$publishedAsset.id
+        $draftAssetId = [string]$draftAsset.id
+        if ([string]::IsNullOrWhiteSpace($publishedAssetId) -or
+            [string]::IsNullOrWhiteSpace($draftAssetId) -or
+            $publishedAssetId -cne $draftAssetId -or
             [int64]$publishedAsset.size -ne [int64]$draftAsset.size -or
             [string]$publishedAsset.digest -cne [string]$draftAsset.digest) {
             throw "PUBLICATION VERIFICATION FAILED: asset identity changed for '$name'."
