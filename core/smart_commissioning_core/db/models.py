@@ -9,6 +9,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     ForeignKey,
     Index,
@@ -388,3 +389,100 @@ class RunLifecycleConflict(Base):
     attempted_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     attempted_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class SyncCredential(Base):
+    """A dedicated edge-to-hub machine credential; plaintext keys are never stored."""
+
+    __tablename__ = "sync_credentials"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    edge_id: Mapped[str] = mapped_column(String(255), index=True)
+    api_key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    signing_key_fingerprint: Mapped[str] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class SyncCredentialScope(Base):
+    """One exact project/site pair an edge credential may submit."""
+
+    __tablename__ = "sync_credential_scopes"
+
+    credential_id: Mapped[str] = mapped_column(
+        ForeignKey("sync_credentials.id", ondelete="CASCADE"), primary_key=True
+    )
+    project_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    site_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+
+
+class SyncArtifact(Base):
+    """Hub-owned location for exact edge report bytes and their signed manifest."""
+
+    __tablename__ = "sync_artifacts"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    byte_size: Mapped[int] = mapped_column(BigInteger)
+    storage_relpath: Mapped[str] = mapped_column(String(1024))
+    manifest_json: Mapped[dict] = mapped_column(JSON)
+    manifest_sha256: Mapped[str] = mapped_column(String(64))
+    file_name: Mapped[str] = mapped_column(String(512))
+    media_type: Mapped[str] = mapped_column(String(255))
+    renderer_version: Mapped[str] = mapped_column(String(64))
+    origin: Mapped[str] = mapped_column(String(255))
+    signing_key_id: Mapped[str] = mapped_column(String(128))
+    received_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class SyncReceipt(Base):
+    """Persistent per-item v2 ingest outcome; no credential or tenant secrets."""
+
+    __tablename__ = "sync_receipts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    credential_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sync_credentials.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    bundle_id: Mapped[str] = mapped_column(String(64), index=True)
+    item_id: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    receipt_class: Mapped[str] = mapped_column(String(64))
+    acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    item_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "credential_id",
+            "bundle_id",
+            "item_id",
+            "receipt_class",
+            name="uq_sync_receipt_retry",
+        ),
+    )
+
+
+class SyncDeliveryState(Base):
+    """Edge-side v2 acknowledgement state; the source of truth for its watermark."""
+
+    __tablename__ = "sync_delivery_state"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    protocol_version: Mapped[str] = mapped_column(String(16), default="2.0")
+    item_sha256: Mapped[str] = mapped_column(String(64))
+    result_sha256: Mapped[str] = mapped_column(String(64))
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_receipt_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_receipt_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)

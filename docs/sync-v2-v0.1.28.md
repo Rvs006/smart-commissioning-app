@@ -1,4 +1,9 @@
-# Sync v2 plan for v0.1.28
+# Historical Sync v2 plan for v0.1.28
+
+Status: implemented for v0.1.28. The released protocol contract now lives in
+`sync-v2-wire-format.md`, `sync-v2-credential-scope.md`, and
+`sync-v2-operations.md`. This file preserves the planning boundary recorded
+when v0.1.27 was cut as the urgent Windows heartbeat fix.
 
 Sync v2 moves from v0.1.27 to v0.1.28. The urgent v0.1.27 release stays focused
 on the Windows portable inline-lease failure and its independent executable

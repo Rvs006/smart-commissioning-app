@@ -1,12 +1,12 @@
 import json
-import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from smart_commissioning_core.db.engine import default_sqlite_url
+from smart_commissioning_core.owned_run_heartbeat import OwnedRunHeartbeatPolicy
 from smart_commissioning_core.sync_identity import (
     EdgeIdentity,
     load_edge_signing_key,
@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     # acceptance and constrained deployments, but unsafe timing is rejected.
     run_lease_seconds: int = 60
     run_heartbeat_seconds: float = 15.0
+    # Stable, non-secret deployment identity folded into deterministic MQTT
+    # client IDs. The worker reads the same environment variable and default,
+    # so queued and inline execution resolve an identical frozen context.
+    deployment_id: str = Field(
+        default="smart-commissioning-local",
+        validation_alias=AliasChoices(
+            "SMART_COMMISSIONING_DEPLOYMENT_ID",
+            "DEPLOYMENT_ID",
+            "deployment_id",
+        ),
+    )
     # Edge->hub synchronization role (smart_commissioning_core.sync). Determines
     # which sync features are active for this instance:
     #   - "standalone" (default): today's single-instance behavior. No sync; the
@@ -67,6 +78,16 @@ class Settings(BaseSettings):
     # The edge sync CLI appends /api/v1/hub/runs/ingest. May be overridden per
     # invocation with --hub-url.
     hub_url: str | None = None
+    # Edge-only Sync v2 bearer secret. It is read from SYNC_HUB_API_KEY (the CLI
+    # also accepts SMART_COMMISSIONING_SYNC_KEY) and must never enter a bundle,
+    # receipt, log record, or release-evidence file.
+    sync_hub_api_key: str | None = None
+    # Fail-closed limits for signed Sync v2 bundles. The compressed request,
+    # declared uncompressed members, and receipt item count are bounded
+    # independently so a small archive cannot expand into unbounded work.
+    max_sync_bundle_bytes: int = 20 * 1024 * 1024
+    max_sync_uncompressed_bytes: int = 200 * 1024 * 1024
+    max_sync_items: int = 500
     # Hub-only: path to a JSON file pinning the edges this hub trusts. The file
     # is a list of objects, each with an "edge_id" and EITHER a
     # "public_key_fingerprint" (16 hex chars) OR a full "pem" / "public_key_pem".
@@ -97,20 +118,27 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @model_validator(mode="after")
-    def validate_run_heartbeat_timing(self) -> "Settings":
-        if self.run_lease_seconds < 15:
-            raise ValueError("run_lease_seconds must be at least 15")
-        if self.run_lease_seconds > 300:
-            raise ValueError("run_lease_seconds must be no more than 300")
-        if not math.isfinite(self.run_heartbeat_seconds):
-            raise ValueError("run_heartbeat_seconds must be finite")
-        if self.run_heartbeat_seconds < 1:
-            raise ValueError("run_heartbeat_seconds must be at least 1")
-        if self.run_heartbeat_seconds * 3 > self.run_lease_seconds:
+    def validate_runtime_bounds(self) -> "Settings":
+        policy = OwnedRunHeartbeatPolicy(
+            lease_seconds=self.run_lease_seconds,
+            interval_seconds=self.run_heartbeat_seconds,
+        )
+        self.run_lease_seconds = policy.lease_seconds
+        self.run_heartbeat_seconds = policy.interval_seconds
+        self.deployment_id = self.deployment_id.strip()
+        if not self.deployment_id or len(self.deployment_id) > 255:
+            raise ValueError("deployment_id must contain between 1 and 255 characters")
+        one_mib = 1024 * 1024
+        two_gib = 2 * 1024 * 1024 * 1024
+        if self.max_sync_bundle_bytes < one_mib:
+            raise ValueError("max_sync_bundle_bytes must be at least 1 MiB")
+        if not self.max_sync_bundle_bytes <= self.max_sync_uncompressed_bytes <= two_gib:
             raise ValueError(
-                "run_heartbeat_seconds must be no more than one third of "
-                "run_lease_seconds"
+                "max_sync_uncompressed_bytes must be at least max_sync_bundle_bytes "
+                "and no greater than 2 GiB"
             )
+        if not 1 <= self.max_sync_items <= 10_000:
+            raise ValueError("max_sync_items must be between 1 and 10000")
         return self
 
     def load_trusted_edges(self) -> dict[str, str]:

@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
+from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.rbac import Role
 
@@ -29,7 +30,11 @@ from app.api.routes.reports import _build_report_artifact, _to_report_summary
 from app.core.auth import require_role
 from app.core.runtime import ARTIFACTS_ROOT, IMPORT_FILES_ROOT, REPORT_SIGNING_ROOT, SECRETS_ROOT
 from app.services.backup_service import BackupError, BackupSources, create_backup_bundle
-from app.services.report_artifacts import load_report_artifact, verify_signed_manifest
+from app.services.report_artifacts import (
+    load_content_addressed_artifact,
+    load_report_artifact,
+    verify_signed_manifest,
+)
 from app.services.reports_integrity import (
     INTEGRITY_KEY,
     fingerprint_for_pem,
@@ -93,7 +98,19 @@ def verify_report(report_id: str) -> ReportVerifyResponse:
     )
     if isinstance(manifest, dict):
         try:
-            artifact = load_report_artifact(manifest)
+            synced = SyncV2Repository(service.engine).get_artifact(report_id)
+            if synced is not None:
+                if synced["manifest"] != manifest:
+                    raise RuntimeError(
+                        "Synchronized artifact manifest conflicts with sealed evidence."
+                    )
+                artifact = load_content_addressed_artifact(
+                    str(synced["storage_relpath"]),
+                    expected_hash=str(synced["artifact_sha256"]),
+                    expected_size=int(synced["byte_size"]),
+                )
+            else:
+                artifact = load_report_artifact(manifest)
         except (FileNotFoundError, RuntimeError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         computed_hash = sha256_bytes(artifact)

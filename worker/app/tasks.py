@@ -7,12 +7,12 @@ Each discovery/validation actor drives the matching engine processor from
 from the run parameters; the run store is a CancellableRunStore, so the engines
 honour ``POST /runs/{id}/cancel`` on this path too.
 
-BROKER ACCESS (Phase 2 carry-forward): the worker registers an MQTT
-configuration-values provider at import (see app.mqtt_config_provider) so the
-MQTT discovery / live UDMI capture / config-publish actors can resolve a broker
-host from stored configuration OR from run parameters. Certificate (mutual-TLS)
-material is NOT resolved on the worker — see that module's docstring; that path
-stays on-site-validation surface.
+BROKER ACCESS: every actor resolves broker settings only from its frozen
+RunContextV1. At import, the worker registers the read-only secret resolver from
+app.mqtt_config_provider. When the backend secrets directory and key file are
+mounted into the worker, the same encrypted mutual-TLS references resolve in
+both processes. Missing material fails honestly instead of consulting current
+configuration or demo defaults.
 
 HONESTY: the real network probes live inside the engines and are unit-tested
 against fakes/loopback only. No real BACnet device, building network, or live
@@ -21,7 +21,6 @@ requires on-site validation.
 """
 
 import logging
-import threading
 from collections.abc import Callable
 from functools import wraps
 from typing import Any
@@ -37,11 +36,24 @@ from smart_commissioning_core.engines.comparison import process_mapping_validati
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
 from smart_commissioning_core.engines.point_validation import process_bacnet_validation_run
-from smart_commissioning_core.execution_context import resolve_context_parameters
+from smart_commissioning_core.execution_context import (
+    SecretMaterialUnavailableError,
+    resolve_context_parameters,
+    verify_stored_context,
+)
 from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
-from smart_commissioning_core.owned_run_store import OwnedRunStore
+from smart_commissioning_core.owned_run_heartbeat import (
+    OWNED_CONTEXT_FAILURE_MESSAGE,
+    OWNED_CONTEXT_FAILURE_STAGE,
+    OWNED_EXECUTOR_FAILURE_MESSAGE,
+    OWNED_EXECUTOR_FAILURE_STAGE,
+    OWNED_EXECUTOR_MISSING_TERMINAL_MESSAGE,
+    OWNED_EXECUTOR_MISSING_TERMINAL_STAGE,
+    OWNED_HEARTBEAT_START_FAILURE_STAGE,
+    OwnedRunHeartbeat,
+)
+from smart_commissioning_core.owned_run_store import OwnedRunStore, OwnershipLostError
 from smart_commissioning_core.run_context import RunContextV1
-from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 from app.config import get_settings
@@ -86,6 +98,43 @@ _WORKER_HEARTBEAT_SECONDS = settings.heartbeat_seconds
 _WORKER_LEASE_SECONDS = settings.lease_seconds
 
 
+class _ExecutionContextResolutionError(RuntimeError):
+    """Keep worker parameter-resolution failures distinct from engine failures."""
+
+
+def _seal_owned_failure(
+    store: OwnedRunStore,
+    *,
+    stage: str,
+    error_message: str,
+) -> None:
+    """Best-effort fenced failure used by every worker wrapper exit path."""
+
+    if store.ownership_lost or store.terminal_outcome is not None:
+        return
+    try:
+        store.update_run_status(
+            store.lease.run_id,
+            status="failed",
+            stage=stage,
+            progress_percent=100,
+            error_message=error_message,
+        )
+    except OwnershipLostError:
+        logger.warning(
+            "Worker ownership was lost before failure finalization",
+            extra={"run_id": store.lease.run_id},
+        )
+    except Exception as error:
+        logger.error(
+            "Could not seal owned worker failure",
+            extra={
+                "run_id": store.lease.run_id,
+                "exception_type": type(error).__name__,
+            },
+        )
+
+
 def _with_worker_lease(
     function: Callable[[str, RunContextV1, OwnedRunStore], None]
 ) -> Callable[[str, str], None]:
@@ -100,86 +149,94 @@ def _with_worker_lease(
         )
         if lease is None:
             logger.info(
-                "Skipping duplicate or stale delivery",
+                "Skipping duplicate or stale delivery run_id=%s",
+                run_id,
                 extra={"run_id": run_id, "dispatch_id": dispatch_id},
             )
             return
         owned_store = OwnedRunStore(lifecycle_repository, lease)
+        heartbeat: OwnedRunHeartbeat | None = None
         try:
-            stored_context = lifecycle_repository.get_context(run_id)
-        except Exception:
-            logger.exception("Stored execution context could not be loaded")
-            lifecycle_repository.finalize_run(
-                run_id,
-                lease.owner_token,
-                TerminalResultV1(
-                    status="failed",
-                    stage="context_load_failed",
-                    summary={},
-                    error_message="stored execution context is unavailable",
-                ),
+            heartbeat = OwnedRunHeartbeat(
+                owned_store,
+                lease_seconds=_WORKER_LEASE_SECONDS,
+                interval_seconds=_WORKER_HEARTBEAT_SECONDS,
+                executor_label="worker",
+                thread_name_prefix="run-heartbeat",
             )
-            return
-        if stored_context.context_sha256 != lease.context_sha256:
-            lifecycle_repository.finalize_run(
-                run_id,
-                lease.owner_token,
-                TerminalResultV1(
-                    status="failed",
-                    stage="context_hash_mismatch",
-                    summary={},
-                    error_message="stored execution context failed integrity verification",
-                ),
+            heartbeat.start()
+        except Exception as error:
+            logger.error(
+                "Worker heartbeat could not start",
+                extra={"run_id": run_id, "exception_type": type(error).__name__},
             )
+            _seal_owned_failure(
+                owned_store,
+                stage=OWNED_HEARTBEAT_START_FAILURE_STAGE,
+                error_message=OWNED_EXECUTOR_FAILURE_MESSAGE,
+            )
+            if heartbeat is not None:
+                heartbeat.stop_and_join()
             return
 
-        stopped = threading.Event()
-
-        def refresh() -> bool:
+        try:
             try:
-                return owned_store.heartbeat(lease_seconds=_WORKER_LEASE_SECONDS)
-            except Exception:
-                logger.exception("Could not refresh worker heartbeat", extra={"run_id": run_id})
-                return False
-
-        def beat() -> None:
-            while not stopped.wait(_WORKER_HEARTBEAT_SECONDS):
-                if not refresh():
-                    stopped.set()
-                    break
-
-        heartbeat = threading.Thread(
-            target=beat,
-            name=f"run-heartbeat-{run_id}",
-            daemon=True,
-        )
-        heartbeat.start()
-        try:
-            function(run_id, stored_context.context, owned_store)
-            if owned_store.terminal_outcome is None:
-                owned_store.update_run_status(
-                    run_id,
-                    status="failed",
-                    stage="worker_missing_terminal_result",
-                    progress_percent=100,
-                    error_message="worker processor returned without a terminal result",
+                stored_context = lifecycle_repository.get_context(run_id)
+                context = verify_stored_context(stored_context, lease)
+            except Exception as error:
+                logger.error(
+                    "Stored execution context could not be verified",
+                    extra={"run_id": run_id, "exception_type": type(error).__name__},
                 )
-        except BaseException:
-            if owned_store.terminal_outcome is None:
-                try:
-                    owned_store.update_run_status(
-                        run_id,
-                        status="failed",
-                        stage="worker_unhandled_failure",
-                        progress_percent=100,
-                        error_message="worker execution was interrupted",
-                    )
-                except Exception:
-                    logger.exception("Could not seal unhandled worker failure")
-            raise
+                _seal_owned_failure(
+                    owned_store,
+                    stage=OWNED_CONTEXT_FAILURE_STAGE,
+                    error_message=OWNED_CONTEXT_FAILURE_MESSAGE,
+                )
+                return
+            if heartbeat.ownership_lost or owned_store.ownership_lost:
+                return
+            try:
+                function(run_id, context, owned_store)
+            except (
+                SecretMaterialUnavailableError,
+                _ExecutionContextResolutionError,
+            ) as error:
+                logger.error(
+                    "Frozen execution secret material is unavailable",
+                    extra={"run_id": run_id, "exception_type": type(error).__name__},
+                )
+                _seal_owned_failure(
+                    owned_store,
+                    stage=OWNED_CONTEXT_FAILURE_STAGE,
+                    error_message=OWNED_CONTEXT_FAILURE_MESSAGE,
+                )
+                return
+            except OwnershipLostError:
+                logger.warning(
+                    "Worker processor observed ownership loss; terminal evidence was not written",
+                    extra={"run_id": run_id},
+                )
+                return
+            except BaseException:
+                _seal_owned_failure(
+                    owned_store,
+                    stage=OWNED_EXECUTOR_FAILURE_STAGE,
+                    error_message=OWNED_EXECUTOR_FAILURE_MESSAGE,
+                )
+                raise
+            if (
+                owned_store.terminal_outcome is None
+                and not heartbeat.ownership_lost
+                and not owned_store.ownership_lost
+            ):
+                _seal_owned_failure(
+                    owned_store,
+                    stage=OWNED_EXECUTOR_MISSING_TERMINAL_STAGE,
+                    error_message=OWNED_EXECUTOR_MISSING_TERMINAL_MESSAGE,
+                )
         finally:
-            stopped.set()
-            heartbeat.join(timeout=1.0)
+            heartbeat.stop_and_join()
 
     return wrapped
 
@@ -215,13 +272,16 @@ def _effective_parameters(
     channel: str,
 ) -> dict[str, Any]:
     """Build engine input exclusively from the persisted context."""
-    return resolve_context_parameters(
-        context,
-        store.lease,
-        deployment_id=settings.deployment_id,
-        channel=channel,
-        secret_resolver=resolve_worker_secret,
-    )
+    try:
+        return resolve_context_parameters(
+            context,
+            store.lease,
+            deployment_id=settings.deployment_id,
+            channel=channel,
+            secret_resolver=resolve_worker_secret,
+        )
+    except Exception as error:
+        raise _ExecutionContextResolutionError from error
 
 
 def _import_loader(context: RunContextV1) -> Callable[[str], list[dict[str, Any]]]:
@@ -305,7 +365,7 @@ def discover_ip_range(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="ip-discovery")
+        parameters = _effective_parameters(context, store, channel="ip_discovery")
         logger.info("Starting IP discovery", extra={"actor": "discover_ip_range"})
         try:
             process_ip_discovery_run(
@@ -330,7 +390,7 @@ def discover_bacnet(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="bacnet-discovery")
+        parameters = _effective_parameters(context, store, channel="bacnet_discovery")
         logger.info("Starting BACnet discovery", extra={"actor": "discover_bacnet"})
         # Non-dry runs default to the UNVALIDATED real bacpypes3 path; simulation
         # is dry-run/test-only. The engine stamps result_summary['backend'] so a
@@ -359,7 +419,7 @@ def discover_mqtt(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="mqtt-discovery")
+        parameters = _effective_parameters(context, store, channel="mqtt_discovery")
         logger.info("Starting MQTT discovery", extra={"actor": "discover_mqtt"})
         # live_capture defaults to the real raw-socket subscribe_and_capture.
         # Broker settings and secret references came from the frozen context. If
@@ -396,7 +456,7 @@ def validate_udmi_payloads(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="udmi-capture")
+        parameters = _effective_parameters(context, store, channel="udmi_validation")
         logger.info("Starting UDMI validation", extra={"actor": "validate_udmi_payloads"})
         # live_capture defaults to the real subscribe_and_capture; broker
         # settings came from the frozen context.
@@ -424,7 +484,7 @@ def publish_mqtt_config(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="mqtt-config")
+        parameters = _effective_parameters(context, store, channel="mqtt_config_publish")
         logger.info("Starting MQTT config publish", extra={"actor": "publish_mqtt_config"})
         # broker_publisher defaults to the real publish path. A run without
         # use_live_broker stays validate-only (no broker write).
@@ -443,7 +503,7 @@ def validate_bacnet_points(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="bacnet-validation")
+        parameters = _effective_parameters(context, store, channel="bacnet_validation")
         logger.info("Starting BACnet point validation", extra={"actor": "validate_bacnet_points"})
         process_bacnet_validation_run(
             run_id,
@@ -463,7 +523,7 @@ def compare_bacnet_mqtt(
     run_id: str, context: RunContextV1, store: OwnedRunStore
 ) -> None:
     with run_id_context(run_id):
-        parameters = _effective_parameters(context, store, channel="mapping-validation")
+        parameters = _effective_parameters(context, store, channel="mapping_validation")
         logger.info("Starting BACnet to MQTT mapping comparison", extra={"actor": "compare_bacnet_mqtt"})
         process_mapping_validation_run(
             run_id,

@@ -5,6 +5,78 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.28] - 2026-07-27
+
+### Added
+
+- **Sync v2 transfers complete immutable evidence.** A sealed run, terminal
+  result, frozen execution or report snapshot, signed artifact manifest, and
+  exact report bytes travel in one signed bundle. The hub verifies and stores
+  the original bytes for repeat download.
+- **Per-item receipts control delivery state.** Accepted and byte-identical
+  items advance their own watermark. Conflicts, scope failures, malformed data,
+  bad signatures, hash or size mismatches, missing artifacts, and partial
+  bundles remain visible and pending.
+- **Dedicated sync credentials carry project/site scope.** Hashed machine keys
+  are bound to an edge signing key and explicit allowed pairs. Scope rejection
+  returns a generic receipt without hub metadata.
+- **Published hosted images have immutable provenance.** API, worker, and
+  frontend images are pushed to GHCR from the merged release commit. Digest
+  evidence, OCI labels, and CycloneDX inventories identify the exact bytes.
+
+### Changed
+
+- **One heartbeat guard owns every execution profile.** Portable asynchronous
+  inline, synchronous inline, Docker inline, and queued worker execution share
+  timing validation, bounded transient retry, ownership-loss fencing, terminal
+  decisions, and thread cleanup.
+- **Frozen-context verification is identical in API and worker.** Both
+  recompute the canonical digest and resolve canonical job types plus opaque
+  encrypted certificate references.
+- **Sync protocol choice is explicit.** A valid capability response selects
+  v2. A genuine older hub can use v1, while authentication, timeout, malformed
+  response, and server failures stop rather than downgrade.
+- **Hosted release acceptance covers both execution profiles.** Real Compose
+  tests exercise Postgres, Redis, worker recovery, duplicate delivery, mTLS,
+  Sync v2 exact bytes, frontend controls, logs, and cleanup.
+
+### Fixed
+
+- **A brief worker database interruption no longer abandons a healthy run.**
+  Heartbeat retry stays bounded by the lease and confirmed loss fences the old
+  executor.
+- **Worker heartbeat protection starts immediately after claim.** Slow context
+  loading cannot consume an unprotected lease window.
+- **Redis publication uncertainty cannot create a second executor.** Durable
+  dispatch identity is retained even when acceptance and client observation
+  disagree.
+- **Duplicate deliveries cannot create duplicate terminal records.** Atomic
+  claim and finalization keep one result and one seal.
+- **New report runs are sealed before Sync v2 eligibility.** Legacy incomplete
+  report records remain on the compatibility path rather than being relabelled.
+
+### Migration
+
+- Alembic advances from `f6a7b8c9d0e1` to `a7b8c9d0e1f2` with additive Sync v2
+  credential, scope, artifact, receipt, and delivery-state tables.
+- Downgrade removes those five tables and their v2 audit state. Export required
+  receipts and imported artifacts before returning to v0.1.27.
+
+### Security
+
+- Sync requests, receipts, logs, and stored evidence exclude plaintext API
+  keys, private keys, owner tokens, connection URLs, passwords, and decrypted
+  certificates.
+- Artifact verification checks supported algorithms, signature, derived key ID,
+  exact size, exact hash, and safe member paths before storage.
+
+### Known limitations
+
+- Legacy reports without a terminal result, seal, complete frozen snapshot, and
+  exact signed artifact remain v1 or pending.
+- Controller connectivity, broker ACLs, certificate chains, and site-network
+  access still require validation in the commissioning environment.
+
 ## [0.1.27] - 2026-07-27
 
 ### Fixed

@@ -11,11 +11,16 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 from smart_commissioning_core.db.repositories import DiscoveryRepository
+from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
 from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary, RunRecord
-from app.services.report_artifacts import load_report_artifact, store_report_artifact
+from app.services.report_artifacts import (
+    load_content_addressed_artifact,
+    load_report_artifact,
+    store_report_artifact,
+)
 from app.services.report_naming import build_report_file_name, report_content_disposition
 from app.services.report_pdf import PdfDocument
 from app.services.run_service import (
@@ -226,6 +231,18 @@ def _stored_or_legacy_artifact(run: object, output_format: str) -> tuple[bytes, 
         media_type = manifest.get("media_type")
         if not isinstance(media_type, str) or not media_type:
             raise RuntimeError("Stored report manifest has no media type.")
+        synced = SyncV2Repository(service.engine).get_artifact(run.run_id)
+        if synced is not None:
+            if synced["manifest"] != manifest:
+                raise RuntimeError("Synchronized artifact manifest conflicts with sealed evidence.")
+            return (
+                load_content_addressed_artifact(
+                    str(synced["storage_relpath"]),
+                    expected_hash=str(synced["artifact_sha256"]),
+                    expected_size=int(synced["byte_size"]),
+                ),
+                media_type,
+            )
         return load_report_artifact(manifest), media_type
     # Pre-v0.1.26 records remain downloadable, but the compatibility path is
     # strictly read-only and never creates provenance during GET.

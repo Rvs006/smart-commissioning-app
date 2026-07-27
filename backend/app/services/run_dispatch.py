@@ -17,18 +17,28 @@ from collections.abc import Callable
 from typing import Any
 
 from smart_commissioning_core.execution_context import (
-    SecretMaterialUnavailableError,
     resolve_context_parameters,
+    verify_stored_context,
+)
+from smart_commissioning_core.owned_run_heartbeat import (
+    DEFAULT_OWNED_RUN_HEARTBEAT_POLICY,
+    OWNED_CONTEXT_FAILURE_MESSAGE,
+    OWNED_CONTEXT_FAILURE_STAGE,
+    OWNED_EXECUTOR_FAILURE_MESSAGE,
+    OWNED_EXECUTOR_FAILURE_STAGE,
+    OWNED_EXECUTOR_MISSING_TERMINAL_MESSAGE,
+    OWNED_EXECUTOR_MISSING_TERMINAL_STAGE,
+    OWNED_HEARTBEAT_START_FAILURE_STAGE,
+    OwnedRunHeartbeat,
 )
 from smart_commissioning_core.owned_run_store import (
     OwnedRunStore,
     OwnershipLostError,
 )
 
-from app.core.config import edge_identity, get_settings
+from app.core.config import get_settings
 from app.schemas.jobs import JobAcceptedResponse, RunRecord
 from app.services.configuration_service import read_secret_material
-from app.services.inline_heartbeat import InlineRunHeartbeat
 from app.services.job_queue import JobQueueService, JobQueueUnavailable, RunEnqueuer
 from app.services.run_service import RunService
 
@@ -41,14 +51,6 @@ InlineFn = Callable[[OwnedRunStore, dict[str, Any]], object]
 # building the persister). The startup orphan sweep only reclaims runs stuck at
 # 'running'; a crash here can strand a run at 'queued', which the sweep does NOT
 # touch, so the crash guard must land a terminal 'failed' itself.
-_INLINE_RUN_CRASH_MESSAGE = (
-    "This run stopped unexpectedly before it could finish, so no results were "
-    "saved. Please run it again."
-)
-_INLINE_CONTEXT_ERROR_MESSAGE = "Frozen execution inputs could not be resolved."
-_INLINE_LEASE_SECONDS = 60
-_INLINE_HEARTBEAT_SECONDS = 15.0
-
 _OUTBOX_DESTINATIONS = {
     "ip_discovery": ("discover_ip_range", "discovery"),
     "bacnet_discovery": ("discover_bacnet", "discovery"),
@@ -75,8 +77,20 @@ def publish_pending_dispatches(service: RunService | None = None) -> list[str]:
             queue.enqueue_for(actor_name, queue_name)(run, dispatch.dispatch_id)
         except JobQueueUnavailable:
             continue
-        if run_service.mark_dispatch_published(dispatch.dispatch_id):
-            published.append(dispatch.dispatch_id)
+        try:
+            if run_service.mark_dispatch_published(dispatch.dispatch_id):
+                published.append(dispatch.dispatch_id)
+        except Exception as error:
+            # Redis may have accepted the message even when the outbox update is
+            # temporarily unavailable. Leave the row pending for the same-ID
+            # retry. Never fall back to an inline executor.
+            logger.warning(
+                "queue publication state remains pending for run_id=%s "
+                "dispatch_id=%s exception_type=%s",
+                run.run_id,
+                dispatch.dispatch_id,
+                type(error).__name__,
+            )
     return published
 
 
@@ -85,7 +99,7 @@ def _run_inline_guarded(
     run: RunRecord,
     run_inline: InlineFn,
     owned_store: OwnedRunStore,
-    heartbeat: InlineRunHeartbeat,
+    heartbeat: OwnedRunHeartbeat,
 ) -> None:
     """Resolve and execute one claimed inline run under heartbeat protection.
 
@@ -102,25 +116,32 @@ def _run_inline_guarded(
         service.mark_dispatch_published(dispatch.dispatch_id)
         try:
             stored_context = service.get_execution_context(run.run_id)
+            context = verify_stored_context(stored_context, owned_store.lease)
             parameters = resolve_context_parameters(
-                stored_context.context,
+                context,
                 owned_store.lease,
-                deployment_id=edge_identity().edge_id,
+                deployment_id=get_settings().deployment_id,
                 channel=run.job_type,
                 secret_resolver=lambda reference: read_secret_material(
                     reference
                 ).encode("utf-8"),
             )
-        except (FileNotFoundError, ValueError, SecretMaterialUnavailableError):
-            if heartbeat.ownership_lost:
+        except Exception as error:
+            if heartbeat.ownership_lost or owned_store.ownership_lost:
                 return
+            logger.error(
+                "inline execution context could not be resolved for run_id=%s "
+                "exception_type=%s",
+                run.run_id,
+                type(error).__name__,
+            )
             try:
                 owned_store.update_run_status(
                     run.run_id,
                     status="failed",
-                    stage="execution_context_unavailable",
+                    stage=OWNED_CONTEXT_FAILURE_STAGE,
                     progress_percent=100,
-                    error_message=_INLINE_CONTEXT_ERROR_MESSAGE,
+                    error_message=OWNED_CONTEXT_FAILURE_MESSAGE,
                 )
             except Exception as error:
                 logger.error(
@@ -130,9 +151,21 @@ def _run_inline_guarded(
                     type(error).__name__,
                 )
             return
-        if heartbeat.ownership_lost:
+        if heartbeat.ownership_lost or owned_store.ownership_lost:
             return
         run_inline(owned_store, parameters)
+        if (
+            owned_store.terminal_outcome is None
+            and not heartbeat.ownership_lost
+            and not owned_store.ownership_lost
+        ):
+            owned_store.update_run_status(
+                run.run_id,
+                status="failed",
+                stage=OWNED_EXECUTOR_MISSING_TERMINAL_STAGE,
+                progress_percent=100,
+                error_message=OWNED_EXECUTOR_MISSING_TERMINAL_MESSAGE,
+            )
         if owned_store.ownership_lost and not heartbeat.ownership_lost:
             logger.warning(
                 "inline processor observed ownership loss for run_id=%s; "
@@ -152,7 +185,7 @@ def _run_inline_guarded(
             run.run_id,
             type(error).__name__,
         )
-        if heartbeat.ownership_lost:
+        if heartbeat.ownership_lost or owned_store.ownership_lost:
             return
         if owned_store.terminal_outcome is not None:
             # The processor committed its one terminal result and then raised
@@ -163,9 +196,9 @@ def _run_inline_guarded(
             owned_store.update_run_status(
                 run.run_id,
                 status="failed",
-                stage="inline_run_crashed",
+                stage=OWNED_EXECUTOR_FAILURE_STAGE,
                 progress_percent=100,
-                error_message=_INLINE_RUN_CRASH_MESSAGE,
+                error_message=OWNED_EXECUTOR_FAILURE_MESSAGE,
             )
         except Exception as write_error:
             logger.error(
@@ -208,10 +241,18 @@ def _inline_response(
     """
     settings = get_settings()
     lease_seconds = int(
-        getattr(settings, "run_lease_seconds", _INLINE_LEASE_SECONDS)
+        getattr(
+            settings,
+            "run_lease_seconds",
+            DEFAULT_OWNED_RUN_HEARTBEAT_POLICY.lease_seconds,
+        )
     )
     heartbeat_seconds = float(
-        getattr(settings, "run_heartbeat_seconds", _INLINE_HEARTBEAT_SECONDS)
+        getattr(
+            settings,
+            "run_heartbeat_seconds",
+            DEFAULT_OWNED_RUN_HEARTBEAT_POLICY.interval_seconds,
+        )
     )
     owned_store = service.claim_owned_run(
         run.run_id,
@@ -226,12 +267,14 @@ def _inline_response(
             message=message,
         )
 
-    heartbeat: InlineRunHeartbeat | None = None
+    heartbeat: OwnedRunHeartbeat | None = None
     try:
-        heartbeat = InlineRunHeartbeat(
+        heartbeat = OwnedRunHeartbeat(
             owned_store,
             lease_seconds=lease_seconds,
             interval_seconds=heartbeat_seconds,
+            executor_label="inline",
+            thread_name_prefix="inline-heartbeat",
         )
         heartbeat.start()
     except Exception as error:
@@ -244,9 +287,9 @@ def _inline_response(
             owned_store.update_run_status(
                 run.run_id,
                 status="failed",
-                stage="inline_heartbeat_start_failed",
+                stage=OWNED_HEARTBEAT_START_FAILURE_STAGE,
                 progress_percent=100,
-                error_message=_INLINE_RUN_CRASH_MESSAGE,
+                error_message=OWNED_EXECUTOR_FAILURE_MESSAGE,
             )
         except Exception as write_error:
             logger.error(
@@ -288,7 +331,7 @@ def _inline_response(
                     status="failed",
                     stage="inline_executor_start_failed",
                     progress_percent=100,
-                    error_message=_INLINE_RUN_CRASH_MESSAGE,
+                    error_message=OWNED_EXECUTOR_FAILURE_MESSAGE,
                 )
             except Exception as write_error:
                 logger.error(
@@ -346,26 +389,40 @@ def dispatch_run(
     dispatch = service.get_dispatch_for_run(run.run_id)
     try:
         enqueue(run, dispatch.dispatch_id)
-        service.mark_dispatch_published(dispatch.dispatch_id)
-        return JobAcceptedResponse(
-            run_id=run.run_id,
-            job_type=run.job_type,
-            status=run.status,
-            message=queued_message,
-        )
-    except JobQueueUnavailable as error:
+    except JobQueueUnavailable:
         logger.warning(
-            "queue publish deferred for run_id=%s dispatch_id=%s: %s",
+            "queue publish deferred for run_id=%s dispatch_id=%s",
             run.run_id,
             dispatch.dispatch_id,
-            error,
         )
-
-        # Keep the durable row pending. The publisher retries the same dispatch
-        # id, and the worker's lease fence prevents duplicate finalization.
         return JobAcceptedResponse(
             run_id=run.run_id,
             job_type=run.job_type,
             status=run.status,
             message="Job accepted; queue publication is pending automatic retry.",
         )
+
+    try:
+        published = service.mark_dispatch_published(dispatch.dispatch_id)
+    except Exception as error:
+        # The message may already be visible in Redis. Preserve the pending
+        # outbox row so maintenance can reconcile it with the same dispatch ID.
+        # A second inline executor is never started from this uncertainty path.
+        logger.warning(
+            "queue publication acknowledgement could not be stored for run_id=%s "
+            "dispatch_id=%s exception_type=%s",
+            run.run_id,
+            dispatch.dispatch_id,
+            type(error).__name__,
+        )
+        published = False
+    return JobAcceptedResponse(
+        run_id=run.run_id,
+        job_type=run.job_type,
+        status=run.status,
+        message=(
+            queued_message
+            if published
+            else "Job accepted; queue publication is pending automatic retry."
+        ),
+    )

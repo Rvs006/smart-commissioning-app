@@ -1,12 +1,12 @@
-name: v0.1.27 Release Gates
+name: v0.1.28 Release Gates
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, exactly v0.1.27
+        description: Release version, exactly v0.1.28
         required: true
-        default: v0.1.27
+        default: v0.1.28
       release_sha:
         description: Full 40-character SHA; must equal current origin/main
         required: true
@@ -19,6 +19,13 @@ on:
       - "infra/**"
       - "scripts/**"
       - "docs/migration-rollback-v0.1.27.md"
+      - "docs/migration-rollback-v0.1.28.md"
+      - "docs/release-notes-v0.1.28.md"
+      - "docs/release-validation-v0.1.28.md"
+      - "docs/docker-deployment-rollback-v0.1.28.md"
+      - "docs/sync-v2-wire-format.md"
+      - "docs/sync-v2-credential-scope.md"
+      - "docs/sync-v2-operations.md"
       - ".github/workflows/release-gates.yml"
 
 permissions:
@@ -30,7 +37,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.27' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.28' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha }}
 
 jobs:
@@ -41,12 +48,13 @@ jobs:
         with:
           ref: ${{ inputs.release_sha || github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Prove PR-head candidate or exact-main merged release commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$RELEASE_VERSION" = v0.1.27
+          test "$RELEASE_VERSION" = v0.1.28
           test "${#RELEASE_SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain)"
@@ -68,18 +76,30 @@ jobs:
 
       - name: Ruff and complete Python suites
         run: |
-          ruff check backend worker core scripts/backup_rollback_smoke.py scripts/check_v0126_release_contracts.py scripts/check_v0127_release_contracts.py scripts/generate_release_evidence.py scripts/generate_sbom.py scripts/smoke_hosted_queue.py scripts/smoke_windows_portable_release.py scripts/test_v0127_release_evidence.py scripts/test_windows_portable_release_smoke.py scripts/validate_release_evidence.py scripts/validate_v0127_release_evidence.py
+          ruff check backend worker core scripts/backup_rollback_smoke.py scripts/check_v0126_release_contracts.py scripts/check_v0127_release_contracts.py scripts/check_v0128_docker_contracts.py scripts/check_v0128_release_contracts.py scripts/check_hosted_frontend.py scripts/check_hosted_mtls.py scripts/check_hosted_release_logs.py scripts/check_hosted_terminal_evidence.py scripts/generate_docker_image_evidence.py scripts/generate_release_evidence.py scripts/generate_sbom.py scripts/hosted_release_acceptance.py scripts/smoke_hosted_queue.py scripts/smoke_sync_v2.py scripts/smoke_windows_portable_release.py scripts/test_check_hosted_frontend.py scripts/test_check_hosted_mtls.py scripts/test_check_hosted_release_logs.py scripts/test_check_hosted_terminal_evidence.py scripts/test_generate_docker_image_evidence.py scripts/test_hosted_release_acceptance.py scripts/test_smoke_sync_v2.py scripts/test_v0127_release_evidence.py scripts/test_v0128_release_evidence.py scripts/test_verify_signed_release_tag.py scripts/test_windows_portable_release_smoke.py scripts/validate_release_evidence.py scripts/validate_v0127_release_evidence.py scripts/validate_v0128_release_evidence.py scripts/verify_signed_release_tag.py
           python -m unittest discover -s core/tests
           (cd backend && python -m unittest discover -s tests)
           (cd worker && python -m unittest discover -s tests)
           python scripts/test_v0127_release_evidence.py
+          python scripts/test_v0128_release_evidence.py
+          python scripts/test_generate_docker_image_evidence.py
+          python scripts/test_hosted_release_acceptance.py
+          python scripts/test_check_hosted_frontend.py
+          python scripts/test_check_hosted_mtls.py
+          python scripts/test_check_hosted_release_logs.py
+          python scripts/test_check_hosted_terminal_evidence.py
+          python scripts/test_smoke_sync_v2.py
+          python scripts/test_verify_signed_release_tag.py
           python scripts/test_windows_portable_release_smoke.py
 
       - name: Deployment contracts and migration/rollback fixture
         run: |
           python scripts/check_v0126_release_contracts.py
-          python scripts/check_v0127_release_contracts.py
+          python scripts/check_v0128_docker_contracts.py
+          python scripts/check_v0128_release_contracts.py
           python scripts/backup_rollback_smoke.py
+          bash -n scripts/publish_docker_images.sh scripts/promote_docker_images.sh
+          shellcheck scripts/publish_docker_images.sh scripts/promote_docker_images.sh
 
       - name: Python CycloneDX and runtime licenses
         run: |
@@ -98,6 +118,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.release_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
       - name: Prove exact candidate/release commit
         run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -127,100 +148,539 @@ jobs:
   hosted:
     needs: [python, frontend]
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT_NAME: sca-release-${{ github.run_id }}-${{ github.run_attempt }}
+      BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.release_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
       - name: Prove exact candidate/release commit
         run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      - name: Resolve isolated candidate image names
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "GHCR_API_IMAGE=ghcr.io/$owner/smart-commissioning-app-api"
+            echo "GHCR_WORKER_IMAGE=ghcr.io/$owner/smart-commissioning-app-worker"
+            echo "GHCR_FRONTEND_IMAGE=ghcr.io/$owner/smart-commissioning-app-frontend"
+            echo "API_IMAGE=smart-commissioning-api:$RELEASE_SHA"
+            echo "WORKER_IMAGE=smart-commissioning-worker:$RELEASE_SHA"
+            echo "FRONTEND_IMAGE=smart-commissioning-frontend:$RELEASE_SHA"
+          } >> "$GITHUB_ENV"
+
       - name: Create disposable hosted environment
-        run: sh scripts/bootstrap-env.sh
-      - name: Validate and build hosted Compose
+        run: |
+          sh scripts/bootstrap-env.sh
+          {
+            echo "APP_VERSION=$RELEASE_VERSION"
+            echo "SOURCE_COMMIT=$RELEASE_SHA"
+            echo "SOURCE_REPOSITORY=https://github.com/$GITHUB_REPOSITORY"
+            echo "API_IMAGE=smart-commissioning-api:$RELEASE_SHA"
+            echo "WORKER_IMAGE=smart-commissioning-worker:$RELEASE_SHA"
+            echo "FRONTEND_IMAGE=smart-commissioning-frontend:$RELEASE_SHA"
+          } >> infra/.env
+
+      - name: Validate and build candidate Compose images
         run: |
           mkdir -p build/release-evidence
           docker compose -f infra/docker-compose.yml --env-file infra/.env config --quiet
-          docker compose -f infra/docker-compose.yml --env-file infra/.env build runtime-init api worker frontend
-          docker compose -f infra/docker-compose.yml --env-file infra/.env create api worker frontend
-          docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q api)" "smart-commissioning-api:$RELEASE_SHA"
-          docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q worker)" "smart-commissioning-worker:$RELEASE_SHA"
-          docker tag "$(docker compose -f infra/docker-compose.yml --env-file infra/.env images -q frontend)" "smart-commissioning-frontend:$RELEASE_SHA"
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.inline.yml --env-file infra/.env config --quiet
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml --env-file infra/.env config --quiet
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml -f infra/docker-compose.sync-acceptance.yml --env-file infra/.env config --quiet
+          docker compose -f infra/docker-compose.yml --env-file infra/.env build api worker frontend
+          : > build/release-evidence/candidate-image-ids.env
+          for role in api worker frontend; do
+            case "$role" in
+              api) image="$API_IMAGE"; id_name=API_CANDIDATE_ID ;;
+              worker) image="$WORKER_IMAGE"; id_name=WORKER_CANDIDATE_ID ;;
+              frontend) image="$FRONTEND_IMAGE"; id_name=FRONTEND_CANDIDATE_ID ;;
+            esac
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$RELEASE_VERSION"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = "https://github.com/$GITHUB_REPOSITORY"
+            media_type="$(docker image inspect "$image" --format '{{ index .Descriptor "mediaType" }}')"
+            case "$media_type" in
+              application/vnd.oci.image.manifest.v1+json|application/vnd.docker.distribution.manifest.v2+json) ;;
+              *) echo "::error::Accepted image is not a single image manifest: $image ($media_type)"; exit 1 ;;
+            esac
+            printf '%s=%s\n' "$id_name" "$(docker image inspect "$image" --format '{{.Id}}')" >> build/release-evidence/candidate-image-ids.env
+          done
+
+      - name: Queue profile health, lifecycle, interruption, and frontend acceptance
+        run: |
+          set -euo pipefail
+          compose=(docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml --env-file infra/.env)
+          api_key="$(sed -n 's/^API_KEY=//p' infra/.env)"
+          "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+          "${compose[@]}" up -d --no-build postgres redis mqtt-acceptance runtime-init api worker frontend
+          for attempt in $(seq 1 90); do
+            worker_id="$("${compose[@]}" ps -q worker)"
+            worker_state="$(docker inspect --format='{{.State.Health.Status}}' "$worker_id" 2>/dev/null || true)"
+            if [ "$worker_state" = healthy ] && \
+               curl --fail --silent http://127.0.0.1:8080/ >/tmp/frontend.html && \
+               curl --fail --silent http://127.0.0.1:8080/api/v1/health >/tmp/health.json && \
+               curl --fail --silent http://127.0.0.1:8080/api/v1/ready >/tmp/ready.json && \
+               python -c "import json; p=json.load(open('/tmp/ready.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok'"; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then "${compose[@]}" logs api worker frontend postgres redis; exit 1; fi
+            sleep 2
+          done
+
+          "${compose[@]}" exec -T worker python -c "import bacpypes3, app.tasks; print('BACnet and worker imports OK')"
+          "${compose[@]}" exec -T api python - api < scripts/check_hosted_mtls.py
+          "${compose[@]}" exec -T worker python - worker < scripts/check_hosted_mtls.py
+
+          python scripts/hosted_release_acceptance.py worker-capture --api-key "$api_key" --output /tmp/api-restart-run.json
+          "${compose[@]}" restart api
+          for attempt in $(seq 1 90); do
+            curl --fail --silent http://127.0.0.1:8000/api/v1/ready >/tmp/api-restarted-ready.json && \
+              python -c "import json; p=json.load(open('/tmp/api-restarted-ready.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok'" && break
+            test "$attempt" -lt 90 || { "${compose[@]}" logs api postgres redis; exit 1; }
+            sleep 2
+          done
+          python scripts/hosted_release_acceptance.py cancel-existing --api-key "$api_key" --input /tmp/api-restart-run.json --expected-execution-mode dramatiq_worker
+          api_restart_run_id="$(python -c "import json; print(json.load(open('/tmp/api-restart-run.json'))['run_id'])")"
+          "${compose[@]}" exec -T api python - --run-id "$api_restart_run_id" --expected-status cancelled --expected-execution-mode dramatiq_worker < scripts/check_hosted_terminal_evidence.py
+          python scripts/hosted_release_acceptance.py canonical --api-key "$api_key" --expected-execution-mode dramatiq_worker
+          python scripts/hosted_release_acceptance.py long-capture --api-key "$api_key" --expected-execution-mode dramatiq_worker --timeout 180
+          python scripts/hosted_release_acceptance.py cancel-capture --api-key "$api_key" --expected-execution-mode dramatiq_worker
+
+          python scripts/hosted_release_acceptance.py worker-capture --api-key "$api_key" --output /tmp/worker-kill-run.json
+          "${compose[@]}" kill -s KILL worker
+          python scripts/hosted_release_acceptance.py wait-worker-recovery --api-key "$api_key" --input /tmp/worker-kill-run.json --output /tmp/worker-terminal.json --timeout 420
+          killed_run_id="$(python -c "import json; print(json.load(open('/tmp/worker-kill-run.json'))['run_id'])")"
+          "${compose[@]}" exec -T api python - --run-id "$killed_run_id" --expected-status failed --expected-stage lease_expired --expected-stage worker_heartbeat_expired --allow-lease-expiry --snapshot-output /tmp/worker-kill-terminal-db.json < scripts/check_hosted_terminal_evidence.py
+          "${compose[@]}" up -d --no-build worker
+          for attempt in $(seq 1 60); do
+            worker_id="$("${compose[@]}" ps -q worker)"
+            test "$(docker inspect --format='{{.State.Health.Status}}' "$worker_id" 2>/dev/null || true)" = healthy && break
+            test "$attempt" -lt 60 || { "${compose[@]}" logs worker; exit 1; }
+            sleep 2
+          done
+          "${compose[@]}" logs --no-color worker > /tmp/worker-before-redelivery.log
+          duplicate_delivery_log="Skipping duplicate or stale delivery run_id=$killed_run_id"
+          duplicate_delivery_before="$(grep -Fc -- "$duplicate_delivery_log" /tmp/worker-before-redelivery.log || true)"
+          "${compose[@]}" exec -T -e "ACCEPTANCE_RUN_ID=$killed_run_id" worker python -c "import os; from app.tasks import discover_mqtt, lifecycle_repository; run_id=os.environ['ACCEPTANCE_RUN_ID']; dispatch=lifecycle_repository.get_dispatch_for_run(run_id); discover_mqtt.send(run_id, dispatch.dispatch_id)"
+          duplicate_delivery_observed=0
+          for attempt in $(seq 1 60); do
+            "${compose[@]}" logs --no-color worker > /tmp/worker-after-redelivery.log
+            duplicate_delivery_after="$(grep -Fc -- "$duplicate_delivery_log" /tmp/worker-after-redelivery.log || true)"
+            if [ "$duplicate_delivery_after" -gt "$duplicate_delivery_before" ]; then
+              duplicate_delivery_observed=1
+              break
+            fi
+            sleep 1
+          done
+          test "$duplicate_delivery_observed" -eq 1
+          python scripts/hosted_release_acceptance.py assert-snapshot --api-key "$api_key" --input /tmp/worker-terminal.json
+          "${compose[@]}" exec -T api python - --run-id "$killed_run_id" --expected-status failed --expected-stage lease_expired --expected-stage worker_heartbeat_expired --allow-lease-expiry --snapshot-input /tmp/worker-kill-terminal-db.json < scripts/check_hosted_terminal_evidence.py
+
+          "${compose[@]}" stop redis
+          python scripts/hosted_release_acceptance.py deferred-create --api-key "$api_key" --output /tmp/deferred-run.json
+          "${compose[@]}" start redis
+          for attempt in $(seq 1 60); do
+            redis_id="$("${compose[@]}" ps -q redis)"
+            test "$(docker inspect --format='{{.State.Health.Status}}' "$redis_id" 2>/dev/null || true)" = healthy && break
+            test "$attempt" -lt 60 || { "${compose[@]}" logs redis worker api; exit 1; }
+            sleep 2
+          done
+          python scripts/hosted_release_acceptance.py wait-canonical --api-key "$api_key" --input /tmp/deferred-run.json --expected-execution-mode dramatiq_worker --timeout 240
+
+          python scripts/hosted_release_acceptance.py worker-capture --api-key "$api_key" --output /tmp/database-outage-run.json
+          database_run_id="$(python -c "import json; print(json.load(open('/tmp/database-outage-run.json'))['run_id'])")"
+          "${compose[@]}" stop postgres
+          database_outage_observed=0
+          for attempt in $(seq 1 30); do
+            status_code="$(curl --silent --show-error --max-time 15 --output /tmp/database-down-ready.json --write-out '%{http_code}' http://127.0.0.1:8000/api/v1/ready || true)"
+            if [ "$status_code" = 503 ] && \
+               python -c "import json; p=json.load(open('/tmp/database-down-ready.json')); assert p['status']=='not_ready' and p['checks']['database']['status']!='ok'"; then
+              database_outage_observed=1
+              break
+            fi
+            sleep 1
+          done
+          test "$database_outage_observed" -eq 1
+          # Hold the database offline beyond one 15-second heartbeat interval,
+          # but well inside the 60-second ownership lease.
+          sleep 20
+          "${compose[@]}" start postgres
+          for attempt in $(seq 1 90); do
+            postgres_id="$("${compose[@]}" ps -q postgres)"
+            postgres_state="$(docker inspect --format='{{.State.Health.Status}}' "$postgres_id" 2>/dev/null || true)"
+            if [ "$postgres_state" = healthy ] && \
+               curl --fail --silent http://127.0.0.1:8000/api/v1/ready >/tmp/database-recovered-ready.json && \
+               python -c "import json; p=json.load(open('/tmp/database-recovered-ready.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok'"; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then "${compose[@]}" logs api worker postgres; exit 1; fi
+            sleep 2
+          done
+          heartbeat_recovery_observed=0
+          for attempt in $(seq 1 30); do
+            "${compose[@]}" logs --no-color worker > /tmp/database-outage-worker.log
+            if grep -Fq "owned-run heartbeat recovered for run_id=$database_run_id" /tmp/database-outage-worker.log; then
+              heartbeat_recovery_observed=1
+              break
+            fi
+            sleep 1
+          done
+          test "$heartbeat_recovery_observed" -eq 1
+          grep -F "owned-run heartbeat refresh failed for run_id=$database_run_id" /tmp/database-outage-worker.log
+          python scripts/hosted_release_acceptance.py cancel-existing --api-key "$api_key" --input /tmp/database-outage-run.json --expected-execution-mode dramatiq_worker
+          "${compose[@]}" exec -T api python - --run-id "$database_run_id" --expected-status cancelled --expected-execution-mode dramatiq_worker < scripts/check_hosted_terminal_evidence.py
+          python scripts/hosted_release_acceptance.py canonical --api-key "$api_key" --expected-execution-mode dramatiq_worker
+
+          mkdir -p build/browser
+          : > build/browser/chrome.log
+          chrome_profile="$(mktemp -d)"
+          google-chrome --headless=new --no-sandbox --disable-gpu \
+            --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
+            --user-data-dir="$chrome_profile" about:blank \
+            >> build/browser/chrome.log 2>&1 &
+          chrome_pid=$!
+          cleanup_chrome() {
+            kill "$chrome_pid" >/dev/null 2>&1 || true
+            wait "$chrome_pid" >/dev/null 2>&1 || true
+          }
+          trap cleanup_chrome EXIT
+          node scripts/hosted_frontend_interaction.mjs \
+            --base-url http://127.0.0.1:8080 \
+            --debug-url http://127.0.0.1:9222 \
+            --expected-version "$RELEASE_VERSION" \
+            --route / \
+            --route /configuration \
+            --route /run-history \
+            --output build/browser/interaction.json
+          cleanup_chrome
+          trap - EXIT
+          for route in '' configuration run-history; do
+            output="build/browser/${route:-home}.html"
+            timeout 45s google-chrome --headless=new --no-sandbox --disable-gpu \
+              --enable-logging=stderr --virtual-time-budget=12000 --dump-dom \
+              "http://127.0.0.1:8080/$route" > "$output" 2>> build/browser/chrome.log
+          done
+          python scripts/check_hosted_frontend.py \
+            --page build/browser/home.html \
+            --page build/browser/configuration.html \
+            --page build/browser/run-history.html \
+            --browser-log build/browser/chrome.log \
+            --interaction-report build/browser/interaction.json \
+            --expected-version "$RELEASE_VERSION"
+
+          "${compose[@]}" logs --no-color > build/hosted-queue.log
+          python scripts/check_hosted_release_logs.py --logs build/hosted-queue.log --env-file infra/.env
+          "${compose[@]}" down -v --remove-orphans
+
+      - name: Isolated Sync v2 edge-to-hub acceptance
+        run: |
+          set -euo pipefail
+          compose=(docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml -f infra/docker-compose.sync-acceptance.yml --env-file infra/.env)
+          api_key="$(sed -n 's/^API_KEY=//p' infra/.env)"
+          "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+          "${compose[@]}" up -d --no-build hub-postgres hub-runtime-init hub-api
+          for attempt in $(seq 1 90); do
+            hub_id="$("${compose[@]}" ps -q hub-api)"
+            hub_state="$(docker inspect --format='{{.State.Health.Status}}' "$hub_id" 2>/dev/null || true)"
+            if [ "$hub_state" = healthy ] && \
+               curl --fail --silent http://127.0.0.1:18080/api/v1/ready >/tmp/hub-ready.json && \
+               python -c "import json; p=json.load(open('/tmp/hub-ready.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok'"; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then "${compose[@]}" logs hub-postgres hub-runtime-init hub-api; exit 1; fi
+            sleep 2
+          done
+          python -m pip install -e ./core -e ./backend
+          python scripts/smoke_sync_v2.py \
+            --hub-base-url http://127.0.0.1:18080/api/v1 \
+            --api-key "$api_key" \
+            --compose-project "$COMPOSE_PROJECT_NAME" \
+            --compose-file infra/docker-compose.yml \
+            --compose-file infra/docker-compose.acceptance.yml \
+            --compose-file infra/docker-compose.sync-acceptance.yml \
+            --env-file infra/.env \
+            --hub-service hub-api
+          "${compose[@]}" logs --no-color > build/hosted-sync-v2.log
+          python scripts/check_hosted_release_logs.py --logs build/hosted-sync-v2.log --env-file infra/.env
+          "${compose[@]}" down -v --remove-orphans
+
+      - name: Deliberate inline profile parity and Redis independence
+        run: |
+          set -euo pipefail
+          compose=(docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml -f infra/docker-compose.inline.yml --env-file infra/.env)
+          api_key="$(sed -n 's/^API_KEY=//p' infra/.env)"
+          "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+          "${compose[@]}" up -d --no-build postgres redis mqtt-acceptance runtime-init api frontend
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:8080/api/v1/ready >/tmp/inline-ready.json && \
+               python -c "import json; p=json.load(open('/tmp/inline-ready.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok'"; then break; fi
+            test "$attempt" -lt 90 || { "${compose[@]}" logs api frontend; exit 1; }
+            sleep 2
+          done
+          test -z "$("${compose[@]}" ps -q worker)"
+          python scripts/hosted_release_acceptance.py canonical --api-key "$api_key" --expected-execution-mode inline_local_fallback
+          python scripts/hosted_release_acceptance.py long-capture --api-key "$api_key" --expected-execution-mode inline_local_fallback --timeout 180
+          python scripts/hosted_release_acceptance.py cancel-capture --api-key "$api_key" --expected-execution-mode inline_local_fallback
+          "${compose[@]}" stop redis
+          curl --fail --silent http://127.0.0.1:8080/api/v1/ready >/tmp/inline-no-redis.json
+          python -c "import json; p=json.load(open('/tmp/inline-no-redis.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok' and 'redis' not in p['checks']"
+          "${compose[@]}" logs --no-color > build/hosted-inline.log
+          python scripts/check_hosted_release_logs.py --logs build/hosted-inline.log --env-file infra/.env
+          "${compose[@]}" down -v --remove-orphans
+
+      - name: Stop hosted stacks and prove cleanup
+        if: always()
+        run: |
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml --env-file infra/.env down -v --remove-orphans || true
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml -f infra/docker-compose.inline.yml --env-file infra/.env down -v --remove-orphans || true
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.acceptance.yml -f infra/docker-compose.sync-acceptance.yml --env-file infra/.env down -v --remove-orphans || true
+          test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")"
+          test -z "$(docker volume ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")"
+          test -z "$(docker network ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")"
+
+      - name: Archive the exact accepted images for isolated publication
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          API_CANDIDATE_ID="$(sed -n 's/^API_CANDIDATE_ID=//p' build/release-evidence/candidate-image-ids.env)"
+          WORKER_CANDIDATE_ID="$(sed -n 's/^WORKER_CANDIDATE_ID=//p' build/release-evidence/candidate-image-ids.env)"
+          FRONTEND_CANDIDATE_ID="$(sed -n 's/^FRONTEND_CANDIDATE_ID=//p' build/release-evidence/candidate-image-ids.env)"
+          test "$(docker image inspect "$API_IMAGE" --format '{{.Id}}')" = "$API_CANDIDATE_ID"
+          test "$(docker image inspect "$WORKER_IMAGE" --format '{{.Id}}')" = "$WORKER_CANDIDATE_ID"
+          test "$(docker image inspect "$FRONTEND_IMAGE" --format '{{.Id}}')" = "$FRONTEND_CANDIDATE_ID"
+          docker save "$API_IMAGE" "$WORKER_IMAGE" "$FRONTEND_IMAGE" | gzip -1 > build/release-evidence/accepted-images.tar.gz
+          test -s build/release-evidence/accepted-images.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: release-accepted-images-${{ inputs.release_sha }}
+          path: |
+            build/release-evidence/accepted-images.tar.gz
+            build/release-evidence/candidate-image-ids.env
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-images:
+    needs: [python, frontend, hosted]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove exact-main publication commit
+        run: |
+          test "$RELEASE_VERSION" = v0.1.28
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch origin main --no-tags
+          test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-accepted-images-${{ inputs.release_sha }}
+          path: build/release-evidence
+      - name: Restore and verify accepted image identities
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "GHCR_API_IMAGE=ghcr.io/$owner/smart-commissioning-app-api"
+            echo "GHCR_WORKER_IMAGE=ghcr.io/$owner/smart-commissioning-app-worker"
+            echo "GHCR_FRONTEND_IMAGE=ghcr.io/$owner/smart-commissioning-app-frontend"
+            echo "API_IMAGE=smart-commissioning-api:$RELEASE_SHA"
+            echo "WORKER_IMAGE=smart-commissioning-worker:$RELEASE_SHA"
+            echo "FRONTEND_IMAGE=smart-commissioning-frontend:$RELEASE_SHA"
+          } >> "$GITHUB_ENV"
+          gzip -dc build/release-evidence/accepted-images.tar.gz | docker load
+          API_CANDIDATE_ID="$(sed -n 's/^API_CANDIDATE_ID=//p' build/release-evidence/candidate-image-ids.env)"
+          WORKER_CANDIDATE_ID="$(sed -n 's/^WORKER_CANDIDATE_ID=//p' build/release-evidence/candidate-image-ids.env)"
+          FRONTEND_CANDIDATE_ID="$(sed -n 's/^FRONTEND_CANDIDATE_ID=//p' build/release-evidence/candidate-image-ids.env)"
+          for role in api worker frontend; do
+            case "$role" in
+              api) image="smart-commissioning-api:$RELEASE_SHA"; expected_id="$API_CANDIDATE_ID" ;;
+              worker) image="smart-commissioning-worker:$RELEASE_SHA"; expected_id="$WORKER_CANDIDATE_ID" ;;
+              frontend) image="smart-commissioning-frontend:$RELEASE_SHA"; expected_id="$FRONTEND_CANDIDATE_ID" ;;
+            esac
+            test "$(docker image inspect "$image" --format '{{.Id}}')" = "$expected_id"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "$RELEASE_VERSION"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "$RELEASE_SHA"
+            test "$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.source" }}')" = "https://github.com/$GITHUB_REPOSITORY"
+          done
+      - name: Verify signed annotated release tag before package mutation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/verify_signed_release_tag.py
+          --repository "$GITHUB_REPOSITORY"
+          --version "$RELEASE_VERSION"
+          --commit "$RELEASE_SHA"
+      - name: Login to GHCR after hosted acceptance
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish accepted commit-SHA images and pull exact registry digests
+        run: bash scripts/publish_docker_images.sh
+      - name: Bind SBOM scans to digest-pulled accepted identities
+        run: |
+          for reference in "$API_IMAGE" "$WORKER_IMAGE" "$FRONTEND_IMAGE"; do
+            [[ "$reference" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]]
+            docker image inspect "$reference" --format '{{json .RepoDigests}}' | grep -F "\"$reference\""
+          done
+          docker tag "$API_IMAGE" "smart-commissioning-api-sbom:$RELEASE_SHA"
+          docker tag "$WORKER_IMAGE" "smart-commissioning-worker-sbom:$RELEASE_SHA"
+          docker tag "$FRONTEND_IMAGE" "smart-commissioning-frontend-sbom:$RELEASE_SHA"
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: smart-commissioning-api:${{ env.RELEASE_SHA }}
+          image: smart-commissioning-api-sbom:${{ env.RELEASE_SHA }}
           format: cyclonedx-json
           output-file: build/release-evidence/SBOM.image-api.cdx.json
           upload-artifact: false
           upload-release-assets: false
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: smart-commissioning-worker:${{ env.RELEASE_SHA }}
+          image: smart-commissioning-worker-sbom:${{ env.RELEASE_SHA }}
           format: cyclonedx-json
           output-file: build/release-evidence/SBOM.image-worker.cdx.json
           upload-artifact: false
           upload-release-assets: false
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: smart-commissioning-frontend:${{ env.RELEASE_SHA }}
+          image: smart-commissioning-frontend-sbom:${{ env.RELEASE_SHA }}
           format: cyclonedx-json
           output-file: build/release-evidence/SBOM.image-frontend.cdx.json
           upload-artifact: false
           upload-release-assets: false
-      - name: Start and wait for API, worker, frontend, and database readiness
-        run: |
-          docker compose -f infra/docker-compose.yml --env-file infra/.env up -d postgres redis runtime-init api worker frontend
-          for attempt in $(seq 1 60); do
-            state=$(docker inspect --format='{{.State.Health.Status}}' "$(docker compose -f infra/docker-compose.yml --env-file infra/.env ps -q worker)" 2>/dev/null || true)
-            if [ "$state" = healthy ]; then break; fi
-            if [ "$attempt" -eq 60 ]; then docker compose -f infra/docker-compose.yml --env-file infra/.env logs api worker; exit 1; fi
-            sleep 5
-          done
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:8080/ > /tmp/frontend.html && grep -q '<div id="root"></div>' /tmp/frontend.html && curl --fail --silent --show-error http://127.0.0.1:8080/api/v1/health > /tmp/health.json && curl --fail --silent --show-error http://127.0.0.1:8080/api/v1/ready > /tmp/ready.json && python -c "import json; p=json.load(open('/tmp/ready.json')); assert p['status']=='ready' and p['checks']['database']['status']=='ok'"; then break; fi
-            if [ "$attempt" -eq 30 ]; then docker compose -f infra/docker-compose.yml --env-file infra/.env logs frontend api; exit 1; fi
-            sleep 2
-          done
-      - name: Hosted BACnet, encrypted secret, and queued UDMI smoke
-        run: |
-          docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T worker python -c "import bacpypes3, app.tasks; print('BACnet and worker imports OK')"
-          docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T api python -c "import os; from app.services.configuration_service import write_secret_material; write_secret_material('secret://release-mtls-smoke', os.urandom(32).hex())"
-          docker compose -f infra/docker-compose.yml --env-file infra/.env exec -T worker python -c "from app.mqtt_config_provider import _resolve_secret; value=_resolve_secret('secret://release-mtls-smoke'); assert value is not None and len(value) == 64 and all(chr(c) in '0123456789abcdef' for c in value)"
-          python scripts/smoke_hosted_queue.py --api-key "$(sed -n 's/^API_KEY=//p' infra/.env)"
-      - name: Stop hosted stack
-        if: always()
-        run: docker compose -f infra/docker-compose.yml --env-file infra/.env down -v
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-image-sboms-${{ inputs.release_sha || github.event.pull_request.head.sha }}
-          path: build/release-evidence/SBOM.image-*.cdx.json
+          name: release-hosted-containers-${{ inputs.release_sha }}
+          path: |
+            build/release-evidence/SBOM.image-*.cdx.json
+            build/release-evidence/docker-image-evidence.json
           if-no-files-found: error
 
   evidence:
-    needs: [python, frontend, hosted]
+    needs: [python, frontend, hosted, publish-images]
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.release_sha || github.event.pull_request.head.sha }}
+          persist-credentials: false
       - name: Prove exact candidate/release commit
         run: test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: release-*-${{ inputs.release_sha || github.event.pull_request.head.sha }}
+          name: release-python-evidence-${{ inputs.release_sha }}
           path: build/release-evidence
-          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-npm-evidence-${{ inputs.release_sha }}
+          path: build/release-evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-hosted-containers-${{ inputs.release_sha }}
+          path: build/release-evidence
       - name: Assemble and validate enriched hosted release evidence
         run: |
-          cp docs/migration-rollback-v0.1.27.md build/release-evidence/MIGRATION_ROLLBACK.md
+          cp docs/migration-rollback-v0.1.28.md build/release-evidence/MIGRATION_ROLLBACK.md
+          cp docs/sync-v2-wire-format.md build/release-evidence/SYNC_V2_WIRE_FORMAT.md
+          cp docs/sync-v2-credential-scope.md build/release-evidence/SYNC_V2_CREDENTIAL_SCOPE.md
+          cp docs/sync-v2-operations.md build/release-evidence/SYNC_V2_OPERATIONS.md
+          cp docs/docker-deployment-rollback-v0.1.28.md build/release-evidence/DOCKER_DEPLOYMENT_ROLLBACK.md
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           artifact_name="$RELEASE_VERSION-release-evidence-$RELEASE_SHA"
-          python scripts/generate_release_evidence.py --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-run-url "$run_url" --workflow-event "$GITHUB_EVENT_NAME" --output-dir build/release-evidence --artifact build/release-evidence/MIGRATION_ROLLBACK.md --sbom build/release-evidence/SBOM.python.cdx.json --sbom build/release-evidence/SBOM.npm.cdx.json --sbom build/release-evidence/SBOM.image-api.cdx.json --sbom build/release-evidence/SBOM.image-worker.cdx.json --sbom build/release-evidence/SBOM.image-frontend.cdx.json --gate python=passed --gate frontend=passed --gate hosted_compose=passed --gate backup_rollback=passed --test ruff=passed --test core_unittest=passed --test backend_unittest=passed --test worker_unittest=passed --test frontend_lint=passed --test frontend_typecheck=passed --test frontend_vitest=passed --test frontend_build=passed --test migration_rollback=passed --test hosted_queue_smoke=passed
-          python scripts/validate_v0127_release_evidence.py --evidence build/release-evidence/release-evidence.json --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-event "$GITHUB_EVENT_NAME" --require-gate python --require-gate frontend --require-gate hosted_compose --require-gate backup_rollback --require-test ruff --require-test core_unittest --require-test backend_unittest --require-test worker_unittest --require-test frontend_lint --require-test frontend_typecheck --require-test frontend_vitest --require-test frontend_build --require-test migration_rollback --require-test hosted_queue_smoke
+          python scripts/generate_release_evidence.py --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-run-url "$run_url" --workflow-event "$GITHUB_EVENT_NAME" --output-dir build/release-evidence --artifact build/release-evidence/MIGRATION_ROLLBACK.md --artifact build/release-evidence/SYNC_V2_WIRE_FORMAT.md --artifact build/release-evidence/SYNC_V2_CREDENTIAL_SCOPE.md --artifact build/release-evidence/SYNC_V2_OPERATIONS.md --artifact build/release-evidence/DOCKER_DEPLOYMENT_ROLLBACK.md --artifact build/release-evidence/docker-image-evidence.json --sbom build/release-evidence/SBOM.python.cdx.json --sbom build/release-evidence/SBOM.npm.cdx.json --sbom build/release-evidence/SBOM.image-api.cdx.json --sbom build/release-evidence/SBOM.image-worker.cdx.json --sbom build/release-evidence/SBOM.image-frontend.cdx.json --gate python=passed --gate frontend=passed --gate hosted_compose=passed --gate hosted_queue=passed --gate hosted_inline=passed --gate sync_v2=passed --gate docker_publication=passed --gate docker_pull_by_digest=passed --gate worker_recovery=passed --gate api_restart=passed --gate redis_recovery=passed --gate database_recovery=passed --gate mtls_resolution=passed --gate frontend_runtime=passed --gate cleanup=passed --gate backup_rollback=passed --test ruff=passed --test core_unittest=passed --test backend_unittest=passed --test worker_unittest=passed --test frontend_lint=passed --test frontend_typecheck=passed --test frontend_vitest=passed --test frontend_build=passed --test migration_rollback=passed --test hosted_queue_smoke=passed --test hosted_inline_smoke=passed --test hosted_sync_v2_round_trip=passed --test hosted_long_capture=passed --test hosted_cancellation=passed --test hosted_worker_kill=passed --test hosted_duplicate_delivery=passed --test hosted_api_restart=passed --test hosted_redis_interruption=passed --test hosted_database_interruption=passed --test docker_oci_labels=passed --test docker_sbom_from_digest=passed --test browser_control_interaction=passed --test browser_console=passed --test hosted_log_inspection=passed
+          python scripts/validate_v0128_release_evidence.py --evidence build/release-evidence/release-evidence.json --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-event "$GITHUB_EVENT_NAME" --require-gate python --require-gate frontend --require-gate hosted_compose --require-gate hosted_queue --require-gate hosted_inline --require-gate sync_v2 --require-gate docker_publication --require-gate docker_pull_by_digest --require-gate worker_recovery --require-gate api_restart --require-gate redis_recovery --require-gate database_recovery --require-gate mtls_resolution --require-gate frontend_runtime --require-gate cleanup --require-gate backup_rollback --require-test ruff --require-test core_unittest --require-test backend_unittest --require-test worker_unittest --require-test frontend_lint --require-test frontend_typecheck --require-test frontend_vitest --require-test frontend_build --require-test migration_rollback --require-test hosted_queue_smoke --require-test hosted_inline_smoke --require-test hosted_sync_v2_round_trip --require-test hosted_long_capture --require-test hosted_cancellation --require-test hosted_worker_kill --require-test hosted_duplicate_delivery --require-test hosted_api_restart --require-test hosted_redis_interruption --require-test hosted_database_interruption --require-test docker_oci_labels --require-test docker_sbom_from_digest --require-test browser_control_interaction --require-test browser_console --require-test hosted_log_inspection
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: v0.1.27-release-evidence-${{ inputs.release_sha || github.event.pull_request.head.sha }}
+          name: v0.1.28-release-evidence-${{ inputs.release_sha || github.event.pull_request.head.sha }}
           path: build/release-evidence
+          if-no-files-found: error
+          retention-days: 30
+
+  promote-images:
+    needs: [evidence, publish-images]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prove exact-main promotion commit
+        run: |
+          test "$RELEASE_VERSION" = v0.1.28
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch origin main --no-tags
+          test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-accepted-images-${{ inputs.release_sha }}
+          path: build/release-evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: v0.1.28-release-evidence-${{ inputs.release_sha }}
+          path: build/release-evidence
+      - name: Restore the exact accepted image archive
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "GHCR_API_IMAGE=ghcr.io/$owner/smart-commissioning-app-api"
+            echo "GHCR_WORKER_IMAGE=ghcr.io/$owner/smart-commissioning-app-worker"
+            echo "GHCR_FRONTEND_IMAGE=ghcr.io/$owner/smart-commissioning-app-frontend"
+            echo "API_IMAGE=smart-commissioning-api:$RELEASE_SHA"
+            echo "WORKER_IMAGE=smart-commissioning-worker:$RELEASE_SHA"
+            echo "FRONTEND_IMAGE=smart-commissioning-frontend:$RELEASE_SHA"
+          } >> "$GITHUB_ENV"
+          gzip -dc build/release-evidence/accepted-images.tar.gz | docker load
+      - name: Re-verify signed annotated release tag before version promotion
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/verify_signed_release_tag.py
+          --repository "$GITHUB_REPOSITORY"
+          --version "$RELEASE_VERSION"
+          --commit "$RELEASE_SHA"
+      - name: Login to GHCR for final version promotion
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote validated digest references to version aliases
+        run: bash scripts/promote_docker_images.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-image-promotion-${{ inputs.release_sha }}
+          path: build/release-evidence/docker-image-promotion.txt
           if-no-files-found: error
           retention-days: 30

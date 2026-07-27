@@ -5,11 +5,13 @@ from smart_commissioning_core.db.db_run_store import (
     WORKER_STALE_OBSERVED_AT_KEY,
     DbRunStore,
 )
-from smart_commissioning_core.db.models import Run
+from smart_commissioning_core.db.engine import session_factory
+from smart_commissioning_core.db.models import Run, RunResult, RunSeal
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.owned_run_store import OwnedRunStore
+from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from sqlalchemy import select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -32,6 +34,7 @@ from app.services.report_artifacts import (
     REPORT_SNAPSHOT_SCHEMA_VERSION,
     canonical_json_bytes,
     snapshot_sha256,
+    verify_signed_manifest,
 )
 from app.services.report_naming import build_report_file_name
 from app.services.run_context_builder import build_run_context
@@ -285,6 +288,7 @@ class RunService:
                 continue
             seen_source_ids.add(source.run_id)
             snapshot_sources.append(source)
+        parameters["source_run_ids"] = [source.run_id for source in snapshot_sources]
         if request.udmi_scope is not None:
             snapshot_source_objects: list[object] = list(snapshot_sources)
             parameters["udmi_scope"] = normalise_udmi_report_scope(
@@ -310,10 +314,17 @@ class RunService:
         }
         discovery_snapshots = self._snapshot_discovery_rows(snapshot_sources)
         parameters["source_discovery_snapshots"] = discovery_snapshots
+        raw_scope = parameters.get("udmi_scope")
+        raw_selected_payloads = (
+            raw_scope.get("selected_payloads", []) if isinstance(raw_scope, dict) else []
+        )
+        selected_payloads = (
+            raw_selected_payloads if isinstance(raw_selected_payloads, list) else []
+        )
         selected_assets = sorted(
             {
                 str(row.get("asset_id"))
-                for row in (parameters.get("udmi_scope") or {}).get("selected_payloads", [])
+                for row in selected_payloads
                 if isinstance(row, dict) and row.get("asset_id")
             },
             key=str.casefold,
@@ -351,6 +362,23 @@ class RunService:
                 udmi_snapshot=parameters.get("udmi_report_snapshot"),
             ),
         }
+        report_snapshot_v2.update(
+            {
+                "report_metadata": {
+                    "output_format": request.output_format,
+                    "report_type": request.report_type,
+                    "report_title_custom": custom_report_title,
+                    "report_title": parameters["report_title"],
+                    "report_generated_at": parameters["report_generated_at"],
+                    "renderer_version": REPORT_RENDERER_VERSION,
+                },
+                "udmi_report_snapshot": parameters.get("udmi_report_snapshot"),
+                "source_run_snapshots": source_snapshots,
+                "source_run_seals": parameters["source_run_seals"],
+                "source_discovery_snapshots": discovery_snapshots,
+                "udmi_scope": parameters.get("udmi_scope"),
+            }
+        )
         parameters["report_snapshot_v2"] = report_snapshot_v2
         parameters["report_snapshot_sha256"] = snapshot_sha256(report_snapshot_v2)
 
@@ -713,14 +741,14 @@ class RunService:
     def complete_report_run(self, run_id: str, manifest: dict[str, object]) -> RunRecord:
         """Publish one immutable artifact manifest and terminal status atomically."""
 
-        statement = (
-            select(Run.status, Run.job_type, Run.result_summary)
-            .where(Run.id == run_id)
-            .with_for_update()
-        )
+        if not verify_signed_manifest(manifest):
+            raise ValueError("Report artifact manifest is not a supported valid signature.")
+        if manifest.get("report_id") != run_id:
+            raise ValueError("Report artifact manifest identifies a different run.")
         now = datetime.now(UTC)
-        with self._engine.begin() as connection:
-            row = connection.execute(statement).one_or_none()
+        factory = session_factory(self._engine)
+        with factory.begin() as session:
+            row = session.scalar(select(Run).where(Run.id == run_id).with_for_update())
             if row is None:
                 raise FileNotFoundError(run_id)
             if row.job_type != "report_generation":
@@ -730,9 +758,28 @@ class RunService:
             if existing is not None:
                 if existing != manifest or row.status != "succeeded":
                     raise RuntimeError("Report artifact finalization conflicts with stored state.")
+                result_row = session.get(RunResult, run_id)
+                seal_row = session.get(RunSeal, run_id)
+                if (
+                    result_row is None
+                    or seal_row is None
+                    or result_row.result_sha256 != row.result_sha256
+                    or seal_row.result_sha256 != row.result_sha256
+                ):
+                    raise RuntimeError("Report artifact finalization is not fully sealed.")
             else:
                 if row.status not in {"queued", "running"}:
                     raise RuntimeError(f"Report run '{run_id}' is already terminal ({row.status}).")
+                report_snapshot = row.parameters.get("report_snapshot_v2")
+                expected_snapshot_hash = row.parameters.get("report_snapshot_sha256")
+                if not isinstance(report_snapshot, dict) or not isinstance(
+                    expected_snapshot_hash, str
+                ):
+                    raise RuntimeError("Report run has no complete frozen snapshot.")
+                if snapshot_sha256(report_snapshot) != expected_snapshot_hash:
+                    raise RuntimeError("Report run snapshot digest is inconsistent.")
+                if manifest.get("snapshot_sha256") != expected_snapshot_hash:
+                    raise RuntimeError("Artifact manifest does not bind the frozen snapshot.")
                 artifact_hash = manifest.get("artifact_sha256")
                 next_summary = {
                     **current,
@@ -747,22 +794,40 @@ class RunService:
                         "signed_at": manifest.get("signed_at"),
                     },
                 }
-                values: dict[str, object] = {
-                    "result_summary": next_summary,
-                    "status": "succeeded",
-                    "stage": "report_ready",
-                    "progress_percent": 100,
-                    "updated_at": now,
-                }
-                if hasattr(Run, "terminal_at"):
-                    values["terminal_at"] = now
-                result = connection.execute(
-                    update(Run)
-                    .where(Run.id == run_id, Run.status.in_(("queued", "running")))
-                    .values(**values)
+                terminal = TerminalResultV1(
+                    status="succeeded",
+                    stage="report_ready",
+                    summary=next_summary,
                 )
-                if result.rowcount != 1:
-                    raise RuntimeError("Report artifact finalization lost its lifecycle race.")
+                result_sha256 = terminal.sha256()
+                row.result_summary = next_summary
+                row.status = terminal.status
+                row.stage = terminal.stage
+                row.progress_percent = 100
+                row.updated_at = now
+                row.terminal_at = now
+                row.result_sha256 = result_sha256
+                session.add(
+                    RunResult(
+                        run_id=run_id,
+                        schema_version=terminal.schema_version,
+                        terminal_status=terminal.status,
+                        terminal_stage=terminal.stage,
+                        summary=next_summary,
+                        result_payload=terminal.model_dump(mode="json"),
+                        result_sha256=result_sha256,
+                        created_at=now,
+                    )
+                )
+                session.add(
+                    RunSeal(
+                        run_id=run_id,
+                        terminal_status=terminal.status,
+                        context_sha256=expected_snapshot_hash,
+                        result_sha256=result_sha256,
+                        sealed_at=now,
+                    )
+                )
         return self.get_run(run_id)
 
     def replace_issues(

@@ -8,6 +8,7 @@ from app.api.routes import (
     evidence,
     health,
     hub,
+    hub_sync_v2,
     imports,
     logs,
     reports,
@@ -24,6 +25,15 @@ api_router = APIRouter()
 # Health endpoints stay unauthenticated so liveness/readiness probes work
 # without credentials (they expose no project data).
 api_router.include_router(health.router, tags=["health"])
+
+# Sync v2 has a dedicated scoped machine credential. It is intentionally
+# outside the ordinary user-auth router so X-Sync-Key cannot authorize any
+# interactive API and X-API-Key cannot authorize evidence ingestion.
+api_router.include_router(
+    hub_sync_v2.router,
+    prefix="/hub/sync",
+    tags=["hub-sync-v2"],
+)
 
 # Import format helpers (profile list + blank templates) are unauthenticated:
 # they expose only column headers and a synthetic example row, i.e. the format

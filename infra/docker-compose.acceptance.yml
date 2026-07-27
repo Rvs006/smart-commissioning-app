@@ -1,0 +1,19 @@
+# Release-gate-only dependencies. This file adds one silent MQTT broker so a
+# real capture can remain active across the ownership-lease boundary without
+# depending on a public network or storing field identifiers.
+services:
+  worker:
+    restart: "no"
+
+  mqtt-acceptance:
+    image: "eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c"
+    restart: "no"
+    command: ["mosquitto", "-c", "/mosquitto/config/acceptance.conf"]
+    volumes:
+      - ./mosquitto-acceptance.conf:/mosquitto/config/acceptance.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "127.0.0.1", "-p", "1883", "-t", "release/health", "-m", "ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s

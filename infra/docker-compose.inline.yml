@@ -1,0 +1,13 @@
+# Deliberate hosted-inline override used only for parity acceptance and small
+# installations that explicitly choose inline execution. The API remains
+# asynchronous so callers receive the run ID and can use Stop run.
+services:
+  api:
+    environment:
+      JOB_EXECUTION_MODE: "inline"
+      INLINE_RUN_ASYNC: "1"
+
+  # Keep the queued worker out of an inline-profile `up`. Its unusual profile
+  # name makes accidental startup visible and avoids a second executor lane.
+  worker:
+    profiles: ["queue-only"]
