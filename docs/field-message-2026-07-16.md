@@ -1,12 +1,15 @@
-# Message to field engineer — v0.1.11–v0.1.13 wrap-up (ready to send)
+# Historical field message: v0.1.11 to v0.1.13 wrap-up
+
+> Sent on 2026-07-16. Keep this as a release record; current field instructions
+> live in [field-quickstart.md](field-quickstart.md).
 
 **Written 2026-07-16, updated same day after the Releases went live.** All three
 GitHub Releases are published with portable zips attached (v0.1.13 = latest), so
-this message is true as written — paste it into Teams or email as-is.
+this message is true as written - paste it into Teams or email as-is.
 
 The follow-up questions (`docs/field-followups-2026-07-16.md`) and the lab-day
 runbook (`docs/lab-day-2026-07-20-runbook.md`) should reach field engineer alongside this
-if he doesn't have them yet — "the runbook" below means that file.
+if he doesn't have them yet - "the runbook" below means that file.
 
 ## The message (sent 2026-07-16)
 
@@ -24,7 +27,7 @@ Going down your notes:
 - Electracom logo showing in the app - in
 - Menus named properly (IP Discovery, BACnet Discovery, and so on) - in
 - Reports appearing on the Reports tab as soon as they're generated - in
-- Results staying put when you navigate away and back - in
+- Results staying put when you leave a page and return - in
 - Register import telling you which rows got rejected and why, and re-picking
   a fixed file with the same name actually working - in
 - BACnet scan reaching past the local subnet by registering with your BBMD as
@@ -66,8 +69,8 @@ Product team
 
 ## Related docs
 
-- `docs/release-publishing-handoff.md` — the publish job (executed 2026-07-16).
-- `docs/field-followups-2026-07-16.md` — the pre-Monday questions (decisions
+- `docs/release-publishing-handoff.md` - the publish job (executed 2026-07-16).
+- `docs/field-followups-2026-07-16.md` - the pre-Monday questions (decisions
   shipped with defaults that want field engineer's confirmation).
-- `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session.
-- `docs/handoff-v0.1.13-remaining-punchlist.md` — what was deferred and why.
+- `docs/lab-day-2026-07-20-runbook.md` - Monday's BACnet lab session.
+- `docs/handoff-v0.1.13-remaining-punchlist.md` - what was deferred and why.

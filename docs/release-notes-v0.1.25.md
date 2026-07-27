@@ -1,9 +1,8 @@
-# v0.1.25: the Workbench keeps the view you chose
+# v0.1.25 - The Workbench keeps the view you chose
 
-This release applies the 24 July field review to UDMI Workbench results and
-reports. The key regression was concrete: three filtered devices could become
-the full imported register by the time a report was rendered. The selected rows
-are now frozen when report generation starts.
+Three filtered devices could become the full imported register while the report
+title dialog was open. v0.1.25 freezes the selected rows when report generation
+starts and applies the 24 July field review to the Workbench.
 
 ## What changed
 

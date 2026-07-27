@@ -751,6 +751,7 @@ class UdmiV1ReportTests(ApiTestCase):
                 "with_issues": 1,
                 "successfully_validated": 0,
                 "unexpected": 0,
+                "wrong_topic": 0,
             },
         )
         self.assertEqual(
@@ -798,6 +799,231 @@ class UdmiV1ReportTests(ApiTestCase):
                 for row in findings
             )
         )
+
+    def test_scoped_annotated_register_preserves_every_frozen_row_and_value(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        summary["wrong_topic_assets"] = [
+            {
+                "asset_id": "A-1",
+                "system": "BMS",
+                "expected_topic_root": "site/floor-1/A-1",
+                "actual_topic_root": "site/floor-0/A-1",
+                "payloads": [
+                    {
+                        "payload_type": "state",
+                        "expected_topic": "site/floor-1/A-1/state",
+                        "actual_topic": "site/floor-0/A-1/state",
+                    },
+                    {
+                        "payload_type": "pointset",
+                        "expected_topic": "site/floor-1/A-1/pointset",
+                        "actual_topic": "site/floor-0/A-1/pointset",
+                    },
+                ],
+                "last_seen": "2026-07-23T10:02:00+00:00",
+            }
+        ]
+        state_payload = summary["asset_results"][0]["payload_results"][0]
+        state_payload["topic"] = "site/floor-1/A-1/state"
+        state_payload["topics"] = [
+            "site/floor-0/A-1/state",
+            "site/floor-1/A-1/state",
+        ]
+        original_columns = [
+            "Row marker",
+            "Asset ID",
+            "Payload type",
+            "Observed in run",
+            "Topic status",
+            "Actual topic(s)",
+            "Comment",
+            "Source run ID",
+            "Observed at",
+        ]
+        frozen_rows = [
+            {
+                "Row marker": "row-1",
+                "Asset ID": "A-1",
+                "Payload type": "state",
+                "Observed in run": "source-observed-1",
+                "Topic status": "source-status-1",
+                "Actual topic(s)": "source-topic-1",
+                "Comment": "source-comment-1",
+                "Source run ID": "source-id-1",
+                "Observed at": "source-time-1",
+            },
+            {
+                "Row marker": "row-2",
+                "Asset ID": "A-1",
+                "Payload type": "metadata",
+                "Observed in run": "source-observed-2",
+                "Topic status": "source-status-2",
+                "Actual topic(s)": "source-topic-2",
+                "Comment": "source-comment-2",
+                "Source run ID": "source-id-2",
+                "Observed at": "source-time-2",
+            },
+            {
+                "Row marker": "row-3",
+                "Asset ID": "B-1",
+                "Payload type": "state",
+                "Observed in run": "source-observed-3",
+                "Topic status": "source-status-3",
+                "Actual topic(s)": "source-topic-3",
+                "Comment": "source-comment-3",
+                "Source run ID": "source-id-3",
+                "Observed at": "source-time-3",
+            },
+        ]
+        source_id = self._seed_run(
+            summary=summary,
+            parameters={
+                "register_columns": original_columns,
+                "register_rows": frozen_rows,
+            },
+        )
+        report = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "schema_version": "1.0",
+                "selected_payloads": [
+                    {
+                        "source_run_id": source_id,
+                        "asset_id": "A-1",
+                        "payload_type": "state",
+                    }
+                ],
+                "unexpected_device_ids": [],
+                "filters": {},
+            },
+        )
+
+        with zipfile.ZipFile(
+            io.BytesIO(self._download(report["report_id"]).content)
+        ) as archive:
+            register = json.loads(archive.read("annotated_input_register.json"))
+            wrong_topics = json.loads(archive.read("wrong_topic_assets.json"))
+
+        self.assertEqual(register["columns"][: len(original_columns)], original_columns)
+        self.assertEqual(
+            register["columns"][len(original_columns) :],
+            [f"{column} (report)" for column in original_columns[3:]],
+        )
+        self.assertEqual(
+            [row["Row marker"] for row in register["rows"]],
+            ["row-1", "row-2", "row-3"],
+        )
+        for exported, frozen in zip(register["rows"], frozen_rows, strict=True):
+            self.assertEqual(
+                {column: exported[column] for column in original_columns},
+                frozen,
+            )
+
+        state_row, metadata_row, other_asset_row = register["rows"]
+        self.assertEqual(state_row["Observed in run (report)"], "Yes")
+        self.assertEqual(state_row["Topic status (report)"], "Wrong topic")
+        self.assertEqual(
+            state_row["Actual topic(s) (report)"],
+            "site/floor-0/A-1/state, site/floor-1/A-1/state",
+        )
+        self.assertNotIn(
+            "Not included in this report's selected payload scope.",
+            state_row["Comment (report)"],
+        )
+        self.assertEqual(metadata_row["Observed in run (report)"], "No")
+        self.assertEqual(metadata_row["Topic status (report)"], "Not evaluated")
+        self.assertEqual(metadata_row["Actual topic(s) (report)"], "")
+        self.assertIn(
+            "Not included in this report's selected payload scope.",
+            metadata_row["Comment (report)"],
+        )
+        self.assertIn(
+            "Not included in this report's selected payload scope.",
+            other_asset_row["Comment (report)"],
+        )
+        self.assertEqual(
+            [
+                payload["payload_type"]
+                for payload in wrong_topics["rows"][0]["payloads"]
+            ],
+            ["state"],
+        )
+
+    def test_partial_scope_keeps_topic_fault_without_failing_payload_content(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        summary["wrong_topic_assets"] = [
+            {
+                "asset_id": "A-1",
+                "system": "BMS",
+                "expected_topic_root": "site/floor-1/A-1",
+                "actual_topic_root": "site/floor-0/A-1",
+                "payloads": [
+                    {
+                        "payload_type": "state",
+                        "expected_topic": "site/floor-1/A-1/state",
+                        "actual_topic": "site/floor-0/A-1/state",
+                    }
+                ],
+                "last_seen": "2026-07-23T10:00:00+00:00",
+            }
+        ]
+        summary["fault_rows"].append(
+            {
+                "issue_id": "a-state-topic-mismatch",
+                "asset_id": "A-1",
+                "system": "BMS",
+                "payload_type": None,
+                "topic_compliance_payload_type": "state",
+                "category": "other_issues",
+                "severity": "high",
+                "description": "Registered state payload used the wrong topic.",
+                "point_name": None,
+                "expected_value": "site/floor-1/A-1/state",
+                "observed_value": "site/floor-0/A-1/state",
+                "suggested_action": "Correct the publisher topic.",
+                "raw_evidence_uri": None,
+            }
+        )
+        source_id = self._seed_run(summary=summary)
+        report = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "schema_version": "1.0",
+                "selected_payloads": [
+                    {
+                        "source_run_id": source_id,
+                        "asset_id": "A-1",
+                        "payload_type": "state",
+                    }
+                ],
+                "unexpected_device_ids": [],
+                "filters": {},
+            },
+        )
+
+        with zipfile.ZipFile(
+            io.BytesIO(self._download(report["report_id"]).content)
+        ) as archive:
+            rendered = json.loads(archive.read("validation_summary.json"))
+            schedule = json.loads(archive.read("asset_validation_schedule.json"))
+            findings = json.loads(archive.read("findings.json"))
+
+        self.assertEqual(rendered["asset_metrics"]["wrong_topic"], 1)
+        self.assertEqual(rendered["asset_metrics"]["successfully_validated"], 0)
+        self.assertEqual(rendered["issue_metrics"], {"blocking": 1, "warning": 0})
+        self.assertEqual(
+            [row["issue_id"] for row in findings],
+            ["a-state-topic-mismatch"],
+        )
+        state = schedule["rows"][0]["payload_results"][0]
+        self.assertEqual(state["payload_type"], "state")
+        self.assertFalse(state["has_issues"])
+        self.assertEqual(state["blocking_issue_count"], 0)
+        self.assertTrue(state["successfully_validated"])
+        self.assertEqual(schedule["rows"][0]["blocking_issue_count"], 1)
+        self.assertFalse(schedule["rows"][0]["successfully_validated"])
 
     def test_empty_filtered_scope_is_valid_and_yields_empty_report(self) -> None:
         source_id = self._seed_run(summary=copy.deepcopy(_SCOPABLE_SUMMARY))
@@ -1326,7 +1552,7 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(summary["report_title"], "Site & <A> Validation")
         self.assertEqual(
             summary["asset_metrics"],
-            {**_TOTALS["asset_metrics"], "unexpected": 0},
+            {**_TOTALS["asset_metrics"], "unexpected": 0, "wrong_topic": 0},
         )
         self.assertEqual(
             summary["payload_metrics"],
@@ -1426,6 +1652,13 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertIn(b'<w:vAlign w:val="center"/>', document)
         self.assertIn(b"<w:insideH", document)
         self.assertIn(b"<w:insideV", document)
+        self.assertEqual(document.count(b"<w:tr>"), document.count(b"<w:cantSplit/>"))
+        self.assertIn(b"<w:keepNext/>", document)
+        self.assertIn(
+            b'<w:pgMar w:top="720" w:right="720" w:bottom="1080" w:left="720" '
+            b'w:header="540" w:footer="540" w:gutter="0"/>',
+            document,
+        )
 
     def test_register_project_site_drives_all_udmi_report_headers(self) -> None:
         source_id = self._seed_run(
@@ -1576,6 +1809,216 @@ class UdmiV1ReportTests(ApiTestCase):
             _payload_correctness({"expected": 0, "successfully_validated": 0}),
             ("N/A", "N/A"),
         )
+
+    def test_wrong_topic_and_annotated_register_render_across_report_formats(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        summary["asset_metrics"]["wrong_topic"] = 1
+        summary["wrong_topic_assets"] = [
+            {
+                "asset_id": "A-1",
+                "system": "BMS",
+                "expected_topic_root": "site/floor-1/A-1",
+                "actual_topic_root": "site/floor-0/A-1",
+                "payloads": [
+                    {
+                        "payload_type": "state",
+                        "expected_topic": "site/floor-1/A-1/state",
+                        "actual_topic": "site/floor-0/A-1/state",
+                    }
+                ],
+                "last_seen": "2026-07-23T10:00:00+00:00",
+            }
+        ]
+        summary["asset_results"][0]["payload_results"][0]["topic"] = (
+            "site/floor-0/A-1/state"
+        )
+        source_id = self._seed_run(
+            summary=summary,
+            parameters={
+                "register_import_id": "imp-sanitized-1",
+                "register_import_filename": "commissioning-register.csv",
+                "register_columns": [
+                    "Project/site",
+                    "System",
+                    "Asset ID",
+                    "Expected topic",
+                ],
+                "register_rows": [
+                    {
+                        "Project/site": "Site A",
+                        "System": "BMS",
+                        "Asset ID": "A-1",
+                        "Expected topic": "site/floor-1/A-1/#",
+                    }
+                ],
+            },
+        )
+
+        xlsx = self._create_report("xlsx", [source_id], title="Topic Review")
+        workbook = load_workbook(io.BytesIO(self._download(xlsx["report_id"]).content))
+        self.assertIn("Wrong Topic Assets", workbook.sheetnames)
+        self.assertIn("Annotated Input Register", workbook.sheetnames)
+        wrong_sheet = workbook["Wrong Topic Assets"]
+        wrong_headers = {cell.value: cell.column for cell in wrong_sheet[1]}
+        self.assertEqual(
+            wrong_sheet.cell(2, wrong_headers["Actual Topic"]).value,
+            "site/floor-0/A-1/state",
+        )
+        register = workbook["Annotated Input Register"]
+        register_headers = [cell.value for cell in register[1]]
+        self.assertEqual(
+            register_headers[:4],
+            ["Project/site", "System", "Asset ID", "Expected topic"],
+        )
+        self.assertEqual(register.cell(2, register_headers.index("Observed in run") + 1).value, "Yes")
+        self.assertEqual(register.cell(2, register_headers.index("Topic status") + 1).value, "Wrong topic")
+        actual_topics = register.cell(
+            2,
+            register_headers.index("Actual topic(s)") + 1,
+        ).value
+        self.assertIn("site/floor-0/A-1/state", actual_topics)
+        self.assertIn("site/a-1/pointset", actual_topics)
+
+        zipped = self._create_report("zip", [source_id], title="Topic Review")
+        with zipfile.ZipFile(io.BytesIO(self._download(zipped["report_id"]).content)) as archive:
+            self.assertIn("wrong_topic_assets.json", archive.namelist())
+            self.assertIn("annotated_input_register.json", archive.namelist())
+            register_json = json.loads(archive.read("annotated_input_register.json"))
+        self.assertEqual(register_json["rows"][0]["Topic status"], "Wrong topic")
+
+        docx = self._create_report("docx", [source_id], title="Topic Review")
+        with zipfile.ZipFile(io.BytesIO(self._download(docx["report_id"]).content)) as archive:
+            document_xml = archive.read("word/document.xml")
+        self.assertIn(b"Registered Assets on Wrong Topics", document_xml)
+        self.assertIn(b"site/floor-0/A-1/state", document_xml)
+        wrong_topic_heading = document_xml.rsplit(
+            b"Registered Assets on Wrong Topics",
+            maxsplit=1,
+        )[0].rsplit(b"<w:p>", maxsplit=1)[-1]
+        self.assertIn(b"<w:pageBreakBefore/>", wrong_topic_heading)
+
+        pdf = self._create_report("pdf", [source_id], title="Topic Review")
+        pdf_content = self._download(pdf["report_id"]).content
+        self.assertIn(b"Registered Assets on Wrong Topics", pdf_content)
+        self.assertIn(b"site/floor-0/A-1/state", pdf_content)
+
+    def test_wrong_topic_totals_use_source_run_asset_identity_per_system(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        summary["wrong_topic_assets"] = [
+            {
+                "asset_id": "A-1",
+                "system": "BMS",
+                "expected_topic_root": "site/floor-1/A-1",
+                "actual_topic_root": "site/floor-0/A-1",
+                "payloads": [
+                    {
+                        "payload_type": "state",
+                        "expected_topic": "site/floor-1/A-1/state",
+                        "actual_topic": "site/floor-0/A-1/state",
+                    }
+                ],
+                "last_seen": "2026-07-23T10:00:00+00:00",
+            }
+        ]
+        first_id = self._seed_run(summary=copy.deepcopy(summary))
+        second_id = self._seed_run(summary=copy.deepcopy(summary))
+        report = self._create_report("zip", [first_id, second_id])
+
+        with zipfile.ZipFile(
+            io.BytesIO(self._download(report["report_id"]).content)
+        ) as archive:
+            rendered = json.loads(archive.read("validation_summary.json"))
+            wrong_topics = json.loads(archive.read("wrong_topic_assets.json"))
+
+        self.assertEqual(rendered["asset_metrics"]["wrong_topic"], 2)
+        bms = next(
+            row for row in rendered["system_metrics"] if row["system"] == "BMS"
+        )
+        self.assertEqual(bms["asset_metrics"]["wrong_topic"], 2)
+        self.assertEqual(
+            {
+                (row["source_run_id"], row["asset_id"])
+                for row in wrong_topics["rows"]
+            },
+            {(first_id, "A-1"), (second_id, "A-1")},
+        )
+
+    def test_legacy_count_only_wrong_topic_metric_is_not_erased(self) -> None:
+        summary = copy.deepcopy(_SCOPABLE_SUMMARY)
+        summary["asset_metrics"]["wrong_topic"] = 1
+        bms = next(
+            row for row in summary["system_metrics"] if row["system"] == "BMS"
+        )
+        bms["asset_metrics"]["wrong_topic"] = 1
+        summary.pop("wrong_topic_assets", None)
+        source_id = self._seed_run(summary=summary)
+        report = self._create_report("zip", [source_id])
+
+        with zipfile.ZipFile(
+            io.BytesIO(self._download(report["report_id"]).content)
+        ) as archive:
+            rendered = json.loads(archive.read("validation_summary.json"))
+            members = set(archive.namelist())
+
+        self.assertEqual(rendered["asset_metrics"]["wrong_topic"], 1)
+        rendered_bms = next(
+            row for row in rendered["system_metrics"] if row["system"] == "BMS"
+        )
+        self.assertEqual(rendered_bms["asset_metrics"]["wrong_topic"], 1)
+        self.assertNotIn("wrong_topic_assets.json", members)
+
+        full_scope = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "schema_version": "1.0",
+                "selected_payloads": [
+                    {
+                        "source_run_id": source_id,
+                        "asset_id": asset_id,
+                        "payload_type": payload_type,
+                    }
+                    for asset_id, payload_types in (
+                        ("A-1", ("state", "metadata", "pointset")),
+                        ("B-1", ("state", "pointset")),
+                    )
+                    for payload_type in payload_types
+                ],
+                "unexpected_device_ids": [],
+                "filters": {},
+            },
+        )
+        with zipfile.ZipFile(
+            io.BytesIO(self._download(full_scope["report_id"]).content)
+        ) as archive:
+            scoped = json.loads(archive.read("validation_summary.json"))
+        self.assertEqual(scoped["asset_metrics"]["wrong_topic"], 1)
+        scoped_bms = next(
+            row for row in scoped["system_metrics"] if row["system"] == "BMS"
+        )
+        self.assertEqual(scoped_bms["asset_metrics"]["wrong_topic"], 1)
+
+        partial_scope = self._create_report(
+            "zip",
+            [source_id],
+            udmi_scope={
+                "schema_version": "1.0",
+                "selected_payloads": [
+                    {
+                        "source_run_id": source_id,
+                        "asset_id": "A-1",
+                        "payload_type": "state",
+                    }
+                ],
+                "unexpected_device_ids": [],
+                "filters": {},
+            },
+        )
+        with zipfile.ZipFile(
+            io.BytesIO(self._download(partial_scope["report_id"]).content)
+        ) as archive:
+            partial = json.loads(archive.read("validation_summary.json"))
+        self.assertEqual(partial["asset_metrics"]["wrong_topic"], 0)
 
     def test_udmi_xlsx_treats_untrusted_text_as_literal_cells(self) -> None:
         summary = copy.deepcopy(_V1_SUMMARY)

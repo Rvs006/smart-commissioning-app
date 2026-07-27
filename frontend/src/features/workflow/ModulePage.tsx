@@ -5,6 +5,7 @@ import {
   cancelRun,
   createImport,
   createReport,
+  deleteReports,
   deleteUdmiSchemaSet,
   downloadFile,
   getDiscoveryResults,
@@ -32,6 +33,7 @@ import {
   startValidationRun,
   uploadUdmiSchemaSet,
   DiscoveryRowRecord,
+  ReportListResponse,
   ReportSummary,
   ReportFormat,
   ReportType,
@@ -98,6 +100,9 @@ type ModulePageProps = {
   moduleRoute: string;
 };
 
+const ALL_REPORT_FORMATS = ["pdf", "docx", "xlsx", "zip"] as const satisfies readonly ReportFormat[];
+type ReportFormatSelection = ReportFormat | "all";
+
 type CopyFeedback = {
   message: string;
   severity: "success" | "warning";
@@ -148,6 +153,7 @@ const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discov
 // honest remainder count rather than building pagination for a pre-1.0 fix:
 // fixing the listed rows and re-uploading surfaces the rest.
 const IMPORT_ERROR_DISPLAY_CAP = 50;
+const LONG_PAYLOAD_ISSUE_THRESHOLD = 8;
 
 const validationModeCards = [
   {
@@ -348,14 +354,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // one-shot confirmation shown after a report is generated (mqatcqb3/mqautz9j).
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
   const [reportToast, setReportToast] = useState<string | null>(null);
+  const [reportToastWarning, setReportToastWarning] = useState(false);
+  const [reportDeleteNotice, setReportDeleteNotice] = useState<string | null>(null);
   // PDF default: the field deliverable is a human-readable handover document
   // (ask 2026-07-14); Word/Excel/zip remain for editable/evidence workflows.
-  const [reportExportFormat, setReportExportFormat] = useState<ReportFormat>("pdf");
+  const [reportExportFormat, setReportExportFormat] = useState<ReportFormatSelection>("pdf");
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
   const [reportTitle, setReportTitle] = useState("");
   const [reportScopeSnapshot, setReportScopeSnapshot] =
     useState<FrozenUdmiReportScope | null>(null);
-  const [reportIntent, setReportIntent] = useState<ReportIntent | null>(null);
+  const [reportIntents, setReportIntents] = useState<readonly ReportIntent[] | null>(null);
   const reportDialogRef = useRef<HTMLDialogElement | null>(null);
   const reportTitleInputRef = useRef<HTMLInputElement | null>(null);
   const reportDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -381,6 +389,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // to that payload's issues (ITEM-D). A ref map, not getElementById: asset ids
   // are arbitrary imported field data, unsafe to trust as DOM element ids.
   const payloadGroupRefs = useRef(new Map<string, HTMLDivElement>());
+  // Long issue lists can put the comparison control well below the fold. Keep
+  // an exact per-payload target so the jump action focuses the right control.
+  const payloadComparisonControlRefs = useRef(new Map<string, HTMLButtonElement>());
+  const reportDeleteButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const reportDeleteSelectedRef = useRef<HTMLButtonElement | null>(null);
+  const reportsHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const reportDeleteFocusIntentRef = useRef<
+    { kind: "bulk" } | { kind: "row"; reportId: string } | null
+  >(null);
   const templateDownload = useFileDownload(apiClient);
   const reportDownload = useFileDownload(apiClient);
   const exportDownload = useFileDownload(apiClient);
@@ -728,10 +745,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setExpandedAsset(null);
     setSelectedReportIds(new Set());
     setReportToast(null);
+    setReportToastWarning(false);
     setReportDialogOpen(false);
     setReportTitle("");
     setReportScopeSnapshot(null);
-    setReportIntent(null);
+    setReportIntents(null);
     dispatchRun({ type: "reset" });
     setScanAuthorized(false);
     setScanDryRun(false);
@@ -812,7 +830,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!reportToast) {
       return;
     }
-    const timer = setTimeout(() => setReportToast(null), 8000);
+    const timer = setTimeout(() => {
+      setReportToast(null);
+      setReportToastWarning(false);
+    }, 8000);
     return () => clearTimeout(timer);
   }, [reportToast]);
 
@@ -1160,36 +1181,151 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Format is operator-chosen (field ask 2026-07-14: PDF and Word exports).
   const reportFromRunMutation = useMutation({
     mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),
-    mutationFn: ({
-      intent,
+    mutationFn: async ({
+      intents,
       reportTitle: title,
     }: {
-      intent: ReportIntent;
+      intents: readonly ReportIntent[];
       reportTitle: string;
-    }) =>
-      createReport({
-        context: { client: apiClient },
-        format: intent.format,
-        reportTitle: title,
-        reportType: intent.reportType,
-        sourceRunIds: [intent.runId],
-        udmiScope: intent.udmiScope,
-        workspace: workspaceRef,
-      }),
-    onSuccess: (result) => {
+    }) => {
+      const settled = await Promise.allSettled(
+        intents.map((intent) =>
+          createReport({
+            context: { client: apiClient },
+            format: intent.format,
+            reportTitle: title,
+            reportType: intent.reportType,
+            sourceRunIds: [intent.runId],
+            udmiScope: intent.udmiScope,
+            workspace: workspaceRef,
+          }),
+        ),
+      );
+      const reports: ReportSummary[] = [];
+      const failedFormats: ReportFormat[] = [];
+      settled.forEach((outcome, index) => {
+        if (outcome.status === "fulfilled") {
+          reports.push(outcome.value);
+        } else {
+          failedFormats.push(intents[index].format);
+        }
+      });
+      if (reports.length === 0) {
+        const firstFailure = settled.find(
+          (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
+        );
+        throw firstFailure?.reason instanceof Error
+          ? firstFailure.reason
+          : new Error("Report generation failed.");
+      }
+      return { failedFormats, reports, requestedCount: intents.length };
+    },
+    onSuccess: ({ failedFormats, reports, requestedCount }) => {
       setReportDialogOpen(false);
       setReportScopeSnapshot(null);
-      setReportIntent(null);
+      setReportIntents(null);
       window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
-      setReportToast(
-        `Report generated from this run — see the Reports tab. Report ID: ${result.report_id}.`,
-      );
+      if (failedFormats.length > 0) {
+        setReportToastWarning(true);
+        setReportToast(
+          `${reports.length} of ${requestedCount} reports were generated. Failed formats: ${failedFormats
+            .map((format) => format.toUpperCase())
+            .join(", ")}. The completed reports are in the Reports tab.`,
+        );
+      } else if (reports.length === 1) {
+        setReportToastWarning(false);
+        setReportToast(
+          `Report generated from this run. See the Reports tab. Report ID: ${reports[0].report_id}.`,
+        );
+      } else {
+        setReportToastWarning(false);
+        setReportToast(
+          `${reports.length} reports generated from this run: PDF, Word, Excel, and evidence pack. See the Reports tab.`,
+        );
+      }
       // The toast points at the Reports tab, so the list behind it must not be
       // stale. The reports query is disabled off the reports route, so this
       // marks it stale and it refetches when that route enables it.
       void queryClient.invalidateQueries({
         queryKey: queryKeys.reports(sessionScopeId, workspaceRef),
       });
+    },
+  });
+
+  const deleteReportsMutation = useMutation({
+    mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),
+    mutationFn: (reportIds: string[]) =>
+      deleteReports({ reportIds, context: { client: apiClient } }),
+    onMutate: () => {
+      setReportDeleteNotice(null);
+    },
+    onSuccess: (result) => {
+      const deletedIds = new Set(result.deleted_report_ids);
+      const reportsQueryKey = queryKeys.reports(sessionScopeId, workspaceRef);
+      const cachedReports =
+        queryClient.getQueryData<ReportListResponse>(reportsQueryKey)?.reports ?? [];
+      const focusIntent = reportDeleteFocusIntentRef.current;
+      reportDeleteFocusIntentRef.current = null;
+      let nextFocusReportId: string | null = null;
+      if (focusIntent?.kind === "row") {
+        const deletedIndex = cachedReports.findIndex(
+          (report) => report.report_id === focusIntent.reportId,
+        );
+        if (deletedIndex >= 0) {
+          const nextReport = cachedReports
+            .slice(deletedIndex + 1)
+            .find((report) => !deletedIds.has(report.report_id));
+          const previousReport = cachedReports
+            .slice(0, deletedIndex)
+            .reverse()
+            .find((report) => !deletedIds.has(report.report_id));
+          nextFocusReportId = nextReport?.report_id ?? previousReport?.report_id ?? null;
+        }
+      }
+      // The delete response is authoritative. Remove those rows immediately so
+      // a failed reconciliation fetch cannot leave dead Download/Delete actions.
+      queryClient.setQueryData<ReportListResponse>(reportsQueryKey, (current) =>
+        current
+          ? {
+              ...current,
+              reports: current.reports.filter((report) => !deletedIds.has(report.report_id)),
+            }
+          : current,
+      );
+      setSelectedReportIds((current) => {
+        const retained = new Set(current);
+        for (const reportId of deletedIds) {
+          retained.delete(reportId);
+        }
+        return retained;
+      });
+      const warningCount = result.artifact_cleanup_warnings.length;
+      setReportDeleteNotice(
+        `Deleted ${result.deleted_count} report${result.deleted_count === 1 ? "" : "s"}.${
+          warningCount > 0
+            ? ` ${warningCount} artifact cleanup warning${warningCount === 1 ? "" : "s"} recorded.`
+            : ""
+        }`,
+      );
+      window.requestAnimationFrame(() => {
+        const nextRowAction = nextFocusReportId
+          ? reportDeleteButtonRefs.current.get(nextFocusReportId)
+          : null;
+        if (nextRowAction) {
+          nextRowAction.focus();
+          return;
+        }
+        const bulkAction = reportDeleteSelectedRef.current;
+        if (bulkAction && !bulkAction.disabled) {
+          bulkAction.focus();
+          return;
+        }
+        reportsHeadingRef.current?.focus();
+      });
+      void reportsQuery.refetch();
+    },
+    onError: () => {
+      reportDeleteFocusIntentRef.current = null;
     },
   });
 
@@ -1367,6 +1503,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     () => new Map((validationSummary?.asset_results ?? []).map((asset) => [asset.asset_id, asset])),
     [validationSummary],
   );
+  const wrongTopicAssetsById = useMemo(
+    () =>
+      new Map(
+        (validationSummary?.wrong_topic_assets ?? []).map((asset) => [asset.asset_id, asset]),
+      ),
+    [validationSummary],
+  );
   const hasPersistedValidationEvidence =
     validationSummary !== null ||
     (payloadViews?.length ?? 0) > 0 ||
@@ -1450,7 +1593,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         const payloadSummary = validationAssetResultsById
           .get(group.assetId)
           ?.payload_results.find((payload) => payload.payload_type === entry.payloadType);
-        const topic = payloadSummary?.topic;
+        const wrongTopicPayload = wrongTopicAssetsById
+          .get(group.assetId)
+          ?.payloads.find((payload) => payload.payload_type === entry.payloadType);
+        const topic = wrongTopicPayload?.actual_topic ?? payloadSummary?.topic;
+        const topicStatus = wrongTopicPayload
+          ? "Wrong topic"
+          : entry.observedPresent || payloadSummary?.received
+            ? "Expected topic"
+            : "No topic observed";
         // Shared (issues-gated) verdict helper so the row, its View detail,
         // and the per-asset payload sections can never disagree on the verdict.
         const { label, verdict } = gatedUdmiVerdict(
@@ -1463,6 +1614,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           Asset: group.assetId,
           Payload: `UDMI ${entry.payloadType}`,
           Topic: topic || "—",
+          "Topic status": topicStatus,
           Observed: observed,
           Issues: String(entry.issues.length),
           "Raw Payload": entry.observed ? JSON.stringify(entry.observed) : "",
@@ -1498,6 +1650,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       Asset: device.topic_root || device.topics[0] || "Unexpected publisher",
       Payload: "Unexpected device",
       Topic: device.topics.join(", ") || device.topic_root || "Not recorded",
+      "Topic status": "Outside register",
       Observed: "Yes",
       Issues: "0",
       "Raw Payload": "",
@@ -1514,7 +1667,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (rows.length === 0) {
       return null;
     }
-    return { columns: ["System", "Asset", "Payload", "Topic", "Observed", "Issues", "Raw Payload", "Result"], rows };
+    return {
+      columns: [
+        "System",
+        "Asset",
+        "Payload",
+        "Topic",
+        "Topic status",
+        "Observed",
+        "Issues",
+        "Raw Payload",
+        "Result",
+      ],
+      rows,
+    };
   }, [
     module.route,
     resultAssetGroups,
@@ -1523,6 +1689,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     gatedUdmiVerdict,
     notObservedAssets,
     validationAssetResultsById,
+    wrongTopicAssetsById,
   ]);
 
   // Reset the row selection when the live UDMI view replaces the sample rows so
@@ -2112,10 +2279,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     );
   };
 
-  // Live, downloadable reports from GET /reports. Only succeeded reports have a
-  // real file behind getReportDownloadPath, so only those are selectable.
+  // All reports remain selectable for deletion. Export derives its own subset
+  // because only succeeded reports have bytes behind the download endpoint.
   const liveReports = reportsQuery.data?.reports ?? [];
   const downloadableReports = liveReports.filter((report) => report.status === "succeeded");
+  const selectedReports = liveReports.filter((report) => selectedReportIds.has(report.report_id));
+  const selectedDownloadableReports = downloadableReports.filter((report) =>
+    selectedReportIds.has(report.report_id),
+  );
 
   const toggleReportSelection = (reportId: string) => {
     setSelectedReportIds((current) => {
@@ -2133,7 +2304,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // multiple bundle into a single zip via one fetch — a per-file download loop
   // tripped the browser's per-gesture throttle and kept only one file.
   const handleExportSelected = async () => {
-    const chosen = downloadableReports.filter((report) => selectedReportIds.has(report.report_id));
+    const chosen = selectedDownloadableReports;
     if (chosen.length === 0) {
       return;
     }
@@ -2153,6 +2324,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     });
   };
 
+  const handleDeleteReports = (
+    reports: ReportSummary[],
+    focusIntent: { kind: "bulk" } | { kind: "row"; reportId: string },
+  ) => {
+    if (!canEngineer || reports.length === 0 || deleteReportsMutation.isPending) {
+      return;
+    }
+    const reportIds = Array.from(new Set(reports.map((report) => report.report_id)));
+    const description =
+      reportIds.length === 1
+        ? reports[0].report_title?.trim() || reports[0].file_name || reportIds[0]
+        : `${reportIds.length} selected reports`;
+    const confirmed = window.confirm(
+      `Delete ${description}? Generated report records and their local artifacts will be removed. Source runs remain intact.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+    reportDeleteFocusIntentRef.current = focusIntent;
+    deleteReportsMutation.mutate(reportIds);
+  };
+
   // "Generate report from this run" affordance shown on a terminal validation/
   // discovery run (mqautz9j). Scopes the report to the originating run id via
   // source_run_ids so the report traces back to it.
@@ -2161,6 +2354,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!runId) {
       return;
     }
+    setReportToast(null);
+    setReportToastWarning(false);
     const reportType: ReportType =
       activeRun.kind === "discovery"
         ? ((module.route === "ip-scanner"
@@ -2204,13 +2399,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     } else {
       setReportScopeSnapshot(null);
     }
-    setReportIntent(
-      createReportIntent({
-        format: reportExportFormat,
-        reportType,
-        runId,
-        ...(frozenScope ? { udmiScope: frozenScope } : {}),
-      }),
+    const formats =
+      reportExportFormat === "all" ? ALL_REPORT_FORMATS : [reportExportFormat];
+    setReportIntents(
+      formats.map((format) =>
+        createReportIntent({
+          format,
+          reportType,
+          runId,
+          ...(frozenScope ? { udmiScope: frozenScope } : {}),
+        }),
+      ),
     );
     reportDialogOpenerRef.current = opener;
     setReportTitle(defaultReportTitle(activeRunRecord));
@@ -2221,18 +2420,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const closeReportDialog = () => {
     setReportDialogOpen(false);
     setReportScopeSnapshot(null);
-    setReportIntent(null);
+    setReportIntents(null);
     window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
   };
 
   const handleReportDialogSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const title = reportTitle.trim();
-    if (!reportIntent || !title || title.length > 160) {
+    if (!reportIntents || !title || title.length > 160) {
       return;
     }
     reportFromRunMutation.mutate({
-      intent: reportIntent,
+      intents: reportIntents,
       reportTitle: title,
     });
   };
@@ -2312,6 +2511,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
   const visibleImportErrors = importErrors.slice(0, IMPORT_ERROR_DISPLAY_CAP);
   const hiddenImportErrorCount = Math.max(importErrors.length - IMPORT_ERROR_DISPLAY_CAP, 0);
+
+  const jumpToPayloadComparison = useCallback((payloadKey: string) => {
+    const target = payloadComparisonControlRefs.current.get(payloadKey);
+    if (!target) {
+      return;
+    }
+    const reducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({
+      behavior: reducedMotion ? "auto" : "smooth",
+      block: "center",
+    });
+  }, []);
 
   // Selecting a live-UDMI result through its Select/View controls opens the
   // matching asset in the inspector and scrolls to that payload type's issues
@@ -3697,21 +3911,46 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         <section className="surface" data-stepgroup="setup run results">
           <div className="surface-heading">
             <div>
-              <h3>Generated Reports</h3>
+              <h3 className="report-list-heading" ref={reportsHeadingRef} tabIndex={-1}>
+                Generated Reports
+              </h3>
             </div>
-            <button
-              className="secondary-button compact"
-              disabled={selectedReportIds.size === 0 || exportDownload.pendingKey !== null}
-              onClick={() => void handleExportSelected()}
-              title={
-                selectedReportIds.size === 0
-                  ? "Tick one or more completed reports to export them."
-                  : `Download ${selectedReportIds.size} selected report(s).`
-              }
-              type="button"
-            >
-              {exportDownload.pendingKey?.startsWith("selected-") ? "Exporting..." : "Export selected"}
-            </button>
+            <div className="report-list-actions">
+              <button
+                className="secondary-button compact"
+                disabled={
+                  selectedDownloadableReports.length === 0 ||
+                  exportDownload.pendingKey !== null
+                }
+                onClick={() => void handleExportSelected()}
+                title={
+                  selectedDownloadableReports.length === 0
+                    ? "Select one or more completed reports to export them."
+                    : `Download ${selectedDownloadableReports.length} selected completed report(s).`
+                }
+                type="button"
+              >
+                {exportDownload.pendingKey?.startsWith("selected-")
+                  ? "Exporting..."
+                  : "Export selected"}
+              </button>
+              {canEngineer && (
+                <button
+                  className="secondary-button compact destructive"
+                  disabled={selectedReports.length === 0 || deleteReportsMutation.isPending}
+                  onClick={() => handleDeleteReports(selectedReports, { kind: "bulk" })}
+                  ref={reportDeleteSelectedRef}
+                  title={
+                    selectedReports.length === 0
+                      ? "Select one or more reports to delete them."
+                      : `Delete ${selectedReports.length} selected report(s).`
+                  }
+                  type="button"
+                >
+                  {deleteReportsMutation.isPending ? "Deleting..." : "Delete selected"}
+                </button>
+              )}
+            </div>
           </div>
           <p className="section-copy">
             Every report you generate here is stored against its run and listed below. Generate a report from
@@ -3719,9 +3958,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             validation run elsewhere — it will appear here, traceable to the run it came from.
           </p>
           {reportToast && (
-            <div className="state-panel success" role="status">
-              <strong>Report generated</strong>
+            <div className={`state-panel ${reportToastWarning ? "warning" : "success"}`} role="status">
+              <strong>{reportToastWarning ? "Report generation incomplete" : "Report generated"}</strong>
               <span>{reportToast}</span>
+            </div>
+          )}
+          {reportDeleteNotice && (
+            <div className="state-panel success" role="status">
+              <strong>Reports deleted</strong>
+              <span>{reportDeleteNotice}</span>
             </div>
           )}
           <div className="data-table-wrap">
@@ -3738,6 +3983,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <th>Source runs</th>
                     <th>File</th>
                     <th>Download</th>
+                    {canEngineer && <th>Delete</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -3749,9 +3995,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           <input
                             aria-label={`Select report ${report.file_name || report.report_id}`}
                             checked={selectedReportIds.has(report.report_id)}
-                            disabled={!downloadable}
                             onChange={() => toggleReportSelection(report.report_id)}
-                            title={downloadable ? undefined : "Only completed reports can be exported."}
+                            title="Select this report for export or deletion."
                             type="checkbox"
                           />
                         </td>
@@ -3802,6 +4047,31 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               : "Download"}
                           </button>
                         </td>
+                        {canEngineer && (
+                          <td>
+                            <button
+                              aria-label={`Delete report ${report.file_name || report.report_id}`}
+                              className="secondary-button compact destructive"
+                              disabled={deleteReportsMutation.isPending}
+                              onClick={() =>
+                                handleDeleteReports([report], {
+                                  kind: "row",
+                                  reportId: report.report_id,
+                                })
+                              }
+                              ref={(el) => {
+                                if (el) {
+                                  reportDeleteButtonRefs.current.set(report.report_id, el);
+                                } else {
+                                  reportDeleteButtonRefs.current.delete(report.report_id);
+                                }
+                              }}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     );
                   })}
@@ -3824,6 +4094,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <div className="state-panel error">
               <strong>Export failed</strong>
               <span>{exportDownload.error}</span>
+            </div>
+          )}
+          {deleteReportsMutation.isError && (
+            <div className="state-panel error" role="alert">
+              <strong>Delete failed</strong>
+              <span>
+                {deleteReportsMutation.error instanceof Error
+                  ? deleteReportsMutation.error.message
+                  : "The report deletion request failed."}
+              </span>
             </div>
           )}
         </section>
@@ -4340,18 +4620,35 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                   }}
                                   tabIndex={-1}
                                 >
-                                  <h5>{entry.payloadType}</h5>
-                                  {sectionTone && (
-                                    <p className={`payload-verdict ${sectionTone}`}>
-                                      {sectionVerdict.verdict === "pass"
-                                        ? "PASS — UDMI Compliant"
-                                        : sectionVerdict.verdict === "pass-notes"
-                                          ? "PASS WITH NOTES — minor issues below"
-                                          : sectionVerdict.verdict === "offline"
-                                            ? "NOT OBSERVED THIS RUN — no payload arrived during the capture window"
-                                            : "NON-COMPLIANT — please see details below"}
-                                    </p>
-                                  )}
+                                  <div className="payload-type-heading">
+                                    <h5>{entry.payloadType}</h5>
+                                    {entry.hasPayloadView &&
+                                      entry.issues.length >= LONG_PAYLOAD_ISSUE_THRESHOLD && (
+                                        <button
+                                          aria-label={`Jump to ${entry.payloadType} expected versus observed comparison`}
+                                          className="secondary-button compact"
+                                          onClick={() => jumpToPayloadComparison(payloadKey)}
+                                          type="button"
+                                        >
+                                          Jump to payload comparison
+                                        </button>
+                                      )}
+                                  </div>
+                                  <p
+                                    className={`payload-verdict ${sectionTone ?? "neutral"}`}
+                                  >
+                                    {sectionVerdict.verdict === "pass"
+                                      ? "PASS: UDMI Compliant"
+                                      : sectionVerdict.verdict === "pass-notes"
+                                        ? "PASS WITH NOTES: minor issues below"
+                                        : sectionVerdict.verdict === "offline"
+                                          ? "NOT OBSERVED THIS RUN: no payload arrived during the capture window"
+                                          : sectionVerdict.verdict === "fail"
+                                            ? "NON-COMPLIANT: please see details below"
+                                            : sectionVerdict.label === "Not received"
+                                              ? "NOT RECEIVED: no payload arrived for this payload type"
+                                              : sectionVerdict.label}
+                                  </p>
                                   {entry.issues.map((issue) => (
                                     <IssueCard key={issue.id} context={issue.area} issue={issue} />
                                   ))}
@@ -4363,6 +4660,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                         onClick={() =>
                                           setExpandedPayloadKey(payloadOpen ? null : payloadKey)
                                         }
+                                        ref={(el) => {
+                                          if (el) {
+                                            payloadComparisonControlRefs.current.set(payloadKey, el);
+                                          } else {
+                                            payloadComparisonControlRefs.current.delete(payloadKey);
+                                          }
+                                        }}
                                         type="button"
                                       >
                                         {payloadOpen ? "Hide" : "Show"} expected vs observed payload
@@ -4470,8 +4774,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             />
           </div>
           {reportToast && (
-            <div className="state-panel success" role="status">
-              <strong>Report generated</strong>
+            <div className={`state-panel ${reportToastWarning ? "warning" : "success"}`} role="status">
+              <strong>{reportToastWarning ? "Report generation incomplete" : "Report generated"}</strong>
               <span>{reportToast}</span>
             </div>
           )}
@@ -4499,9 +4803,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <div className="report-title-dialog-heading">
               <h3 id="report-title-heading">Name this validation report</h3>
               <p id="report-title-help">
-                Use a title that identifies the site, systems, or capture window. It will appear in
-                the generated {(reportIntent?.format ?? reportExportFormat).toUpperCase()} report, the Reports list, and the
-                download filename.
+                Use a title that identifies the site, systems, or capture window. It will appear in{" "}
+                {reportIntents?.length === ALL_REPORT_FORMATS.length
+                  ? "all four generated reports"
+                  : `the generated ${(
+                      reportIntents?.[0]?.format ??
+                      (reportExportFormat === "all" ? "PDF" : reportExportFormat)
+                    ).toUpperCase()} report`}
+                , the Reports list, and{" "}
+                {reportIntents?.length === ALL_REPORT_FORMATS.length
+                  ? "each download filename"
+                  : "the download filename"}.
               </p>
             </div>
             {reportScopeSnapshot && (
@@ -4613,8 +4925,8 @@ function ReportFromRunControls({
   onGenerate,
   pending,
 }: {
-  format: ReportFormat;
-  onFormatChange: (next: ReportFormat) => void;
+  format: ReportFormatSelection;
+  onFormatChange: (next: ReportFormatSelection) => void;
   onGenerate: (opener: HTMLButtonElement) => void;
   pending: boolean;
 }) {
@@ -4624,13 +4936,14 @@ function ReportFromRunControls({
         Report format
         <select
           aria-label="Report format"
-          onChange={(event) => onFormatChange(event.target.value as ReportFormat)}
+          onChange={(event) => onFormatChange(event.target.value as ReportFormatSelection)}
           value={format}
         >
           <option value="pdf">PDF (.pdf)</option>
           <option value="docx">Word (.docx)</option>
           <option value="xlsx">Excel (.xlsx)</option>
           <option value="zip">Evidence pack (.zip)</option>
+          <option value="all">Generate All</option>
         </select>
       </label>
       <button
@@ -4707,6 +5020,7 @@ function buildValidationSummaryDisplay(
     return null;
   }
   const unexpectedDevices = summary.unexpected_devices ?? [];
+  const wrongTopicAssets = summary.wrong_topic_assets ?? [];
   const retiredFaults = summary.fault_rows.filter((fault) =>
     retiredUnexpectedIssueIds.has(fault.issue_id),
   );
@@ -4794,10 +5108,21 @@ function buildValidationSummaryDisplay(
       unexpected: Array.isArray(summary.unexpected_devices)
         ? unexpectedDevices.length
         : (summary.asset_metrics.unexpected ?? 0),
+      wrong_topic: Array.isArray(summary.wrong_topic_assets)
+        ? wrongTopicAssets.length
+        : (summary.asset_metrics.wrong_topic ?? 0),
     },
     payload_metrics: normalisePayloadMetrics(summary.payload_metrics, summary.asset_results),
     system_metrics: summary.system_metrics.map((system) => ({
       ...system,
+      asset_metrics: {
+        ...system.asset_metrics,
+        wrong_topic: Array.isArray(summary.wrong_topic_assets)
+          ? wrongTopicAssets.filter(
+              (asset) => (asset.system || "Unspecified") === system.system,
+            ).length
+          : (system.asset_metrics.wrong_topic ?? 0),
+      },
       ...withoutRetiredFaults(
         system.fault_metrics,
         system.issue_metrics,
@@ -4811,6 +5136,7 @@ function buildValidationSummaryDisplay(
     ...adjustedOverall,
     fault_rows: retainedFaults,
     unexpected_devices: unexpectedDevices,
+    wrong_topic_assets: wrongTopicAssets,
   };
 }
 
@@ -4833,6 +5159,7 @@ function summaryMetricsForAssets(
   faults: SummaryFaultRow[],
   scopeIssuesToFaults: boolean,
   unexpected = 0,
+  wrongTopic = 0,
 ) {
   const payloads = assets.flatMap((asset) => asset.payload_results);
   const expectedPayloads = payloads.filter((payload) => payload.expected);
@@ -4886,6 +5213,7 @@ function summaryMetricsForAssets(
       with_issues: assets.filter((asset) => asset.issue_count > 0).length,
       successfully_validated: assets.filter((asset) => asset.successfully_validated).length,
       unexpected,
+      wrong_topic: wrongTopic,
     },
     payload_metrics: {
       expected: expectedPayloads.length,
@@ -4927,6 +5255,8 @@ function filterValidationSummary(
   );
   const unexpectedDevices = summary.unexpected_devices ?? [];
   const unexpectedCount = summary.asset_metrics.unexpected ?? unexpectedDevices.length;
+  const wrongTopicAssets = summary.wrong_topic_assets ?? [];
+  const wrongTopicCount = summary.asset_metrics.wrong_topic ?? wrongTopicAssets.length;
   const summaryChanged =
     reconciledAssets.some((asset, index) => asset !== summary.asset_results[index]) ||
     expectedFaultRows.length !== summary.fault_rows.length;
@@ -4937,6 +5267,7 @@ function filterValidationSummary(
       expectedFaultRows,
       false,
       unexpectedCount,
+      wrongTopicCount,
     );
     const systems = Array.from(new Set(reconciledAssets.map((asset) => asset.system || "Unspecified"))).sort();
     const systemMetrics = systems.map((system) => {
@@ -4945,7 +5276,19 @@ function filterValidationSummary(
       const systemFaults = expectedFaultRows.filter(
         (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
       );
-      return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, false) };
+      const systemWrongTopicCount = wrongTopicAssets.filter(
+        (asset) => (asset.system || "Unspecified") === system,
+      ).length;
+      return {
+        system,
+        ...summaryMetricsForAssets(
+          systemAssets,
+          systemFaults,
+          false,
+          0,
+          systemWrongTopicCount,
+        ),
+      };
     });
     reconciledSummary = {
       ...summary,
@@ -5072,11 +5415,21 @@ function filterValidationSummary(
   const scopedUnexpectedDevices = unexpectedDevices.filter((device) =>
     selectedUnexpectedIds.has(device.id),
   );
+  const scopedWrongTopicAssets = wrongTopicAssets.flatMap((asset) => {
+    if (!assetIds.has(asset.asset_id)) {
+      return [];
+    }
+    const payloads = asset.payloads.filter((payload) =>
+      selectedPayloadKeys.has(`${asset.asset_id}\u0000${payload.payload_type}`),
+    );
+    return payloads.length > 0 ? [{ ...asset, payloads }] : [];
+  });
   const overall = summaryMetricsForAssets(
     assets,
     faultRows,
     true,
     scopedUnexpectedDevices.length,
+    scopedWrongTopicAssets.length,
   );
   const systems = Array.from(new Set(assets.map((asset) => asset.system || "Unspecified"))).sort();
   const systemMetrics = systems.map((system) => {
@@ -5085,7 +5438,19 @@ function filterValidationSummary(
     const systemFaults = faultRows.filter(
       (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
     );
-    return { system, ...summaryMetricsForAssets(systemAssets, systemFaults, true) };
+    const systemWrongTopicCount = scopedWrongTopicAssets.filter(
+      (asset) => (asset.system || "Unspecified") === system,
+    ).length;
+    return {
+      system,
+      ...summaryMetricsForAssets(
+        systemAssets,
+        systemFaults,
+        true,
+        0,
+        systemWrongTopicCount,
+      ),
+    };
   });
   return {
     ...reconciledSummary,
@@ -5094,6 +5459,7 @@ function filterValidationSummary(
     fault_rows: faultRows,
     system_metrics: systemMetrics,
     unexpected_devices: scopedUnexpectedDevices,
+    wrong_topic_assets: scopedWrongTopicAssets,
   };
 }
 
@@ -5192,6 +5558,7 @@ function UdmiSummaryPanel({
     { label: "Not observed", value: summary.asset_metrics.not_observed },
     { label: "Assets with issues", value: summary.asset_metrics.with_issues },
     { label: "Successfully validated", value: summary.asset_metrics.successfully_validated },
+    { label: "Wrong-topic assets", value: summary.asset_metrics.wrong_topic ?? 0 },
     { label: "Unexpected devices", value: summary.asset_metrics.unexpected ?? 0 },
   ];
   const faults: SummaryMetric[] = [
@@ -5252,6 +5619,56 @@ function UdmiSummaryPanel({
         <PayloadMetricGroup summary={summary} />
         <SummaryMetricGroup metrics={faults} title="Fault metrics" tone="faults" />
       </div>
+
+      {(summary.wrong_topic_assets ?? []).length > 0 ? (
+        <section
+          className="udmi-system-summary udmi-wrong-topic-summary"
+          aria-labelledby="udmi-wrong-topic-summary-heading"
+        >
+          <div>
+            <h4 id="udmi-wrong-topic-summary-heading">Registered assets on wrong topics</h4>
+            <p>
+              These assets were received and identified, but their observed MQTT topic roots do
+              not match the register.
+            </p>
+          </div>
+          <div className="data-table-wrap">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Asset</th>
+                  <th>System</th>
+                  <th>Expected topic root</th>
+                  <th>Observed topic root</th>
+                  <th>Affected payloads</th>
+                  <th>Last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(summary.wrong_topic_assets ?? []).map((asset) => (
+                  <tr key={`${asset.asset_id}:${asset.actual_topic_root}`}>
+                    <td>{asset.asset_id}</td>
+                    <td>{asset.system || "Unspecified"}</td>
+                    <td>{asset.expected_topic_root}</td>
+                    <td>{asset.actual_topic_root}</td>
+                    <td>
+                      {asset.payloads
+                        .map(
+                          (payload) =>
+                            `${payload.payload_type}: ${payload.expected_topic} → ${payload.actual_topic}`,
+                        )
+                        .join(", ")}
+                    </td>
+                    <td>
+                      {asset.last_seen ? formatAbsoluteTime(asset.last_seen) : "Not recorded"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       <p className="udmi-metric-basis">
         The Observed assets metric counts expected register assets with at least one retained expected payload.

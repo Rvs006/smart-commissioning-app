@@ -219,35 +219,28 @@ export function udmiPayloadVerdict(input: {
   if (assetOffline && !observedPresent) {
     return { label: "Not observed this run", verdict: "offline" };
   }
+  // Presence is a separate fact from validity. When no payload arrived there
+  // is nothing to classify as compliant or non-compliant, even if the engine
+  // retained an asset-level or missing-payload issue for the operator to read.
+  if (!observedPresent) {
+    return { label: "Not received", verdict: "none" };
+  }
   if (criticalCount > 0) {
     return {
-      label: `Non-compliant — ${totalIssues} issue${totalIssues === 1 ? "" : "s"} (${criticalCount} critical)`,
+      label: `Non-compliant: ${totalIssues} issue${totalIssues === 1 ? "" : "s"} (${criticalCount} critical)`,
       verdict: "fail",
     };
   }
   if (majorCount > 0) {
     return {
-      label: `Non-compliant — ${totalIssues} issue${totalIssues === 1 ? "" : "s"}`,
+      label: `Non-compliant: ${totalIssues} issue${totalIssues === 1 ? "" : "s"}`,
       verdict: "fail",
     };
   }
   if (totalIssues > 0) {
-    // "Pass with notes" is an honest claim ONLY when a payload was actually
-    // observed. A payload type that was never received but still carries
-    // minor-only notes must not read as a PASS (ISSUE-10) — it stays neutral
-    // "Not received", with the note count kept visible in the label. Hard fails
-    // (critical/major) above are unaffected: those issues are real regardless of
-    // whether a payload was observed.
-    return observedPresent
-      ? { label: "Pass with notes", verdict: "pass-notes" }
-      : {
-          label: `Not received — ${totalIssues} note${totalIssues === 1 ? "" : "s"}`,
-          verdict: "none",
-        };
+    return { label: "Pass with notes", verdict: "pass-notes" };
   }
-  return observedPresent
-    ? { label: "Pass", verdict: "pass" }
-    : { label: "Not received", verdict: "none" };
+  return { label: "Pass", verdict: "pass" };
 }
 
 // Shading tone for a verdict under the RAG scheme: green (pass) for a compliant

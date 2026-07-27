@@ -14,12 +14,12 @@ routes.
 
 ### Assets
 
-- **Building configuration** — network/BACnet/MQTT settings, imported registers,
+- **Building configuration** - network/BACnet/MQTT settings, imported registers,
   expected-asset schedules. Disclosure or tampering misdirects commissioning.
-- **Credentials** — MQTT broker username/password, BACnet/TLS client
+- **Credentials** - MQTT broker username/password, BACnet/TLS client
   certificates and private keys, the API key, Redis/Postgres passwords, the
   secret-store Fernet key, and the evidence signing key.
-- **Evidence** — captured payloads, validation issues, signed report bundles.
+- **Evidence** - captured payloads, validation issues, signed report bundles.
   Integrity matters: evidence is a record used for handover/acceptance.
 
 ### Trust boundaries
@@ -29,7 +29,7 @@ routes.
 - **Edge ↔ Hub.** The portable laptop (edge) holds its own SQLite + secrets and
   trusts only loopback; the hosted hub is a shared server reached over the
   network (behind a TLS-terminating reverse proxy). They are distinct trust
-  zones — edge data does not implicitly trust the hub and vice versa. Across this
+  zones - edge data does not implicitly trust the hub and vice versa. Across this
   boundary the hub trusts an edge only via a pinned-key **trusted-edges
   allowlist** and accepts only signed, hash-verified, immutable run bundles
   (untrusted or tampered bundles are rejected and nothing is written); see
@@ -39,7 +39,7 @@ routes.
   probes, MQTT). This is the **highest-consequence boundary**: an unauthorized or
   aggressive scan can disrupt controllers, trip alarms, or flood a broker. The
   scan-safety controls (section 4) exist for exactly this boundary.
-- **App ↔ infrastructure.** Postgres, Redis, the MQTT broker — reached over the
+- **App ↔ infrastructure.** Postgres, Redis, the MQTT broker - reached over the
   compose network (hosted) with password auth; never exposed publicly by the app
   (loopback binding + reverse proxy in front).
 
@@ -71,20 +71,20 @@ route except health):
 - **`api_key` (hosted profile; compose default).** Every request must present the
   key via `X-API-Key` or `Authorization: Bearer <key>`. Key comparison is
   constant-time (`secrets.compare_digest`). With **no key configured the API
-  fails closed** — every authenticated request is rejected with 401, and startup
+  fails closed** - every authenticated request is rejected with 401, and startup
   logs a warning.
 
 Properties:
 
 - **Loopback edge trusts any co-resident process.** In `local` mode a loopback
   request with no key resolves to a synthetic **ADMIN** principal, so on the edge
-  the RBAC `require_role()` gates are **not** a security boundary — any local
+  the RBAC `require_role()` gates are **not** a security boundary - any local
   process can reach any endpoint as ADMIN. Those gates bite only under
   `api_key` mode with per-user keys (a rejected/inactive key still 401s).
 - **Health endpoints are exempt** so liveness/readiness probes work without
   credentials (they expose no project data).
 - The configured key is **never echoed** back; 401 detail messages are generic.
-- **No cookies / sessions** — header auth only, so credentialed CORS stays
+- **No cookies / sessions** - header auth only, so credentialed CORS stays
   disabled (`allow_credentials=False`) and CORS is restricted to
   `CORS_ORIGINS`.
 - **Schema endpoints** (`/docs`, `/redoc`, `/openapi.json`) are gated off (404)
@@ -106,7 +106,7 @@ Implemented in `backend/app/services/configuration_service.py` and
   stored under the secrets root (`SMART_COMMISSIONING_SECRETS_ROOT`, default
   `backend/runtime/secrets/`).
 - **`secret://` indirection.** The database stores only opaque `secret://`
-  references — never the secret bytes. The configuration payload carries the
+  references - never the secret bytes. The configuration payload carries the
   reference; the material is resolved from disk only by internal consumers (e.g.
   the MQTT connection builder) via the `mask_secrets=False` path.
 - **Masking on every API response.** Password-kind fields are returned as an
@@ -125,7 +125,7 @@ Implemented in `backend/app/services/configuration_service.py` and
 - **Rotation.** Per-secret rotation (API key, Redis/Postgres passwords,
   secret-store key, signing key, MQTT/BACnet material) is documented in
   `docs/runbook.md` section 7. The secret-store key rotation is manual and
-  consequential — back up first (`docs/backup-restore.md`).
+  consequential - back up first (`docs/backup-restore.md`).
 
 ## 4. Scan-safety controls
 
@@ -137,19 +137,19 @@ testable precondition and limit blast radius.
   `require_scan_authorization`). A real scan runs only when the run's
   `parameters` carry either `authorized = true` (shorthand) **or** the
   audit-friendly `scan_authorization = {authorized: true, authorized_by: "<who>"}`
-  (preferred — it records *who* authorized). Anything else raises
+  (preferred - it records *who* authorized). Anything else raises
   `ScanNotAuthorized` (which carries no parameter contents, so it is safe to
   surface). The API enforces the same contract at the boundary
   (`discovery.py`, `validation.py`) returning **403** with an actionable message;
   the engine re-checks as defense in depth.
-- **Dry-run** (`build_dry_run_plan`). A `dry_run = true` run performs **no I/O** —
+- **Dry-run** (`build_dry_run_plan`). A `dry_run = true` run performs **no I/O** -
   no socket opened, no packet/broadcast emitted. It returns the concrete targets
   and actions it *would* execute under `result_summary_extra["dry_run_plan"]`.
   Dry-run is allowed without authorization because it is side-effect free; the
   real scan is gated **after** the dry-run branch.
-- **Throttle** (`config.py`, applied to the engines). Conservative defaults —
+- **Throttle** (`config.py`, applied to the engines). Conservative defaults -
   `scan_max_concurrency=16`, `scan_rate_limit_per_sec=10`,
-  `scan_connect_timeout_s=5` — so a scan pointed at a real building network
+  `scan_connect_timeout_s=5` - so a scan pointed at a real building network
   cannot overwhelm controllers or a broker. Per-run parameters may narrow these
   but should not exceed site policy.
 - **Cooperative cancellation** (`POST /api/v1/runs/{run_id}/cancel`). Sets the
@@ -160,7 +160,7 @@ testable precondition and limit blast radius.
   A live MQTT config publish is an active write, so it is gated by the **same
   authorization contract** as a scan. The forward publish records the prior
   retained config value; rollback re-publishes that value to the same topic
-  (also authorization-gated — a rollback is itself a live write). If no prior
+  (also authorization-gated - a rollback is itself a live write). If no prior
   value was captured, rollback returns 400 (nothing to roll back to).
 
 > **Honesty:** the real network probes, the bacpypes3 BACnet path, and the live
@@ -184,12 +184,12 @@ assessed it. Framed as "what the app addresses vs what is open / out of scope".
 | FR3 System integrity | Evidence signing/hash verification (parallel-phase evidence/verify path); migrations owned by the API; in-memory report generation. | TLS termination is delegated to a reverse proxy (not in-app); signing-key custody is operational. |
 | FR4 Data confidentiality | Fernet encryption of secret material at rest; `secret://` indirection; masking in API responses; credential-free errors/logs; TLS for MQTT supported. | Disk/volume encryption is the deployer's responsibility (esp. the edge laptop). No field-level DB encryption beyond secrets. |
 | FR5 Restricted data flow | Loopback-only binding by default; CORS restricted to `CORS_ORIGINS`; `/metrics` and schema endpoints kept off public exposure; conservative scan throttle limits OT traffic. | Network segmentation (VLAN/firewall between tool, OT, and hub) is a site-network control outside the app. |
-| FR6 Timely response to events | Structured JSON logs with `request_id`/`run_id`; `/metrics` for rate/latency/runs-by-status; readiness probe; cancellation; rollback. | No built-in SIEM/alerting — wire the metrics/logs into your monitoring (`docs/observability.md`). Audit-trail of config changes/runs/exports is recorded; long-term retention is operational. |
+| FR6 Timely response to events | Structured JSON logs with `request_id`/`run_id`; `/metrics` for rate/latency/runs-by-status; readiness probe; cancellation; rollback. | No built-in SIEM/alerting - wire the metrics/logs into your monitoring (`docs/observability.md`). Audit-trail of config changes/runs/exports is recorded; long-term retention is operational. |
 | FR7 Resource availability | Throttle + timeouts prevent self-inflicted DoS on OT; readiness gating; worker horizontal scaling. | Broker/DB availability and backups are deployment concerns (`docs/backup-restore.md`). |
 
 Open items, stated plainly: **RBAC exists but is inert on the loopback edge**
 (`UserRepository`, `Role`, `require_role`); it is a boundary only under `api_key`
-mode with per-user keys — in `local` mode any co-resident loopback process is
+mode with per-user keys - in `local` mode any co-resident loopback process is
 trusted as ADMIN. The app does **not terminate TLS** itself (delegated to a
 reverse proxy), network **segmentation is a site control** outside the app, and
 the **bacpypes3 / live broker** paths are unvalidated against real hardware. None

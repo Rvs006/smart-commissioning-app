@@ -1,7 +1,10 @@
-# Message to field engineer + integration engineer — v0.1.18 (ready to send)
+# Historical field message: v0.1.18
+
+> Retained as the message prepared for v0.1.18. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-20, ahead of the tag.** Send AFTER the v0.1.18 Release is
-published with the portable zip attached and marked latest — check the link
+published with the portable zip attached and marked latest - check the link
 resolves first.
 
 Context for the next session: v0.1.18 is the same-day turnaround of the
@@ -25,7 +28,7 @@ The big ones:
    refreshing the page to escape a run.
 2. Runs now happen in the background. Click Execute and the page comes
    back immediately with a progress bar and an elapsed timer. You can
-   navigate away and come back - the running job picks up where the
+   leave the page and come back - the running job picks up where the
    monitor left off. Closing the app kills the run (it'll show as
    "interrupted" next start - that's expected).
 3. Run time: leave it blank and it now genuinely runs until every
@@ -53,7 +56,7 @@ integration engineer - your scrollable windows and the "register already importe
 note are in there too.
 
 field engineer - still curious what your 10-minute capture showed. If the tool
-said "not published" for things Joe definitely published, grab the log
+said "not published" for things the site engineer definitely published, grab the log
 bundle after a run on this build and send it over - it captures the
 full story now.
 
@@ -66,5 +69,5 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-v0.1.17.md` — the previous build's message.
-- `CHANGELOG.md` `[0.1.18]` — full detail.
+- `docs/field-message-v0.1.17.md` - the previous build's message.
+- `CHANGELOG.md` `[0.1.18]` - full detail.

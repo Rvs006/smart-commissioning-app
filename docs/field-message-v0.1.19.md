@@ -1,7 +1,10 @@
-# Message to field engineer + integration engineer — v0.1.19 (ready to send)
+# Historical field message: v0.1.19
+
+> Retained as the message prepared for v0.1.19. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-20, ahead of the tag.** Send AFTER the v0.1.19 Release is
-published with the portable zip attached and marked latest — check the link
+published with the portable zip attached and marked latest - check the link
 resolves first. Assumes the v0.1.18 message went out earlier today.
 
 ## The message
@@ -44,5 +47,5 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-v0.1.18.md` — earlier today's build.
-- `CHANGELOG.md` `[0.1.19]` — full detail.
+- `docs/field-message-v0.1.18.md` - earlier today's build.
+- `CHANGELOG.md` `[0.1.19]` - full detail.

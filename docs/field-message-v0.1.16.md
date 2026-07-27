@@ -1,13 +1,16 @@
-# Message to field engineer — v0.1.16 (ready to send)
+# Historical field message: v0.1.16
+
+> Retained as the message prepared for v0.1.16. Use
+> [field-quickstart.md](field-quickstart.md) for current work.
 
 **Written 2026-07-17, ahead of the tag.** Send AFTER the v0.1.16 Release is
-published with the portable zip attached and marked latest — check the link
+published with the portable zip attached and marked latest - check the link
 resolves first.
 
 Context for the next session: v0.1.16 is the fix bundle from the 2026-07-17
 live session on field engineer's flat (no-BBMD) network. His Wireshark capture proved
 the scan worked on the wire while every real run 500'd and froze at
-"running" — raw bacpypes3 values failing JSON persistence, plus a run-wrapper
+"running" - raw bacpypes3 values failing JSON persistence, plus a run-wrapper
 double-fault that skipped the terminal status. His log bundle came back empty
 (500 tracebacks never reached `app.log`), which is also fixed. His run
 history shows five runs stuck at "running"; the new startup sweep reclaims
@@ -63,8 +66,8 @@ Product team
 
 ## Related docs
 
-- `docs/field-message-v0.1.15.md` — the previous build's message (sent; carries
+- `docs/field-message-v0.1.15.md` - the previous build's message (sent; carries
   a correction note about its BBMD steps).
-- `docs/protocol-conformance.md` §3 — the recorded BBMD-optional requirement.
-- `docs/lab-day-2026-07-20-runbook.md` — Monday's BACnet lab session (rewrite
+- `docs/protocol-conformance.md` §3 - the recorded BBMD-optional requirement.
+- `docs/lab-day-2026-07-20-runbook.md` - Monday's BACnet lab session (rewrite
   pending field engineer's BBMD answer).

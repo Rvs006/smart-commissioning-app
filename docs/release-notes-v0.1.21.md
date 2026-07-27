@@ -1,8 +1,8 @@
-# v0.1.21: field reliability gate
+# v0.1.21 - Field reliability gate
 
-This patch closes the pre-ship findings found in the v0.1.20 site-readiness
-review. The BACnet deadlock correction remains unchanged and is now backed by
-direct tests of the production timeout adapter.
+The v0.1.20 site-readiness review found several field reliability gaps around
+timeouts, worker ownership, and timestamp evidence. v0.1.21 closes them and
+adds direct tests around the production BACnet timeout adapter.
 
 ## What changed
 

@@ -1702,17 +1702,32 @@ class PointsetMisnamePairingTests(unittest.TestCase):
         self.assertNotIn(self._MISSING, descriptions)
         self.assertNotIn(self._UNEXPECTED, descriptions)
 
-    def test_offline_device_with_no_pointset_payload_is_not_a_rename(self) -> None:
-        # No pointset payload => nothing 'unexpected' to pair against, so a
-        # missing expected point stays the plain 'not received' fault.
+    def test_missing_pointset_payload_does_not_fan_out_per_expected_point(self) -> None:
+        # Broker silence is represented by the payload-level absence. Repeating
+        # that fact for every register point can turn one missing publish into
+        # hundreds of misleading point faults.
         descriptions = _descriptions(
             {"expected_schedule": _schedule(points=["phase2_line_current_sensor"], units={})}
+        )
+        self.assertNotIn(
+            "Expected point phase2_line_current_sensor was not received in the pointset payload.",
+            descriptions,
+        )
+        self.assertNotIn(self._MERGED, descriptions)
+
+    def test_present_empty_pointset_payload_still_fails_expected_points(self) -> None:
+        descriptions = _descriptions(
+            {
+                "expected_schedule": _schedule(
+                    points=["phase2_line_current_sensor"], units={}
+                ),
+                "pointset_payload": {},
+            }
         )
         self.assertIn(
             "Expected point phase2_line_current_sensor was not received in the pointset payload.",
             descriptions,
         )
-        self.assertNotIn(self._MERGED, descriptions)
 
     def test_pointset_typo_merges_while_metadata_typo_stays_independent(self) -> None:
         # AGENTS.md: schema/register checks are independent. The pointset side
@@ -2012,6 +2027,45 @@ class CaptureRunTimeTests(unittest.TestCase):
 
 
 class SharedMultiAssetCaptureTests(unittest.TestCase):
+    def test_default_capture_limit_scales_past_500_for_large_registers(self) -> None:
+        def assets_for(count: int) -> list[dict[str, object]]:
+            assets: list[dict[str, object]] = []
+            for number in range(1, count + 1):
+                asset_id = f"ASSET-{number:03d}"
+                root = f"site/building-a/{asset_id}"
+                assets.append(
+                    {
+                        "expected_schedule": {
+                            "asset_id": asset_id,
+                            "system": "HVAC",
+                        },
+                        "register_topic_filter": f"{root}/#",
+                        "state_topic": f"{root}/state",
+                        "metadata_topic": f"{root}/metadata",
+                        "pointset_topic": f"{root}/events/pointset",
+                        "extra_capture_topics": [f"{root}/event/pointset"],
+                    }
+                )
+            return assets
+
+        for asset_count, expected_limit in ((100, DEFAULT_MAX_MESSAGES), (554, 2_216)):
+            with self.subTest(asset_count=asset_count):
+                capture = RecordingCapture([])
+                validate_udmi_full_report(
+                    {
+                        **_BROKER,
+                        "capture_seconds": 1,
+                        "assets": assets_for(asset_count),
+                    },
+                    live_capture=capture,
+                    cancel_check=lambda: False,
+                )
+
+                call = capture.calls[0]
+                self.assertEqual(len(call["primary_topics"]), asset_count * 4)
+                self.assertEqual(call["max_messages"], expected_limit)
+                self.assertEqual(call["secondary_max_messages"], expected_limit)
+
     def test_one_shared_capture_routes_payloads_to_each_asset(self) -> None:
         # ONE live_capture call subscribes every asset's topics; messages route
         # back to each entry's payload slots (duplicates keep the last payload).
@@ -2051,6 +2105,320 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         self.assertEqual(len(asset_entries[1]["messages"]), 2)
         self.assertEqual(asset_entries[0]["state_payload"]["system"]["hardware"]["make"], "Co1")
         self.assertEqual(asset_entries[1]["state_payload"]["system"]["hardware"]["make"], "Co2")
+
+    def test_registered_asset_on_wrong_parent_topic_is_routed_and_reported(self) -> None:
+        observed_at = datetime(2026, 7, 27, 10, 5, tzinfo=UTC)
+        wrong_state = _state()
+        wrong_state["system"]["hardware"]["make"] = "Observed Co"
+        messages = [
+            MqttMessage(
+                "hv/bms/floor-00/ASSET-001/state",
+                json.dumps(wrong_state).encode(),
+                received_at=observed_at,
+            ),
+            # Once the state topic identifies this as the registered asset's
+            # wrong publisher root, ancillary traffic from that same root must
+            # not create a duplicate "unexpected device" row.
+            MqttMessage(
+                "hv/bms/floor-00/ASSET-001/config",
+                b"{}",
+                received_at=observed_at,
+            ),
+            MqttMessage(
+                "hv/bms/floor-00/ASSET-001/custom/diagnostic",
+                b"{}",
+                received_at=observed_at,
+            ),
+            _msg(
+                "hv/bms/floor-01/ASSET-002/state",
+                json.dumps(_state()).encode(),
+            ),
+        ]
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 2,
+            "assets": [
+                {
+                    "expected_schedule": _schedule(
+                        asset_id="ASSET-001",
+                        system="BMS",
+                        manufacturer="Expected Co",
+                    ),
+                    "state_topic": "hv/bms/floor-01/ASSET-001/state",
+                },
+                {
+                    "expected_schedule": _schedule(
+                        asset_id="ASSET-002", system="BMS"
+                    ),
+                    "state_topic": "hv/bms/floor-01/ASSET-002/state",
+                },
+            ],
+        }
+
+        result = validate_udmi_full_report(
+            parameters,
+            live_capture=RecordingCapture(messages),
+            cancel_check=lambda: False,
+        )
+
+        self.assertEqual(
+            result.result_summary["subscribed_topics"],
+            [
+                "hv/bms/floor-01/ASSET-001/state",
+                "hv/bms/floor-01/ASSET-002/state",
+                "hv/bms/#",
+            ],
+        )
+        self.assertEqual(result.result_summary["wrong_topic_asset_count"], 1)
+        self.assertEqual(
+            result.result_summary["wrong_topic_assets"],
+            [
+                {
+                    "asset_id": "ASSET-001",
+                    "system": "BMS",
+                    "expected_topic_root": "hv/bms/floor-01/ASSET-001",
+                    "actual_topic_root": "hv/bms/floor-00/ASSET-001",
+                    "payloads": [
+                        {
+                            "payload_type": "state",
+                            "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                            "actual_topic": "hv/bms/floor-00/ASSET-001/state",
+                        }
+                    ],
+                    "last_seen": observed_at.isoformat(),
+                }
+            ],
+        )
+        self.assertEqual(result.result_summary["unexpected_device_count"], 0)
+        self.assertEqual(
+            parameters["assets"][0]["state_payload"]["system"]["hardware"]["make"],
+            "Observed Co",
+        )
+        self.assertTrue(
+            any(
+                issue.asset_id == "ASSET-001"
+                and issue.expected_value
+                == "hv/bms/floor-01/ASSET-001/state"
+                and issue.observed_value
+                == "hv/bms/floor-00/ASSET-001/state"
+                for issue in result.issues
+            )
+        )
+        self.assertTrue(
+            any(
+                issue.asset_id == "ASSET-001"
+                and "manufacturer does not match" in issue.description
+                for issue in result.issues
+            )
+        )
+        summary = result.result_summary["validation_summary_v1"]
+        self.assertEqual(summary["asset_metrics"]["wrong_topic"], 1)
+        self.assertTrue(
+            next(
+                row
+                for row in summary["asset_results"]
+                if row["asset_id"] == "ASSET-001"
+            )["observed"]
+        )
+
+    def test_same_payload_on_several_wrong_topics_retains_every_actual_topic(self) -> None:
+        early = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)
+        late = datetime(2026, 7, 27, 10, 5, tzinfo=UTC)
+        latest = datetime(2026, 7, 27, 10, 10, tzinfo=UTC)
+        messages = [
+            MqttMessage(
+                "hv/bms/floor-00/ASSET-1/state",
+                json.dumps(_state()).encode(),
+                received_at=early,
+            ),
+            MqttMessage(
+                "hv/bms/floor-02/ASSET-1/state",
+                json.dumps(_state()).encode(),
+                received_at=late,
+            ),
+            MqttMessage(
+                "hv/bms/floor-00/ASSET-1/state",
+                json.dumps(_state()).encode(),
+                received_at=latest,
+            ),
+        ]
+
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": [
+                    {
+                        "expected_schedule": _schedule(
+                            asset_id="ASSET-1",
+                            system="BMS",
+                        ),
+                        "state_topic": "hv/bms/floor-01/ASSET-1/state",
+                    }
+                ],
+            },
+            live_capture=RecordingCapture(messages),
+            cancel_check=lambda: False,
+        )
+
+        wrong_topic = result.result_summary["wrong_topic_assets"][0]
+        self.assertEqual(result.result_summary["wrong_topic_asset_count"], 1)
+        self.assertEqual(
+            wrong_topic["payloads"],
+            [
+                {
+                    "payload_type": "state",
+                    "expected_topic": "hv/bms/floor-01/ASSET-1/state",
+                    "actual_topic": "hv/bms/floor-00/ASSET-1/state",
+                },
+                {
+                    "payload_type": "state",
+                    "expected_topic": "hv/bms/floor-01/ASSET-1/state",
+                    "actual_topic": "hv/bms/floor-02/ASSET-1/state",
+                },
+            ],
+        )
+        self.assertEqual(wrong_topic["actual_topic_root"], "hv/bms/floor-00/ASSET-1")
+        self.assertEqual(wrong_topic["last_seen"], latest.isoformat())
+        mismatch_issues = [
+            issue
+            for issue in result.issues
+            if issue.asset_id == "ASSET-1"
+            and issue.issue_type == "topic_mismatch"
+            and issue.expected_value == "hv/bms/floor-01/ASSET-1/state"
+            and issue.observed_value
+            == (
+                "hv/bms/floor-00/ASSET-1/state, "
+                "hv/bms/floor-02/ASSET-1/state"
+            )
+        ]
+        self.assertEqual(len(mismatch_issues), 1)
+        summary = result.result_summary["validation_summary_v1"]
+        mismatch_fault = next(
+            row
+            for row in summary["fault_rows"]
+            if row["issue_id"] == mismatch_issues[0].issue_id
+        )
+        self.assertEqual(mismatch_fault["category"], "other_issues")
+        self.assertIsNone(mismatch_fault["payload_type"])
+        self.assertEqual(
+            mismatch_fault["topic_compliance_payload_type"], "state"
+        )
+        self.assertEqual(summary["fault_metrics"]["payload_formatting_issues"], 0)
+        self.assertEqual(summary["issue_metrics"]["blocking"], 1)
+        asset_result = summary["asset_results"][0]
+        state_result = next(
+            payload
+            for payload in asset_result["payload_results"]
+            if payload["payload_type"] == "state"
+        )
+        self.assertFalse(state_result["has_issues"])
+        self.assertTrue(state_result["successfully_validated"])
+        self.assertTrue(asset_result["all_received_payloads_successfully_validated"])
+        self.assertFalse(asset_result["successfully_validated"])
+
+    def test_wrong_topic_identity_requires_one_exact_case_sensitive_segment(self) -> None:
+        messages = [
+            _msg("hv/bms/floor-00/ASSET-001-copy/state"),
+            _msg("hv/bms/floor-00/asset-001/state"),
+            _msg("hv/bms/floor-00/ASSET-001/ASSET-002/state"),
+        ]
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": [
+                    {
+                        "expected_schedule": {
+                            "asset_id": "ASSET-001",
+                            "system": "BMS",
+                        },
+                        "state_topic": "hv/bms/floor-01/ASSET-001/state",
+                    },
+                    {
+                        "expected_schedule": {
+                            "asset_id": "ASSET-002",
+                            "system": "BMS",
+                        },
+                        "state_topic": "hv/bms/floor-01/ASSET-002/state",
+                    },
+                ],
+            },
+            live_capture=RecordingCapture(messages),
+            cancel_check=lambda: False,
+        )
+
+        self.assertEqual(result.result_summary["wrong_topic_assets"], [])
+        self.assertEqual(result.result_summary["wrong_topic_asset_count"], 0)
+        self.assertEqual(result.result_summary["unexpected_device_count"], 3)
+
+    def test_restored_wrong_topic_rows_have_one_deterministic_asset_count(self) -> None:
+        older = {
+            "asset_id": "ASSET-001",
+            "system": "BMS",
+            "expected_topic_root": "hv/bms/floor-01/ASSET-001",
+            "actual_topic_root": "hv/bms/floor-00/ASSET-001",
+            "payloads": [
+                {
+                    "payload_type": "state",
+                    "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                    "actual_topic": "hv/bms/floor-00/ASSET-001/state",
+                }
+            ],
+            "last_seen": "2026-07-27T11:00:00+02:00",
+        }
+        newer = {
+            **older,
+            "actual_topic_root": "hv/bms/floor-02/ASSET-001",
+            "payloads": [
+                {
+                    "payload_type": "state",
+                    "expected_topic": "hv/bms/floor-01/ASSET-001/state",
+                    "actual_topic": "hv/bms/floor-02/ASSET-001/state",
+                }
+            ],
+            "last_seen": "2026-07-27T10:00:00+00:00",
+        }
+
+        def restored(rows: list[dict[str, object]]) -> dict[str, object]:
+            result = validate_udmi_full_report(
+                {
+                    "assets": [
+                        {
+                            "expected_schedule": {
+                                "asset_id": "ASSET-001",
+                                "system": "BMS",
+                            }
+                        }
+                    ],
+                    "wrong_topic_assets": rows,
+                },
+                live_capture=None,
+            )
+            return result.result_summary
+
+        forward = restored([older, newer])
+        reverse = restored([newer, older])
+        self.assertEqual(forward["wrong_topic_assets"], reverse["wrong_topic_assets"])
+        self.assertEqual(forward["wrong_topic_asset_count"], 1)
+        self.assertEqual(
+            forward["validation_summary_v1"]["asset_metrics"]["wrong_topic"],
+            1,
+        )
+        self.assertEqual(
+            forward["wrong_topic_assets"][0]["actual_topic_root"],
+            "hv/bms/floor-02/ASSET-001",
+        )
+        self.assertEqual(
+            [
+                payload["actual_topic"]
+                for payload in forward["wrong_topic_assets"][0]["payloads"]
+            ],
+            [
+                "hv/bms/floor-00/ASSET-001/state",
+                "hv/bms/floor-02/ASSET-001/state",
+            ],
+        )
 
     def test_shared_capture_stop_when_waits_for_every_asset(self) -> None:
         capture = RecordingCapture([_msg("site/a1/state"), _msg("site/a2/state")])

@@ -152,6 +152,7 @@ def validate_udmi_full_report(
         issues.append(register_rejection)
     issues.extend(_register_duplicate_id_issues(parameters, issues))
     issues.extend(_review_all_payload_issues(parameters or {}, issues))
+    issues.extend(_wrong_topic_issues(parameters, issues))
     issues = _unique_udmi_issue_ids(issues)
     expected_devices = _list_value(full_report, "DeviceList")
     not_publishing = _list_value(full_report, "DevicesNotPublishing")
@@ -201,6 +202,8 @@ def validate_udmi_full_report(
         "unexpected_devices_measurement_scope": parameters.get(
             "unexpected_devices_measurement_scope"
         ),
+        "wrong_topic_asset_count": len(_wrong_topic_assets(parameters)),
+        "wrong_topic_assets": _wrong_topic_assets(parameters),
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
             captured_topics=capture_summary["captured_topics"],
@@ -1085,8 +1088,12 @@ def _review_payload_issues(
     # leftovers after that pairing stay as the two independent messages below.
     # When no pointset payload was captured ``unexpected_points`` is empty, so
     # the pairing is a no-op and an offline device never reads as a rename.
-    missing_points = sorted(expected_points - observed_points)
-    unexpected_points = sorted(observed_points - expected_points)
+    # Broker silence is one payload-level absence, not one missing-point fault
+    # per register row. An explicitly present empty JSON object is different:
+    # it is captured evidence and must still fail the expected-point checks.
+    pointset_present = "pointset_payload" in parameters
+    missing_points = sorted(expected_points - observed_points) if pointset_present else []
+    unexpected_points = sorted(observed_points - expected_points) if pointset_present else []
     misname_pairs = _probable_misname_pairs(missing_points, unexpected_points)
     paired_expected = {expected_name for expected_name, _ in misname_pairs}
     paired_received = {received_name for _, received_name in misname_pairs}
@@ -1452,13 +1459,17 @@ def _route_capture_messages_to_assets(
     messages: list[MqttMessage],
     *,
     observed_at: str,
+    wrong_topic_routes: dict[str, int] | None = None,
 ) -> None:
     """Route the latest live evidence into every matching register asset."""
-    for entry, subscribed_topics, validation_topics in zip(
-        entries,
-        per_entry_subscribed_topics,
-        per_entry_validation_topics,
-        strict=True,
+    wrong_topic_routes = wrong_topic_routes or {}
+    for entry_index, (entry, subscribed_topics, validation_topics) in enumerate(
+        zip(
+            entries,
+            per_entry_subscribed_topics,
+            per_entry_validation_topics,
+            strict=True,
+        )
     ):
         entry["capture_observed_at"] = observed_at
         entry["subscribed_topics"] = list(subscribed_topics)
@@ -1466,18 +1477,21 @@ def _route_capture_messages_to_assets(
         diagnostic_messages = [
             message
             for message in messages
-            if any(
-                _topic_matches_filter(message.topic, topic)
-                for topic in subscribed_topics
-            )
-            and (
+            if wrong_topic_routes.get(message.topic) == entry_index
+            or (
                 any(
                     _topic_matches_filter(message.topic, topic)
-                    for topic in validation_topics
+                    for topic in subscribed_topics
                 )
-                or (
-                    publisher_root is not None
-                    and _topic_within_publisher_root(message.topic, publisher_root)
+                and (
+                    any(
+                        _topic_matches_filter(message.topic, topic)
+                        for topic in validation_topics
+                    )
+                    or (
+                        publisher_root is not None
+                        and _topic_within_publisher_root(message.topic, publisher_root)
+                    )
                 )
             )
         ]
@@ -1487,7 +1501,8 @@ def _route_capture_messages_to_assets(
         entry_messages = [
             message
             for message in messages
-            if any(
+            if wrong_topic_routes.get(message.topic) == entry_index
+            or any(
                 _topic_matches_filter(message.topic, topic)
                 for topic in validation_topics
             )
@@ -1547,6 +1562,7 @@ def _build_progressive_result(
         issues.append(register_rejection)
     issues.extend(_register_duplicate_id_issues(parameters, issues))
     issues.extend(_review_all_payload_issues(parameters, issues))
+    issues.extend(_wrong_topic_issues(parameters, issues))
     issues.extend(_progressive_invalid_payload_issues(messages, issues))
     issues = _unique_udmi_issue_ids(issues)
 
@@ -1593,6 +1609,8 @@ def _build_progressive_result(
         "unexpected_devices_measurement_scope": parameters.get(
             "unexpected_devices_measurement_scope"
         ),
+        "wrong_topic_asset_count": len(_wrong_topic_assets(parameters)),
+        "wrong_topic_assets": _wrong_topic_assets(parameters),
         "payload_views": payload_views,
         "payload_view_source": _payload_view_source(
             captured_topics=captured_topics,
@@ -1838,9 +1856,12 @@ def _capture_live_payloads_per_asset(
             strict=True,
         )
     ]
+    registered_asset_routes = _registered_asset_routes(entries)
     parameters["unexpected_devices"] = []
     parameters["unexpected_devices_measured"] = False
     parameters["unexpected_devices_measurement_scope"] = measurement_scope
+    parameters["wrong_topic_assets"] = []
+    parameters["wrong_topic_asset_count"] = 0
     topics: list[str] = []
     for entry_topics in per_entry_topics:
         for topic in entry_topics:
@@ -1877,7 +1898,16 @@ def _capture_live_payloads_per_asset(
     for entry_topics in per_entry_validation_topics:
         groups.extend(_capture_topic_groups(entry_topics))
     timeout_seconds, capture_mode = _capture_window(parameters, cancel_check)
-    max_messages = parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES)
+    configured_max_messages = parse_int(parameters.get("max_messages"), default=0)
+    # The transport retains one latest message per distinct expected topic and
+    # stops when this ceiling is reached. A fixed 500-topic default truncates a
+    # large register before every expected payload can be retained: 554 assets
+    # produce 2,216 concrete validation filters. Keep explicit operator limits,
+    # otherwise size the safety ceiling to the actual shared subscription.
+    max_messages = configured_max_messages or max(
+        DEFAULT_MAX_MESSAGES,
+        len(validation_topics),
+    )
     unexpected_max_messages = parse_int(
         parameters.get("unexpected_max_messages"),
         default=max_messages,
@@ -1890,6 +1920,8 @@ def _capture_live_payloads_per_asset(
     latest_progress_messages_by_entry: list[dict[str, MqttMessage]] = [
         {} for _ in entries
     ]
+    progress_wrong_topic_messages: dict[str, MqttMessage] = {}
+    progress_wrong_topic_routes: dict[str, int] = {}
     exact_topic_routes: dict[str, set[int]] = {}
     wildcard_topic_routes: list[tuple[int, str]] = []
     for entry_index, entry_topics in enumerate(per_entry_validation_topics):
@@ -1900,11 +1932,18 @@ def _capture_live_payloads_per_asset(
                 exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
     progress_message_count = 0
 
+    def matching_validation_entries(topic: str) -> set[int]:
+        matching_entries = set(exact_topic_routes.get(topic, ()))
+        for entry_index, topic_filter in wildcard_topic_routes:
+            if _topic_matches_filter(topic, topic_filter):
+                matching_entries.add(entry_index)
+        return matching_entries
+
+    def topic_matches_validation_filter(topic: str) -> bool:
+        return bool(matching_validation_entries(topic))
+
     def matches_validation_topic(message: MqttMessage) -> bool:
-        return any(
-            _topic_matches_filter(message.topic, topic_filter)
-            for topic_filter in validation_topics
-        )
+        return topic_matches_validation_filter(message.topic)
 
     def capture_cancel_check() -> bool:
         """Latch cancellation observed by the capture loop.
@@ -1923,7 +1962,33 @@ def _capture_live_payloads_per_asset(
         nonlocal progress_message_count
         latest_progress_messages[message.topic] = message
         progress_messages = list(latest_progress_messages.values())
-        if matches_validation_topic(message):
+        matching_entries = matching_validation_entries(message.topic)
+        wrong_topic_entry = None
+        if not matching_entries:
+            wrong_topic_entry = _registered_wrong_topic_entry_index(
+                message.topic,
+                expected_publisher_roots,
+                registered_asset_routes,
+                topic_matches_validation_filter,
+            )
+        if wrong_topic_entry is not None:
+            progress_wrong_topic_messages[message.topic] = message
+            progress_wrong_topic_routes.clear()
+            progress_wrong_topic_routes.update(
+                _record_wrong_topic_assets(
+                    parameters,
+                    entries,
+                    expected_publisher_roots,
+                    per_entry_validation_topics,
+                    registered_asset_routes,
+                    list(progress_wrong_topic_messages.values()),
+                    topic_matches_validation_filter,
+                )
+            )
+        is_registered_validation_message = bool(matching_entries) or (
+            wrong_topic_entry is not None
+        )
+        if is_registered_validation_message:
             progress_message_count += 1
             latest_progress_validation_messages[message.topic] = message
         progress_validation_messages = list(
@@ -1934,12 +1999,11 @@ def _capture_live_payloads_per_asset(
             progress_messages,
             expected_publisher_roots,
             measurement_scope,
+            registered_wrong_topic_routes=progress_wrong_topic_routes,
             measured=False,
         )
-        matching_entries = set(exact_topic_routes.get(message.topic, ()))
-        for entry_index, topic_filter in wildcard_topic_routes:
-            if _topic_matches_filter(message.topic, topic_filter):
-                matching_entries.add(entry_index)
+        if wrong_topic_entry is not None:
+            matching_entries.add(wrong_topic_entry)
         observed_at = message.received_at.isoformat()
         # Update only entries that can receive this topic. Re-routing the full
         # accumulated capture through every asset on each broker message makes
@@ -1955,6 +2019,9 @@ def _capture_live_payloads_per_asset(
             entry["messages"] = [
                 _serialise_capture_message(captured) for captured in routed_messages
             ]
+            entry["observed_topics"] = list(
+                dict.fromkeys(captured.topic for captured in routed_messages)
+            )
             _route_latest_payloads(entry, routed_messages)
         if progress_callback is not None:
             progress_callback(
@@ -2030,6 +2097,20 @@ def _capture_live_payloads_per_asset(
         for message in messages
         if matches_validation_topic(message)
     ]
+    wrong_topic_routes = _record_wrong_topic_assets(
+        parameters,
+        entries,
+        expected_publisher_roots,
+        per_entry_validation_topics,
+        registered_asset_routes,
+        messages,
+        topic_matches_validation_filter,
+    )
+    validation_messages = [
+        message
+        for message in messages
+        if matches_validation_topic(message) or message.topic in wrong_topic_routes
+    ]
     expected_topic_count = len({message.topic for message in expected_messages})
     observation_topic_count = len(
         {
@@ -2047,12 +2128,14 @@ def _capture_live_payloads_per_asset(
         per_entry_validation_topics,
         messages,
         observed_at=capture_observed_at,
+        wrong_topic_routes=wrong_topic_routes,
     )
     _measure_unexpected_publishers(
         parameters,
         messages,
         expected_publisher_roots,
         measurement_scope,
+        registered_wrong_topic_routes=wrong_topic_routes,
         measured=(
             capture_error_status is None
             and not capture_cancelled
@@ -2063,8 +2146,8 @@ def _capture_live_payloads_per_asset(
 
     # Measurement-only wildcard traffic must never become a validation issue.
     # It is retained solely for the separate unexpected-device summary above.
-    valid_messages = _valid_payload_messages(expected_messages)
-    valid_topics = _ordered_valid_payload_topics(expected_messages)
+    valid_messages = _valid_payload_messages(validation_messages)
+    valid_topics = _ordered_valid_payload_topics(validation_messages)
     missing = _unseen_groups(groups, {message.topic for message in valid_messages})
     if capture_error_status:
         return {
@@ -2090,10 +2173,10 @@ def _capture_live_payloads_per_asset(
         else (
             _invalid_payload_issue(
                 asset_id=None,
-                messages=expected_messages,
+                messages=validation_messages,
                 missing=missing,
             )
-            if len(valid_messages) != len(expected_messages)
+            if len(valid_messages) != len(validation_messages)
             else _missing_topics_issue(
                 asset_id=None,
                 missing=missing,
@@ -2224,7 +2307,13 @@ def _topic_within_publisher_root(topic: str, publisher_root: str) -> bool:
 
 
 def _unexpected_measurement_scope(expected_roots: list[str | None]) -> str | None:
-    """A strict common parent filter, never an unbounded bare ``#``."""
+    """A bounded common-ancestor filter, never an unbounded bare ``#``.
+
+    The strict common parent can only see sibling publishers in the same
+    register branch. Step up one additional parent when that remains bounded,
+    so a registered asset moved between adjacent site/floor branches can still
+    be identified by its exact MQTT topic segment.
+    """
     if not expected_roots or any(root is None for root in expected_roots):
         return None
     roots = [str(root) for root in expected_roots]
@@ -2239,9 +2328,175 @@ def _unexpected_measurement_scope(expected_roots: list[str | None]) -> str | Non
     # sibling discovery possible.
     if common and any(len(common) >= len(parts) for parts in split_roots):
         common.pop()
+    if len(common) > 1:
+        common.pop()
     if not common or any(part in {"", "+", "#"} for part in common):
         return None
     return "/".join(common) + "/#"
+
+
+def _registered_asset_routes(entries: list[dict]) -> dict[str, int]:
+    """Map only unique, non-blank register asset IDs to their entry index."""
+    indexes: dict[str, list[int]] = defaultdict(list)
+    for entry_index, entry in enumerate(entries):
+        expected = _dict_or_empty(entry.get("expected_schedule"))
+        asset_id = str(expected.get("asset_id") or "").strip()
+        if asset_id:
+            indexes[asset_id].append(entry_index)
+    return {
+        asset_id: entry_indexes[0]
+        for asset_id, entry_indexes in indexes.items()
+        if len(entry_indexes) == 1
+    }
+
+
+def _registered_wrong_topic_entry_index(
+    topic: str,
+    expected_roots: list[str | None],
+    registered_asset_routes: dict[str, int],
+    validation_topic_matcher: Callable[[str], bool],
+) -> int | None:
+    """Identify one registered asset on a different literal publisher root.
+
+    MQTT segments and register IDs are compared exactly and case-sensitively.
+    A topic naming no registered ID, more than one registered ID, or a duplicate
+    register ID is left as observational traffic rather than guessed.
+    """
+    if _payload_key_for_topic(topic) is None:
+        return None
+    if validation_topic_matcher(topic):
+        return None
+    segments = topic.strip().strip("/").split("/")
+    entry_indexes = {
+        registered_asset_routes[segment]
+        for segment in segments
+        if segment in registered_asset_routes
+    }
+    if len(entry_indexes) != 1:
+        return None
+    entry_index = next(iter(entry_indexes))
+    expected_root = expected_roots[entry_index]
+    if not expected_root:
+        return None
+    actual_root = _publisher_root_from_message_topic(topic)
+    if actual_root == expected_root:
+        return None
+    return entry_index
+
+
+def _expected_topic_for_payload(
+    entry: dict,
+    validation_topics: list[str],
+    payload_type: str,
+) -> str:
+    direct = _string(entry.get(f"{payload_type}_topic"))
+    if direct:
+        return direct
+    payload_key = f"{payload_type}_payload"
+    return next(
+        (
+            topic
+            for topic in validation_topics
+            if _payload_key_for_topic(topic) == payload_key
+        ),
+        "",
+    )
+
+
+def _record_wrong_topic_assets(
+    parameters: dict[str, object],
+    entries: list[dict],
+    expected_roots: list[str | None],
+    per_entry_validation_topics: list[list[str]],
+    registered_asset_routes: dict[str, int],
+    messages: list[MqttMessage],
+    validation_topic_matcher: Callable[[str], bool],
+) -> dict[str, int]:
+    """Persist one deterministic expected-vs-actual topic row per asset."""
+    routes: dict[str, int] = {}
+    # Keep the latest message for every distinct actual topic. One registered
+    # asset can publish the same payload type below several wrong roots during a
+    # capture; collapsing by payload type alone loses evidence needed by the
+    # annotated register and wrong-topic report detail.
+    latest_by_topic: dict[tuple[int, str, str], MqttMessage] = {}
+    messages_by_entry: dict[int, list[MqttMessage]] = defaultdict(list)
+    for message in messages:
+        entry_index = _registered_wrong_topic_entry_index(
+            message.topic,
+            expected_roots,
+            registered_asset_routes,
+            validation_topic_matcher,
+        )
+        if entry_index is None:
+            continue
+        payload_key = _payload_key_for_topic(message.topic)
+        if payload_key is None:
+            continue
+        payload_type = payload_key.removesuffix("_payload")
+        routes[message.topic] = entry_index
+        messages_by_entry[entry_index].append(message)
+        key = (entry_index, payload_type, message.topic)
+        current = latest_by_topic.get(key)
+        if current is None or (message.received_at, message.topic) >= (
+            current.received_at,
+            current.topic,
+        ):
+            latest_by_topic[key] = message
+
+    payload_order = {"state": 0, "metadata": 1, "pointset": 2}
+    rows: list[dict[str, object]] = []
+    for entry_index, entry_messages in messages_by_entry.items():
+        entry = entries[entry_index]
+        expected = _dict_or_empty(entry.get("expected_schedule"))
+        latest = max(
+            entry_messages,
+            key=lambda message: (message.received_at, message.topic),
+        )
+        payloads: list[dict[str, str]] = []
+        for (payload_entry_index, payload_type, _actual_topic), message in sorted(
+            latest_by_topic.items(),
+            key=lambda item: (
+                item[0][0],
+                payload_order.get(item[0][1], 99),
+                item[0][2],
+            ),
+        ):
+            if payload_entry_index != entry_index:
+                continue
+            payloads.append(
+                {
+                    "payload_type": payload_type,
+                    "expected_topic": _expected_topic_for_payload(
+                        entry,
+                        per_entry_validation_topics[entry_index],
+                        payload_type,
+                    ),
+                    "actual_topic": message.topic,
+                }
+            )
+        rows.append(
+            {
+                "asset_id": str(expected.get("asset_id") or "").strip(),
+                "system": str(expected.get("system") or "").strip()
+                or "Unspecified",
+                "expected_topic_root": str(expected_roots[entry_index] or ""),
+                "actual_topic_root": _publisher_root_from_message_topic(
+                    latest.topic
+                ),
+                "payloads": payloads,
+                "last_seen": latest.received_at.isoformat(),
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            str(row["asset_id"]).casefold(),
+            str(row["expected_topic_root"]),
+            str(row["actual_topic_root"]),
+        )
+    )
+    parameters["wrong_topic_assets"] = rows
+    parameters["wrong_topic_asset_count"] = len(rows)
+    return routes
 
 
 def _measure_unexpected_publishers(
@@ -2250,6 +2505,7 @@ def _measure_unexpected_publishers(
     expected_roots: list[str | None],
     measurement_scope: str | None,
     *,
+    registered_wrong_topic_routes: dict[str, int] | None = None,
     measured: bool,
 ) -> None:
     """Persist a deterministic, deduplicated inventory of unexpected siblings."""
@@ -2259,13 +2515,24 @@ def _measure_unexpected_publishers(
         parameters["unexpected_devices"] = []
         return
     literal_expected_roots = [root for root in expected_roots if root]
+    registered_wrong_topic_routes = registered_wrong_topic_routes or {}
+    registered_wrong_topic_roots = {
+        _publisher_root_from_message_topic(topic)
+        for topic in registered_wrong_topic_routes
+    }
     grouped: dict[str, list[MqttMessage]] = defaultdict(list)
     for message in messages:
         if not _topic_matches_filter(message.topic, measurement_scope):
             continue
         if any(_topic_belongs_to_root(message.topic, root) for root in literal_expected_roots):
             continue
-        grouped[_publisher_root_from_message_topic(message.topic)].append(message)
+        if any(
+            _topic_belongs_to_root(message.topic, root)
+            for root in registered_wrong_topic_roots
+        ):
+            continue
+        publisher_root = _publisher_root_from_message_topic(message.topic)
+        grouped[publisher_root].append(message)
 
     unexpected: list[dict[str, object]] = []
     for topic_root in sorted(grouped):
@@ -2303,6 +2570,157 @@ def _unexpected_devices(parameters: dict[str, object]) -> list[dict[str, object]
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _wrong_topic_assets(parameters: dict[str, object]) -> list[dict[str, object]]:
+    value = parameters.get("wrong_topic_assets")
+    if not isinstance(value, list):
+        return []
+    payload_order = {"state": 0, "metadata": 1, "pointset": 2}
+    rows: dict[str, dict[str, object]] = {}
+    payloads_by_asset: dict[
+        str, dict[tuple[str, str, str], dict[str, str]]
+    ] = defaultdict(dict)
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("asset_id") or "").strip()
+        if not asset_id:
+            continue
+        raw_payloads = item.get("payloads")
+        for payload in raw_payloads if isinstance(raw_payloads, list) else []:
+            if not isinstance(payload, dict):
+                continue
+            payload_type = str(payload.get("payload_type") or "").strip()
+            expected_topic = str(payload.get("expected_topic") or "").strip()
+            actual_topic = str(payload.get("actual_topic") or "").strip()
+            if payload_type not in _PAYLOAD_ISSUE_TYPES or not actual_topic:
+                continue
+            key = (payload_type, expected_topic, actual_topic)
+            payloads_by_asset[asset_id][key] = {
+                "payload_type": payload_type,
+                "expected_topic": expected_topic,
+                "actual_topic": actual_topic,
+            }
+        row: dict[str, object] = {
+            "asset_id": asset_id,
+            "system": str(item.get("system") or "").strip() or "Unspecified",
+            "expected_topic_root": str(
+                item.get("expected_topic_root") or ""
+            ).strip(),
+            "actual_topic_root": str(
+                item.get("actual_topic_root") or ""
+            ).strip(),
+            "last_seen": str(item.get("last_seen") or "").strip() or None,
+        }
+        existing = rows.get(asset_id)
+        last_seen = str(row["last_seen"] or "")
+        row_rank = (
+            *_parse_timestamp_sort_key(last_seen),
+            last_seen,
+            str(row["system"]),
+            str(row["expected_topic_root"]),
+            str(row["actual_topic_root"]),
+        )
+        if existing is None:
+            existing_rank = None
+        else:
+            existing_last_seen = str(existing["last_seen"] or "")
+            existing_rank = (
+                *_parse_timestamp_sort_key(existing_last_seen),
+                existing_last_seen,
+                str(existing["system"]),
+                str(existing["expected_topic_root"]),
+                str(existing["actual_topic_root"]),
+            )
+        if existing_rank is None or row_rank > existing_rank:
+            rows[asset_id] = row
+    for asset_id, row in rows.items():
+        row["payloads"] = sorted(
+            payloads_by_asset[asset_id].values(),
+            key=lambda payload: (
+                payload_order.get(payload["payload_type"], 99),
+                payload["actual_topic"],
+                payload["expected_topic"],
+            ),
+        )
+    return [
+        rows[asset_id]
+        for asset_id in sorted(rows, key=lambda item: (item.casefold(), item))
+    ]
+
+
+def _wrong_topic_issues(
+    parameters: dict[str, object],
+    existing_issues: list[ValidationIssueRecord],
+) -> list[ValidationIssueRecord]:
+    """Turn registered topic mismatches into separate blocking topic faults."""
+    issues = [*existing_issues]
+    first_new_issue = len(issues)
+    for row in _wrong_topic_assets(parameters):
+        asset_id = str(row["asset_id"] or "UDMI asset")
+        payloads = row.get("payloads")
+        topic_evidence: dict[str, dict[str, set[str]]] = {}
+        for payload in payloads if isinstance(payloads, list) else []:
+            if not isinstance(payload, dict):
+                continue
+            payload_type = str(payload.get("payload_type") or "")
+            expected_topic = str(payload.get("expected_topic") or "")
+            actual_topic = str(payload.get("actual_topic") or "")
+            if (
+                payload_type not in _PAYLOAD_ISSUE_TYPES
+                or not actual_topic
+                or actual_topic == expected_topic
+            ):
+                continue
+            bucket = topic_evidence.setdefault(
+                payload_type,
+                {"expected_topics": set(), "actual_topics": set()},
+            )
+            if expected_topic:
+                bucket["expected_topics"].add(expected_topic)
+            bucket["actual_topics"].add(actual_topic)
+
+        # One deterministic finding per affected payload type, while the
+        # supporting wrong-topic collection keeps every distinct actual topic.
+        for payload_type in _PAYLOAD_ISSUE_TYPES:
+            evidence = topic_evidence.get(payload_type)
+            if evidence is None:
+                continue
+            expected_topics = sorted(evidence["expected_topics"])
+            actual_topics = sorted(evidence["actual_topics"])
+            expected_value = ", ".join(expected_topics)
+            observed_value = ", ".join(actual_topics)
+            if len(actual_topics) == 1:
+                description = (
+                    f"Registered asset {asset_id} published its {payload_type} "
+                    f"payload on {observed_value}; the register expects "
+                    f"{expected_value or 'a different topic'}."
+                )
+            else:
+                description = (
+                    f"Registered asset {asset_id} published its {payload_type} "
+                    f"payload on these topics: {observed_value}; the register expects "
+                    f"{expected_value or 'a different topic'}."
+                )
+            issues.append(
+                _issue(
+                    issues,
+                    asset_id=asset_id,
+                    issue_type="topic_mismatch",
+                    severity="high",
+                    description=description,
+                    topic=actual_topics[0] if len(actual_topics) == 1 else None,
+                    expected_value=expected_value or None,
+                    observed_value=observed_value,
+                    match_basis=payload_type,
+                    suggested_action=(
+                        "Correct the publisher topic or update the register after "
+                        "confirming the intended device path."
+                    ),
+                )
+            )
+    return issues[first_new_issue:]
 
 
 def _payload_key_for_topic(topic: str) -> str | None:
@@ -2502,6 +2920,7 @@ def _issue(
     severity: str,
     description: str,
     point_name: str | None = None,
+    topic: str | None = None,
     expected_value: str | None = None,
     observed_value: str | None = None,
     match_basis: str | None = None,
@@ -2516,6 +2935,7 @@ def _issue(
         "pointset_timestamp": "UDMI-TS",
         "state_validation": "UDMI-ST",
         "metadata_validation": "UDMI-MD",
+        "topic_mismatch": "UDMI-TP",
         "register_import": "UDMI-RG",
     }.get(issue_type, "UDMI-IS")
     return make_issue(
@@ -2526,6 +2946,7 @@ def _issue(
         severity=severity,
         description=description,
         point_name=point_name,
+        topic=topic,
         expected_value=expected_value,
         observed_value=observed_value,
         match_basis=match_basis,

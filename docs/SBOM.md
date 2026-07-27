@@ -35,7 +35,7 @@ The script emits CycloneDX 1.5 JSON and a markdown table. It is
 optional `bacpypes3` extra here) is listed with `installed: false` and no
 fabricated version or license; the license string is whatever the package
 metadata declares (`License-Expression` per PEP 639, the free-form `License`
-field, or a `License ::` trove classifier) — none is inferred.
+field, or a `License ::` trove classifier) - none is inferred.
 
 ### Alternative: pip-licenses / cyclonedx-py
 
@@ -111,17 +111,17 @@ such a dependency is ever introduced.
 
 Flagged for review (present, but accepted):
 
-- **`dramatiq` — LGPL-3.0-or-later.** Weak copyleft. Used as an unmodified,
+- **`dramatiq` - LGPL-3.0-or-later.** Weak copyleft. Used as an unmodified,
   separately-installed library (imported, not statically linked / vendored), so
   the LGPL's reciprocal obligation is limited to offering the library's own
-  source — which is publicly available upstream. **Acceptable** for an app that
+  source - which is publicly available upstream. **Acceptable** for an app that
   ships it as a dependency. Obligation: do not modify-and-redistribute the
   dramatiq source without offering those modifications.
-- **`psycopg` / `psycopg-binary` — LGPL-3.0-only.** Same reasoning: the
+- **`psycopg` / `psycopg-binary` - LGPL-3.0-only.** Same reasoning: the
   PostgreSQL driver is used as an unmodified library. **Acceptable.** Only
   relevant to the hosted (Postgres) profile; the portable edge profile uses
   SQLite (stdlib) and does not ship psycopg at runtime.
-- **`certifi` — MPL-2.0.** File-level weak copyleft over certifi's own files
+- **`certifi` - MPL-2.0.** File-level weak copyleft over certifi's own files
   only; used unmodified. **Acceptable.**
 
 No **GPL** or **AGPL** dependency is present. The previously-considered

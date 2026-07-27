@@ -6,51 +6,51 @@ Installation & Setup**; this is the short version.
 
 ## Before you leave the office
 
-- [ ] Windows laptop with an **Intel/AMD (x64)** CPU — not a Snapdragon/ARM one.
+- [ ] Windows laptop with an **Intel/AMD (x64)** CPU - not a Snapdragon/ARM one.
 - [ ] `Smart_Commissioning_App_Windows_Portable.zip` downloaded from the repo's
       GitHub **Releases** page. Check the asset date is current.
 - [ ] A wired connection to the target network: built-in Ethernet, or a
       **USB-C-to-Ethernet adapter** if the laptop has no RJ45 port.
 - [ ] Locked-down laptop (ThreatLocker or similar)? Get IT to approve the exe by
-      SHA-256 hash BEFORE you leave — the hash is pinned in the release notes,
+      SHA-256 hash BEFORE you leave - the hash is pinned in the release notes,
       or compute it yourself: `Get-FileHash .\SmartCommissioningApp.exe`
       in PowerShell prints it. Every release is a new file with a new hash, so
       re-approval is per release.
 
 ## Get it running (about 2 minutes)
 
-1. **Extract the zip** — right-click → *Extract All*. Do not run it from inside
+1. **Extract the zip** - right-click → *Extract All*. Do not run it from inside
    the zip preview.
 2. Double-click **`SmartCommissioningApp.exe`**. A console window opens (leave it
-   open — it is the app) and your browser opens the tool.
+   open - it is the app) and your browser opens the tool.
 3. If Windows SmartScreen warns "unknown publisher": *More info* → *Run anyway*.
-4. The header shows **"Signed in as local admin"** — that is correct. There is no
+4. The header shows **"Signed in as local admin"** - that is correct. There is no
    API key to set on this build.
 
 ## Put yourself on the network (Windows owns the IP)
 
-Set your IP the way you always do — in **Windows → Network settings**, static or
+Set your IP the way you always do - in **Windows → Network settings**, static or
 DHCP, on the VLAN you need. The app never changes adapter settings; it only reads
 them and chooses which adapter to scan from.
 
 1. Plug into the switch. Confirm Windows shows the connection up.
 2. In the app: **Configuration → Source Interface**.
    - Pick the adapter you are scanning from (wired defaults first; Wi-Fi is
-     tagged "not recommended"; virtual adapters sit at the bottom — on a
+     tagged "not recommended"; virtual adapters sit at the bottom - on a
      Hyper-V host the "vEthernet" entry can be the machine's real network
      adapter, so pick it if it carries the site IP).
    - The read-only panel below shows that adapter's current IP / subnet /
-     gateway / DNS — check it matches what you set in Windows. If it does, the
+     gateway / DNS - check it matches what you set in Windows. If it does, the
      tool is reading the right NIC.
 3. Save the configuration.
 
 ## Run a scan (dry-run first, always)
 
-1. Open the module you need — **IP Scanner**, **BACnet**, or **MQTT**.
+1. Open the module you need - **IP Scanner**, **BACnet**, or **MQTT**.
 2. Run a **dry run** first: it previews the plan and touches nothing on the
    network. Confirm the target range/interface looks right.
 3. Tick **scan authorization**, then run the real scan. (Real scans refuse to run
-   unauthorized — that is deliberate.)
+   unauthorized - that is deliberate.)
 4. **First real scan:** if Windows Firewall pops up, click **Allow**.
 5. Review results, add comments, **export CSV/Excel**, send it back.
 
@@ -58,7 +58,7 @@ them and chooses which adapter to scan from.
 
 **Operate → Run History** lists every run this laptop has done, with the date and
 time each started/finished, its type, status, and how long it took. Sort or
-filter it, and hit **Export CSV** for the whole list — no digging through files.
+filter it, and hit **Export CSV** for the whole list - no digging through files.
 
 ## MQTT/UDMI field check (v0.1.24 or later)
 
@@ -72,17 +72,31 @@ filter it, and hit **Export CSV** for the whole list — no digging through file
 
 This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
 
+### Large-register acceptance for v0.1.29
+
+Use the dedicated [v0.1.29 field acceptance checklist](v0.1.29-field-acceptance-checklist.md)
+for the 554-asset run. With no positive `max_messages` value, register-driven
+capture now uses the larger of 500 or its concrete validation-filter count. The
+known 554-row register produces 2,216 filters, so the automatic capacity must be
+at least 2,216 and capture must continue beyond retained message 500.
+
+Run the payload grabber or MQTT Explorer over the same approved scope and time
+window. The app must list a registered asset seen on a wrong topic with both
+paths, keep its payload validation result, and include the annotated 554-row
+register in the Excel and ZIP evidence. A two-hour result proves scale only;
+the second run must cover the longest expected payload cadence.
+
 ## Upgrading to a new release (settings carry over)
 
 Your settings, certificates, and run history live in
-`%LOCALAPPDATA%\SmartCommissioning` — **not** in the release folder — so
+`%LOCALAPPDATA%\SmartCommissioning` - **not** in the release folder - so
 extracting a new release and running its exe keeps everything: broker
 credentials, uploaded certs, the chosen Source Interface, run history. The
 first launch of a new version also migrates state forward automatically if it
 finds an older release's `runtime\` folder next to the exe. Moving to a
 **different laptop** (or a different Windows user on the same machine) needs a
 copy: close the app, copy the whole `%LOCALAPPDATA%\SmartCommissioning` folder
-to the same path on the new machine, then start the app there — the folder
+to the same path on the new machine, then start the app there - the folder
 carries the settings, certificates, and their encryption key, so treat the
 copy as sensitive.
 
@@ -91,14 +105,14 @@ copy as sensitive.
 - **Scan finds nothing and no firewall popup appeared** → Windows Firewall is the
   first suspect, not the app. Allow it and retry.
 - **Source Interface dropdown shows only "Auto"** → you are on a discontinued
-  container (Docker-era) build. Use the portable exe from the latest release — it
+  container (Docker-era) build. Use the portable exe from the latest release - it
   reads the laptop's real NICs.
 - **A device is unreachable / broker won't connect** → the tool records a real
-  failure status. It never fakes a pass — a red result is real, chase the network.
+  failure status. It never fakes a pass - a red result is real, chase the network.
 - **Anything else** → close the console window to stop the app, then send the
   console text and the files under `%LOCALAPPDATA%\SmartCommissioning\logs\`.
 
 ## Trust the numbers (once per site)
 
-Cross-check one scan against an independent tool — **Yabe** for BACnet, **MQTT
+Cross-check one scan against an independent tool - **Yabe** for BACnet, **MQTT
 Explorer** for MQTT. Same devices from two tools = the app is honest.

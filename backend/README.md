@@ -8,14 +8,14 @@ This service is the HTTP boundary for:
 - validation runs
 - reports
 
-The current implementation pairs typed contracts with real run execution — discovery and validation runs invoke the shared core engines and record real results (a UDMI validation run without its required register import is refused, never answered from the packaged sample fixture). It is intended to be expanded against the specification and the architecture document in `../docs/production-architecture.md`.
+The current implementation pairs typed contracts with real run execution - discovery and validation runs invoke the shared core engines and record real results (a UDMI validation run without its required register import is refused, never answered from the packaged sample fixture). It is intended to be expanded against the specification and the architecture document in `../docs/production-architecture.md`.
 
 ## Quickstart
 
 The API depends on the shared `smart-commissioning-core` package in `../core`
-(UDMI validation, MQTT transport, and the run processors). It is not published
-to PyPI and `pyproject.toml` cannot declare a portable path dependency, so the
-install order matters — install core first, then the API:
+(UDMI validation, MQTT transport, and the run processors). The backend installs
+it from `../core`; `pyproject.toml` cannot declare that portable path dependency, so the
+install order matters - install core first, then the API:
 
 ```bash
 # from the repository root
@@ -44,4 +44,4 @@ startup; set `AUTO_MIGRATE=false` to disable that (for example when migrations
 are applied out of band).
 
 Uploaded import files and secret material stay on disk under
-`backend/runtime/` — only `secret://` references are stored in the database.
+`backend/runtime/` - only `secret://` references are stored in the database.

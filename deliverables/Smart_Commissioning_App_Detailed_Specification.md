@@ -1,8 +1,13 @@
 # Smart Commissioning App Detailed Specification
 
+> Historical snapshot generated on 11 June 2026. It describes the early MVP,
+> not the current release candidate. Start with
+> [README.md](../README.md) and the
+> [documentation index](../docs/README.md) for current behavior.
+
 Generated: 11 June 2026
 
-Repository: `R:\Smart Commissioning App`
+Repository: <https://github.com/Rvs006/smart-commissioning-app>
 
 Current local app: `http://127.0.0.1:8000`
 
@@ -16,7 +21,7 @@ The Smart Commissioning App, also referred to in the original specification as t
 
 The app provides a structured web interface for configuring system connectivity, importing expected registers, discovering IP, BACnet, and MQTT data sources, validating live data, comparing BACnet source values with MQTT translated values, and producing commissioning evidence.
 
-This repository currently contains a working React and FastAPI scaffold with important review-driven workflows implemented. It is suitable for demos, stakeholder review, workflow validation, API contract development, and continued engineering. It is not yet suitable for live production commissioning use as the authoritative system of record.
+This historical snapshot contains a working React and FastAPI scaffold with important review-driven workflows implemented. It supports demos, stakeholder review, workflow validation, API contract development, and continued engineering. Authoritative live commissioning still required the production controls listed below.
 
 ## 2. What The App Is For
 
@@ -106,7 +111,7 @@ Expected activities:
 
 The app is a local review build and early MVP scaffold. It has a working UI, API contracts, local runtime persistence, import templates, configuration validation, partial UDMI validation, and basic report artifact downloads.
 
-It is not production ready because authentication, durable database storage, production worker execution, hardened secrets, protocol integrations, audit logs, monitoring, and formal evidence generation are not complete.
+Production readiness at the time still required authentication, durable database storage, production worker execution, hardened secrets, protocol integrations, audit logs, monitoring, and formal evidence generation.
 
 ### What Works Now
 
@@ -769,4 +774,4 @@ For a technical reviewer:
 
 This PDF is a current-state specification and implementation handoff. It explains what the Smart Commissioning App is intended to become, what exists now, what is incomplete, and how a human or AI engineer should continue the work.
 
-The most important message to forward is: this is a strong local review/MVP scaffold with useful UI and API foundations, but it is not production ready until real protocol engines, durable persistence, security, worker execution, audit logging, and formal evidence generation are completed.
+The key message in this snapshot: the local review/MVP scaffold had useful UI and API foundations. Production use still required real protocol engines, durable persistence, security, worker execution, audit logging, and formal evidence generation.

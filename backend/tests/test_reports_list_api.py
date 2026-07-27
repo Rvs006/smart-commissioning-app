@@ -18,6 +18,8 @@ downloaded, so the Ed25519 signing key is never touched.
 
 import unittest
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import patch
 
 from harness import ApiTestCase
 
@@ -135,6 +137,198 @@ class ReportListProjectionTests(ApiTestCase):
 
         # Scoping order is the operator's; the projection must not sort it.
         self.assertEqual(listed["source_run_ids"], requested_order)
+
+    def test_delete_one_report_removes_its_row_and_owned_local_artifact(self) -> None:
+        from app.core.runtime import ARTIFACTS_ROOT
+        from app.services.run_service import RunService
+
+        created = self._create_report(self._seed_source_runs(1))
+        stored = RunService().get_run(created["report_id"])
+        manifest = stored.result_summary["artifact_manifest"]
+        artifact = Path(ARTIFACTS_ROOT) / manifest["artifact_relpath"]
+        self.assertTrue(artifact.is_file())
+
+        response = self.client.post(
+            "/api/v1/reports/delete",
+            json={"report_ids": [created["report_id"]]},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "deleted_report_ids": [created["report_id"]],
+                "deleted_count": 1,
+                "artifact_cleanup_warnings": [],
+            },
+        )
+        self.assertFalse(artifact.exists())
+        self.assertEqual(
+            self.client.get(f"/api/v1/reports/{created['report_id']}").status_code,
+            404,
+        )
+
+    def test_delete_reports_preserves_their_source_runs(self) -> None:
+        source_id = self._seed_source_runs(1)[0]
+        created = self._create_report([source_id])
+
+        response = self.client.post(
+            "/api/v1/reports/delete",
+            json={"report_ids": [created["report_id"]]},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self.client.get(f"/api/v1/validation/runs/{source_id}").status_code,
+            200,
+        )
+
+    def test_delete_reports_deduplicates_and_removes_a_validated_batch(self) -> None:
+        first = self._create_report([])
+        second = self._create_report([])
+
+        response = self.client.post(
+            "/api/v1/reports/delete",
+            json={
+                "report_ids": [
+                    second["report_id"],
+                    first["report_id"],
+                    second["report_id"],
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["deleted_report_ids"],
+            [second["report_id"], first["report_id"]],
+        )
+        self.assertEqual(response.json()["deleted_count"], 2)
+        remaining_ids = {report["report_id"] for report in self._list_reports()}
+        self.assertNotIn(first["report_id"], remaining_ids)
+        self.assertNotIn(second["report_id"], remaining_ids)
+
+    def test_invalid_mixed_delete_batch_is_atomic_and_cannot_delete_a_source_run(self) -> None:
+        source_id = self._seed_source_runs(1)[0]
+        first = self._create_report([source_id])
+        second = self._create_report([source_id])
+
+        response = self.client.post(
+            "/api/v1/reports/delete",
+            json={"report_ids": [first["report_id"], source_id, second["report_id"]]},
+        )
+
+        self.assertEqual(response.status_code, 404, response.text)
+        remaining_ids = {report["report_id"] for report in self._list_reports()}
+        self.assertIn(first["report_id"], remaining_ids)
+        self.assertIn(second["report_id"], remaining_ids)
+        self.assertEqual(
+            self.client.get(f"/api/v1/validation/runs/{source_id}").status_code,
+            200,
+        )
+
+    def test_artifact_cleanup_rejects_nested_content_addressed_paths(self) -> None:
+        from app.core.runtime import ARTIFACTS_ROOT
+        from app.services.report_artifacts import delete_report_artifact
+
+        shared = Path(ARTIFACTS_ROOT) / "sha256" / "aa" / ("a" * 64)
+        shared.parent.mkdir(parents=True, exist_ok=True)
+        shared.write_bytes(b"shared-report-evidence")
+
+        with self.assertRaisesRegex(RuntimeError, "path is invalid"):
+            delete_report_artifact(
+                {
+                    "report_id": "report-1",
+                    "artifact_relpath": shared.relative_to(ARTIFACTS_ROOT).as_posix(),
+                },
+                report_id="report-1",
+            )
+
+        self.assertTrue(shared.is_file())
+
+    def test_create_delete_interleaving_cleans_unpublished_artifact(self) -> None:
+        """A delete between artifact write and manifest publish leaves no bytes."""
+
+        from app.api.routes import reports as reports_route
+        from app.core.runtime import ARTIFACTS_ROOT
+
+        original_complete = reports_route.service.complete_report_run
+        written_artifact: Path | None = None
+
+        def delete_then_complete(run_id: str, manifest: dict[str, object]):
+            nonlocal written_artifact
+            written_artifact = Path(ARTIFACTS_ROOT) / str(manifest["artifact_relpath"])
+            self.assertTrue(written_artifact.is_file())
+            reports_route.service.delete_report_runs([run_id])
+            return original_complete(run_id, manifest)
+
+        with patch.object(
+            reports_route.service,
+            "complete_report_run",
+            side_effect=delete_then_complete,
+        ):
+            response = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertIsNotNone(written_artifact)
+        self.assertFalse(written_artifact.exists())
+
+    def test_artifact_cleanup_unlinks_same_root_symlink_not_its_target(self) -> None:
+        from app.core.runtime import ARTIFACTS_ROOT
+        from app.services.report_artifacts import delete_report_artifact
+
+        root = Path(ARTIFACTS_ROOT)
+        target = root / "another-report-owned.zip"
+        link = root / "report-link-owned.zip"
+        target.write_bytes(b"other report bytes")
+        try:
+            link.symlink_to(target.name)
+        except OSError as error:
+            self.skipTest(f"File symlinks are unavailable: {error}")
+
+        removed = delete_report_artifact(
+            {
+                "report_id": "report-link",
+                "artifact_relpath": link.name,
+            },
+            report_id="report-link",
+        )
+
+        self.assertTrue(removed)
+        self.assertFalse(link.is_symlink())
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), b"other report bytes")
+
+    def test_artifact_cleanup_removes_dangling_same_root_symlink(self) -> None:
+        from app.core.runtime import ARTIFACTS_ROOT
+        from app.services.report_artifacts import delete_report_artifact
+
+        root = Path(ARTIFACTS_ROOT)
+        link = root / "report-dangling-owned.zip"
+        try:
+            link.symlink_to("missing-report-artifact.zip")
+        except OSError as error:
+            self.skipTest(f"File symlinks are unavailable: {error}")
+
+        removed = delete_report_artifact(
+            {
+                "report_id": "report-dangling",
+                "artifact_relpath": link.name,
+            },
+            report_id="report-dangling",
+        )
+
+        self.assertTrue(removed)
+        self.assertFalse(link.is_symlink())
 
 
 if __name__ == "__main__":

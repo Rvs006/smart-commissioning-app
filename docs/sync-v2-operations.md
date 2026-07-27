@@ -127,8 +127,8 @@ consistent set:
 - the complete report artifact root, including `sha256/<prefix>/<digest>`;
 - runtime state, encrypted secret store, edge identity, and report-signing key.
 
-A copied database without its artifact directory is not a backup; it is half a
-restore set. Record file counts, byte totals, and SHA-256 values for the archive.
+A complete backup pairs the copied database with its artifact directory. Record
+file counts, byte totals, and SHA-256 values for the archive.
 
 v0.1.28 moves Alembic from `f6a7b8c9d0e1` to `a7b8c9d0e1f2` with five additive
 tables. Existing run, context, result, seal, report, v1 Sync, secret, and artifact

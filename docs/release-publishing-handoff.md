@@ -1,4 +1,7 @@
-# Handoff — publish the GitHub Releases for v0.1.11 / v0.1.12 / v0.1.13
+# Handoff - publish the GitHub Releases for v0.1.11 / v0.1.12 / v0.1.13
+
+> **Historical release record.** The publication steps were completed on
+> 2026-07-16. Use the current release notes and workflow for newer versions.
 
 > **✅ EXECUTED 2026-07-16.** All three Releases are published (v0.1.13 is
 > marked latest) and the CHANGELOG sections are cut. Do not re-run this doc;
@@ -11,14 +14,14 @@ conversation.
 
 ## State when this was written (verify it still holds)
 
-- `main` @ `aedbfd3` — local == origin, working tree clean, **0 open PRs**,
+- `main` @ `aedbfd3` - local == origin, working tree clean, **0 open PRs**,
   one worktree (main only).
 - Tags on GitHub: `v0.1.11` → `0abb63c`, `v0.1.12` → `e6ba552`,
   `v0.1.13` → `8beb523`. All three exist and are pushed.
 - CI, Windows Compatibility, and Windows Portable Bundle are green on `main`.
 - The source code for every version is already on GitHub (the repo IS the
   source; a Release is only a labelled pointer + notes). The **only** thing
-  missing is published Releases for 11/12/13 — the Releases page currently stops
+  missing is published Releases for 11/12/13 - the Releases page currently stops
   at v0.1.10.
 
 Verify before doing anything:
@@ -31,15 +34,15 @@ gh pr list --state open                   # expect none
 
 ## The job: publish 3 Releases from the existing tags
 
-Do NOT create new tags — they exist. Publish a Release for each, with the notes
+Do NOT create new tags - they exist. Publish a Release for each, with the notes
 below. Source-code zips attach automatically; optionally also attach the exe
 (see the last section).
 
 With the gh CLI (preferred):
 ```bash
-gh release create v0.1.11 --title "v0.1.11 — Reports you can find, imports that explain themselves" --notes-file /tmp/v0111.md
-gh release create v0.1.12 --title "v0.1.12 — BACnet foreign-device registration"                        --notes-file /tmp/v0112.md
-gh release create v0.1.13 --title "v0.1.13 — The rest of the walkthrough"                                --notes-file /tmp/v0113.md
+gh release create v0.1.11 --title "v0.1.11 - Reports you can find, imports that explain themselves" --notes-file /tmp/v0111.md
+gh release create v0.1.12 --title "v0.1.12 - BACnet foreign-device registration"                        --notes-file /tmp/v0112.md
+gh release create v0.1.13 --title "v0.1.13 - The rest of the walkthrough"                                --notes-file /tmp/v0113.md
 ```
 Or the REST API (`POST /repos/Rvs006/smart-commissioning-app/releases` with
 `tag_name`, `name`, `body`), or the web UI (Releases → Draft a new release →
@@ -50,14 +53,14 @@ sensibly. None of these is a pre-release.
 
 ---
 
-### v0.1.11 — Reports you can find, imports that explain themselves
+### v0.1.11 - Reports you can find, imports that explain themselves
 
 The 2026-07-15 walkthrough punch list, first batch. Nothing changes how a scan
 works; every item is about the app telling you the truth about what it found.
 
 - Reports are visible in the Reports tab on arrival (they were always being
   created, just hidden behind a step nobody knew to click).
-- Each head remembers its last run when you navigate away and back.
+- Each head remembers its last run when you leave and return.
 - Result tables no longer invent sample rows.
 - A rejected register import lists the actual per-row reasons; re-picking a
   same-named corrected file works instead of silently doing nothing.
@@ -72,10 +75,10 @@ Full detail: `CHANGELOG.md` `[0.1.11]`.
 
 ---
 
-### v0.1.12 — BACnet foreign-device registration
+### v0.1.12 - BACnet foreign-device registration
 
 Discovery can register with a BBMD as a foreign device, so it reaches devices on
-subnets a local broadcast cannot cross — the thing a third-party BACnet browser
+subnets a local broadcast cannot cross - the thing a third-party BACnet browser
 does, and why a browser could see a device this app could not. It runs only when
 Foreign Device is Enabled with a real BBMD Address, on its own UDP port (47809),
 alongside the ordinary local-broadcast scan. If the BBMD refuses or ignores the
@@ -87,14 +90,14 @@ zero devices.
 
 Two things to know: an existing install does not pick this up until Foreign
 Device and BBMD Address are set by hand, and the live BACnet path has not run
-against real hardware yet (first contact is the on-site lab session — see
+against real hardware yet (first contact is the on-site lab session - see
 `docs/lab-day-2026-07-20-runbook.md`).
 
 Full detail: `CHANGELOG.md` `[0.1.12]`.
 
 ---
 
-### v0.1.13 — The rest of the walkthrough
+### v0.1.13 - The rest of the walkthrough
 
 The remaining walkthrough items: honest config, better reports, MQTT and UDMI
 upgrades.
@@ -128,7 +131,7 @@ Full detail: `CHANGELOG.md` `[Unreleased]` (this content should be cut to a date
 
 Once all three Releases are live, a ready-to-send plain-text message for field engineer
 (what changed across v0.1.11–13, keyed to his walkthrough list) is in
-`docs/field-message-2026-07-16.md` — send it with the v0.1.13 Release URL. His
+`docs/field-message-2026-07-16.md` - send it with the v0.1.13 Release URL. His
 open follow-up questions are in `docs/field-followups-2026-07-16.md`.
 
 ## Optional: attach a version-stamped exe to each Release
@@ -153,5 +156,5 @@ to a scratch dir and run `PYTHONPATH=<scratch> python -m ruff check backend
 worker core` (its binary loads under WDAC); and run the Python test suites from a
 copy of the packages placed OUTSIDE the repo tree with deps pip-installed to a
 `--target` dir. See `AGENTS.md` "Gotchas" and, if present, the account-local
-memory. On any normal machine ignore this — the standard commands in `AGENTS.md`
+memory. On any normal machine ignore this - the standard commands in `AGENTS.md`
 just work.

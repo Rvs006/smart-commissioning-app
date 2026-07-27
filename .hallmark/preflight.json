@@ -1,0 +1,24 @@
+{
+  "scope": "component",
+  "framework": "React 19, TypeScript, and Vite",
+  "styling": "Existing CSS token system in frontend/src/styles.css and frontend/src/styles/electracom-theme.css",
+  "motion": "Existing browser behavior only; no motion dependency is installed",
+  "audience": "Field commissioning engineers reviewing MQTT and UDMI evidence",
+  "primary_use": "Find registered assets, verify where they published, inspect payload compliance, and manage generated reports",
+  "tone": "Technical, restrained, and evidence-first",
+  "design_system_decision": "Preserve the current console structure, tokens, typography, spacing, tables, and button treatments",
+  "accessibility_constraints": [
+    "Keep content visible without animation",
+    "Use text as well as colour for every status",
+    "Keep keyboard focus with programmatic scrolling",
+    "Respect prefers-reduced-motion",
+    "Do not add dead controls"
+  ],
+  "feature_decisions": [
+    "Separate observation, topic compliance, and payload compliance",
+    "Use an eight-issue threshold for the payload-comparison jump control",
+    "Keep the selected-row treatment separate from validation status",
+    "Require engineer permission and explicit confirmation for report deletion"
+  ],
+  "macrostructure_review": "Skipped because this is a component-level extension to an established application"
+}

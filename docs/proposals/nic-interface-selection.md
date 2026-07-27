@@ -1,11 +1,11 @@
 # Proposal: Source-NIC / network-interface selection for active scans
 
-Status: Implemented (Phases 0-2) — see CHANGELOG. On-real-hardware egress verification pending (section 8.3).
-Update (NIC UX v2, 2026-07-03): the product owner REVERSED the section-5.3 gateway/DNS omission — the endpoint now also returns `adapter_type` / `subnet_mask` / `gateway` / `dns_servers` (nine fields total) so engineers can confirm the tool reads the NIC correctly. MAC addresses and adapter description/driver strings stay omitted. See the 5.3 update note.
+Status: Implemented (Phases 0-2) - see CHANGELOG. On-real-hardware egress verification pending (section 8.3).
+Update (NIC UX v2, 2026-07-03): the product owner REVERSED the section-5.3 gateway/DNS omission - the endpoint now also returns `adapter_type` / `subnet_mask` / `gateway` / `dns_servers` (nine fields total) so engineers can confirm the tool reads the NIC correctly. MAC addresses and adapter description/driver strings stay omitted. See the 5.3 update note.
 Update (wired-first default, 2026-07): `DEFAULT_CONFIGURATION` now seeds `Source Interface` **empty** (= never chosen) and, while the value is empty, the UI pre-selects the first up wired adapter (Ethernet/USB-Ethernet); the `Auto (OS default route)` sentinel is stored only on an explicit pick, and saved values are never overridden. See the 3.3 and 7.4 update notes.
 Author: (fill in)
 Date: 2026-07-03
-Scope: `smart-commissioning-app` — core engines, backend API, worker, frontend Configuration page
+Scope: `smart-commissioning-app` - core engines, backend API, worker, frontend Configuration page
 
 ## 1. Problem and goal
 
@@ -13,7 +13,7 @@ A commissioning engineer on a multi-NIC laptop (e.g. corporate Wi-Fi + a USB-C
 Ethernet dongle on the OT VLAN, plus a VPN tap) has no way to tell the app which
 interface active scans should egress from. Today every engine relies on the OS
 default route, so an IP sweep or a BACnet Who-Is can leave via the wrong NIC
-(the internet-facing one) and see nothing — or, worse, touch the wrong network.
+(the internet-facing one) and see nothing - or, worse, touch the wrong network.
 
 Goal: let the operator pick a **source interface** (identified by its local IPv4
 address) that all active-scan engines bind their sockets to, while keeping the
@@ -26,7 +26,7 @@ The three active-scan egress points that need a source binding:
 |---|---|---|---|
 | IP discovery | `core/smart_commissioning_core/engines/ip_scan.py:106` | `asyncio.open_connection(host, port)` | `local_addr=(source_ip, 0)` |
 | MQTT transport (discovery + config publish) | `core/smart_commissioning_core/mqtt_transport.py:107` | `socket.create_connection((host, port), timeout)` | `source_address=(source_ip, 0)` |
-| BACnet discovery | `core/smart_commissioning_core/engines/bacnet_discovery.py:320-374, 511` | `Bacpypes3Backend(local_address=...)` | already plumbed — nothing currently *feeds* `local_address` |
+| BACnet discovery | `core/smart_commissioning_core/engines/bacnet_discovery.py:320-374, 511` | `Bacpypes3Backend(local_address=...)` | already plumbed - nothing currently *feeds* `local_address` |
 
 The BACnet path is the tell: `Bacpypes3Backend.__init__` already accepts
 `local_address` (`bacnet_discovery.py:306`), `_ensure_app` already binds the
@@ -36,7 +36,7 @@ producer that puts `local_address` into the run parameters. This proposal adds
 one producer that feeds **all three** engines a single chosen source IP.
 
 Note a wrinkle bacpypes3 forces on us: BACnet `local_address` is not a bare IP,
-it is `ip/prefixlen` (e.g. `192.168.1.10/24`) — see the docstring at
+it is `ip/prefixlen` (e.g. `192.0.2.10/24`) - see the docstring at
 `bacnet_discovery.py:313-318` and the `_ensure_app` error at `:347-351`. The IP
 and MQTT paths want a bare IP. So the chosen interface must carry **both** the
 bare IPv4 and its prefix length. That is why enumeration (section 2) returns the
@@ -49,13 +49,13 @@ operator's choice as a string:
 
 - empty / absent / the literal `Auto (OS default route)` → **default behaviour**:
   engines bind nothing, OS picks the route. This is the backward-compatible path.
-- an interface IPv4 with prefix, e.g. `192.168.1.10/24` → engines bind to
-  `192.168.1.10`; BACnet gets the full `192.168.1.10/24`.
+- an interface IPv4 with prefix, e.g. `192.0.2.10/24` → engines bind to
+  `192.0.2.10`; BACnet gets the full `192.0.2.10/24`.
 
 The value is chosen from a dropdown populated by a new read-only endpoint
 `GET /api/v1/system/interfaces` that enumerates the host's usable NICs. A
 free-text entry is also accepted (for the case where the app runs on a different
-host than the browser, or an interface is momentarily down) — see section 3 UX.
+host than the browser, or an interface is momentarily down) - see section 3 UX.
 
 At run-dispatch time, a new helper resolves the configured Source Interface into
 a `source_ip` (+ `local_address` for BACnet) and injects it into the run
@@ -64,12 +64,12 @@ queued worker path both see it (they both read `run.parameters`). Then each
 engine's socket-creation site binds to it.
 
 ```
-Configuration (device."Source Interface" = "192.168.1.10/24")
+Configuration (device."Source Interface" = "192.0.2.10/24")
         │
         ▼
 engine_dispatch.resolve_source_interface(parameters, config)   ← NEW
-        │  writes parameters["source_ip"]="192.168.1.10"
-        │         parameters["local_address"]="192.168.1.10/24"
+        │  writes parameters["source_ip"]="192.0.2.10"
+        │         parameters["local_address"]="192.0.2.10/24"
         ▼
 run record persisted with those parameters
         ├── inline path (routes/discovery.py)  ─┐
@@ -80,7 +80,7 @@ run record persisted with those parameters
    bacnet_discovery._select_backend → Bacpypes3Backend(local_address=parameters["local_address"])  (already wired)
 ```
 
-## 3. UX — Configuration page NIC selector
+## 3. UX - Configuration page NIC selector
 
 ### 3.1 Placement
 
@@ -90,9 +90,9 @@ That section is expanded by default (`ConfigurationPage.tsx:37-45`,
 lives, so the operator sees it before starting a run. It sits naturally beside
 `IP Assignment`.
 
-### 3.2 Control type — dropdown from enumeration with free-text fallback
+### 3.2 Control type - dropdown from enumeration with free-text fallback
 
-Recommendation: a **hybrid** — a dropdown seeded from
+Recommendation: a **hybrid** - a dropdown seeded from
 `GET /api/v1/system/interfaces`, but one whose `<select>` renders any current
 value even if it is not in the enumerated list. The existing `FieldControl`
 `select` branch already does exactly this:
@@ -105,17 +105,17 @@ value even if it is not in the enumerated list. The existing `FieldControl`
 </select>
 ```
 
-That `!options.includes(value)` line means a stored value like `192.168.1.10/24`
-still displays when the host that renders the page can't enumerate it (browser on
+That `!options.includes(value)` line keeps a stored value like `192.0.2.10/24`
+visible when the host that renders the page omits it from enumeration (browser on
 a different machine than the API, or the NIC is down). That preserves the value
-instead of silently dropping it — the exact fallback we want.
+instead of silently dropping it - the exact fallback we want.
 
 Two options considered:
 
-- **Pure dropdown (enumeration only)** — clean, no typos, but breaks when the API
-  host's NIC list doesn't match what the operator expects (or the endpoint 500s).
+- **Pure dropdown (enumeration only)** - clean and typo-resistant, but fragile when
+  the API host's NIC list differs from the operator's expectation or the endpoint returns 500.
   A blank selector then blocks the operator.
-- **Free-text IP only** — always works, but invites typos and gives no
+- **Free-text IP only** - always works, but invites typos and gives no
   discoverability of what NICs exist.
 
 The hybrid gets discoverability *and* a fallback. Because the current
@@ -131,7 +131,7 @@ combobox". Two ways to ship the hybrid:
    the static `fieldDefinitions` map (see 3.4).
 2. **Phase-2 nicety:** a true editable combobox (`<input list=...>` + `<datalist>`)
    so the operator can free-type while still getting suggestions. This is a new
-   `FieldKind` (`"combobox"`) in `FieldControl`. Deferred — not needed for the
+   `FieldKind` (`"combobox"`) in `FieldControl`. Deferred - not needed for the
    first useful slice.
 
 ### 3.3 Default and label
@@ -140,7 +140,7 @@ combobox". Two ways to ship the hybrid:
   chosen), which the resolver treats as `Auto`. The dropdown shows
   `Auto (OS default route)` as the first option. *(Update, wired-first default
   2026-07: while the value is empty the UI pre-selects the first up wired
-  adapter — Ethernet/USB-Ethernet — rather than `Auto`; the sentinel is stored
+  adapter - Ethernet/USB-Ethernet - rather than `Auto`; the sentinel is stored
   only on an explicit pick, and saved values are never overridden.)*
 - Label copy / tooltip (add to `FIELD_TOOLTIPS`, `ConfigurationPage.tsx:661-712`):
   > `Source Interface`: "Which local network interface active scans send from.
@@ -153,7 +153,7 @@ combobox". Two ways to ship the hybrid:
   - Add a `useQuery` for interfaces (queryKey `["system-interfaces"]`) calling a
     new `getSystemInterfaces()` in `api/client.ts`.
   - Build the option list: `["Auto (OS default route)", ...data.map(i => i.cidr)]`
-    where `cidr` is `"192.168.1.10/24"`.
+    where `cidr` is `"192.0.2.10/24"`.
   - Because `fieldDefinitions` (`:141-171`) is a static const, add a small
     override at render so the `device."Source Interface"` field's `options` come
     from the query result. Concretely, where `FieldControl` reads
@@ -177,16 +177,16 @@ explicitly a Windows-first feature. Three ways to list interfaces:
 
 ### 4.1 Options
 
-**A. stdlib only (`socket`) — no clean Windows API.**
+**A. stdlib only (`socket`) - no clean Windows API.**
 `socket.if_nameindex()` exists but on Windows returns interface *indexes*, not
 usable IPv4s or up/down state. `socket.gethostbyname_ex(socket.gethostname())`
 returns *some* local IPv4s but drops interface names, prefix lengths, and
 up/down status, and misdirects on hosts with odd DNS. There is no stdlib call
 that gives `(name, ipv4, prefix, up/down)` on Windows. Verdict: insufficient for
-a trustworthy dropdown — we'd be guessing prefixes (bad, because BACnet needs the
+a trustworthy dropdown - we'd be guessing prefixes (bad, because BACnet needs the
 real prefix, section 1).
 
-**B. `psutil` — clean, but a NEW dependency.**
+**B. `psutil` - clean, but a NEW dependency.**
 `psutil.net_if_addrs()` returns per-interface address lists including
 `family == AF_INET`, `address`, and `netmask` (convertible to a prefix length
 via `ipaddress.IPv4Network("0.0.0.0/" + netmask).prefixlen`).
@@ -195,7 +195,7 @@ give exactly `(name, ipv4, prefix_length, is_up)` cross-platform, including
 Windows, with no subprocess and no parsing of localized output. Verdict:
 cleanest by far; cost is one new runtime dependency in `core`/`backend`.
 
-**C. WMI / `ipconfig` parsing — stdlib deps only, but brittle.**
+**C. WMI / `ipconfig` parsing - stdlib deps only, but brittle.**
 Either shell out to `ipconfig /all` and parse, or query WMI
 (`Win32_NetworkAdapterConfiguration`) via `pywin32`/`comtypes`. `ipconfig`
 parsing is locale-sensitive (field labels are localized on non-English Windows)
@@ -232,7 +232,7 @@ New module `backend/app/services/interface_service.py` (or
   `name, ipv4, prefix_length, cidr, is_up`.
 - Filter to `AF_INET` addresses; **exclude** loopback (`127.0.0.0/8`) and
   link-local APIPA (`169.254.0.0/16`) so the dropdown only offers real egress
-  NICs. (Keep them out of the list but still *accept* a manually-entered value —
+  NICs. (Keep them out of the list but still *accept* a manually-entered value -
   validation, section 7, only blocks obviously-broken input.)
 - Sort `is_up` first, then by name, so the likely-correct NIC is near the top.
 
@@ -266,17 +266,17 @@ and add `system` to the `from app.api.routes import (...)` tuple (`router.py:4-1
 ```python
 class SystemInterface(BaseModel):
     name: str            # OS adapter name, e.g. "Ethernet 3"
-    ipv4: str            # "192.168.1.10"
+    ipv4: str            # "192.0.2.10"
     prefix_length: int   # 24
     subnet_mask: str     # "255.255.255.0"  (dotted form of prefix_length)
-    cidr: str            # "192.168.1.10/24"  (what the dropdown stores)
-    gateway: str | None  # "192.168.1.1"  (default IPv4 gateway, or None)
+    cidr: str            # "192.0.2.10/24"  (what the dropdown stores)
+    gateway: str | None  # "192.0.2.1"  (default IPv4 gateway, or None)
     is_up: bool
 ```
 
 > **Update (NIC UX v2, 2026-07-03):** the shipped schema also carries
 > `adapter_type` ("ethernet" | "wifi" | "usb_ethernet" | "virtual" |
-> "unknown"), `subnet_mask`, `gateway` and `dns_servers` — see the 5.3 update
+> "unknown"), `subnet_mask`, `gateway` and `dns_servers` - see the 5.3 update
 > note for the product-owner decision that added them. An interim
 > "richer confirmation UI" step (PR #48) first added `subnet_mask` + `gateway`
 > via a `Get-CimInstance Win32_NetworkAdapterConfiguration` lookup; NIC UX v2
@@ -293,14 +293,14 @@ class SystemInterface(BaseModel):
   field a viewer can already see, and it is read-only. It does **not** need to be
   engineer-gated (choosing the value and saving config already is, via
   `configuration.router` PUT at `configuration.py:31`).
-- **Do not leak beyond need** *(v1 decision — partially REVERSED, see update
+- **Do not leak beyond need** *(v1 decision - partially REVERSED, see update
   below)*: return **only** `name / ipv4 / prefix_length / cidr / is_up`.
   Deliberately omit MAC addresses, gateway, DNS, adapter descriptions/driver
-  strings, and any non-IPv4 addressing — none are needed to pick an egress NIC
+  strings, and any non-IPv4 addressing - none are needed to pick an egress NIC
   and each widens the host-fingerprint surface exposed over the API. Exclude
   loopback and APIPA from the list (section 4.3).
 
-  > **Update (NIC UX v2, 2026-07-03 meeting — product-owner decision):** field engineer
+  > **Update (NIC UX v2, 2026-07-03 meeting - product-owner decision):** field engineer
   > explicitly reversed the gateway/DNS omission: field engineers need the
   > selected adapter's default gateway and DNS visible (read-only) to confirm
   > the tool reads the NIC correctly, and confirming the NIC's gateway
@@ -309,15 +309,15 @@ class SystemInterface(BaseModel):
   > prefix_length / cidr / is_up / adapter_type / subnet_mask / gateway /
   > dns_servers`. The added surface is small (default route + resolvers per
   > NIC) and the endpoint stays viewer-gated and auth-required, so this is an
-  > accepted trade-off, NOT a leak regression — do not "fix" the endpoint back
+  > accepted trade-off, NOT a leak regression - do not "fix" the endpoint back
   > to five fields. MAC addresses and adapter description/driver strings
   > remain deliberately omitted, virtual adapters are excluded from the
   > response entirely, and the no-gateway-leak assertion in
   > `test_system_interfaces_api.py` was updated accordingly.
 
-## 6. Per-engine source binding — exact edits
+## 6. Per-engine source binding - exact edits
 
-### 6.1 IP discovery — `local_addr`
+### 6.1 IP discovery - `local_addr`
 
 `core/smart_commissioning_core/engines/ip_scan.py`
 
@@ -352,7 +352,7 @@ Concretely:
   behaviour, so `Auto` is a no-op.
 - Error handling: an invalid/down `source_ip` makes `open_connection` raise
   `OSError` (e.g. `EADDRNOTAVAIL`). Today's `except (OSError, TimeoutError,
-  ValueError)` at `:109` would swallow that as "port closed" for **every** host —
+  ValueError)` at `:109` would swallow that as "port closed" for **every** host -
   a silent all-negative sweep, the worst failure mode. Fix: **pre-validate** the
   bind once, before the sweep, in `_run_ip_discovery` (`:379-386`, right after
   `require_scan_authorization`): attempt a throwaway `socket.socket()` +
@@ -361,12 +361,12 @@ Concretely:
   terminal failure (matching the module's "engines never fake success" honesty
   rule, `CLAUDE.md`) instead of a bogus empty result.
 
-### 6.2 MQTT transport — `source_address`
+### 6.2 MQTT transport - `source_address`
 
 `core/smart_commissioning_core/mqtt_transport.py`
 
 - Add `source_address: tuple[str, int] | None = None` to `MqttConnectionSettings`
-  (`:65-77`) — a frozen dataclass, so add a field with a default (backward
+  (`:65-77`) - a frozen dataclass, so add a field with a default (backward
   compatible; every existing constructor call keeps working).
 - In `MqttClient.__enter__` (`:106-116`), the socket is created at `:107`:
 
@@ -403,15 +403,15 @@ Concretely:
 - Error handling: `create_connection` with a bad `source_address` raises `OSError`
   on connect. The MQTT engine already maps connect failures to an honest
   `broker_unreachable`-family status (`_broker_error_status`,
-  `mqtt_settings.py:80-89`), so a bad bind won't fake success — but its label
+  `mqtt_settings.py:80-89`), so a bad bind won't fake success - but its label
   would be misleading. Optional nicety: detect `EADDRNOTAVAIL` and surface a
   `source_interface_unavailable` status. Not required for the first slice.
 
-### 6.3 BACnet discovery — feed the existing `local_address`
+### 6.3 BACnet discovery - feed the existing `local_address`
 
 `core/smart_commissioning_core/engines/bacnet_discovery.py`
 
-Nothing changes in this file — the plumbing already exists:
+Nothing changes in this file - the plumbing already exists:
 
 - `_select_backend` reads `parameters.get("local_address")` (`:511`) and passes
   it to `Bacpypes3Backend(local_address=...)`.
@@ -443,8 +443,8 @@ def resolve_source_interface(parameters: dict[str, Any], source_interface: str |
 
     `source_interface` is the configured device."Source Interface" value:
       - falsy / "Auto (OS default route)"  -> no-op (OS default route).
-      - "192.168.1.10/24" or "192.168.1.10" -> parameters["source_ip"]="192.168.1.10"
-                                               parameters["local_address"]="192.168.1.10/24"
+      - "192.0.2.10/24" or "192.0.2.10" -> parameters["source_ip"]="192.0.2.10"
+                                               parameters["local_address"]="192.0.2.10/24"
     An operator-supplied parameters["source_ip"]/["local_address"] wins (setdefault).
     Raises ValueError on a malformed value so the route returns a clean 400.
     """
@@ -452,9 +452,9 @@ def resolve_source_interface(parameters: dict[str, Any], source_interface: str |
 
 Behaviour:
 - Treat empty / `"Auto (OS default route)"` (case-insensitively) as no-op.
-- Parse `ip[/prefix]` with `ipaddress`: `ipaddress.ip_interface("192.168.1.10/24")`
+- Parse `ip[/prefix]` with `ipaddress`: `ipaddress.ip_interface("192.0.2.10/24")`
   → `.ip` (bare) and `.with_prefixlen`. A bare IP defaults BACnet to `/32`
-  (bacpypes3 needs *a* prefix; note this in the field help — a bare IP is fine
+  (bacpypes3 needs *a* prefix; note this in the field help - a bare IP is fine
   for IP/MQTT but the operator should give the real subnet for BACnet).
 - `parameters.setdefault("source_ip", str(interface.ip))` and
   `parameters.setdefault("local_address", interface.with_prefixlen)` so an
@@ -464,14 +464,14 @@ Behaviour:
 
 ### 7.2 Route inline path
 
-`backend/app/api/routes/discovery.py` — each `create_*_run` builds `parameters`
+`backend/app/api/routes/discovery.py` - each `create_*_run` builds `parameters`
 before persisting the run:
 
 - IP (`:187-217`): after `_resolve_expected_ports(...)` (`:197`) and before
   `_create_run(...)` (`:198`), call
   `resolve_source_interface(parameters, _configured_source_interface(request.project_id, request.site_id))`.
 - BACnet (`:220-244`): `parameters = dict(run.parameters)` is built at `:223`;
-  inject right after. (Note BACnet builds `run` first then copies params — either
+  inject right after. (Note BACnet builds `run` first then copies params - either
   inject into `parameters` before the `run_inline` closure reads it, or restructure
   to resolve params before `_create_run` like the IP route, so the **persisted**
   `run.parameters` also carries it for the worker path. Prefer the latter for
@@ -497,7 +497,7 @@ Because injection happens **before** `_create_run`, the resolved `source_ip` /
 `worker/app/tasks.py` actors (`discover_ip_range` `:134`, `discover_bacnet`
 `:150`, `discover_mqtt` `:171`, and the MQTT config-publish `:207`) receive
 `parameters: dict` already containing `source_ip` / `local_address` from the
-persisted run record — **no per-actor change needed**, provided section 7.2
+persisted run record - **no per-actor change needed**, provided section 7.2
 injects before persist. This is the key to "inline and queued behave
 identically": one resolver, run once at creation, persisted once.
 
@@ -508,7 +508,7 @@ identically": one resolver, run once at creation, persisted once.
 
 ### 7.4 Config schema / defaults
 
-- `backend/app/schemas/configuration.py`: no structural change needed —
+- `backend/app/schemas/configuration.py`: no structural change needed -
   `ConfigurationSection.values` is a free `dict[str, str]` (`:5`), so
   `"Source Interface"` is just a new key. (If we want it to appear even on a
   fresh install, seed it in `DEFAULT_CONFIGURATION`.)
@@ -522,7 +522,7 @@ identically": one resolver, run once at creation, persisted once.
   migration. Add a validation rule in `ConfigurationService.validate` (near the
   device-field checks at `:312-315`): accept empty / `Auto...` / a parseable
   `ip[/prefix]`; otherwise append `"Source Interface must be 'Auto (OS default
-  route)' or a valid interface IP (optionally with prefix, e.g. 192.168.1.10/24)."`
+  route)' or a valid interface IP (optionally with prefix, e.g. 192.0.2.10/24)."`
 
 ## 8. Validation, tests, and on-real-hardware verification
 
@@ -536,13 +536,13 @@ identically": one resolver, run once at creation, persisted once.
 - Bind pre-check: `ip_scan` pre-validates the bind before the sweep (section 6.1)
   so a down NIC fails the run honestly rather than returning an empty scan.
 
-### 8.2 Tests (stdlib `unittest`, to match CI — `CLAUDE.md` → Tests)
+### 8.2 Tests (stdlib `unittest`, to match CI - `CLAUDE.md` → Tests)
 
 Core (`core/tests/`, alphabetical order preserved):
 - `test_ip_scan.py`: add a case asserting that when `parameters["source_ip"]` is
   set, the default probe passes `local_addr=(source_ip, 0)` to
   `open_connection`. Inject a fake `connect`/monkeypatch `open_connection` to
-  capture kwargs (the module already injects `connect` for socket-free tests —
+  capture kwargs (the module already injects `connect` for socket-free tests -
   `ip_scan.py:331/368`). Add a case asserting an unavailable `source_ip`
   produces a terminal failure, not an empty success.
 - `test_mqtt_transport.py`: assert `MqttConnectionSettings(source_address=...)`
@@ -551,7 +551,7 @@ Core (`core/tests/`, alphabetical order preserved):
   `source_address` when no factory is injected (capture via a fake
   `create_connection`).
 - New `test_engine_dispatch_source_interface.py` (backend `tests/`): unit-test
-  `resolve_source_interface` — Auto → no-op; `1.2.3.4/24` → both keys set;
+  `resolve_source_interface` - Auto → no-op; `1.2.3.4/24` → both keys set;
   bare IP → `/32` local_address; malformed → `ValueError`; existing
   `source_ip`/`local_address` not clobbered.
 
@@ -559,7 +559,7 @@ Backend (`backend/tests/`):
 - `test_system_interfaces_api.py`: mock the enumerator (so tests don't depend on
   the CI host's real NICs) and assert `GET /api/v1/system/interfaces` returns the
   mocked list, requires auth (401 without key), is viewer-allowed, and the
-  response contains **only** the nine allowed fields — `name / ipv4 /
+  response contains **only** the nine allowed fields - `name / ipv4 /
   prefix_length / cidr / is_up / adapter_type / subnet_mask / gateway /
   dns_servers` per the NIC UX v2 update in section 5.3 (still no MAC or
   adapter-description/driver-string leak).
@@ -601,28 +601,28 @@ Manual verification checklist for a real box (document in the PR):
 
 ## 9. Phased rollout
 
-**Phase 0 — plumbing, no UI (smallest useful slice).**
+**Phase 0 - plumbing, no UI (smallest useful slice).**
 - `resolve_source_interface` in `engine_dispatch.py` + wire into the three
   discovery routes before persist (section 7.2).
 - `ip_scan` `local_addr` + bind pre-check (6.1); `mqtt_transport` `source_address`
   + `mqtt_settings` producer (6.2). BACnet needs no code (6.3).
-- Accept `source_ip`/`local_address` as run `parameters` (already possible) — an
+- Accept `source_ip`/`local_address` as run `parameters` (already possible) - an
   operator/API caller can set it manually. Ship with core + dispatch tests.
 - Value: an engineer can already force the NIC via a saved config key or a run
-  parameter, and inline+worker are consistent — the hard part is done and tested
+  parameter, and inline+worker are consistent - the hard part is done and tested
   without any UI or new dependency.
 
-**Phase 1 — configuration field + validation.**
+**Phase 1 - configuration field + validation.**
 - `DEFAULT_CONFIGURATION` key + `validate` rule (7.4). Config-driven selection
   works end to end via a free-text field; still no enumeration dependency.
 
-**Phase 2 — enumeration endpoint + dropdown.**
+**Phase 2 - enumeration endpoint + dropdown.**
 - `interface_service` (psutil, guarded) + `GET /system/interfaces` + schema +
   router registration (sections 4-5). Frontend dropdown with the
   `!options.includes` fallback (section 3). This is where the `psutil` open
   decision is resolved.
 
-**Phase 3 — niceties (optional).**
+**Phase 3 - niceties (optional).**
 - True editable combobox (`<datalist>`); `EADDRNOTAVAIL`-specific MQTT status;
   worker-side belt-and-braces re-resolve.
 

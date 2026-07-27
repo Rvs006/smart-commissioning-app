@@ -10,7 +10,7 @@ The API and worker emit **single-line JSON** via `JsonLogFormatter`
 (`backend/app/core/logging.py`). The formatter uses only the standard library,
 so the FastAPI backend and the Dramatiq worker share it without an extra logging
 dependency. `configure_logging(LOG_LEVEL)` is installed in the API lifespan
-startup (idempotent — re-running replaces the handler rather than stacking).
+startup (idempotent - re-running replaces the handler rather than stacking).
 
 ### Fields
 
@@ -32,7 +32,7 @@ Present when set (correlation, via `contextvars` + `CorrelationIdFilter`):
 
 Conditional:
 
-- `exc_info` / `stack_info` — formatted traceback / stack when present.
+- `exc_info` / `stack_info` - formatted traceback / stack when present.
 - Any keys passed via `logger.info(..., extra={...})` are merged into the JSON
   (reserved `LogRecord` attributes and private `_`-prefixed keys are skipped).
 
@@ -60,7 +60,7 @@ asyncio task / per worker message and never leak across concurrent requests.
 Alongside the console handler, the API installs a **rotating file handler**
 (`configure_file_logging`, `backend/app/core/logging.py`) that writes the same
 single-line JSON to **`<RUNTIME_ROOT>/logs/app.log`**. It rotates by **size**
-(5 MiB per file, 10 rollovers kept — a ~50 MiB hard cap so a chatty capture can
+(5 MiB per file, 10 rollovers kept - a ~50 MiB hard cap so a chatty capture can
 never fill a field laptop's disk); `app.log.1` … `app.log.10` are the rollovers.
 The handler opens the file lazily (`delay=True`), so importing the app never
 creates an empty `app.log` and Windows holds no open handle while logging is
@@ -78,7 +78,7 @@ Configuration save):
 
 **Retention** is *time-based pruning of rotated/crash files only*, run once at
 startup: `purge_old_logs` deletes `*.log*` files older than the configured
-**Log Retention** days (default 30). Live rotation stays size-based — the days
+**Log Retention** days (default 30). Live rotation stays size-based - the days
 value does not shorten `app.log` itself.
 
 > Windows file-locking caveat: `RotatingFileHandler` rollover renames the file,
@@ -87,23 +87,23 @@ value does not shorten `app.log` itself.
 > rollover error rather than crashing, but the rotation is silently lost.
 
 **Scope:** this file destination is for the **API** process (single-process
-edge/portable target). The hosted **worker** stays **console-only** — each
+edge/portable target). The hosted **worker** stays **console-only** - each
 container has its own log pipeline, and a `RotatingFileHandler` shared across
 processes would be a Windows-locking / rename race. Do not point the worker at a
 shared file.
 
-### Retrieving logs — `/logs/bundle` and `/logs/upload`
+### Retrieving logs - `/logs/bundle` and `/logs/upload`
 
 Two **engineer-gated** endpoints (`backend/app/api/routes/logs.py`) let an
 operator collect logs without remote-desktop access:
 
-- **`GET /api/v1/logs/bundle`** — downloads every `*.log*` file under the local
+- **`GET /api/v1/logs/bundle`** - downloads every `*.log*` file under the local
   logs directory as a single zip (masked; see below). Empty logs dir → 404.
-- **`POST /api/v1/logs/upload`** — builds the same masked bundle and POSTs it
+- **`POST /api/v1/logs/upload`** - builds the same masked bundle and POSTs it
   (multipart `file` field) to the configured **Log Upload URL**, with the
   **Log Upload Token** sent only as an `Authorization: Bearer` header. The
   response reports the **honest outcome**: `uploaded` (2xx), `rejected` (≥400,
-  with the status), or `no_response` (the endpoint did not answer) — never a
+  with the status), or `no_response` (the endpoint did not answer) - never a
   fabricated success, never a retry, and all three return HTTP 200 (the
   `outcome` field is the result). A missing/invalid URL is a 400.
 
@@ -112,7 +112,7 @@ credential-shaped keys (`password`/`token`/`secret`/`api_key`/`authorization`/
 `private_key`) in both JSON and `key=value` forms. It is **not** a DLP scanner
 and cannot catch a secret embedded in free text by a future log call. The
 primary control is **containment**: the bundle only ever contains files from the
-local logs directory — the secrets store, the database, and uploaded import
+local logs directory - the secrets store, the database, and uploaded import
 files are never included. The upload token never appears in the URL, the
 response, or any log line.
 
@@ -120,7 +120,7 @@ response, or any log line.
 
 For the portable edge build, an unhandled crash (the kind that would otherwise
 vanish when the console window closes) is captured to a crash log **under the
-app data directory** — alongside the SQLite database and secrets. The portable
+app data directory** - alongside the SQLite database and secrets. The portable
 launcher in `packaging/windows_portable/` (`install_crash_logging`) writes
 timestamped files under `%LOCALAPPDATA%\SmartCommissioning\logs\` for the
 frozen exe (`<SMART_COMMISSIONING_DATA_DIR>\logs\` when that override is set;
@@ -129,7 +129,7 @@ frozen exe (`<SMART_COMMISSIONING_DATA_DIR>\logs\` when that override is set;
 `faulthandler-<timestamp>.log` for interpreter-level faults. When triaging a
 portable crash, collect those files together with the runtime bundle (see
 `docs/backup-restore.md`). Note: after an in-place upgrade, an exe-adjacent
-`runtime\logs\` folder is a pre-upgrade rollback copy — it holds only old
+`runtime\logs\` folder is a pre-upgrade rollback copy - it holds only old
 logs, so do not triage current crashes from it. They are the edge equivalent
 of `docker logs` for a process with no attached console.
 
@@ -139,7 +139,7 @@ Metrics use `prometheus-client` against a **dedicated registry** (isolated from
 the process-global default registry so re-importing the app in tests does not
 raise duplicate-timeseries errors). The `/metrics` endpoint is wired in
 `app.main` **at the app level (not under `/api/v1`)** and is intentionally
-exempt from auth and the schema gate — scrapers are unauthenticated infra, so in
+exempt from auth and the schema gate - scrapers are unauthenticated infra, so in
 production **bind it to an internal network and do not expose it publicly**.
 
 Exposed series (all prefixed `sct_`):
@@ -166,7 +166,7 @@ scrape_configs:
     scrape_interval: 15s
     static_configs:
       # The api's loopback debug port, or your internal service address.
-      # Do NOT scrape across an untrusted network — /metrics is unauthenticated.
+      # Do NOT scrape across an untrusted network - /metrics is unauthenticated.
       - targets: ["127.0.0.1:8000"]
 ```
 
@@ -213,19 +213,19 @@ metrics and signals that actually exist above.
 | --- | --- | --- |
 | API down | `/health` scrape/probe failing for > 2m | Process down or unreachable. |
 | Not ready | `/ready` 503 for > 5m | A required dependency (DB, or Redis in queue mode) is down. |
-| Error-rate spike | `rate(sct_http_requests_total{status=~"5.."}[5m])` elevated | Server-side failures. |
+| Error-rate spike | `rate(sct_http_requests_total{status=~"5.."}[5m])` above its threshold | Server-side failures. |
 | Latency regression | p95 of `sct_http_request_duration_seconds` above SLO for > 10m | Slow dependency / saturation. |
 | Queue backlog (hosted) | `sct_runs_by_status{status="running"}` and/or `queued` rising with no terminal transitions over N minutes | Worker stuck/down or Redis unreachable; jobs not draining. |
-| Queue age (hosted) | Oldest non-terminal run age exceeds a threshold | Jobs queued but not being picked up — derive from run timestamps; pair with the backlog alert. |
+| Queue age (hosted) | Oldest non-terminal run age exceeds a threshold | Jobs queued but not being picked up - derive from run timestamps; pair with the backlog alert. |
 | Run failure rate | Ratio of `failed` to finished runs over a window exceeds threshold | Systematic job failures. |
 | In-progress pileup | `sct_http_requests_in_progress` sustained high | Requests not completing (deadlock/slow downstream). |
 
 > "Queue depth/age" alerts are derived from `sct_runs_by_status` plus run
-> timestamps from the runs list — there is no separate broker-depth metric
+> timestamps from the runs list - there is no separate broker-depth metric
 > exported today. If you need true Redis/Dramatiq queue depth, scrape it from
 > Redis directly or add a queue-depth gauge in a future change; that broker-side
 > metric is **not** currently emitted (it would require a live Redis to be
-> meaningful — see the honesty note below).
+> meaningful - see the honesty note below).
 
 ## 5. Honesty note
 

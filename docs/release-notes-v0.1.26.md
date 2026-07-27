@@ -1,13 +1,10 @@
-# v0.1.26: completed evidence stays completed
+# v0.1.26 - Completed evidence stays completed
 
-This reliability release closes the race conditions that could let a delayed
-worker, browser request, or report download show evidence from the wrong point
-in time.
+A delayed worker or browser request could expose evidence from the wrong point
+in time. v0.1.26 seals completed runs and stores report bytes, so downloading
+the same report twice returns the same SHA-256 and the same file.
 
-The best change is deliberately boring: download the same report twice and you
-get the same bytes.
-
-## What you will notice
+## What changed
 
 - A completed run is sealed. Delayed queue messages and stale workers cannot
   change its status, counts, devices, points, topics, or issues.
@@ -52,7 +49,11 @@ but does not mark an immutable conflict as synchronized or let sync replace a
 sealed terminal result. Exact report bytes and signed manifests are not yet
 transferred to a hub. See `docs/sync-v2-v0.1.27.md`.
 
-## Windows portable evidence
+## Windows portable download
+
+Download `Smart_Commissioning_App_Windows_Portable.zip`, extract it into a new
+empty directory, and run `SmartCommissioningApp.exe`. Existing settings and run
+history remain under `%LOCALAPPDATA%\SmartCommissioning`.
 
 - Source commit: `{{COMMIT}}`
 - EXE SHA-256: `{{EXE_SHA256}}`

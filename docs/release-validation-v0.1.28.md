@@ -2,7 +2,7 @@
 
 Every unchecked row blocks publication. Record the exact 40-character commit,
 workflow URL, artifact digest, and test result beside each item. A green local
-build is useful, but it is not release evidence.
+build helps diagnosis. Release evidence must come from the hosted workflow.
 
 ## Release identity
 

@@ -1,5 +1,8 @@
 # Smart Commissioning V1 Review Checklist
 
+> Historical implementation record for the first V1 review. Current release and
+> field status live in [docs/README.md](README.md).
+
 This checklist maps the V1 review notes from `Smart Commissioning Tool version 1 notes.docx` to the production React/FastAPI/worker scaffold. Status values describe the implementation in this repository, not legacy static prototypes.
 
 | Review note | Status | Evidence | Verification |

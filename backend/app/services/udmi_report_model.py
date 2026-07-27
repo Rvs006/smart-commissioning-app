@@ -16,6 +16,7 @@ ASSET_METRIC_LABELS = (
     ("not_observed", "Not Observed Assets"),
     ("with_issues", "Assets With Issues"),
     ("successfully_validated", "Successfully Validated Assets"),
+    ("wrong_topic", "Registered Assets on Wrong Topics"),
     ("unexpected", "Unexpected Devices"),
 )
 
@@ -44,6 +45,14 @@ ISSUE_METRIC_LABELS = (
 _PAYLOAD_TYPES = ("state", "metadata", "pointset")
 _PAYLOAD_ORDER = {payload_type: index for index, payload_type in enumerate(_PAYLOAD_TYPES)}
 _BLOCKING_SEVERITIES = frozenset({"critical", "high", "medium", "blocking"})
+_REGISTER_ANNOTATION_COLUMNS = (
+    "Observed in run",
+    "Topic status",
+    "Actual topic(s)",
+    "Comment",
+    "Source run ID",
+    "Observed at",
+)
 
 METRIC_DEFINITIONS = (
     {
@@ -71,6 +80,13 @@ METRIC_DEFINITIONS = (
     {
         "metric": "Successfully Validated Assets",
         "definition": "Assets whose expected retained payloads passed the recorded validation checks.",
+    },
+    {
+        "metric": "Registered Assets on Wrong Topics",
+        "definition": (
+            "Distinct expected register assets observed on a retained MQTT topic that does not "
+            "match the register. Their payload content is still validated."
+        ),
     },
     {
         "metric": "Unexpected Devices",
@@ -167,7 +183,11 @@ METRIC_DEFINITIONS = (
     },
 )
 
-_ASSET_KEYS = tuple(key for key, _label in ASSET_METRIC_LABELS if key != "unexpected")
+_ASSET_KEYS = tuple(
+    key
+    for key, _label in ASSET_METRIC_LABELS
+    if key not in {"unexpected", "wrong_topic"}
+)
 _PAYLOAD_KEYS = tuple(key for key, _label in PAYLOAD_METRIC_LABELS if key != "not_received")
 _FAULT_KEYS = tuple(key for key, _label in FAULT_METRIC_LABELS)
 _ISSUE_KEYS = tuple(key for key, _label in ISSUE_METRIC_LABELS)
@@ -218,6 +238,96 @@ def _optional_text(value: object) -> str | None:
     return str(value) if value is not None and str(value) else None
 
 
+def _register_row_value(row: dict[str, Any], *headings: str) -> object:
+    """Read canonical fields while retaining exact source headings in output."""
+
+    lookup = {
+        " ".join(str(key).strip().casefold().split()): value
+        for key, value in row.items()
+    }
+    for heading in headings:
+        key = " ".join(heading.strip().casefold().split())
+        if key in lookup:
+            return lookup[key]
+    return None
+
+
+def _register_annotation_columns(
+    original_columns: list[str],
+) -> dict[str, str]:
+    """Allocate annotation headings without overwriting frozen register fields."""
+
+    used = set(original_columns)
+    allocated: dict[str, str] = {}
+    for heading in _REGISTER_ANNOTATION_COLUMNS:
+        candidate = heading
+        suffix = 1
+        while candidate in used:
+            candidate = (
+                f"{heading} (report)"
+                if suffix == 1
+                else f"{heading} (report {suffix})"
+            )
+            suffix += 1
+        used.add(candidate)
+        allocated[heading] = candidate
+    return allocated
+
+
+def _normalise_wrong_topic_asset(
+    value: object,
+    *,
+    source_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    asset_id = _text(value.get("asset_id")).strip()
+    raw_payloads = value.get("payloads")
+    if not asset_id or not isinstance(raw_payloads, list):
+        return None
+    payloads: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for raw_payload in raw_payloads:
+        if not isinstance(raw_payload, dict):
+            return None
+        payload_type = _text(raw_payload.get("payload_type")).strip().casefold()
+        expected_topic = _text(raw_payload.get("expected_topic")).strip()
+        actual_topic = _text(raw_payload.get("actual_topic")).strip()
+        if payload_type not in _PAYLOAD_TYPES or not actual_topic:
+            return None
+        key = (payload_type, expected_topic, actual_topic)
+        if key in seen:
+            continue
+        seen.add(key)
+        payloads.append(
+            {
+                "payload_type": payload_type,
+                "expected_topic": expected_topic,
+                "actual_topic": actual_topic,
+            }
+        )
+    if not payloads:
+        return None
+    payloads.sort(
+        key=lambda row: (
+            _PAYLOAD_ORDER[row["payload_type"]],
+            row["expected_topic"].casefold(),
+            row["actual_topic"].casefold(),
+        )
+    )
+    row: dict[str, Any] = {
+        "asset_id": asset_id,
+        "system": _text(value.get("system"), "Unspecified").strip() or "Unspecified",
+        "expected_topic_root": _optional_text(value.get("expected_topic_root")),
+        "actual_topic_root": _optional_text(value.get("actual_topic_root")),
+        "payloads": payloads,
+        "last_seen": _optional_text(value.get("last_seen")),
+    }
+    if source_run_id is not None:
+        row["source_run_id"] = source_run_id
+    return row
+
+
 def _normalise_fault_category(value: object) -> str:
     key = _text(value, "other_issues").strip().casefold().replace("-", "_").replace(" ", "_")
     return _FAULT_CATEGORY_ALIASES.get(key, "other_issues")
@@ -253,6 +363,9 @@ def _contract(value: object) -> dict[str, Any] | None:
     unexpected_devices_present = "unexpected_devices" in value
     raw_unexpected = value.get("unexpected_devices", [])
     unexpected_devices = raw_unexpected if isinstance(raw_unexpected, list) else None
+    wrong_topic_assets_present = "wrong_topic_assets" in value
+    raw_wrong_topic = value.get("wrong_topic_assets", [])
+    wrong_topic_assets = raw_wrong_topic if isinstance(raw_wrong_topic, list) else None
     if (
         asset_metrics is None
         or payload_metrics is None
@@ -262,6 +375,7 @@ def _contract(value: object) -> dict[str, Any] | None:
         or not isinstance(asset_results, list)
         or not isinstance(fault_rows, list)
         or unexpected_devices is None
+        or wrong_topic_assets is None
     ):
         return None
     if value.get("schema_version") == "1.0":
@@ -275,6 +389,20 @@ def _contract(value: object) -> dict[str, Any] | None:
     if unexpected_count is None:
         unexpected_count = len([row for row in unexpected_devices if isinstance(row, dict)])
     asset_metrics["unexpected"] = unexpected_count
+    normalised_wrong_topic: list[dict[str, Any]] = []
+    for raw_asset in wrong_topic_assets:
+        asset = _normalise_wrong_topic_asset(raw_asset)
+        if asset is None:
+            return None
+        normalised_wrong_topic.append(asset)
+    wrong_topic_count = None
+    if not wrong_topic_assets_present and isinstance(raw_asset_metrics, dict):
+        wrong_topic_count = _non_negative_int(raw_asset_metrics.get("wrong_topic"))
+    if wrong_topic_count is None:
+        wrong_topic_count = len(
+            {asset["asset_id"] for asset in normalised_wrong_topic}
+        )
+    asset_metrics["wrong_topic"] = wrong_topic_count
     return {
         "schema_version": str(value["schema_version"]),
         "asset_metrics": asset_metrics,
@@ -285,6 +413,8 @@ def _contract(value: object) -> dict[str, Any] | None:
         "asset_results": asset_results,
         "fault_rows": fault_rows,
         "unexpected_devices": unexpected_devices,
+        "wrong_topic_assets": normalised_wrong_topic,
+        "wrong_topic_assets_present": wrong_topic_assets_present,
         "unexpected_devices_measured": value.get("unexpected_devices_measured") is True,
         "unexpected_devices_measurement_scope": value.get(
             "unexpected_devices_measurement_scope"
@@ -330,6 +460,16 @@ def _normalise_payload_results(value: object) -> list[dict[str, Any]] | None:
             for field in ("topic", "received_at")
         ):
             return None
+        raw_topics = raw.get("topics", [])
+        if not isinstance(raw_topics, list) or any(
+            not isinstance(topic, str) or not topic.strip()
+            for topic in raw_topics
+        ):
+            return None
+        topics = sorted(
+            {topic.strip() for topic in raw_topics},
+            key=lambda topic: (topic.casefold(), topic),
+        )
         seen_payload_types.add(payload_type)
         rows.append(
             {
@@ -340,6 +480,7 @@ def _normalise_payload_results(value: object) -> list[dict[str, Any]] | None:
                 "blocking_issue_count": blocking_issue_count,
                 "successfully_validated": raw["successfully_validated"],
                 "topic": _optional_text(raw.get("topic")),
+                "topics": topics,
                 "received_at": _optional_text(raw.get("received_at")),
             }
         )
@@ -720,6 +861,7 @@ def _computed_metrics(
 def _computed_system_metrics(
     assets: list[dict[str, Any]],
     faults: list[dict[str, Any]],
+    wrong_topic_assets: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for system in sorted({row["system"] for row in assets}, key=str.casefold):
@@ -732,6 +874,13 @@ def _computed_system_metrics(
             and (row["source_run_id"], row["asset_id"]) in asset_keys
         ]
         asset, payload, fault, issue = _computed_metrics(system_assets, system_faults)
+        asset["wrong_topic"] = len(
+            {
+                (row["source_run_id"], row["asset_id"])
+                for row in wrong_topic_assets
+                if row["system"] == system
+            }
+        )
         rows.append(
             {
                 "system": system,
@@ -803,6 +952,7 @@ def build_udmi_report_model(
 
     asset_metrics = _empty_metrics(_ASSET_KEYS)
     asset_metrics["unexpected"] = 0
+    asset_metrics["wrong_topic"] = 0
     payload_metrics = _empty_metrics(_PAYLOAD_KEYS)
     fault_metrics = _empty_metrics(_FAULT_KEYS)
     issue_metrics = _empty_metrics(_ISSUE_KEYS)
@@ -810,6 +960,41 @@ def build_udmi_report_model(
     asset_results: list[dict[str, Any]] = []
     fault_rows: list[dict[str, Any]] = []
     unexpected_devices: list[dict[str, Any]] = []
+    wrong_topic_assets: list[dict[str, Any]] = []
+    annotated_register_rows: list[dict[str, Any]] = []
+    annotated_register_columns: list[str] = []
+    legacy_wrong_topic_count = 0
+    legacy_wrong_topic_by_source: dict[str, int] = {}
+    legacy_wrong_topic_by_source_system: dict[tuple[str, str], int] = {}
+    source_registers: dict[str, tuple[list[str], list[dict[str, Any]]]] = {}
+    for source, _contract_value in contracts:
+        source_id = _text(getattr(source, "run_id", ""))
+        parameters = getattr(source, "parameters", None)
+        parameters = parameters if isinstance(parameters, dict) else {}
+        raw_columns = parameters.get("register_columns")
+        source_columns = (
+            [str(column) for column in raw_columns if str(column)]
+            if isinstance(raw_columns, list)
+            else []
+        )
+        raw_register_rows = parameters.get("register_rows")
+        source_register_rows = (
+            [dict(row) for row in raw_register_rows if isinstance(row, dict)]
+            if isinstance(raw_register_rows, list)
+            else []
+        )
+        for register_row in source_register_rows:
+            for column in register_row:
+                column_text = str(column)
+                if column_text not in source_columns:
+                    source_columns.append(column_text)
+        for column in source_columns:
+            if column not in annotated_register_columns:
+                annotated_register_columns.append(column)
+        source_registers[source_id] = (source_columns, source_register_rows)
+    register_annotation_columns = _register_annotation_columns(
+        annotated_register_columns
+    )
     unexpected_devices_measured = bool(contracts)
     unexpected_measurement_scopes: set[str] = set()
     project_sites: set[str] = set()
@@ -833,6 +1018,10 @@ def build_udmi_report_model(
             contract["issue_metrics"],
             retired_fault_rows,
         )
+        if not contract["wrong_topic_assets_present"]:
+            source_wrong_topic_count = contract["asset_metrics"]["wrong_topic"]
+            legacy_wrong_topic_count += source_wrong_topic_count
+            legacy_wrong_topic_by_source[source_id] = source_wrong_topic_count
         _add_metrics(asset_metrics, contract["asset_metrics"])
         _add_metrics(payload_metrics, contract["payload_metrics"])
         _add_metrics(fault_metrics, source_fault_metrics)
@@ -850,6 +1039,126 @@ def build_udmi_report_model(
                     f"Source run '{source_id}' contains a malformed unexpected-device row."
                 )
             unexpected_devices.append(device)
+        for raw_asset in contract["wrong_topic_assets"]:
+            asset = _normalise_wrong_topic_asset(raw_asset, source_run_id=source_id)
+            if asset is None:
+                raise ValueError(
+                    f"Source run '{source_id}' contains a malformed wrong-topic asset row."
+                )
+            wrong_topic_assets.append(asset)
+
+        _source_columns, source_register_rows = source_registers[source_id]
+
+        source_assets = {
+            _text(asset.get("asset_id")).strip(): asset
+            for asset in contract["asset_results"]
+            if isinstance(asset, dict) and _text(asset.get("asset_id")).strip()
+        }
+        wrong_by_asset: dict[str, list[dict[str, Any]]] = {}
+        for wrong_asset in contract["wrong_topic_assets"]:
+            wrong_by_asset.setdefault(wrong_asset["asset_id"], []).append(wrong_asset)
+        for register_row in source_register_rows:
+            asset_id = _text(
+                _register_row_value(register_row, "Asset ID", "Asset name")
+            ).strip()
+            asset = source_assets.get(asset_id)
+            register_payload_type = (
+                _text(_register_row_value(register_row, "Payload type"))
+                .strip()
+                .casefold()
+            )
+            relevant_payload_types = (
+                {register_payload_type}
+                if register_payload_type in _PAYLOAD_TYPES
+                else set(_PAYLOAD_TYPES)
+            )
+            payload_results = [
+                payload
+                for payload in (asset.get("payload_results", []) if asset else [])
+                if isinstance(payload, dict)
+                and _text(payload.get("payload_type")).strip().casefold()
+                in relevant_payload_types
+            ]
+            wrong_rows = wrong_by_asset.get(asset_id, [])
+            wrong_payloads = [
+                payload
+                for wrong_row in wrong_rows
+                for payload in wrong_row["payloads"]
+                if payload["payload_type"] in relevant_payload_types
+            ]
+            observed = any(
+                payload.get("received") is True for payload in payload_results
+            ) or bool(wrong_payloads)
+            actual_topics: set[str] = set()
+            for payload in payload_results:
+                if payload.get("received") is not True:
+                    continue
+                actual_topics.update(
+                    _text(topic).strip()
+                    for topic in payload.get("topics", [])
+                    if _text(topic).strip()
+                )
+                legacy_topic = _text(payload.get("topic")).strip()
+                if legacy_topic:
+                    actual_topics.add(legacy_topic)
+            actual_topics.update(
+                payload["actual_topic"]
+                for payload in wrong_payloads
+                if payload["actual_topic"]
+            )
+            topic_status = (
+                "Wrong topic"
+                if wrong_payloads
+                else "Expected topic"
+                if observed
+                else "Not evaluated"
+            )
+            comment = (
+                "Observed, but one or more MQTT topics do not match the register."
+                if wrong_payloads
+                else "Observed on the expected topic."
+                if observed
+                else "Not observed during this run."
+            )
+            observed_times = [
+                parsed
+                for payload in payload_results
+                if payload.get("received") is True
+                and (parsed := _timestamp(payload.get("received_at"))) is not None
+            ]
+            latest_observed = max(
+                observed_times,
+                default=None,
+                key=lambda item: item[0],
+            )
+            if latest_observed is None and wrong_payloads:
+                wrong_times = [
+                    parsed
+                    for wrong_row in wrong_rows
+                    if (parsed := _timestamp(wrong_row.get("last_seen"))) is not None
+                ]
+                latest_observed = max(
+                    wrong_times,
+                    default=None,
+                    key=lambda item: item[0],
+                )
+            annotated_register_rows.append(
+                {
+                    **{str(key): value for key, value in register_row.items()},
+                    register_annotation_columns["Observed in run"]: (
+                        "Yes" if observed else "No"
+                    ),
+                    register_annotation_columns["Topic status"]: topic_status,
+                    register_annotation_columns["Actual topic(s)"]: ", ".join(
+                        sorted(actual_topics, key=str.casefold)
+                    ),
+                    register_annotation_columns["Comment"]: comment,
+                    register_annotation_columns["Source run ID"]: source_id,
+                    register_annotation_columns["Observed at"]: (
+                        latest_observed[1] if latest_observed else None
+                    ),
+                }
+            )
 
         for raw_system in contract["system_metrics"]:
             if not isinstance(raw_system, dict):
@@ -857,7 +1166,8 @@ def build_udmi_report_model(
                     f"Source run '{source_id}' contains a malformed system-metrics row."
                 )
             system_name = _text(raw_system.get("system"), "Unspecified").strip() or "Unspecified"
-            system_asset = _metric_group(raw_system.get("asset_metrics"), _ASSET_KEYS)
+            raw_system_asset = raw_system.get("asset_metrics")
+            system_asset = _metric_group(raw_system_asset, _ASSET_KEYS)
             system_payload = _metric_group(raw_system.get("payload_metrics"), _PAYLOAD_KEYS)
             system_fault = _metric_group(raw_system.get("fault_metrics"), _FAULT_KEYS)
             system_issue = _metric_group(raw_system.get("issue_metrics"), _ISSUE_KEYS)
@@ -911,6 +1221,21 @@ def build_udmi_report_model(
                 },
             )
             _add_metrics(target["asset_metrics"], system_asset)
+            if (
+                not contract["wrong_topic_assets_present"]
+                and isinstance(raw_system_asset, dict)
+            ):
+                retained_wrong_topic = _non_negative_int(
+                    raw_system_asset.get("wrong_topic")
+                )
+                if retained_wrong_topic is not None:
+                    legacy_wrong_topic_by_source_system[
+                        (source_id, system_name)
+                    ] = retained_wrong_topic
+                    target["asset_metrics"]["wrong_topic"] = (
+                        target["asset_metrics"].get("wrong_topic", 0)
+                        + retained_wrong_topic
+                    )
             _add_metrics(target["payload_metrics"], system_payload)
             _add_metrics(target["fault_metrics"], system_fault)
             _add_metrics(target["issue_metrics"], system_issue)
@@ -957,6 +1282,17 @@ def build_udmi_report_model(
             )
 
         for raw_fault in source_fault_rows:
+            topic_compliance_payload_type = _text(
+                raw_fault.get("topic_compliance_payload_type")
+            ).strip().casefold()
+            if (
+                topic_compliance_payload_type
+                and topic_compliance_payload_type not in _PAYLOAD_TYPES
+            ):
+                raise ValueError(
+                    f"Source run '{source_id}' contains a malformed topic-compliance "
+                    "payload type."
+                )
             fault_rows.append(
                 {
                     "source_run_id": source_id,
@@ -964,6 +1300,9 @@ def build_udmi_report_model(
                     "asset_id": _optional_text(raw_fault.get("asset_id")),
                     "system": _text(raw_fault.get("system"), "Unspecified") or "Unspecified",
                     "payload_type": _text(raw_fault.get("payload_type")),
+                    "topic_compliance_payload_type": (
+                        topic_compliance_payload_type or None
+                    ),
                     "category": _normalise_fault_category(raw_fault.get("category")),
                     "severity": _text(raw_fault.get("severity")),
                     "description": _text(raw_fault.get("description")),
@@ -977,6 +1316,9 @@ def build_udmi_report_model(
 
     unexpected_devices.sort(
         key=lambda row: (row["source_run_id"], row["id"].casefold())
+    )
+    wrong_topic_assets.sort(
+        key=lambda row: (row["source_run_id"], row["asset_id"].casefold())
     )
 
     if canonical_scope is not None:
@@ -1020,6 +1362,9 @@ def build_udmi_report_model(
             source_id = fault["source_run_id"]
             asset_id = fault["asset_id"]
             payload_type = fault["payload_type"].strip().casefold()
+            topic_compliance_payload_type = _text(
+                fault.get("topic_compliance_payload_type")
+            ).strip().casefold()
             if asset_id is None:
                 if source_id in full_sources:
                     scoped_faults.append(fault)
@@ -1030,6 +1375,11 @@ def build_udmi_report_model(
             if payload_type:
                 if payload_type in selected_by_asset[asset_key]:
                     scoped_faults.append(fault)
+            elif (
+                topic_compliance_payload_type
+                and topic_compliance_payload_type in selected_by_asset[asset_key]
+            ):
+                scoped_faults.append(fault)
             elif asset_key in full_assets:
                 scoped_faults.append(fault)
 
@@ -1125,9 +1475,70 @@ def build_udmi_report_model(
             for device_id in sorted(chosen_devices, key=str.casefold)
         ]
         asset_metrics["unexpected"] = len(selected_unexpected_ids)
-        systems_list = _computed_system_metrics(asset_results, fault_rows)
+        scoped_wrong_topic_assets: list[dict[str, Any]] = []
+        for row in wrong_topic_assets:
+            selected_types = selected_by_asset.get(
+                (row["source_run_id"], row["asset_id"]),
+                set(),
+            )
+            selected_payloads = [
+                payload
+                for payload in row["payloads"]
+                if payload["payload_type"] in selected_types
+            ]
+            if selected_payloads:
+                scoped_wrong_topic_assets.append(
+                    {**row, "payloads": selected_payloads}
+                )
+        wrong_topic_assets = scoped_wrong_topic_assets
+        # The annotated register is evidence of the exact frozen input, not
+        # another projection of the selected Results rows. Keep every source
+        # row in its original order and say plainly when the report scope did
+        # not select that row. A per-payload register row is included only when
+        # that payload type was selected; a blank Payload type covers the whole
+        # asset and is included when any of its payloads was selected.
+        for row in annotated_register_rows:
+            source_id = _text(
+                row.get(register_annotation_columns["Source run ID"])
+            )
+            asset_id = _text(row.get("Asset ID") or row.get("Asset name")).strip()
+            selected_types = selected_by_asset.get((source_id, asset_id), set())
+            register_payload_type = _text(row.get("Payload type")).strip().casefold()
+            row_is_selected = bool(selected_types) and (
+                register_payload_type not in _PAYLOAD_TYPES
+                or register_payload_type in selected_types
+            )
+            if row_is_selected:
+                continue
+            comment_column = register_annotation_columns["Comment"]
+            prior_comment = _text(row.get(comment_column)).strip()
+            scope_comment = "Not included in this report's selected payload scope."
+            row[comment_column] = (
+                f"{scope_comment} {prior_comment}" if prior_comment else scope_comment
+            )
+        asset_metrics["wrong_topic"] = sum(
+            legacy_wrong_topic_by_source.get(source_id, 0)
+            for source_id in full_sources
+        ) + len(
+            {(row["source_run_id"], row["asset_id"]) for row in wrong_topic_assets}
+        )
+        systems_list = _computed_system_metrics(
+            asset_results,
+            fault_rows,
+            wrong_topic_assets,
+        )
+        for system in systems_list:
+            system["asset_metrics"]["wrong_topic"] += sum(
+                count
+                for (source_id, system_name), count
+                in legacy_wrong_topic_by_source_system.items()
+                if source_id in full_sources and system_name == system["system"]
+            )
     else:
         asset_metrics.setdefault("unexpected", 0)
+        asset_metrics["wrong_topic"] = legacy_wrong_topic_count + len(
+            {(row["source_run_id"], row["asset_id"]) for row in wrong_topic_assets}
+        )
         payload_metrics["not_received"] = (
             payload_metrics["expected"] - payload_metrics["received"]
         )
@@ -1137,6 +1548,17 @@ def build_udmi_report_model(
                 system_payload["expected"] - system_payload["received"]
             )
         systems_list = sorted(systems.values(), key=lambda row: row["system"].casefold())
+        for system in systems_list:
+            system["asset_metrics"]["wrong_topic"] = (
+                system["asset_metrics"].get("wrong_topic", 0)
+                + len(
+                    {
+                        (row["source_run_id"], row["asset_id"])
+                        for row in wrong_topic_assets
+                        if row["system"] == system["system"]
+                    }
+                )
+            )
 
     retained_assets_by_source: dict[str, set[str]] = {}
     if canonical_scope is not None:
@@ -1257,6 +1679,15 @@ def build_udmi_report_model(
         "fault_matrix": [matrix[key] for key in sorted(matrix, key=lambda item: (item[0], item[2].casefold(), item[1].casefold()))],
         "fault_rows": fault_rows,
         "unexpected_devices": unexpected_devices,
+        "wrong_topic_assets": wrong_topic_assets,
+        "annotated_register_columns": [
+            *annotated_register_columns,
+            *[
+                register_annotation_columns[column]
+                for column in _REGISTER_ANNOTATION_COLUMNS
+            ],
+        ],
+        "annotated_register_rows": annotated_register_rows,
         "unexpected_devices_measured": unexpected_devices_measured,
         "unexpected_devices_measurement_scope": (
             "; ".join(sorted(unexpected_measurement_scopes, key=str.casefold)) or None

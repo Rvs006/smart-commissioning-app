@@ -15,8 +15,16 @@ from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
 from smart_commissioning_core.rbac import Role
 
 from app.core.auth import require_role
-from app.schemas.jobs import ReportListResponse, ReportRequest, ReportSummary, RunRecord
+from app.schemas.jobs import (
+    ReportDeleteRequest,
+    ReportDeleteResponse,
+    ReportListResponse,
+    ReportRequest,
+    ReportSummary,
+    RunRecord,
+)
 from app.services.report_artifacts import (
+    delete_report_artifact,
     load_content_addressed_artifact,
     load_report_artifact,
     store_report_artifact,
@@ -102,6 +110,7 @@ def create_report(request: ReportRequest) -> ReportSummary:
         run, report = service.create_report_run(request)
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    manifest: dict[str, object] | None = None
     try:
         render_run = run.model_copy(
             update={"status": "succeeded", "stage": "report_ready", "progress_percent": 100}
@@ -122,6 +131,14 @@ def create_report(request: ReportRequest) -> ReportSummary:
         )
         service.complete_report_run(run.run_id, manifest)
     except Exception as error:
+        if manifest is not None:
+            try:
+                # Deletion can race the interval between writing immutable
+                # bytes and publishing their manifest. If finalization loses
+                # that race, remove only this report-owned directory entry.
+                delete_report_artifact(manifest, report_id=run.run_id)
+            except (OSError, RuntimeError, ValueError):
+                pass
         try:
             service.update_run_status(
                 run.run_id,
@@ -149,6 +166,43 @@ class ReportExportRequest(BaseModel):
     # ids ride in a JSON body, not repeated query params, so an unbounded
     # selection never hits the request-line limits uvicorn/h11 and proxies cap.
     report_ids: list[str] = Field(min_length=1)
+
+
+@router.post(
+    "/delete",
+    response_model=ReportDeleteResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def delete_reports(request: ReportDeleteRequest) -> ReportDeleteResponse:
+    """Delete one or several generated reports after validating the full batch."""
+
+    try:
+        deleted = service.delete_report_runs(request.report_ids)
+    except FileNotFoundError as error:
+        report_id = str(error.args[0]) if error.args else ""
+        raise HTTPException(
+            status_code=404,
+            detail=f"Report '{report_id}' was not found.",
+        ) from error
+
+    warnings: list[str] = []
+    for report_id, manifest in deleted:
+        if manifest is None:
+            continue
+        try:
+            delete_report_artifact(manifest, report_id=report_id)
+        except (OSError, RuntimeError, ValueError):
+            # The database deletion has committed. Keep the response honest while
+            # avoiding raw filesystem paths or exception text in the public API.
+            warnings.append(
+                f"Report '{report_id}' was deleted, but its local artifact requires manual cleanup."
+            )
+    deleted_ids = [report_id for report_id, _manifest in deleted]
+    return ReportDeleteResponse(
+        deleted_report_ids=deleted_ids,
+        deleted_count=len(deleted_ids),
+        artifact_cleanup_warnings=warnings,
+    )
 
 
 # Declared BEFORE /{report_id}: kept ahead of the path route so the literal
@@ -416,6 +470,9 @@ _UDMI_FAULT_MATRIX_TITLE = "Fault Matrix"
 _UDMI_FAULT_DETAIL_TITLE = "Faults in Detail"
 _UDMI_DEFINITIONS_TITLE = "Metric Definitions"
 _UDMI_INCOMPLETE_SCOPE_TITLE = "Validation Scope Incomplete"
+_UDMI_WRONG_TOPIC_TITLE = "Registered Assets on Wrong Topics"
+_UDMI_WRONG_TOPIC_SHEET_TITLE = "Wrong Topic Assets"
+_UDMI_ANNOTATED_REGISTER_TITLE = "Annotated Input Register"
 
 # Section titles for the end-to-end validation report (field ask 2026-07-14).
 # The frontend references these strings — keep them stable across formats.
@@ -1050,6 +1107,15 @@ _UDMI_FAULT_DETAIL_COLUMNS = (
     "Suggested Action",
     "Description",
 )
+_UDMI_WRONG_TOPIC_COLUMNS = (
+    "Source Run",
+    "Asset ID",
+    "System",
+    "Payload",
+    "Expected Topic",
+    "Actual Topic",
+    "Last Seen",
+)
 _UDMI_CATEGORY_LABELS = dict(FAULT_METRIC_LABELS)
 
 
@@ -1212,6 +1278,54 @@ def _udmi_asset_rows(data: dict[str, object]) -> list[dict[str, str]]:
             }
         )
     return rows
+
+
+def _udmi_wrong_topic_rows(data: dict[str, object]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    raw_assets = data.get("wrong_topic_assets")
+    if not isinstance(raw_assets, list):
+        return rows
+    for raw_asset in raw_assets:
+        asset = raw_asset if isinstance(raw_asset, dict) else {}
+        payloads = asset.get("payloads")
+        if not isinstance(payloads, list):
+            continue
+        for raw_payload in payloads:
+            payload = raw_payload if isinstance(raw_payload, dict) else {}
+            rows.append(
+                {
+                    "Source Run": str(asset.get("source_run_id", "")),
+                    "Asset ID": str(asset.get("asset_id", "")),
+                    "System": str(asset.get("system", "Unspecified")),
+                    "Payload": str(payload.get("payload_type", "")),
+                    "Expected Topic": str(payload.get("expected_topic", "")),
+                    "Actual Topic": str(payload.get("actual_topic", "")),
+                    "Last Seen": _display_timestamp(asset.get("last_seen")),
+                }
+            )
+    return rows
+
+
+def _udmi_annotated_register(
+    data: dict[str, object],
+) -> tuple[tuple[str, ...], list[dict[str, str]]]:
+    raw_columns = data.get("annotated_register_columns")
+    columns = tuple(
+        str(column)
+        for column in raw_columns
+        if str(column)
+    ) if isinstance(raw_columns, list) else ()
+    raw_rows = data.get("annotated_register_rows")
+    rows = (
+        [
+            {str(key): "" if value is None else str(value) for key, value in raw.items()}
+            for raw in raw_rows
+            if isinstance(raw, dict)
+        ]
+        if isinstance(raw_rows, list)
+        else []
+    )
+    return columns, rows
 
 
 def _udmi_fault_matrix_rows(data: dict[str, object]) -> list[dict[str, str]]:
@@ -1416,6 +1530,19 @@ def _style_xlsx_statuses(sheet: object) -> None:
                 wrap_text=True,
             )
             cell.fill = _XLSX_POSITIVE_FILL if cell.value == "Yes" else _XLSX_CAUTION_FILL
+    topic_status_column = headers.get("Topic status")
+    if topic_status_column is not None:
+        for row in range(2, sheet.max_row + 1):
+            cell = sheet.cell(row=row, column=topic_status_column)
+            cell.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=True,
+            )
+            if cell.value == "Expected topic":
+                cell.fill = _XLSX_POSITIVE_FILL
+            elif cell.value == "Wrong topic":
+                cell.fill = _XLSX_CAUTION_FILL
     for heading in (
         "Payload Formatting",
         "Missing Points",
@@ -1578,6 +1705,36 @@ def _build_udmi_xlsx_report(run: object, data: dict[str, object]) -> bytes:
     _style_xlsx_header(assets)
     _style_xlsx_statuses(assets)
 
+    wrong_topic_rows = _udmi_wrong_topic_rows(data)
+    if wrong_topic_rows:
+        wrong_topics = workbook.create_sheet(_UDMI_WRONG_TOPIC_SHEET_TITLE)
+        _append_xlsx_row(wrong_topics, list(_UDMI_WRONG_TOPIC_COLUMNS))
+        for row in wrong_topic_rows:
+            _append_xlsx_row(
+                wrong_topics,
+                [row[column] for column in _UDMI_WRONG_TOPIC_COLUMNS],
+            )
+        _configure_xlsx_sheet(
+            wrong_topics,
+            widths=_xlsx_content_widths(_UDMI_WRONG_TOPIC_COLUMNS, wrong_topic_rows),
+        )
+        _style_xlsx_table(wrong_topics)
+        _style_xlsx_header(wrong_topics)
+
+    register_columns, register_rows = _udmi_annotated_register(data)
+    if register_columns and register_rows:
+        annotated = workbook.create_sheet(_UDMI_ANNOTATED_REGISTER_TITLE)
+        _append_xlsx_row(annotated, list(register_columns))
+        for row in register_rows:
+            _append_xlsx_row(annotated, [row.get(column, "") for column in register_columns])
+        _configure_xlsx_sheet(
+            annotated,
+            widths=_xlsx_content_widths(register_columns, register_rows),
+        )
+        _style_xlsx_table(annotated)
+        _style_xlsx_header(annotated)
+        _style_xlsx_statuses(annotated)
+
     matrix_rows = _udmi_fault_matrix_rows(data)
     matrix = workbook.create_sheet(_UDMI_FAULT_MATRIX_TITLE)
     _append_xlsx_row(matrix, list(_UDMI_FAULT_MATRIX_COLUMNS))
@@ -1722,10 +1879,19 @@ def _docx_paragraph(
     *,
     bold: bool = False,
     alignment: str | None = None,
+    page_break_before: bool = False,
+    keep_with_next: bool = False,
 ) -> str:
     run_properties = "<w:rPr><w:b/></w:rPr>" if bold else ""
+    paragraph_settings = ""
+    if page_break_before:
+        paragraph_settings += "<w:pageBreakBefore/>"
+    if keep_with_next:
+        paragraph_settings += "<w:keepNext/>"
+    if alignment:
+        paragraph_settings += f'<w:jc w:val="{alignment}"/>'
     paragraph_properties = (
-        f'<w:pPr><w:jc w:val="{alignment}"/></w:pPr>' if alignment else ""
+        f"<w:pPr>{paragraph_settings}</w:pPr>" if paragraph_settings else ""
     )
     safe_text = _sanitize_report_text(text)
     return (
@@ -1748,14 +1914,21 @@ def _docx_table(
     widths: tuple[int, ...] | None = None,
     center_cells: bool = False,
 ) -> str:
-    effective_widths = widths if widths is not None and len(widths) == len(columns) else None
+    effective_widths = (
+        widths if widths is not None and len(widths) == len(columns) else None
+    )
 
     def cell(text: str, *, bold: bool = False, width: int | None = None) -> str:
         width_property = f'<w:tcW w:w="{width}" w:type="dxa"/>' if width else ""
         cell_properties = f"<w:tcPr>{width_property}<w:vAlign w:val=\"center\"/></w:tcPr>"
+        paragraph = _docx_paragraph(
+            text,
+            bold=bold,
+            alignment="center" if center_cells else None,
+        )
         return (
             f"<w:tc>{cell_properties}"
-            f"{_docx_paragraph(text, bold=bold, alignment='center' if center_cells else None)}"
+            f"{paragraph}"
             "</w:tc>"
         )
 
@@ -1764,7 +1937,7 @@ def _docx_table(
         for index in range(len(columns))
     )
     header = (
-        "<w:tr><w:trPr><w:tblHeader/></w:trPr>"
+        "<w:tr><w:trPr><w:tblHeader/><w:cantSplit/></w:trPr>"
         + "".join(
             cell(
                 column,
@@ -1776,7 +1949,7 @@ def _docx_table(
         + "</w:tr>"
     )
     body = "".join(
-        "<w:tr>"
+        "<w:tr><w:trPr><w:cantSplit/></w:trPr>"
         + "".join(
             cell(
                 row.get(column, ""),
@@ -1835,14 +2008,17 @@ def _docx_sectpr(*, landscape: bool = False) -> str:
         if landscape
         else '<w:pgSz w:w="11906" w:h="16838"/>'
     )
-    margin = 720 if landscape else 1440
+    horizontal_margin = 720 if landscape else 1440
+    top_margin = 720 if landscape else 1440
+    bottom_margin = 1080 if landscape else 1440
     return (
         "<w:sectPr>"
         '<w:headerReference w:type="default" r:id="rIdHdr1"/>'
         '<w:footerReference w:type="default" r:id="rIdFtr1"/>'
         f"{page_size}"
-        f'<w:pgMar w:top="{margin}" w:right="{margin}" w:bottom="{margin}" '
-        f'w:left="{margin}" w:header="540" w:footer="540" w:gutter="0"/>'
+        f'<w:pgMar w:top="{top_margin}" w:right="{horizontal_margin}" '
+        f'w:bottom="{bottom_margin}" w:left="{horizontal_margin}" '
+        'w:header="540" w:footer="540" w:gutter="0"/>'
         "</w:sectPr>"
     )
 
@@ -1944,7 +2120,7 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
         for definition in data["metric_definitions"]
     ]
     definition_columns = ("Metric", "Definition")
-    blocks.append(_docx_paragraph(_UDMI_DEFINITIONS_TITLE, bold=True))
+    blocks.append(_docx_paragraph(_UDMI_DEFINITIONS_TITLE, bold=True, keep_with_next=True))
     blocks.append(
         _docx_table(
             definition_columns,
@@ -1953,14 +2129,26 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
             center_cells=True,
         )
     )
-    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_EXECUTIVE_TITLE, bold=True)])
+    blocks.extend(
+        [
+            _docx_page_break(),
+            _docx_paragraph(_UDMI_EXECUTIVE_TITLE, bold=True, keep_with_next=True),
+        ]
+    )
 
     for section_title, labels, key in (
         ("Asset Level Metrics", ASSET_METRIC_LABELS, "asset_metrics"),
         ("Payload Level Metrics", PAYLOAD_METRIC_LABELS, "payload_metrics"),
         ("Fault Metrics", FAULT_METRIC_LABELS, "fault_metrics"),
     ):
-        blocks.append(_docx_paragraph(section_title, bold=True))
+        blocks.append(
+            _docx_paragraph(
+                section_title,
+                bold=True,
+                page_break_before=section_title == "Fault Metrics",
+                keep_with_next=True,
+            )
+        )
         rows = _udmi_metric_rows(data[key], labels)
         blocks.append(
             _docx_table(
@@ -1970,7 +2158,7 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
                 center_cells=True,
             )
         )
-    blocks.append(_docx_paragraph("Supporting Metrics", bold=True))
+    blocks.append(_docx_paragraph("Supporting Metrics", bold=True, keep_with_next=True))
     blocks.append(
         _docx_table(
             ("Metric", "Value"),
@@ -1982,17 +2170,45 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
             center_cells=True,
         )
     )
-    for note in data["notes"]:
-        blocks.append(_docx_paragraph(f"Note: {note}"))
+    notes = [str(note) for note in data["notes"]]
+    if notes:
+        blocks.append(_docx_paragraph(f"Notes: {' '.join(notes)}"))
+
+    wrong_topic_rows = _udmi_wrong_topic_rows(data)
+    if wrong_topic_rows:
+        blocks.extend(
+            [
+                _docx_paragraph(
+                    _UDMI_WRONG_TOPIC_TITLE,
+                    bold=True,
+                    page_break_before=True,
+                    keep_with_next=True,
+                ),
+                _docx_table(
+                    _UDMI_WRONG_TOPIC_COLUMNS,
+                    wrong_topic_rows,
+                    widths=_docx_content_widths(
+                        _UDMI_WRONG_TOPIC_COLUMNS,
+                        wrong_topic_rows,
+                    ),
+                    center_cells=True,
+                ),
+            ]
+        )
 
     system_assets, system_payloads, system_faults = _udmi_system_tables(data)
-    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_SYSTEM_TITLE, bold=True)])
+    blocks.extend(
+        [
+            _docx_page_break(),
+            _docx_paragraph(_UDMI_SYSTEM_TITLE, bold=True, keep_with_next=True),
+        ]
+    )
     for section_title, columns, rows in (
         ("Asset Metrics by System", _UDMI_SYSTEM_ASSET_COLUMNS, system_assets),
         ("Payload and Issue Metrics by System", _UDMI_SYSTEM_PAYLOAD_COLUMNS, system_payloads),
         ("Fault Metrics by System", _UDMI_SYSTEM_FAULT_COLUMNS, system_faults),
     ):
-        blocks.append(_docx_paragraph(section_title, bold=True))
+        blocks.append(_docx_paragraph(section_title, bold=True, keep_with_next=True))
         blocks.append(
             _docx_table(
                 columns,
@@ -2003,7 +2219,12 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
         )
 
     asset_rows = _udmi_asset_rows(data)
-    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_ASSET_TITLE, bold=True)])
+    blocks.extend(
+        [
+            _docx_page_break(),
+            _docx_paragraph(_UDMI_ASSET_TITLE, bold=True, keep_with_next=True),
+        ]
+    )
     if asset_rows:
         blocks.append(
             _docx_table(
@@ -2017,7 +2238,12 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
         blocks.append(_docx_paragraph("No asset results were retained for the selected runs."))
 
     matrix_rows = _udmi_fault_matrix_rows(data)
-    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_FAULT_MATRIX_TITLE, bold=True)])
+    blocks.extend(
+        [
+            _docx_page_break(),
+            _docx_paragraph(_UDMI_FAULT_MATRIX_TITLE, bold=True, keep_with_next=True),
+        ]
+    )
     if matrix_rows:
         blocks.append(
             _docx_table(
@@ -2031,7 +2257,12 @@ def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
         blocks.append(_docx_paragraph("No faults were retained for the selected runs."))
 
     detail_rows = _udmi_fault_detail_rows(data)
-    blocks.extend([_docx_page_break(), _docx_paragraph(_UDMI_FAULT_DETAIL_TITLE, bold=True)])
+    blocks.extend(
+        [
+            _docx_page_break(),
+            _docx_paragraph(_UDMI_FAULT_DETAIL_TITLE, bold=True, keep_with_next=True),
+        ]
+    )
     if detail_rows:
         blocks.append(
             _docx_table(
@@ -2143,6 +2374,7 @@ def _build_zip_report(run: object) -> bytes:
                         "payloads_incorrect": payloads_incorrect,
                         "system_metrics": udmi["system_metrics"],
                         "unexpected_devices": udmi["unexpected_devices"],
+                        "wrong_topic_assets": udmi.get("wrong_topic_assets", []),
                         "unexpected_devices_measured": udmi["unexpected_devices_measured"],
                         "unexpected_devices_measurement_scope": udmi[
                             "unexpected_devices_measurement_scope"
@@ -2164,6 +2396,31 @@ def _build_zip_report(run: object) -> bytes:
                     indent=2,
                 ),
             )
+            wrong_topic_assets = udmi.get("wrong_topic_assets")
+            if isinstance(wrong_topic_assets, list) and wrong_topic_assets:
+                archive.writestr(
+                    "wrong_topic_assets.json",
+                    json.dumps(
+                        {
+                            "schema_version": udmi["schema_version"],
+                            "rows": wrong_topic_assets,
+                        },
+                        indent=2,
+                    ),
+                )
+            register_columns, register_rows = _udmi_annotated_register(udmi)
+            if register_columns and register_rows:
+                archive.writestr(
+                    "annotated_input_register.json",
+                    json.dumps(
+                        {
+                            "schema_version": udmi["schema_version"],
+                            "columns": list(register_columns),
+                            "rows": register_rows,
+                        },
+                        indent=2,
+                    ),
+                )
             archive.writestr(
                 "fault_matrix.json",
                 json.dumps(
@@ -2347,6 +2604,23 @@ def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
     )
     for note in data["notes"]:
         document.add_paragraph(f"Note: {note}")
+
+    wrong_topic_rows = _udmi_wrong_topic_rows(data)
+    if wrong_topic_rows:
+        document.add_page_break()
+        document.add_heading(_UDMI_WRONG_TOPIC_TITLE, level=1)
+        document.add_table(
+            _UDMI_WRONG_TOPIC_COLUMNS,
+            [
+                [row[column] for column in _UDMI_WRONG_TOPIC_COLUMNS]
+                for row in wrong_topic_rows
+            ],
+            widths=_content_weights(_UDMI_WRONG_TOPIC_COLUMNS, wrong_topic_rows),
+            size=7.5,
+            wrap_cells=True,
+            center_cells=True,
+            draw_grid=True,
+        )
 
     system_assets, system_payloads, system_faults = _udmi_system_tables(data)
     document.add_page_break()
