@@ -183,6 +183,29 @@ def check(repo: Path) -> list[str]:
     if boundary_sleep >= 0 or monitor_call < 0:
         failures.append("heartbeat monitoring still has an unobserved pre-boundary sleep")
 
+    bundle_upload_marker = "      - name: Upload bundle artifact"
+    bundle_upload_start = windows.find(bundle_upload_marker)
+    bundle_upload_end = windows.find(
+        "\n      - name:",
+        bundle_upload_start + len(bundle_upload_marker),
+    )
+    if bundle_upload_start < 0 or bundle_upload_end < 0:
+        failures.append("Windows release artifact upload step is missing")
+    else:
+        bundle_upload = windows[bundle_upload_start:bundle_upload_end]
+        _ordered(
+            bundle_upload,
+            (
+                "uses: actions/upload-artifact@",
+                "name: SmartCommissioningApp-windows-portable",
+                "path: build/Smart_Commissioning_App_Windows_Portable",
+                "include-hidden-files: true",
+                "if-no-files-found: error",
+            ),
+            "Windows release artifact can omit the hidden frontend build stamp",
+            failures,
+        )
+
     for value, description in (
         ("Assert-SignedAnnotatedTag", "publisher does not enforce a signed annotated tag"),
         ("git verify-tag", "publisher does not verify the tag locally"),

@@ -280,6 +280,10 @@ jobs:
         with:
           name: SmartCommissioningApp-windows-portable
           path: build/Smart_Commissioning_App_Windows_Portable
+          # The release publisher requires the build-bound frontend stamp at
+          # frontend/dist/.app-version. upload-artifact v4 excludes dotfiles
+          # unless this is explicit, even when the containing directory is named.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
