@@ -5,6 +5,30 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.30] - 2026-07-28
+
+### Added
+
+- A fully successful Generate All run offers one combined ZIP containing its
+  PDF, DOCX, XLSX, and JSON evidence-pack outputs. Individual report downloads
+  remain available.
+- The independent MQTT evidence collector writes one append-only JSONL record
+  per message with its exact topic and receive time. Credentials come from
+  process-scoped configuration or a hidden prompt, and existing evidence files
+  are never overwritten.
+
+### Fixed
+
+- Live UDMI progress snapshots are coalesced and persisted away from the MQTT
+  socket reader. Large-register report rebuilds no longer consume the capture
+  window while unread pointsets queue. Exact-topic, wrong-topic, and unexpected
+  publisher processing avoid growing full-register rescans for every packet.
+- Provisional validation views use coherent frozen evidence. A stalled progress
+  write has a bounded shutdown and cannot overwrite the terminal result.
+- Hosted Postgres connections now bound connection, row-lock, statement, TCP,
+  and idle-transaction waits so a dead progress transaction cannot block a
+  terminal result indefinitely.
+
 ## [0.1.29] - 2026-07-27
 
 ### Added

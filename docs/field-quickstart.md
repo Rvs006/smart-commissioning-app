@@ -72,9 +72,9 @@ filter it, and hit **Export CSV** for the whole list - no digging through files.
 
 This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
 
-### Large-register acceptance for v0.1.29
+### Large-register acceptance for v0.1.30
 
-Use the dedicated [v0.1.29 field acceptance checklist](v0.1.29-field-acceptance-checklist.md)
+Use the dedicated [v0.1.30 field acceptance checklist](v0.1.30-field-acceptance-checklist.md)
 for the 554-asset run. With no positive `max_messages` value, register-driven
 capture now uses the larger of 500 or its concrete validation-filter count. The
 known 554-row register produces 2,216 filters, so the automatic capacity must be
@@ -85,6 +85,15 @@ window. The app must list a registered asset seen on a wrong topic with both
 paths, keep its payload validation result, and include the annotated 554-row
 register in the Excel and ZIP evidence. A two-hour result proves scale only;
 the second run must cover the longest expected payload cadence.
+
+For an independent raw capture, use `scripts/capture_mqtt_evidence.py`. It writes
+one append-only JSONL record per message with the exact topic and receive time;
+it never flattens topic paths or overwrites an earlier message. Supply the
+password through a process-scoped `SC_CAPTURE_MQTT_PASSWORD` environment
+variable (ideally injected by the site's secret manager) or the hidden prompt.
+Never put a broker password in the script, a command-line argument, a report,
+or an evidence archive. Choose a new output filename for every run; the script
+refuses to overwrite existing evidence.
 
 ## Upgrading to a new release (settings carry over)
 

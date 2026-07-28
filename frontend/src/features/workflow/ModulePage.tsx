@@ -355,6 +355,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
   const [reportToast, setReportToast] = useState<string | null>(null);
   const [reportToastWarning, setReportToastWarning] = useState(false);
+  const [generatedAllReportIds, setGeneratedAllReportIds] = useState<readonly string[] | null>(null);
   const [reportDeleteNotice, setReportDeleteNotice] = useState<string | null>(null);
   // PDF default: the field deliverable is a human-readable handover document
   // (ask 2026-07-14); Word/Excel/zip remain for editable/evidence workflows.
@@ -401,6 +402,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const templateDownload = useFileDownload(apiClient);
   const reportDownload = useFileDownload(apiClient);
   const exportDownload = useFileDownload(apiClient);
+  const generatedAllBundleDownload = useFileDownload(apiClient);
   const validationJsonDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
 
@@ -726,6 +728,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
+  const resetGeneratedAllBundleDownload = generatedAllBundleDownload.reset;
   const resetValidationJsonDownload = validationJsonDownload.reset;
 
   useEffect(() => {
@@ -746,6 +749,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setSelectedReportIds(new Set());
     setReportToast(null);
     setReportToastWarning(false);
+    setGeneratedAllReportIds(null);
     setReportDialogOpen(false);
     setReportTitle("");
     setReportScopeSnapshot(null);
@@ -766,6 +770,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetTemplateDownload();
     resetReportDownload();
     resetExportDownload();
+    resetGeneratedAllBundleDownload();
     resetValidationJsonDownload();
   }, [
     module.route,
@@ -773,6 +778,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetTemplateDownload,
     resetReportDownload,
     resetExportDownload,
+    resetGeneratedAllBundleDownload,
     resetValidationJsonDownload,
     sessionScopeId,
   ]);
@@ -824,10 +830,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     workspaceRef,
   ]);
 
-  // Auto-clear the report confirmation toast after a few seconds so a stale
-  // "report generated" note does not linger on the page (mqautz9j follow-up).
+  // Auto-clear ordinary report confirmations after a few seconds. Keep the
+  // Generate All result available so its combined download is not easy to miss.
   useEffect(() => {
-    if (!reportToast) {
+    if (!reportToast || generatedAllReportIds) {
       return;
     }
     const timer = setTimeout(() => {
@@ -835,7 +841,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setReportToastWarning(false);
     }, 8000);
     return () => clearTimeout(timer);
-  }, [reportToast]);
+  }, [generatedAllReportIds, reportToast]);
 
   // One native modal is shared by both report buttons. showModal supplies focus
   // containment and Escape handling in browsers; the open-attribute fallback
@@ -1108,6 +1114,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         }
       } else {
         setLastReport(result);
+        setGeneratedAllReportIds(null);
         setRunOutcome(`Report generated. Report ID: ${result.report_id}, file: ${result.file_name}`);
         // Report linking (mqautz9j): confirm where the report lives and refresh
         // the reports list so the new report is selectable for export.
@@ -1221,6 +1228,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return { failedFormats, reports, requestedCount: intents.length };
     },
     onSuccess: ({ failedFormats, reports, requestedCount }) => {
+      const allFormatsSucceeded =
+        requestedCount === ALL_REPORT_FORMATS.length &&
+        failedFormats.length === 0 &&
+        reports.length === ALL_REPORT_FORMATS.length;
+      setGeneratedAllReportIds(allFormatsSucceeded ? reports.map((report) => report.report_id) : null);
       setReportDialogOpen(false);
       setReportScopeSnapshot(null);
       setReportIntents(null);
@@ -2324,6 +2336,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     });
   };
 
+  const handleDownloadGeneratedAllReports = () => {
+    if (generatedAllReportIds?.length !== ALL_REPORT_FORMATS.length) {
+      return;
+    }
+    void generatedAllBundleDownload.download(
+      "generated-all-zip",
+      REPORTS_EXPORT_PATH,
+      "reports_export.zip",
+      {
+        body: JSON.stringify({ report_ids: generatedAllReportIds }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+    );
+  };
+
   const handleDeleteReports = (
     reports: ReportSummary[],
     focusIntent: { kind: "bulk" } | { kind: "row"; reportId: string },
@@ -2356,6 +2384,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     setReportToast(null);
     setReportToastWarning(false);
+    setGeneratedAllReportIds(null);
+    generatedAllBundleDownload.reset();
     const reportType: ReportType =
       activeRun.kind === "discovery"
         ? ((module.route === "ip-scanner"
@@ -2445,6 +2475,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       "validation-json",
       getValidationJsonExportPath(run.run_id),
       `udmi-validation-${run.run_id}.json`,
+    );
+  };
+
+  const renderGeneratedAllReportDownload = () => {
+    if (generatedAllReportIds?.length !== ALL_REPORT_FORMATS.length) {
+      return null;
+    }
+    return (
+      <div className="inline-actions">
+        <button
+          className="secondary-button compact"
+          disabled={generatedAllBundleDownload.pendingKey === "generated-all-zip"}
+          onClick={handleDownloadGeneratedAllReports}
+          title="Download the PDF, Word, Excel, and evidence pack together in one ZIP file."
+          type="button"
+        >
+          {generatedAllBundleDownload.pendingKey === "generated-all-zip"
+            ? "Preparing download..."
+            : "Download all reports (.zip)"}
+        </button>
+        {generatedAllBundleDownload.error && (
+          <span className="error-text">
+            Combined report download failed: {generatedAllBundleDownload.error}
+          </span>
+        )}
+      </div>
     );
   };
 
@@ -3184,7 +3240,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               )}
 
               {reportToast && (
-                <span className="run-monitor-note">{reportToast}</span>
+                <>
+                  <span className="run-monitor-note">{reportToast}</span>
+                  {renderGeneratedAllReportDownload()}
+                </>
               )}
               {reportFromRunMutation.isError && (
                 <span className="error-text">{reportFromRunMutation.error.message}</span>
@@ -3959,8 +4018,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </p>
           {reportToast && (
             <div className={`state-panel ${reportToastWarning ? "warning" : "success"}`} role="status">
-              <strong>{reportToastWarning ? "Report generation incomplete" : "Report generated"}</strong>
+              <strong>
+                {reportToastWarning
+                  ? "Report generation incomplete"
+                  : generatedAllReportIds
+                    ? "Reports ready"
+                    : "Report generated"}
+              </strong>
               <span>{reportToast}</span>
+              {renderGeneratedAllReportDownload()}
             </div>
           )}
           {reportDeleteNotice && (
@@ -4775,8 +4841,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </div>
           {reportToast && (
             <div className={`state-panel ${reportToastWarning ? "warning" : "success"}`} role="status">
-              <strong>{reportToastWarning ? "Report generation incomplete" : "Report generated"}</strong>
+              <strong>
+                {reportToastWarning
+                  ? "Report generation incomplete"
+                  : generatedAllReportIds
+                    ? "Reports ready"
+                    : "Report generated"}
+              </strong>
               <span>{reportToast}</span>
+              {renderGeneratedAllReportDownload()}
             </div>
           )}
           {reportFromRunMutation.isError && (

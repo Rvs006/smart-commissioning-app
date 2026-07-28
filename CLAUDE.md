@@ -71,8 +71,8 @@ collection order is alphabetical - keep it so.
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
 - **Current handoff**: status as of 2026-07-28. v0.1.28 is published from signed
-  tag commit `ba11496`. The v0.1.29 feature set is merged to `main`; release
-  identity is now 0.1.29, but field acceptance is still open. Shared MQTT
+  tag commit `ba11496`. v0.1.30 is the current release candidate; field
+  acceptance is still open. Shared MQTT
   capture keeps an explicit positive
   `max_messages`; otherwise it uses the larger of 500 or the number of concrete
   validation filters. Registered assets on wrong topics are matched only by one
@@ -81,12 +81,13 @@ collection order is alphabetical - keep it so.
   topics. The exact imported register is frozen with the run and annotated in
   XLSX and ZIP outputs. Missing payloads read Not Received and do not create
   synthetic point-card fan-out. Generate All, report deletion, the eight-issue
-  focus jump, and the continuous expanded-asset outline are implemented with
-  tests. Before a v0.1.29 release, rerun all suites, build with the Node 24
+  focus jump, the continuous expanded-asset outline, a combined Generate All
+  download, and non-blocking live progress snapshots are implemented with
+  tests. Before a v0.1.30 release, rerun all suites, build with the Node 24
   release runtime, visually inspect DOCX pagination on a release machine, and complete
   both the unfiltered 554-asset scale run and the longest-cadence field run. Do
   not claim field acceptance before both runs pass
-  `docs/v0.1.29-field-acceptance-checklist.md`.
+  `docs/v0.1.30-field-acceptance-checklist.md`.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational

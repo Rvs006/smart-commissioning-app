@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -1631,6 +1632,26 @@ def _build_progressive_result(
     )
 
 
+def _snapshot_progress_parameters(
+    parameters: dict[str, object],
+) -> dict[str, object]:
+    """Freeze the mutable capture surface before a progress report is built.
+
+    Live capture replaces dynamic entry values (messages, observed topics and
+    payloads) rather than mutating those values in place. A top-level copy plus
+    one shallow copy per asset therefore gives the background reporter a stable
+    point-in-time view without deep-copying payload JSON on the MQTT reader.
+    """
+
+    snapshot = dict(parameters)
+    assets = parameters.get("assets")
+    if isinstance(assets, list):
+        snapshot["assets"] = [
+            dict(asset) if isinstance(asset, dict) else asset for asset in assets
+        ]
+    return snapshot
+
+
 def _capture_live_payloads(
     parameters: dict[str, object],
     *,
@@ -1693,28 +1714,35 @@ def _capture_live_payloads(
     capture_error_status: str | None = None
     latest_progress_messages: dict[str, MqttMessage] = {}
     progress_message_count = 0
+    progress_state_lock = threading.Lock()
+
+    def build_progress_snapshot() -> UdmiValidationResult:
+        with progress_state_lock:
+            snapshot_parameters = _snapshot_progress_parameters(parameters)
+            snapshot_messages = list(latest_progress_messages.values())
+            snapshot_message_count = progress_message_count
+        return _build_progressive_result(
+            snapshot_parameters,
+            snapshot_messages,
+            capture_mode=capture_mode,
+            capture_window_seconds=timeout_seconds,
+            subscribed_topics=topics,
+            message_count=snapshot_message_count,
+        )
 
     def on_message(message: MqttMessage) -> None:
         nonlocal progress_message_count
-        progress_message_count += 1
-        latest_progress_messages[message.topic] = message
-        progress_messages = list(latest_progress_messages.values())
-        parameters["capture_observed_at"] = message.received_at.isoformat()
-        parameters["messages"] = [
-            _serialise_capture_message(captured) for captured in progress_messages
-        ]
-        _route_latest_payloads(parameters, progress_messages)
+        with progress_state_lock:
+            progress_message_count += 1
+            latest_progress_messages[message.topic] = message
+            progress_messages = list(latest_progress_messages.values())
+            parameters["capture_observed_at"] = message.received_at.isoformat()
+            parameters["messages"] = [
+                _serialise_capture_message(captured) for captured in progress_messages
+            ]
+            _route_latest_payloads(parameters, progress_messages)
         if progress_callback is not None:
-            progress_callback(
-                lambda: _build_progressive_result(
-                    parameters,
-                    progress_messages,
-                    capture_mode=capture_mode,
-                    capture_window_seconds=timeout_seconds,
-                    subscribed_topics=topics,
-                    message_count=progress_message_count,
-                )
-            )
+            progress_callback(build_progress_snapshot)
 
     try:
         messages = live_capture(
@@ -1751,9 +1779,12 @@ def _capture_live_payloads(
         }
 
     capture_observed_at = datetime.now(UTC).isoformat()
-    parameters["capture_observed_at"] = capture_observed_at
-    parameters["messages"] = [_serialise_capture_message(message) for message in messages]
-    _route_latest_payloads(parameters, messages)
+    with progress_state_lock:
+        parameters["capture_observed_at"] = capture_observed_at
+        parameters["messages"] = [
+            _serialise_capture_message(message) for message in messages
+        ]
+        _route_latest_payloads(parameters, messages)
 
     # Without a transport failure, "captured" is claimed only when EVERY
     # expected topic supplied a usable JSON object; malformed/scalar payloads
@@ -1931,6 +1962,7 @@ def _capture_live_payloads_per_asset(
             else:
                 exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
     progress_message_count = 0
+    progress_state_lock = threading.Lock()
 
     def matching_validation_entries(topic: str) -> set[int]:
         matching_entries = set(exact_topic_routes.get(topic, ()))
@@ -1958,82 +1990,100 @@ def _capture_live_payloads_per_asset(
             capture_cancelled = bool(cancel_check())
         return capture_cancelled
 
-    def on_message(message: MqttMessage) -> None:
-        nonlocal progress_message_count
-        latest_progress_messages[message.topic] = message
-        progress_messages = list(latest_progress_messages.values())
-        matching_entries = matching_validation_entries(message.topic)
-        wrong_topic_entry = None
-        if not matching_entries:
-            wrong_topic_entry = _registered_wrong_topic_entry_index(
-                message.topic,
-                expected_publisher_roots,
-                registered_asset_routes,
-                topic_matches_validation_filter,
+    def build_progress_snapshot() -> UdmiValidationResult:
+        """Build one coherent provisional view away from the socket reader."""
+
+        with progress_state_lock:
+            snapshot_parameters = _snapshot_progress_parameters(parameters)
+            snapshot_entries = [
+                entry
+                for entry in snapshot_parameters.get("assets", [])
+                if isinstance(entry, dict)
+            ]
+            snapshot_messages = list(latest_progress_messages.values())
+            snapshot_validation_messages = list(
+                latest_progress_validation_messages.values()
             )
-        if wrong_topic_entry is not None:
-            progress_wrong_topic_messages[message.topic] = message
-            progress_wrong_topic_routes.clear()
-            progress_wrong_topic_routes.update(
-                _record_wrong_topic_assets(
-                    parameters,
-                    entries,
-                    expected_publisher_roots,
-                    per_entry_validation_topics,
-                    registered_asset_routes,
-                    list(progress_wrong_topic_messages.values()),
-                    topic_matches_validation_filter,
-                )
+            snapshot_wrong_topic_messages = list(
+                progress_wrong_topic_messages.values()
             )
-        is_registered_validation_message = bool(matching_entries) or (
-            wrong_topic_entry is not None
-        )
-        if is_registered_validation_message:
-            progress_message_count += 1
-            latest_progress_validation_messages[message.topic] = message
-        progress_validation_messages = list(
-            latest_progress_validation_messages.values()
+            snapshot_wrong_topic_routes = dict(progress_wrong_topic_routes)
+            snapshot_message_count = progress_message_count
+
+        # Wrong-topic and unexpected-publisher aggregation grows with both the
+        # register and captured-topic sets. Keep it on the coalesced reporter,
+        # never on the MQTT reader thread.
+        _record_wrong_topic_assets(
+            snapshot_parameters,
+            snapshot_entries,
+            expected_publisher_roots,
+            per_entry_validation_topics,
+            registered_asset_routes,
+            snapshot_wrong_topic_messages,
+            topic_matches_validation_filter,
         )
         _measure_unexpected_publishers(
-            parameters,
-            progress_messages,
+            snapshot_parameters,
+            snapshot_messages,
             expected_publisher_roots,
             measurement_scope,
-            registered_wrong_topic_routes=progress_wrong_topic_routes,
+            registered_wrong_topic_routes=snapshot_wrong_topic_routes,
             measured=False,
         )
-        if wrong_topic_entry is not None:
-            matching_entries.add(wrong_topic_entry)
-        observed_at = message.received_at.isoformat()
-        # Update only entries that can receive this topic. Re-routing the full
-        # accumulated capture through every asset on each broker message makes
-        # a chatty expected topic quadratic in both register size and distinct
-        # topics. Exact expected topics, the normal register case, are O(1).
-        for entry_index in matching_entries:
-            entry_messages = latest_progress_messages_by_entry[entry_index]
-            entry_messages[message.topic] = message
-            routed_messages = list(entry_messages.values())
-            entry = entries[entry_index]
-            entry["capture_observed_at"] = observed_at
-            entry["subscribed_topics"] = list(per_entry_topics[entry_index])
-            entry["messages"] = [
-                _serialise_capture_message(captured) for captured in routed_messages
-            ]
-            entry["observed_topics"] = list(
-                dict.fromkeys(captured.topic for captured in routed_messages)
-            )
-            _route_latest_payloads(entry, routed_messages)
-        if progress_callback is not None:
-            progress_callback(
-                lambda: _build_progressive_result(
-                    parameters,
-                    progress_validation_messages,
-                    capture_mode=capture_mode,
-                    capture_window_seconds=timeout_seconds,
-                    subscribed_topics=topics,
-                    message_count=progress_message_count,
+        return _build_progressive_result(
+            snapshot_parameters,
+            snapshot_validation_messages,
+            capture_mode=capture_mode,
+            capture_window_seconds=timeout_seconds,
+            subscribed_topics=topics,
+            message_count=snapshot_message_count,
+        )
+
+    def on_message(message: MqttMessage) -> None:
+        nonlocal progress_message_count
+        with progress_state_lock:
+            latest_progress_messages[message.topic] = message
+            matching_entries = matching_validation_entries(message.topic)
+            wrong_topic_entry = None
+            if not matching_entries:
+                wrong_topic_entry = _registered_wrong_topic_entry_index(
+                    message.topic,
+                    expected_publisher_roots,
+                    registered_asset_routes,
+                    topic_matches_validation_filter,
                 )
+            if wrong_topic_entry is not None:
+                progress_wrong_topic_messages[message.topic] = message
+                progress_wrong_topic_routes[message.topic] = wrong_topic_entry
+            is_registered_validation_message = bool(matching_entries) or (
+                wrong_topic_entry is not None
             )
+            if is_registered_validation_message:
+                progress_message_count += 1
+                latest_progress_validation_messages[message.topic] = message
+            if wrong_topic_entry is not None:
+                matching_entries.add(wrong_topic_entry)
+            observed_at = message.received_at.isoformat()
+            # Update only entries that can receive this topic. Re-routing the
+            # full capture through every asset for each broker message makes a
+            # chatty expected topic quadratic in register size and topic count.
+            for entry_index in matching_entries:
+                entry_messages = latest_progress_messages_by_entry[entry_index]
+                entry_messages[message.topic] = message
+                routed_messages = list(entry_messages.values())
+                entry = entries[entry_index]
+                entry["capture_observed_at"] = observed_at
+                entry["subscribed_topics"] = list(per_entry_topics[entry_index])
+                entry["messages"] = [
+                    _serialise_capture_message(captured)
+                    for captured in routed_messages
+                ]
+                entry["observed_topics"] = list(
+                    dict.fromkeys(captured.topic for captured in routed_messages)
+                )
+                _route_latest_payloads(entry, routed_messages)
+        if progress_callback is not None:
+            progress_callback(build_progress_snapshot)
 
     try:
         expected_complete = _capture_stop_when(groups)
@@ -2092,57 +2142,56 @@ def _capture_live_payloads_per_asset(
 
     capture_observed_at = datetime.now(UTC).isoformat()
 
-    expected_messages = [
-        message
-        for message in messages
-        if matches_validation_topic(message)
-    ]
-    wrong_topic_routes = _record_wrong_topic_assets(
-        parameters,
-        entries,
-        expected_publisher_roots,
-        per_entry_validation_topics,
-        registered_asset_routes,
-        messages,
-        topic_matches_validation_filter,
-    )
-    validation_messages = [
-        message
-        for message in messages
-        if matches_validation_topic(message) or message.topic in wrong_topic_routes
-    ]
-    expected_topic_count = len({message.topic for message in expected_messages})
-    observation_topic_count = len(
-        {
-            message.topic
+    with progress_state_lock:
+        expected_messages = [
+            message for message in messages if matches_validation_topic(message)
+        ]
+        wrong_topic_routes = _record_wrong_topic_assets(
+            parameters,
+            entries,
+            expected_publisher_roots,
+            per_entry_validation_topics,
+            registered_asset_routes,
+            messages,
+            topic_matches_validation_filter,
+        )
+        validation_messages = [
+            message
             for message in messages
-            if not matches_validation_topic(message)
-        }
-    )
+            if matches_validation_topic(message) or message.topic in wrong_topic_routes
+        ]
+        expected_topic_count = len({message.topic for message in expected_messages})
+        observation_topic_count = len(
+            {
+                message.topic
+                for message in messages
+                if not matches_validation_topic(message)
+            }
+        )
 
-    # Route every message back to each entry whose subscribed topics match it,
-    # mirroring the single-asset routing (last payload per slot wins).
-    _route_capture_messages_to_assets(
-        entries,
-        per_entry_topics,
-        per_entry_validation_topics,
-        messages,
-        observed_at=capture_observed_at,
-        wrong_topic_routes=wrong_topic_routes,
-    )
-    _measure_unexpected_publishers(
-        parameters,
-        messages,
-        expected_publisher_roots,
-        measurement_scope,
-        registered_wrong_topic_routes=wrong_topic_routes,
-        measured=(
-            capture_error_status is None
-            and not capture_cancelled
-            and expected_topic_count < max_messages
-            and observation_topic_count < unexpected_max_messages
-        ),
-    )
+        # Route every message back to each entry whose subscribed topics match
+        # it, mirroring single-asset routing (latest payload per slot wins).
+        _route_capture_messages_to_assets(
+            entries,
+            per_entry_topics,
+            per_entry_validation_topics,
+            messages,
+            observed_at=capture_observed_at,
+            wrong_topic_routes=wrong_topic_routes,
+        )
+        _measure_unexpected_publishers(
+            parameters,
+            messages,
+            expected_publisher_roots,
+            measurement_scope,
+            registered_wrong_topic_routes=wrong_topic_routes,
+            measured=(
+                capture_error_status is None
+                and not capture_cancelled
+                and expected_topic_count < max_messages
+                and observation_topic_count < unexpected_max_messages
+            ),
+        )
 
     # Measurement-only wildcard traffic must never become a validation issue.
     # It is retained solely for the separate unexpected-device summary above.

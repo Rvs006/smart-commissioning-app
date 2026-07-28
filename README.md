@@ -268,7 +268,7 @@ small set below instead of guessing from filenames.
 | Validate a running stack | [Quickstart](docs/quickstart.md) |
 | Operate or recover a deployment | [Operations runbook](docs/runbook.md) |
 | Check protocol support and live-test gaps | [Protocol conformance](docs/protocol-conformance.md) and [Phase 5 validation](docs/phase5-onsite-validation.md) |
-| Prepare the v0.1.29 field gate | [v0.1.29 field acceptance checklist](docs/v0.1.29-field-acceptance-checklist.md) |
+| Prepare the v0.1.30 field gate | [v0.1.30 field acceptance checklist](docs/v0.1.30-field-acceptance-checklist.md) |
 | Contribute code | [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) |
 
 ### Security & safety
@@ -307,17 +307,20 @@ artifact metadata, and exact report bytes through Sync v2. Per-item receipts
 advance only accepted or byte-identical items, while project/site scope failures
 remain generic and unsynchronized.
 
-The v0.1.29 candidate removes the fixed 500-message shared MQTT capture ceiling
-and corrects reporting for absent payloads and registered assets on wrong topics.
+The v0.1.30 candidate removes live progress work from the MQTT socket reader
+and retains the v0.1.29 scale-aware message capacity. Large-register captures
+can continue draining broker traffic while provisional reports are prepared
+and stored. It retains the corrected reporting for absent payloads and
+registered assets on wrong topics.
 It remains field-pending until an unfiltered 554-asset run and a second run
 covering the longest expected payload cadence both pass the
-[field acceptance checklist](docs/v0.1.29-field-acceptance-checklist.md).
+[field acceptance checklist](docs/v0.1.30-field-acceptance-checklist.md).
 
-The upgrade adds five Sync v2 tables. Follow
-[the v0.1.28 migration and rollback guide](docs/migration-rollback-v0.1.28.md),
-then complete [the release validation record](docs/release-validation-v0.1.28.md)
-against the exact merged commit. Hosted deployments should pull API, worker, and
-frontend by the immutable references in the public Docker image evidence.
+v0.1.30 adds no database migration. Follow
+[the v0.1.30 migration and rollback guide](docs/migration-rollback-v0.1.30.md),
+then complete [the release validation record](docs/release-validation-v0.1.30.md)
+against the exact merged commit. Hosted deployments should pull API, worker,
+and frontend by the immutable references in the public Docker image evidence.
 
 Production approval still requires Phase 5 on-site validation. Active scans
 against real BMS/OT hardware, live MQTT, Postgres/Redis at scale, and a remote hub

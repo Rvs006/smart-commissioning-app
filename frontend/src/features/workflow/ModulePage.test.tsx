@@ -6049,7 +6049,8 @@ describe("ModulePage report controls placement", () => {
     const captured: {
       reportBodies: Record<string, unknown>[];
       reportBody: Record<string, unknown> | null;
-    } = { reportBodies: [], reportBody: null };
+      exportBodies: Array<{ report_ids: string[] }>;
+    } = { reportBodies: [], reportBody: null, exportBodies: [] };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -6083,6 +6084,21 @@ describe("ModulePage report controls placement", () => {
             report_type: "ip_discovery",
             status: "succeeded",
           });
+        }
+        if (url.endsWith("/api/v1/reports/export") && init?.method === "POST") {
+          captured.exportBodies.push(JSON.parse(String(init.body)) as { report_ids: string[] });
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["report bundle"]),
+            headers: {
+              get: (name: string) =>
+                name.toLowerCase() === "content-disposition"
+                  ? 'attachment; filename="reports_export.zip"'
+                  : null,
+            },
+          } as unknown as Response;
         }
         // The reports route lists them on arrival.
         if (url.endsWith("/api/v1/reports")) {
@@ -6183,6 +6199,44 @@ describe("ModulePage report controls placement", () => {
         /4 reports generated from this run: PDF, Word, Excel, and evidence pack/i,
       ),
     ).toHaveLength(2);
+  });
+
+  it("offers one combined report download after Generate All", async () => {
+    const captured = stubTerminalRun();
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:mock"),
+      revokeObjectURL: vi.fn(),
+    });
+    renderModule("ip-scanner");
+
+    const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
+    fireEvent.change(pickers[1], { target: { value: "all" } });
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    await submitReportDialog(buttons[1], "Building A commissioning");
+
+    await waitFor(() => expect(captured.reportBodies).toHaveLength(4));
+    const downloadButtons = await screen.findAllByRole("button", {
+      name: "Download all reports (.zip)",
+    });
+    expect(downloadButtons).toHaveLength(2);
+    expect(downloadButtons[0].closest("[data-stepgroup]")).toHaveAttribute(
+      "data-stepgroup",
+      "setup run",
+    );
+    expect(downloadButtons[1].closest("[data-stepgroup]")).toHaveAttribute("data-stepgroup", "results");
+    expect(captured.exportBodies).toHaveLength(0);
+
+    fireEvent.click(downloadButtons[1]);
+
+    await waitFor(() =>
+      expect(captured.exportBodies).toEqual([
+        { report_ids: ["rep-1", "rep-2", "rep-3", "rep-4"] },
+      ]),
+    );
+    expect(URL.createObjectURL).toHaveBeenCalled();
   });
 
   it("renders no report controls until a run exists", async () => {
