@@ -1,7 +1,7 @@
 # Documentation index
 
 This index separates current guidance from release records and historical
-working notes. The repository contains 81 tracked Markdown files; a filename alone is a
+working notes. The repository contains 84 tracked Markdown files; a filename alone is a
 poor lifecycle signal, especially when an old handoff still says "ready to
 send."
 
@@ -42,19 +42,22 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Hosted Docker | Versioned for v0.1.28 | [Docker deployment and rollback](docker-deployment-rollback-v0.1.28.md) |
+| Hosted Docker | v0.1.29 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.29.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
-| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md) |
+| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
 ## v0.1.29 candidate
 
 Field acceptance is open. These files describe the candidate, the evidence that
-still needs collecting, and the implementation already committed locally.
+still needs collecting, and the implementation merged to `main`.
 
 - [Release notes](release-notes-v0.1.29.md)
+- [Release validation record](release-validation-v0.1.29.md)
+- [Migration and rollback](migration-rollback-v0.1.29.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.29.md)
 - [Field acceptance checklist](v0.1.29-field-acceptance-checklist.md)
 - [Execution plan](v0.1.29-mqtt-payload-validation-execution-plan.md)
 - [Implementation and review prompt](v0.1.29-mqtt-payload-validation-implementation-prompt.md)
@@ -78,7 +81,8 @@ needed, and Windows portable provenance.
 Blocking release records are retained for
 [v0.1.26](release-validation-v0.1.26.md),
 [v0.1.27](release-validation-v0.1.27.md), and
-[v0.1.28](release-validation-v0.1.28.md).
+[v0.1.28](release-validation-v0.1.28.md) and the
+[v0.1.29 candidate](release-validation-v0.1.29.md).
 
 ## Historical field communication
 

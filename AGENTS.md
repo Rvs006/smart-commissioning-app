@@ -70,9 +70,10 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-27. v0.1.28 is published from signed
-  tag commit `ba11496`. The dirty working tree prepares v0.1.29 and must be
-  preserved. Shared MQTT capture now keeps an explicit positive
+- **Current handoff**: status as of 2026-07-28. v0.1.28 is published from signed
+  tag commit `ba11496`. The v0.1.29 feature set is merged to `main`; release
+  identity is now 0.1.29, but field acceptance is still open. Shared MQTT
+  capture keeps an explicit positive
   `max_messages`; otherwise it uses the larger of 500 or the number of concrete
   validation filters. Registered assets on wrong topics are matched only by one
   exact, case-sensitive topic segment inside a bounded parent scope. Their

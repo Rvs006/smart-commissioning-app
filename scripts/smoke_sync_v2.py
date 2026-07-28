@@ -16,8 +16,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import httpx
 from app.schemas.jobs import ReportRequest
+from app.services.report_artifacts import REPORT_RENDERER_VERSION
 from app.services.report_artifacts import canonical_json_bytes as artifact_json_bytes
 from app.services.run_service import RunService
+from smart_commissioning_core import __version__ as APPLICATION_VERSION
 from smart_commissioning_core.db.engine import create_engine_from_url, default_sqlite_url
 from smart_commissioning_core.db.migrate import upgrade_to_head
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
@@ -133,7 +135,7 @@ class EdgeFixture:
             "file_name": f"sync-smoke-{marker}.pdf",
             "media_type": "application/pdf",
             "byte_size": len(artifact),
-            "renderer_version": "0.1.28",
+            "renderer_version": REPORT_RENDERER_VERSION,
             "artifact_sha256": sha256_bytes(artifact),
             "artifact_relpath": f"edge-{marker}.pdf",
             "origin": self.identity.edge_id,
@@ -177,7 +179,7 @@ class EdgeFixture:
                 "connection_settings": {"private_key": "secret://smoke-key-v1"},
                 "secret_references": {},
                 "requesting_principal": "release-smoke",
-                "application_version": "0.1.28",
+                "application_version": APPLICATION_VERSION,
             }
         )
         envelope = lifecycle.create_run_with_context(

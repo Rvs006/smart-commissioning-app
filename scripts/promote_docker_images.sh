@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Promote validated commit-SHA images to v0.1.28 aliases after evidence passes.
+# Promote validated commit-SHA images to the requested release aliases after evidence passes.
 set -euo pipefail
 
 : "${RELEASE_VERSION:?RELEASE_VERSION is required}"
@@ -151,4 +151,4 @@ for index in "${!roles[@]}"; do
     >> build/release-evidence/docker-image-promotion.txt
 done
 
-echo "Validated commit-SHA images were promoted to v0.1.28 aliases."
+echo "Validated commit-SHA images were promoted to ${RELEASE_VERSION} aliases."
