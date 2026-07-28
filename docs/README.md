@@ -1,14 +1,13 @@
 # Documentation index
 
 This index separates current guidance from release records and historical
-working notes. The repository contains 84 tracked Markdown files; a filename alone is a
-poor lifecycle signal, especially when an old handoff still says "ready to
-send."
+working notes. A filename alone is a poor lifecycle signal, especially when an
+old handoff still says "ready to send."
 
 Status meanings:
 
 - **Current**: maintained guidance for the present codebase.
-- **Candidate**: v0.1.29 material that still needs field or release evidence.
+- **Candidate**: v0.1.30 material that still needs field or release evidence.
 - **Versioned**: accurate for the named release and retained for rollback or
   audit work.
 - **Historical**: a completed plan, sent message, or dated review record.
@@ -42,25 +41,23 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Hosted Docker | v0.1.29 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.29.md) |
+| Hosted Docker | v0.1.30 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.30.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
-| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md) |
+| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.29 candidate
+## v0.1.30 candidate
 
 Field acceptance is open. These files describe the candidate, the evidence that
-still needs collecting, and the implementation merged to `main`.
+still needs collecting, and the implementation prepared for review.
 
-- [Release notes](release-notes-v0.1.29.md)
-- [Release validation record](release-validation-v0.1.29.md)
-- [Migration and rollback](migration-rollback-v0.1.29.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.29.md)
-- [Field acceptance checklist](v0.1.29-field-acceptance-checklist.md)
-- [Execution plan](v0.1.29-mqtt-payload-validation-execution-plan.md)
-- [Implementation and review prompt](v0.1.29-mqtt-payload-validation-implementation-prompt.md)
+- [Release notes](release-notes-v0.1.30.md)
+- [Release validation record](release-validation-v0.1.30.md)
+- [Migration and rollback](migration-rollback-v0.1.30.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.30.md)
+- [Field acceptance checklist](v0.1.30-field-acceptance-checklist.md)
 
 ## Release records
 
@@ -76,13 +73,15 @@ needed, and Windows portable provenance.
 - [v0.1.26](release-notes-v0.1.26.md)
 - [v0.1.27](release-notes-v0.1.27.md)
 - [v0.1.28](release-notes-v0.1.28.md)
-- [v0.1.29 candidate](release-notes-v0.1.29.md)
+- [v0.1.29](release-notes-v0.1.29.md)
+- [v0.1.30 candidate](release-notes-v0.1.30.md)
 
 Blocking release records are retained for
 [v0.1.26](release-validation-v0.1.26.md),
-[v0.1.27](release-validation-v0.1.27.md), and
-[v0.1.28](release-validation-v0.1.28.md) and the
-[v0.1.29 candidate](release-validation-v0.1.29.md).
+[v0.1.27](release-validation-v0.1.27.md),
+[v0.1.28](release-validation-v0.1.28.md),
+[v0.1.29](release-validation-v0.1.29.md), and the
+[v0.1.30 candidate](release-validation-v0.1.30.md).
 
 ## Historical field communication
 

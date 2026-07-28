@@ -8,16 +8,21 @@ skipped structural check is never presented as a pass.
 
 import json
 import socket
+import threading
+import time
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from smart_commissioning_core import mqtt_transport, udmi_schema
+from smart_commissioning_core import mqtt_transport, udmi_schema, udmi_validation
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, set_configuration_values_provider
 from smart_commissioning_core.mqtt_transport import MqttMessage
 from smart_commissioning_core.records import ValidationIssueRecord
-from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
+from smart_commissioning_core.udmi_run_processor import (
+    _CoalescedProgressWriter,
+    process_udmi_validation_run,
+)
 from smart_commissioning_core.udmi_schema import (
     declared_version,
     is_nonpub_version,
@@ -2352,6 +2357,74 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         self.assertEqual(result.result_summary["wrong_topic_asset_count"], 0)
         self.assertEqual(result.result_summary["unexpected_device_count"], 3)
 
+    def test_wrong_topic_aggregation_never_runs_inside_message_callbacks(self) -> None:
+        asset_count = 200
+        assets = [
+            {
+                "expected_schedule": {"asset_id": f"ASSET-{index:03d}"},
+                "state_topic": f"hv/bms/floor-01/ASSET-{index:03d}/state",
+            }
+            for index in range(asset_count)
+        ]
+        messages = [
+            _msg(f"hv/bms/floor-00/ASSET-{index:03d}/state")
+            for index in range(asset_count)
+        ]
+        emitting_callbacks = False
+        completed_callbacks = 0
+        aggregation_calls: list[str] = []
+        original_wrong_topic = udmi_validation._record_wrong_topic_assets
+        original_unexpected = udmi_validation._measure_unexpected_publishers
+
+        def record_wrong_topic(*args: object, **kwargs: object) -> dict[str, int]:
+            self.assertFalse(emitting_callbacks)
+            aggregation_calls.append("wrong_topic")
+            return original_wrong_topic(*args, **kwargs)
+
+        def measure_unexpected(*args: object, **kwargs: object) -> None:
+            self.assertFalse(emitting_callbacks)
+            aggregation_calls.append("unexpected")
+            original_unexpected(*args, **kwargs)
+
+        def wrong_topic_capture(
+            _settings: object, **kwargs: object
+        ) -> list[MqttMessage]:
+            nonlocal emitting_callbacks, completed_callbacks
+            on_message = kwargs["on_message"]
+            assert callable(on_message)
+            emitting_callbacks = True
+            for message in messages:
+                on_message(message)
+                completed_callbacks += 1
+            emitting_callbacks = False
+            return messages
+
+        with (
+            patch(
+                "smart_commissioning_core.udmi_validation._record_wrong_topic_assets",
+                side_effect=record_wrong_topic,
+            ),
+            patch(
+                "smart_commissioning_core.udmi_validation._measure_unexpected_publishers",
+                side_effect=measure_unexpected,
+            ),
+        ):
+            result = validate_udmi_full_report(
+                {
+                    **_BROKER,
+                    "capture_seconds": 2,
+                    "assets": assets,
+                },
+                live_capture=wrong_topic_capture,
+                cancel_check=lambda: False,
+                # Discard provisional factories to isolate the MQTT callback.
+                progress_callback=lambda _factory: None,
+            )
+
+        self.assertEqual(completed_callbacks, asset_count)
+        self.assertEqual(result.result_summary["wrong_topic_asset_count"], asset_count)
+        self.assertEqual(aggregation_calls, ["wrong_topic", "unexpected"])
+
     def test_restored_wrong_topic_rows_have_one_deterministic_asset_count(self) -> None:
         older = {
             "asset_id": "ASSET-001",
@@ -2858,8 +2931,60 @@ _PROCESSOR_PARAMS = {**_BROKER, **_TOPICS, "capture_seconds": 0}
 
 
 class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
+    def test_coalesced_writer_persists_latest_snapshot_after_backoff(self) -> None:
+        persisted_counts: list[int] = []
+        first_persisted = threading.Event()
+        latest_persisted = threading.Event()
+
+        def progress_result(message_count: int) -> UdmiValidationResult:
+            return UdmiValidationResult(
+                result_summary={
+                    "provisional": True,
+                    "message_count": message_count,
+                },
+                issues=[],
+                source_fixture="live_capture_in_progress",
+            )
+
+        def write(factory: object) -> bool:
+            assert callable(factory)
+            result = factory()
+            persisted_counts.append(result.result_summary["message_count"])
+            if len(persisted_counts) == 1:
+                first_persisted.set()
+            if len(persisted_counts) == 2:
+                latest_persisted.set()
+            return True
+
+        writer = _CoalescedProgressWriter(
+            write,
+            interval_seconds=0.1,
+            thread_name="test-progress-backoff",
+        )
+        try:
+            writer.submit(lambda: progress_result(1))
+            self.assertTrue(first_persisted.wait(timeout=1.0))
+            writer.submit(lambda: progress_result(2))
+            writer.submit(lambda: progress_result(3))
+            self.assertTrue(latest_persisted.wait(timeout=1.0))
+        finally:
+            writer.close(drain=False)
+
+        self.assertEqual(persisted_counts, [1, 3])
+        self.assertEqual(writer.stats()["coalesced"], 1)
+
     def test_live_messages_persist_provisional_results_before_terminal(self) -> None:
-        store = _FakeRunStore()
+        progress_written = threading.Event()
+
+        class SignallingStore(_FakeRunStore):
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                super().update_result_summary(run_id, summary, merge)
+                if summary.get("provisional") is True:
+                    progress_written.set()
+
+        store = SignallingStore()
         parameters = {
             **_BROKER,
             "capture_seconds": 1,
@@ -2876,12 +3001,23 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             ],
         }
 
+        message = _msg("site/a1/state")
+
+        def capture_with_live_snapshot(
+            _settings: object, **kwargs: object
+        ) -> list[MqttMessage]:
+            on_message = kwargs["on_message"]
+            assert callable(on_message)
+            on_message(message)
+            self.assertTrue(progress_written.wait(timeout=2.0))
+            return [message]
+
         record = process_udmi_validation_run(
             "run-progress",
             parameters,
             run_store=store,
             execution_mode="dramatiq_worker",
-            live_capture=ProgressRecordingCapture([_msg("site/a1/state")]),
+            live_capture=capture_with_live_snapshot,
         )
 
         provisional = [summary for summary in store.summaries if summary.get("provisional") is True]
@@ -2906,43 +3042,414 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             any(call.get("stage") == "capturing_live_mqtt" for call in store.status_calls)
         )
 
-    def test_progress_persistence_is_throttled_but_terminal_write_is_not(self) -> None:
+    def test_progress_persistence_is_coalesced_off_reader_and_terminal_write_is_not(
+        self,
+    ) -> None:
         store = _FakeRunStore()
-        capture = ProgressRecordingCapture(
-            [
-                _msg("a/b/state", b'{"n":1}'),
-                _msg("a/b/state", b'{"n":2}'),
-                _msg("a/b/state", b'{"n":3}'),
-            ]
+        progress_started = threading.Event()
+        release_progress_build = threading.Event()
+        build_attempts = 0
+        build_lock = threading.Lock()
+
+        def progress_result(message_count: int) -> UdmiValidationResult:
+            nonlocal build_attempts
+            with build_lock:
+                build_attempts += 1
+                attempt = build_attempts
+            progress_started.set()
+            # Hold the first build until every PUBLISH has queued its view. The
+            # interval elapses while it is blocked, reproducing the old inline
+            # throttle failure without relying on scheduler timing.
+            if attempt == 1:
+                self.assertTrue(release_progress_build.wait(timeout=2.0))
+            return UdmiValidationResult(
+                result_summary={
+                    "provisional": True,
+                    "message_count": message_count,
+                    "broker_capture_attempted": True,
+                    "broker_status_detail": "live_capture_in_progress",
+                },
+                issues=[],
+                source_fixture="live_capture_in_progress",
+            )
+
+        terminal = UdmiValidationResult(
+            result_summary={
+                "provisional": False,
+                "message_count": 462,
+                "broker_capture_attempted": False,
+            },
+            issues=[],
+            source_fixture="burst-complete",
         )
 
-        with patch(
-            "smart_commissioning_core.udmi_run_processor.time.monotonic",
-            side_effect=[0.0, 0.2, 1.2],
+        def burst_validation(
+            _parameters: dict[str, object],
+            **kwargs: object,
+        ) -> UdmiValidationResult:
+            progress_callback = kwargs["progress_callback"]
+            assert callable(progress_callback)
+            progress_callback(lambda: progress_result(1))
+            self.assertTrue(progress_started.wait(timeout=2.0))
+            for message_count in range(2, 463):
+                progress_callback(
+                    lambda message_count=message_count: progress_result(message_count)
+                )
+            time.sleep(0.02)
+            release_progress_build.set()
+            return terminal
+
+        started_at = time.perf_counter()
+        with (
+            patch(
+                "smart_commissioning_core.udmi_run_processor._PROGRESS_PERSIST_INTERVAL_SECONDS",
+                0.01,
+            ),
+            patch(
+                "smart_commissioning_core.udmi_run_processor.validate_udmi_full_report",
+                side_effect=burst_validation,
+            ),
         ):
             record = process_udmi_validation_run(
-                "run-throttle",
+                "run-coalesced-progress",
                 {**_BROKER, "capture_seconds": 1, "state_topic": "a/b/state"},
                 run_store=store,
                 execution_mode="dramatiq_worker",
-                live_capture=capture,
             )
+        elapsed = time.perf_counter() - started_at
 
         provisional = [summary for summary in store.summaries if summary.get("provisional") is True]
-        self.assertEqual([summary["message_count"] for summary in provisional], [1, 3])
+        self.assertEqual([summary["message_count"] for summary in provisional], [1])
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(build_attempts, 1)
+        self.assertEqual(store.summaries[-1]["message_count"], 462)
+        self.assertEqual(
+            store.summaries[-1]["progress_snapshot_metrics"],
+            {
+                "mode": "coalesced_background",
+                "submitted": 462,
+                "attempted": 1,
+                "persisted": 1,
+                "coalesced": 461,
+                "shutdown_timed_out": False,
+            },
+        )
         self.assertEqual(record["status"], "succeeded")
         self.assertFalse(store.summaries[-1]["provisional"])
 
+    def test_blocked_progress_store_cannot_starve_462_pointset_messages(self) -> None:
+        progress_write_started = threading.Event()
+        release_progress_write = threading.Event()
+        first_progress_write = True
+        progress_write_lock = threading.Lock()
+        provisional_store_thread_ids: list[int] = []
+
+        class BlockingProgressStore(_FakeRunStore):
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                nonlocal first_progress_write
+                if summary.get("provisional") is True:
+                    provisional_store_thread_ids.append(threading.get_ident())
+                    with progress_write_lock:
+                        should_block = first_progress_write
+                        first_progress_write = False
+                    if should_block:
+                        progress_write_started.set()
+                        release_progress_write.wait(timeout=5.0)
+                super().update_result_summary(run_id, summary, merge)
+
+        store = BlockingProgressStore()
+        assets = [
+            {
+                "expected_schedule": {"asset_id": f"A-{index:03d}"},
+                "pointset_topic": f"site/A-{index:03d}/events/pointset",
+            }
+            for index in range(462)
+        ]
+        messages = [
+            _msg(f"site/A-{index:03d}/events/pointset")
+            for index in range(462)
+        ]
+        reader_thread_ids: list[int] = []
+        completed_callbacks = 0
+
+        def burst_capture(
+            _settings: object, **kwargs: object
+        ) -> list[MqttMessage]:
+            nonlocal completed_callbacks
+            on_message = kwargs["on_message"]
+            assert callable(on_message)
+            reader_thread_ids.append(threading.get_ident())
+            for message in messages:
+                on_message(message)
+                completed_callbacks += 1
+            self.assertTrue(progress_write_started.wait(timeout=4.0))
+            release_progress_write.set()
+            return messages
+
+        record = process_udmi_validation_run(
+            "run-462-pointsets",
+            {
+                **_BROKER,
+                "capture_seconds": 7200,
+                "assets": assets,
+            },
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=burst_capture,
+        )
+
+        self.assertEqual(record["status"], "succeeded")
+        self.assertEqual(completed_callbacks, 462)
+        self.assertTrue(provisional_store_thread_ids)
+        self.assertTrue(reader_thread_ids)
+        self.assertTrue(
+            all(
+                thread_id != reader_thread_ids[0]
+                for thread_id in provisional_store_thread_ids
+            )
+        )
+        # The real full report builder and blocked store run on the writer
+        # thread. All 462 socket callbacks complete independently.
+        for provisional in (
+            summary for summary in store.summaries if summary.get("provisional") is True
+        ):
+            message_count = provisional["message_count"]
+            self.assertEqual(provisional["publishing_seen"], message_count)
+            self.assertEqual(len(provisional["captured_topics"]), message_count)
+            self.assertEqual(
+                provisional["validation_summary_v1"]["asset_metrics"]["observed"],
+                message_count,
+            )
+        summary = store.summaries[-1]
+        self.assertEqual(summary["message_count"], 462)
+        self.assertEqual(
+            summary["validation_summary_v1"]["asset_metrics"]["observed"],
+            462,
+        )
+        self.assertFalse(summary["provisional"])
+
+    def test_stuck_progress_write_cannot_block_or_overwrite_terminal_result(self) -> None:
+        progress_write_started = threading.Event()
+        release_progress_write = threading.Event()
+        terminal_repaired = threading.Event()
+        terminal_write_count = 0
+        terminal_write_lock = threading.Lock()
+
+        class StuckProgressStore(_FakeRunStore):
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                nonlocal terminal_write_count
+                if summary.get("provisional") is True:
+                    progress_write_started.set()
+                    release_progress_write.wait()
+                super().update_result_summary(run_id, summary, merge)
+                if summary.get("provisional") is False:
+                    with terminal_write_lock:
+                        terminal_write_count += 1
+                        if terminal_write_count >= 2:
+                            terminal_repaired.set()
+
+        store = StuckProgressStore()
+        provisional_issue = ValidationIssueRecord(
+            issue_id="progress-issue",
+            issue_type="payload_error",
+            severity="high",
+            description="Provisional issue.",
+        )
+        terminal_issue = ValidationIssueRecord(
+            issue_id="terminal-issue",
+            issue_type="not_publishing",
+            severity="high",
+            description="Terminal issue.",
+        )
+        terminal = UdmiValidationResult(
+            result_summary={
+                "provisional": False,
+                "message_count": 462,
+                "broker_capture_attempted": False,
+            },
+            issues=[terminal_issue],
+            source_fixture="complete",
+        )
+
+        def validation_with_stuck_progress(
+            _parameters: dict[str, object], **kwargs: object
+        ) -> UdmiValidationResult:
+            progress_callback = kwargs["progress_callback"]
+            assert callable(progress_callback)
+            progress_callback(
+                lambda: UdmiValidationResult(
+                    result_summary={
+                        "provisional": True,
+                        "message_count": 1,
+                    },
+                    issues=[provisional_issue],
+                    source_fixture="live_capture_in_progress",
+                )
+            )
+            self.assertTrue(progress_write_started.wait(timeout=2.0))
+            return terminal
+
+        try:
+            started_at = time.perf_counter()
+            with (
+                patch(
+                    "smart_commissioning_core.udmi_run_processor._PROGRESS_SHUTDOWN_TIMEOUT_SECONDS",
+                    0.02,
+                ),
+                patch(
+                    "smart_commissioning_core.udmi_run_processor.validate_udmi_full_report",
+                    side_effect=validation_with_stuck_progress,
+                ),
+                self.assertLogs(
+                    "smart_commissioning_core.udmi_run_processor", level="WARNING"
+                ),
+            ):
+                record = process_udmi_validation_run(
+                    "run-stuck-progress",
+                    {**_BROKER, "capture_seconds": 1},
+                    run_store=store,
+                    execution_mode="dramatiq_worker",
+                )
+            elapsed = time.perf_counter() - started_at
+
+            self.assertLess(elapsed, 0.5)
+            self.assertEqual(record["status"], "succeeded")
+            self.assertFalse(store.current_summary["provisional"])
+            self.assertTrue(
+                store.current_summary["progress_snapshot_metrics"][
+                    "shutdown_timed_out"
+                ]
+            )
+        finally:
+            release_progress_write.set()
+
+        self.assertTrue(terminal_repaired.wait(timeout=2.0))
+        self.assertFalse(store.current_summary["provisional"])
+        self.assertEqual(store.current_summary["message_count"], 462)
+        self.assertEqual(store.issues, [terminal_issue])
+
+    def test_failed_run_drains_latest_snapshot_and_repairs_late_progress(self) -> None:
+        first_progress_write_started = threading.Event()
+        release_first_progress_write = threading.Event()
+        failed_summary_repaired = threading.Event()
+        failure_marker_count = 0
+        first_progress_write = True
+        state_lock = threading.Lock()
+        first_issue = ValidationIssueRecord(
+            issue_id="partial-1",
+            issue_type="payload_error",
+            severity="high",
+            description="First partial issue.",
+        )
+        latest_issue = ValidationIssueRecord(
+            issue_id="partial-2",
+            issue_type="payload_error",
+            severity="high",
+            description="Latest partial issue.",
+        )
+
+        class StuckFailureStore(_FakeRunStore):
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                nonlocal failure_marker_count, first_progress_write
+                if summary.get("provisional") is True:
+                    with state_lock:
+                        should_block = first_progress_write
+                        first_progress_write = False
+                    if should_block:
+                        first_progress_write_started.set()
+                        release_first_progress_write.wait()
+                super().update_result_summary(run_id, summary, merge)
+                if summary.get("validation_incomplete") is True:
+                    with state_lock:
+                        failure_marker_count += 1
+                        if failure_marker_count >= 2:
+                            failed_summary_repaired.set()
+
+        def progress_result(message_count: int) -> UdmiValidationResult:
+            return UdmiValidationResult(
+                result_summary={
+                    "provisional": True,
+                    "message_count": message_count,
+                },
+                issues=[first_issue if message_count == 1 else latest_issue],
+                source_fixture="live_capture_in_progress",
+            )
+
+        def failing_validation(
+            _parameters: dict[str, object], **kwargs: object
+        ) -> UdmiValidationResult:
+            progress_callback = kwargs["progress_callback"]
+            assert callable(progress_callback)
+            progress_callback(lambda: progress_result(1))
+            self.assertTrue(first_progress_write_started.wait(timeout=2.0))
+            progress_callback(lambda: progress_result(2))
+            raise RuntimeError("validator failed after progress")
+
+        store = StuckFailureStore()
+        try:
+            with (
+                patch(
+                    "smart_commissioning_core.udmi_run_processor._PROGRESS_SHUTDOWN_TIMEOUT_SECONDS",
+                    0.02,
+                ),
+                patch(
+                    "smart_commissioning_core.udmi_run_processor.validate_udmi_full_report",
+                    side_effect=failing_validation,
+                ),
+                self.assertLogs(
+                    "smart_commissioning_core.udmi_run_processor", level="WARNING"
+                ),
+            ):
+                record = process_udmi_validation_run(
+                    "run-stuck-progress-failure",
+                    {**_BROKER, "capture_seconds": 1},
+                    run_store=store,
+                    execution_mode="dramatiq_worker",
+                )
+
+            self.assertEqual(record["status"], "failed")
+            self.assertFalse(store.current_summary["provisional"])
+            self.assertTrue(store.current_summary["validation_incomplete"])
+        finally:
+            release_first_progress_write.set()
+
+        self.assertTrue(failed_summary_repaired.wait(timeout=2.0))
+        self.assertEqual(store.current_summary["message_count"], 2)
+        self.assertFalse(store.current_summary["provisional"])
+        self.assertTrue(store.current_summary["validation_incomplete"])
+        self.assertEqual(store.issues, [latest_issue])
+
     def test_progress_persistence_failure_does_not_abort_capture(self) -> None:
+        progress_attempted = threading.Event()
+
         class FailingProgressStore(_FakeRunStore):
             def update_result_summary(
                 self, run_id: str, summary: dict, merge: bool = True
             ) -> None:
                 if summary.get("provisional") is True:
+                    progress_attempted.set()
                     raise OSError("database unavailable secret=do-not-log")
                 super().update_result_summary(run_id, summary, merge)
 
         store = FailingProgressStore()
+
+        message = _msg("a/b/state")
+
+        def capture_with_failed_snapshot(
+            _settings: object, **kwargs: object
+        ) -> list[MqttMessage]:
+            on_message = kwargs["on_message"]
+            assert callable(on_message)
+            on_message(message)
+            self.assertTrue(progress_attempted.wait(timeout=2.0))
+            return [message]
+
         with self.assertLogs(
             "smart_commissioning_core.udmi_run_processor", level="WARNING"
         ) as logs:
@@ -2951,7 +3458,7 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
                 {**_BROKER, "capture_seconds": 1, "state_topic": "a/b/state"},
                 run_store=store,
                 execution_mode="dramatiq_worker",
-                live_capture=ProgressRecordingCapture([_msg("a/b/state")]),
+                live_capture=capture_with_failed_snapshot,
             )
 
         self.assertEqual(record["status"], "succeeded")
@@ -2977,7 +3484,8 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(record["status"], "failed")
-        self.assertTrue(store.current_summary["provisional"])
+        self.assertFalse(store.current_summary["provisional"])
+        self.assertTrue(store.current_summary["validation_incomplete"])
         self.assertEqual(store.current_summary["message_count"], 1)
         self.assertEqual(store.current_summary["execution_mode"], "dramatiq_worker")
         self.assertEqual(store.current_summary["payload_views"][0]["asset_id"], "UDMI asset")
@@ -3300,18 +3808,67 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
         )
 
     def test_cancel_observed_marks_the_run_cancelled(self) -> None:
-        store = _FakeRunStore(cancel=True)
-        capture = RecordingCapture([_msg("a/b/state")])
+        progress_written = threading.Event()
+        operations: list[tuple[str, object]] = []
+
+        class OrderingStore(_FakeRunStore):
+            def update_run_status(self, run_id: str, **kwargs: object) -> dict:
+                record = super().update_run_status(run_id, **kwargs)
+                operations.append(("status", kwargs.get("status")))
+                return record
+
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                super().update_result_summary(run_id, summary, merge)
+                operations.append(("summary", summary.get("provisional")))
+                if summary.get("provisional") is True:
+                    progress_written.set()
+
+            def replace_issues(self, run_id: str, issues: list) -> None:
+                super().replace_issues(run_id, issues)
+                operations.append(("issues", len(issues)))
+
+        store = OrderingStore()
+        message = _msg("a/b/state")
+
+        def cancelling_capture(
+            _settings: object, **kwargs: object
+        ) -> list[MqttMessage]:
+            on_message = kwargs["on_message"]
+            assert callable(on_message)
+            on_message(message)
+            self.assertTrue(progress_written.wait(timeout=2.0))
+            store.cancel = True
+            return [message]
+
         record = process_udmi_validation_run(
             "run-4", dict(_PROCESSOR_PARAMS), run_store=store,
-            execution_mode="dramatiq_worker", live_capture=capture,
+            execution_mode="dramatiq_worker", live_capture=cancelling_capture,
         )
-        # The capture received a live checker reflecting the store's flag …
-        self.assertTrue(capture.calls[-1]["cancel_check"]())
-        # … and the run finishes under a real cancelled status, not succeeded.
+
         self.assertEqual(record["status"], "cancelled")
         self.assertEqual(store.summaries[-1]["captured_topics"], ["a/b/state"])
         self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
+        cancelled_index = operations.index(("status", "cancelled"))
+        terminal_summary_index = max(
+            index
+            for index, operation in enumerate(operations)
+            if operation == ("summary", False)
+        )
+        terminal_issues_index = max(
+            index
+            for index, operation in enumerate(operations)
+            if operation[0] == "issues"
+        )
+        self.assertLess(terminal_summary_index, cancelled_index)
+        self.assertLess(terminal_issues_index, cancelled_index)
+        self.assertFalse(
+            any(
+                operation == ("summary", True)
+                for operation in operations[cancelled_index + 1 :]
+            )
+        )
 
     def test_store_without_cancel_api_falls_back_to_bounded(self) -> None:
         store = _FakeRunStore(cancellable=False)

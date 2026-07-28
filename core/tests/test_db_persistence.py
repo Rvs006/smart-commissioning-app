@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -65,6 +66,29 @@ def _issue(issue_id: str, description: str) -> dict[str, object]:
         "status_detail": None,
         "last_seen_at": "2026-06-11T10:00:00+00:00",
     }
+
+
+class DatabaseEngineConfigurationTests(unittest.TestCase):
+    def test_postgres_connections_bound_connect_lock_and_statement_waits(self) -> None:
+        sentinel = object()
+        with patch(
+            "smart_commissioning_core.db.engine.create_engine",
+            return_value=sentinel,
+        ) as create_engine:
+            engine = create_engine_from_url(
+                "postgresql+psycopg://user:password@db.example.test/app"
+                "?options=-c%20search_path%3Dcommissioning"
+            )
+
+        self.assertIs(engine, sentinel)
+        connect_args = create_engine.call_args.kwargs["connect_args"]
+        self.assertEqual(connect_args["connect_timeout"], 10)
+        self.assertEqual(connect_args["tcp_user_timeout"], 30_000)
+        options = connect_args["options"]
+        self.assertTrue(options.startswith("-c search_path=commissioning "))
+        self.assertIn("lock_timeout=35000", options)
+        self.assertIn("statement_timeout=30000", options)
+        self.assertIn("idle_in_transaction_session_timeout=30000", options)
 
 
 class SqliteTestCase(unittest.TestCase):
