@@ -83,7 +83,7 @@ def build_evidence(
     """Build the fail-closed evidence document from locally pulled digest refs."""
 
     if _VERSION_RE.fullmatch(release_version) is None:
-        raise ImageEvidenceError("release version must look like v0.1.28")
+        raise ImageEvidenceError("release version must look like v0.1.29")
     source_commit = source_commit.lower()
     if _COMMIT_RE.fullmatch(source_commit) is None:
         raise ImageEvidenceError("source commit must be a full lowercase Git SHA")

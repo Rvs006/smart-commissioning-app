@@ -403,6 +403,7 @@ class HubSyncV2ApiTests(ApiTestCase):
         output_format: str = "pdf",
     ) -> str:
         from app.schemas.jobs import ReportRequest
+        from app.services.report_artifacts import REPORT_RENDERER_VERSION
         from app.services.report_artifacts import canonical_json_bytes as artifact_json
         from app.services.run_service import RunService
 
@@ -432,7 +433,7 @@ class HubSyncV2ApiTests(ApiTestCase):
             "file_name": f"public-sync-{marker}.{output_format}",
             "media_type": media_types[output_format],
             "byte_size": len(artifact),
-            "renderer_version": "0.1.28",
+            "renderer_version": REPORT_RENDERER_VERSION,
             "artifact_sha256": sha256_bytes(artifact),
             "artifact_relpath": f"edge-{marker}.{output_format}",
             # Match POST /reports exactly: the signed artifact takes its origin

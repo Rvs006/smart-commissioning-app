@@ -14,7 +14,13 @@ def _require(text: str, tokens: list[str], *, label: str, failures: list[str]) -
             failures.append(f"{label} is missing {token!r}")
 
 
-def main() -> int:
+def main_for_version(
+    *,
+    version: str,
+    release_contract_script: str,
+    deployment_path: str,
+    success_label: str,
+) -> int:
     root = Path(__file__).resolve().parents[1]
     workflow = (root / ".github/workflows/release-gates.yml").read_text(encoding="utf-8")
     compose = (root / "infra/docker-compose.yml").read_text(encoding="utf-8")
@@ -40,9 +46,7 @@ def main() -> int:
         encoding="utf-8"
     )
     worker_tasks = (root / "worker/app/tasks.py").read_text(encoding="utf-8")
-    deployment = (root / "docs/docker-deployment-rollback-v0.1.28.md").read_text(
-        encoding="utf-8"
-    )
+    deployment = (root / deployment_path).read_text(encoding="utf-8")
     failures: list[str] = []
 
     for relative in ("backend/Dockerfile", "worker/Dockerfile", "frontend/Dockerfile"):
@@ -134,7 +138,7 @@ def main() -> int:
     _require(
         workflow,
         [
-            "name: v0.1.28 Release Gates",
+            f"name: {version} Release Gates",
             "packages: write",
             "if: github.event_name == 'workflow_dispatch'",
             "publish-images:",
@@ -168,7 +172,7 @@ def main() -> int:
             "Skipping duplicate or stale delivery run_id=$killed_run_id",
             "check_hosted_frontend.py",
             "check_hosted_release_logs.py",
-            "check_v0128_release_contracts.py",
+            release_contract_script,
             "docker_sbom_from_digest=passed",
         ],
         label="release workflow",
@@ -309,8 +313,17 @@ def main() -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("v0.1.28 Docker release contracts: OK")
+    print(success_label)
     return 0
+
+
+def main() -> int:
+    return main_for_version(
+        version="v0.1.28",
+        release_contract_script="check_v0128_release_contracts.py",
+        deployment_path="docs/docker-deployment-rollback-v0.1.28.md",
+        success_label="v0.1.28 Docker release contracts: OK",
+    )
 
 
 if __name__ == "__main__":

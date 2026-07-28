@@ -50,23 +50,35 @@ def _exact_assignment(
         failures.append(f"{source} must assign {variable} exactly once to {expected}")
 
 
-def check(repo: Path) -> list[str]:
+def check(
+    repo: Path,
+    *,
+    version: str = VERSION,
+    package_version: str = PACKAGE_VERSION,
+    release_notes_path: str = "docs/release-notes-v0.1.28.md",
+    migration_path: str = "docs/migration-rollback-v0.1.28.md",
+    validation_path: str = "docs/release-validation-v0.1.28.md",
+    docker_deployment_path: str = "docs/docker-deployment-rollback-v0.1.28.md",
+    evidence_validator: str = "validate_v0128_release_evidence.py",
+    evidence_test: str = "test_v0128_release_evidence.py",
+    release_contract_script: str = "check_v0128_release_contracts.py",
+) -> list[str]:
     failures: list[str] = []
     windows = _read(repo, ".github/workflows/windows-portable.yml", failures)
     hosted = _read(repo, ".github/workflows/release-gates.yml", failures)
     publisher = _read(repo, "scripts/release-portable.ps1", failures)
     image_publisher = _read(repo, "scripts/publish_docker_images.sh", failures)
-    release_notes = _read(repo, "docs/release-notes-v0.1.28.md", failures)
-    migration = _read(repo, "docs/migration-rollback-v0.1.28.md", failures)
-    validation = _read(repo, "docs/release-validation-v0.1.28.md", failures)
+    release_notes = _read(repo, release_notes_path, failures)
+    migration = _read(repo, migration_path, failures)
+    validation = _read(repo, validation_path, failures)
 
     for relative in (
         "docs/sync-v2-wire-format.md",
         "docs/sync-v2-credential-scope.md",
         "docs/sync-v2-operations.md",
-        "docs/docker-deployment-rollback-v0.1.28.md",
-        "scripts/validate_v0128_release_evidence.py",
-        "scripts/test_v0128_release_evidence.py",
+        docker_deployment_path,
+        f"scripts/{evidence_validator}",
+        f"scripts/{evidence_test}",
         "scripts/generate_docker_image_evidence.py",
         "scripts/test_generate_docker_image_evidence.py",
         "scripts/test_release_portable_ps51.ps1",
@@ -86,12 +98,12 @@ def check(repo: Path) -> list[str]:
         _action_pins(text, name, failures)
 
     for value, message in (
-        ("default: v0.1.28", "Windows workflow is not pinned to v0.1.28"),
+        (f"default: {version}", f"Windows workflow is not pinned to {version}"),
         ("test_owned_run_heartbeat.py", "Windows workflow omits the shared heartbeat guard"),
         ("test_tasks_interrupt.py", "Windows workflow omits worker lifecycle parity"),
         ('- "worker/**"', "Windows workflow paths omit worker changes"),
-        ("docs\\migration-rollback-v0.1.28.md", "Windows bundle omits v0.1.28 migration guidance"),
-        ("validate_v0128_release_evidence.py", "Windows workflow uses the wrong evidence validator"),
+        (migration_path.replace("/", "\\"), f"Windows bundle omits {version} migration guidance"),
+        (evidence_validator, "Windows workflow uses the wrong evidence validator"),
         ("windows-acceptance.json", "Windows workflow omits retained portable acceptance"),
         ("ProductVersion", "Windows workflow does not verify ProductVersion"),
         (
@@ -102,7 +114,7 @@ def check(repo: Path) -> list[str]:
         _require(windows, value, message, failures)
 
     for value, message in (
-        ("name: v0.1.28 Release Gates", "release workflow has the wrong name"),
+        (f"name: {version} Release Gates", "release workflow has the wrong name"),
         ("packages: write", "release dispatch cannot publish GHCR packages"),
         ("github.event_name == 'workflow_dispatch'", "GHCR publication is not dispatch-only"),
         ("ghcr.io", "release gates do not target GHCR"),
@@ -119,13 +131,14 @@ def check(repo: Path) -> list[str]:
         ("sync_v2", "release gates omit Sync v2 acceptance"),
         ("frontend", "release gates omit frontend acceptance"),
         ("down -v", "release gates do not clean the disposable Compose project"),
-        ("validate_v0128_release_evidence.py", "release gates use the wrong evidence validator"),
+        (evidence_validator, "release gates use the wrong evidence validator"),
         ("SYNC_V2_WIRE_FORMAT.md", "hosted evidence omits the Sync v2 wire document"),
         ("SYNC_V2_CREDENTIAL_SCOPE.md", "hosted evidence omits credential scope guidance"),
         ("SYNC_V2_OPERATIONS.md", "hosted evidence omits receipt and compatibility guidance"),
         ("DOCKER_DEPLOYMENT_ROLLBACK.md", "hosted evidence omits Docker rollback guidance"),
-        ('- "docs/release-notes-v0.1.28.md"', "release workflow paths omit release notes"),
-        ('- "docs/release-validation-v0.1.28.md"', "release workflow paths omit validation guidance"),
+        (f'- "{release_notes_path}"', "release workflow paths omit release notes"),
+        (f'- "{validation_path}"', "release workflow paths omit validation guidance"),
+        (release_contract_script, "release workflow omits the current release contract"),
     ):
         _require(f"{hosted}\n{image_publisher}", value, message, failures)
     if windows.count("if ($LASTEXITCODE -ne 0)") < 8:
@@ -189,8 +202,8 @@ def check(repo: Path) -> list[str]:
         except tomllib.TOMLDecodeError as error:
             failures.append(f"{relative} is not valid TOML: {error}")
             continue
-        if package.get("project", {}).get("version") != PACKAGE_VERSION:
-            failures.append(f"{relative} project.version is not exactly {PACKAGE_VERSION}")
+        if package.get("project", {}).get("version") != package_version:
+            failures.append(f"{relative} project.version is not exactly {package_version}")
 
     frontend_package_text = _read(repo, "frontend/package.json", failures)
     frontend_lock_text = _read(repo, "frontend/package-lock.json", failures)
@@ -204,13 +217,18 @@ def check(repo: Path) -> list[str]:
     except json.JSONDecodeError as error:
         failures.append(f"frontend/package-lock.json is not valid JSON: {error}")
         frontend_lock = {}
-    if frontend_package.get("version") != PACKAGE_VERSION:
-        failures.append("frontend/package.json version is not exactly 0.1.28")
+    if frontend_package.get("version") != package_version:
+        failures.append(
+            f"frontend/package.json version is not exactly {package_version}"
+        )
     if (
-        frontend_lock.get("version") != PACKAGE_VERSION
-        or frontend_lock.get("packages", {}).get("", {}).get("version") != PACKAGE_VERSION
+        frontend_lock.get("version") != package_version
+        or frontend_lock.get("packages", {}).get("", {}).get("version")
+        != package_version
     ):
-        failures.append("frontend/package-lock.json root versions are not exactly 0.1.28")
+        failures.append(
+            f"frontend/package-lock.json root versions are not exactly {package_version}"
+        )
 
     version_assignments = (
         ("core/smart_commissioning_core/__init__.py", "__version__"),
@@ -222,7 +240,7 @@ def check(repo: Path) -> list[str]:
     for relative, variable in version_assignments:
         source = _read(repo, relative, failures)
         assignment_sources[relative] = source
-        _exact_assignment(source, variable, PACKAGE_VERSION, relative, failures)
+        _exact_assignment(source, variable, package_version, relative, failures)
     main_source = assignment_sources["backend/app/main.py"]
     _require(main_source, "version=APP_VERSION", "FastAPI does not use the exact APP_VERSION", failures)
     _require(

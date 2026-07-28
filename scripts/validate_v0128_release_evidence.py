@@ -108,7 +108,12 @@ def _validate_docker_images(path: Path, version: str, commit: str, repository: s
     return failures
 
 
-def main(argv: list[str] | None = None) -> int:
+def main_for_version(
+    argv: list[str] | None,
+    *,
+    expected_version: str,
+    success_label: str,
+) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--evidence-kind", required=True)
@@ -118,8 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--search-root", type=Path, action="append", default=[])
     known, _ = parser.parse_known_args(arguments)
-    if known.version != "v0.1.28":
-        parser.error("this validator is pinned to v0.1.28")
+    if known.version != expected_version:
+        parser.error(f"this validator is pinned to {expected_version}")
     commit = known.commit.lower()
     if known.evidence_kind == "hosted":
         base.REQUIRED_FILES["hosted"] = {
@@ -148,8 +153,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     result = base.main(arguments)
     if result == 0:
-        print("v0.1.28 Docker and release evidence: OK")
+        print(success_label)
     return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    return main_for_version(
+        argv,
+        expected_version="v0.1.28",
+        success_label="v0.1.28 Docker and release evidence: OK",
+    )
 
 
 if __name__ == "__main__":

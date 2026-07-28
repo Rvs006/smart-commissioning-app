@@ -47,3 +47,16 @@ The portable bundle must be built and boot-tested by the Windows Portable Bundle
 workflow before publication. Field acceptance still requires an unfiltered
 554-asset two-hour run and a second run covering the longest expected payload
 cadence, preferably 24 hours when daily state or metadata is expected.
+
+## Hosted images
+
+The hosted gate rebuilds API, worker, and frontend images from the same release
+commit. Deploy the immutable digest references recorded in the release evidence:
+
+- API: `{{API_IMAGE}}@{{API_IMAGE_DIGEST}}`
+- Worker: `{{WORKER_IMAGE}}@{{WORKER_IMAGE_DIGEST}}`
+- Frontend: `{{FRONTEND_IMAGE}}@{{FRONTEND_IMAGE_DIGEST}}`
+
+v0.1.29 adds no database migration. Hosted deployments stay on Alembic head
+`a7b8c9d0e1f2`; follow `docs/migration-rollback-v0.1.29.md` and
+`docs/docker-deployment-rollback-v0.1.29.md` for upgrade and rollback checks.
