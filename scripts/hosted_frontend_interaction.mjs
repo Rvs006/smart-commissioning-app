@@ -43,10 +43,13 @@ function parseArguments(argv) {
 }
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const chromeTargetReadyTimeoutMs = 30_000;
+const chromeTargetPollIntervalMs = 100;
 
 async function findPageTarget(debugUrl) {
   let lastError;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + chromeTargetReadyTimeoutMs;
+  while (Date.now() < deadline) {
     try {
       const response = await fetch(`${debugUrl}/json/list`);
       if (!response.ok) {
@@ -63,9 +66,12 @@ async function findPageTarget(debugUrl) {
     } catch (error) {
       lastError = error;
     }
-    await delay(100);
+    await delay(chromeTargetPollIntervalMs);
   }
-  throw lastError ?? new Error("Chrome DevTools endpoint did not become ready");
+  const reason = lastError instanceof Error ? lastError.message : "no diagnostic was returned";
+  throw new Error(
+    `Chrome DevTools at ${debugUrl} did not expose a page target within ${chromeTargetReadyTimeoutMs / 1000} seconds: ${reason}`,
+  );
 }
 
 class DevToolsSession {

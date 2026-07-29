@@ -355,7 +355,7 @@ jobs:
           mkdir -p build/browser
           : > build/browser/chrome.log
           chrome_profile="$(mktemp -d)"
-          google-chrome --headless=new --no-sandbox --disable-gpu \
+          google-chrome --headless=new --no-sandbox --disable-gpu --enable-logging=stderr \
             --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 \
             --user-data-dir="$chrome_profile" about:blank \
             >> build/browser/chrome.log 2>&1 &
@@ -365,14 +365,19 @@ jobs:
             wait "$chrome_pid" >/dev/null 2>&1 || true
           }
           trap cleanup_chrome EXIT
-          node scripts/hosted_frontend_interaction.mjs \
+          if ! node scripts/hosted_frontend_interaction.mjs \
             --base-url http://127.0.0.1:8080 \
             --debug-url http://127.0.0.1:9222 \
             --expected-version "$RELEASE_VERSION" \
             --route / \
             --route /configuration \
             --route /run-history \
-            --output build/browser/interaction.json
+            --output build/browser/interaction.json; then
+            echo "::group::Chrome startup log after frontend interaction failure" >&2
+            tail -n 200 build/browser/chrome.log >&2 || true
+            echo "::endgroup::" >&2
+            exit 1
+          fi
           cleanup_chrome
           trap - EXIT
           for route in '' configuration run-history; do
