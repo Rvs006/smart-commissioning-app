@@ -110,11 +110,15 @@ class CaptureMqttEvidenceTests(unittest.TestCase):
 
     def test_saved_app_runtime_points_only_at_the_requested_data_directory(self) -> None:
         environment: dict[str, str] = {}
-        capture._configure_saved_app_runtime(Path("C:/field-data"), environment)
+        data_root = Path("C:/field-data")
+        capture._configure_saved_app_runtime(data_root, environment)
 
-        self.assertEqual(environment["SMART_COMMISSIONING_RUNTIME_ROOT"], "C:\\field-data")
-        self.assertEqual(environment["SMART_COMMISSIONING_SECRETS_ROOT"], "C:\\field-data\\secrets")
-        self.assertEqual(environment["DATABASE_URL"], "sqlite:///C:/field-data/smart_commissioning.db")
+        self.assertEqual(environment["SMART_COMMISSIONING_RUNTIME_ROOT"], str(data_root))
+        self.assertEqual(environment["SMART_COMMISSIONING_SECRETS_ROOT"], str(data_root / "secrets"))
+        self.assertEqual(
+            environment["DATABASE_URL"],
+            f"sqlite:///{(data_root / 'smart_commissioning.db').as_posix()}",
+        )
 
     def test_saved_app_loader_reads_configuration_without_changing_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
