@@ -28,23 +28,31 @@ class UdmiCaptureWindowCapTests(ApiTestCase):
     env = _ENV_OVERRIDES
     client_headers = {"X-API-Key": _API_KEY}
 
-    def _post_run(self, capture_seconds: object) -> object:
+    def _post_run(
+        self,
+        capture_seconds: object,
+        *,
+        extra_parameters: dict[str, object] | None = None,
+    ) -> object:
+        parameters: dict[str, object] = {
+            "expected_schedule": {"asset_id": "EM-1", "udmi_version": "1.5.2"},
+            "state_payload": {
+                "timestamp": "2026-07-14T10:00:00Z",
+                "version": "1.5.2",
+                "system": {},
+            },
+            "capture_seconds": capture_seconds,
+            "use_live_broker": False,
+        }
+        if extra_parameters:
+            parameters.update(extra_parameters)
         return self.client.post(
             "/api/v1/validation/udmi/runs",
             json={
                 "project_id": "udmi-capture-window-project",
                 "site_id": "udmi-capture-window-site",
                 "job_type": "udmi_validation",
-                "parameters": {
-                    "expected_schedule": {"asset_id": "EM-1", "udmi_version": "1.5.2"},
-                    "state_payload": {
-                        "timestamp": "2026-07-14T10:00:00Z",
-                        "version": "1.5.2",
-                        "system": {},
-                    },
-                    "capture_seconds": capture_seconds,
-                    "use_live_broker": False,
-                },
+                "parameters": parameters,
             },
         )
 
@@ -63,6 +71,28 @@ class UdmiCaptureWindowCapTests(ApiTestCase):
         # Pasted payloads with no live broker: the window is not waited out, so
         # accepting the maximum bound is cheap to prove end to end.
         response = self._post_run(MAX_UDMI_CAPTURE_SECONDS)
+        self.assertEqual(response.status_code, 200, response.text)
+
+    def test_all_topic_discovery_requires_explicit_confirmation(self) -> None:
+        response = self._post_run(
+            1,
+            extra_parameters={
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "all",
+            },
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("topic_discovery_all_scope_confirmed", response.json()["detail"])
+
+    def test_confirmed_all_topic_discovery_request_is_accepted(self) -> None:
+        response = self._post_run(
+            1,
+            extra_parameters={
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "all",
+                "topic_discovery_all_scope_confirmed": True,
+            },
+        )
         self.assertEqual(response.status_code, 200, response.text)
 
     def test_worker_actor_time_limit_exceeds_the_capture_cap(self) -> None:

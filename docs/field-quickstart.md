@@ -72,19 +72,30 @@ filter it, and hit **Export CSV** for the whole list - no digging through files.
 
 This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
 
-### Large-register acceptance for v0.1.30
+### Large-register acceptance for v0.1.31
 
-Use the dedicated [v0.1.30 field acceptance checklist](v0.1.30-field-acceptance-checklist.md)
-for the 554-asset run. With no positive `max_messages` value, register-driven
-capture now uses the larger of 500 or its concrete validation-filter count. The
-known 554-row register produces 2,216 filters, so the automatic capacity must be
-at least 2,216 and capture must continue beyond retained message 500.
+Use the dedicated [v0.1.31 field acceptance checklist](v0.1.31-field-acceptance-checklist.md)
+for the unfiltered large-register run. With no positive `max_messages` value,
+register-driven capture uses the larger of 500 or its concrete validation-filter
+count. Confirm that the automatic capacity is at least the calculated count and
+that capture continues beyond retained message 500 when required.
 
 Run the payload grabber or MQTT Explorer over the same approved scope and time
 window. The app must list a registered asset seen on a wrong topic with both
 paths, keep its payload validation result, and include the annotated 554-row
 register in the Excel and ZIP evidence. A two-hour result proves scale only;
 the second run must cover the longest expected payload cadence.
+
+For every asset observed by the independent collector but absent from the app,
+record its raw exact topic, receive time, expected register topic, app
+classification, and approved subscription scope in the v0.1.31 reconciliation
+table. An in-scope raw message that does not associate with its registered
+asset remains a defect until reproduced and resolved.
+
+Asset-topic discovery is optional topic-only forensic evidence. Keep it on the
+bounded register scope unless an all-topic capture is specifically approved;
+finding an asset ID on another topic does not make the required payload observed
+or valid.
 
 For an independent raw capture, use `scripts/capture_mqtt_evidence.py`. It writes
 one append-only JSONL record per message with the exact topic and receive time;

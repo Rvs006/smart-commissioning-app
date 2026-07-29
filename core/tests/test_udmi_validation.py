@@ -1870,12 +1870,15 @@ class RecordingCapture:
 
 
 class ProgressRecordingCapture(RecordingCapture):
-    """Capture fake that mirrors the transport's per-message callback."""
+    """Capture fake that mirrors the transport's per-message callbacks."""
 
     def __call__(self, _settings: object, **kwargs: object) -> list[MqttMessage]:
         self.calls.append(kwargs)
+        on_observed_message = kwargs.get("on_observed_message")
         on_message = kwargs.get("on_message")
         for message in self.messages:
+            if callable(on_observed_message):
+                on_observed_message(message)
             if callable(on_message):
                 on_message(message)
         return self.messages
@@ -2814,6 +2817,275 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
             cancel_check=lambda: False,
         )
         self.assertIn("site/a1/#", capture.calls[0]["topics"])
+
+
+class AssetTopicDiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def _assets() -> list[dict[str, object]]:
+        return [
+            {
+                "expected_schedule": {"asset_id": "AHU-1003001", "system": "HVAC"},
+                "state_topic": "hv/hvac/03/AHU-1003001/state",
+            },
+            {
+                "expected_schedule": {"asset_id": "EM-1002004", "system": "EMS"},
+                "state_topic": "hv/ems/02/EM-1002004/state",
+            },
+            {
+                "expected_schedule": {"asset_id": "EM-1002103", "system": "EMS"},
+                "state_topic": "hv/ems/02/EM-1002103/state",
+            },
+        ]
+
+    def test_bounded_discovery_records_only_exact_asset_topic_metadata(self) -> None:
+        observed_at = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+        capture = ProgressRecordingCapture(
+            [
+                MqttMessage(
+                    "hv/hvac/03/AHU-1003001/state",
+                    json.dumps(_state()).encode(),
+                    received_at=observed_at,
+                ),
+                MqttMessage(
+                    "hv/other/99/EM-1002004/custom/diagnostic",
+                    b"not-json",
+                    received_at=observed_at,
+                ),
+                MqttMessage(
+                    "hv/other/99/EM-1002004/metrics",
+                    b"not-json",
+                    received_at=observed_at,
+                ),
+                # These are deliberately not exact, unique, case-sensitive
+                # asset-ID segments and must never be attributed to a row.
+                _msg("hv/other/AHU-1003001-copy/state"),
+                _msg("hv/other/ahu-1003001/state"),
+                _msg("hv/other/AHU-1003001/EM-1002004/state"),
+            ]
+        )
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 2,
+            "assets": self._assets(),
+            "topic_discovery_enabled": True,
+            "topic_discovery_scope": "bounded",
+            "topic_discovery_max_topics_per_asset": 1,
+        }
+
+        result = validate_udmi_full_report(
+            parameters,
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        call = capture.calls[0]
+        self.assertEqual(
+            call["topics"],
+            [
+                "hv/hvac/03/AHU-1003001/state",
+                "hv/ems/02/EM-1002004/state",
+                "hv/ems/02/EM-1002103/state",
+                "hv/#",
+            ],
+        )
+        self.assertNotIn("#", call["topics"])
+        self.assertTrue(callable(call["on_observed_message"]))
+
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertEqual(discovery["scope"], "hv/#")
+        self.assertEqual(discovery["scope_source"], "register_common_ancestor")
+        self.assertIsNone(discovery["scope_error"])
+        self.assertTrue(discovery["capture_complete"])
+        self.assertEqual(discovery["capture_status"], "completed")
+        self.assertEqual(
+            discovery["status_counts"],
+            {
+                "expected_topic_observed": 1,
+                "alternate_topic_observed": 1,
+                "no_matching_asset_id_topic_observed": 1,
+                "capture_incomplete": 0,
+                "ambiguous_asset_id": 0,
+                "missing_asset_id": 0,
+                "scope_unavailable": 0,
+                "scope_configuration_error": 0,
+            },
+        )
+        by_asset = {row["asset_id"]: row for row in discovery["asset_results"]}
+        self.assertEqual(by_asset["AHU-1003001"]["status"], "expected_topic_observed")
+        self.assertEqual(
+            by_asset["AHU-1003001"]["observed_expected_topics"],
+            [
+                {
+                    "topic": "hv/hvac/03/AHU-1003001/state",
+                    "message_count": 1,
+                    "last_seen": observed_at.isoformat(),
+                }
+            ],
+        )
+        self.assertEqual(by_asset["EM-1002004"]["status"], "alternate_topic_observed")
+        self.assertTrue(by_asset["EM-1002004"]["topic_limit_reached"])
+        self.assertEqual(
+            by_asset["EM-1002004"]["observed_alternate_topics"],
+            [
+                {
+                    "topic": "hv/other/99/EM-1002004/custom/diagnostic",
+                    "message_count": 1,
+                    "last_seen": observed_at.isoformat(),
+                }
+            ],
+        )
+        self.assertEqual(
+            by_asset["EM-1002103"]["status"],
+            "no_matching_asset_id_topic_observed",
+        )
+        for asset in discovery["asset_results"]:
+            for topic in [
+                *asset["observed_expected_topics"],
+                *asset["observed_alternate_topics"],
+            ]:
+                self.assertNotIn("payload", topic)
+
+    def test_all_scope_requires_explicit_confirmation_in_the_core(self) -> None:
+        capture = RecordingCapture()
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": self._assets(),
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "all",
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        self.assertEqual(capture.calls, [])
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertEqual(discovery["scope"], None)
+        self.assertEqual(discovery["scope_source"], "all")
+        self.assertEqual(discovery["scope_error"], "all_scope_confirmation_required")
+        self.assertFalse(discovery["capture_complete"])
+        self.assertEqual(
+            {row["status"] for row in discovery["asset_results"]},
+            {"scope_configuration_error"},
+        )
+
+    def test_confirmed_all_scope_uses_one_wildcard_subscription(self) -> None:
+        capture = ProgressRecordingCapture()
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": self._assets(),
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "all",
+                "topic_discovery_all_scope_confirmed": True,
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        self.assertEqual(
+            capture.calls[0]["topics"],
+            [
+                "hv/hvac/03/AHU-1003001/state",
+                "hv/ems/02/EM-1002004/state",
+                "hv/ems/02/EM-1002103/state",
+                "#",
+            ],
+        )
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertEqual(discovery["scope"], "#")
+        self.assertEqual(discovery["scope_source"], "all")
+        self.assertTrue(discovery["capture_complete"])
+
+    def test_all_scope_alternate_topic_stays_out_of_validation_evidence(self) -> None:
+        """A message received only because of ``#`` remains ledger-only evidence."""
+
+        observed_at = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+        alternate = MqttMessage(
+            "other/site/AHU-1003001/state",
+            json.dumps(_state()).encode(),
+            received_at=observed_at,
+        )
+        capture = ProgressRecordingCapture([alternate])
+        assets = self._assets()[:1]
+        parameters = {
+            **_BROKER,
+            "capture_seconds": 2,
+            "assets": assets,
+            "topic_discovery_enabled": True,
+            "topic_discovery_scope": "all",
+            "topic_discovery_all_scope_confirmed": True,
+        }
+
+        result = validate_udmi_full_report(
+            parameters,
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        call = capture.calls[0]
+        self.assertEqual(
+            call["secondary_topic_filters"],
+            ["hv/hvac/#"],
+        )
+        discovery = result.result_summary["asset_topic_discovery"]
+        row = discovery["asset_results"][0]
+        self.assertEqual(row["status"], "alternate_topic_observed")
+        self.assertEqual(
+            row["observed_alternate_topics"],
+            [
+                {
+                    "topic": alternate.topic,
+                    "message_count": 1,
+                    "last_seen": observed_at.isoformat(),
+                }
+            ],
+        )
+
+        summary = result.result_summary["validation_summary_v1"]
+        asset = summary["asset_results"][0]
+        self.assertFalse(asset["observed"])
+        self.assertEqual(asset["received_payloads"], 0)
+        self.assertFalse(asset["payload_results"][0]["received"])
+        self.assertEqual(summary["asset_metrics"]["observed"], 0)
+        self.assertEqual(summary["asset_metrics"]["not_observed"], 1)
+        self.assertEqual(summary["asset_metrics"]["wrong_topic"], 0)
+        self.assertEqual(summary["payload_metrics"]["received"], 0)
+        self.assertEqual(result.result_summary["wrong_topic_assets"], [])
+        self.assertEqual(parameters["assets"][0]["messages"], [])
+
+    def test_bounded_scope_is_honest_when_no_common_safe_scope_exists(self) -> None:
+        capture = ProgressRecordingCapture()
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "topic_discovery_enabled": True,
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A1"},
+                        "state_topic": "site/a1/state",
+                    },
+                    {
+                        "expected_schedule": {"asset_id": "A2"},
+                        "state_topic": "other/a2/state",
+                    },
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        self.assertEqual(capture.calls[0]["topics"], ["site/a1/state", "other/a2/state"])
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertIsNone(discovery["scope"])
+        self.assertEqual(discovery["scope_source"], "unavailable")
+        self.assertEqual(
+            {row["status"] for row in discovery["asset_results"]},
+            {"scope_unavailable"},
+        )
 
 
 class PointsetTimestampDiagnosisTests(unittest.TestCase):

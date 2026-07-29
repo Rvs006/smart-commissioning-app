@@ -37,6 +37,10 @@ import {
   ReportSummary,
   ReportFormat,
   ReportType,
+  UdmiAssetTopicDiscovery,
+  UdmiAssetTopicDiscoveryAssetResult,
+  UdmiAssetTopicDiscoveryStatus,
+  UdmiAssetTopicObservation,
   UdmiAssetPayloadView,
   UdmiReportScopeV1,
   UdmiValidationSummaryV1,
@@ -305,6 +309,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [udmiMetadataPayload, setUdmiMetadataPayload] = useState(defaultMetadataPayload);
   const [udmiPointsetPayload, setUdmiPointsetPayload] = useState(defaultPointsetPayload);
   const [udmiUseLiveBroker, setUdmiUseLiveBroker] = useState(false);
+  // This diagnostic is deliberately opt-in. The default bounded scope is the
+  // register's common ancestor; the broad # scope requires a separate, explicit
+  // acknowledgement before it can be selected.
+  const [udmiTopicDiscoveryEnabled, setUdmiTopicDiscoveryEnabled] = useState(false);
+  const [udmiTopicDiscoveryScope, setUdmiTopicDiscoveryScope] = useState<"bounded" | "all">(
+    "bounded",
+  );
+  const [udmiTopicDiscoveryAllScopeConfirmed, setUdmiTopicDiscoveryAllScopeConfirmed] =
+    useState(false);
   const [udmiStateTopic, setUdmiStateTopic] = useState("demo-site/b1/ahu-1000001/state");
   const [udmiMetadataTopic, setUdmiMetadataTopic] = useState("demo-site/b1/ahu-1000001/metadata");
   const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("demo-site/b1/ahu-1000001/events/pointset");
@@ -1046,6 +1059,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   pointsetTopic: udmiPointsetTopic,
                   statePayload: udmiStatePayload,
                   stateTopic: udmiStateTopic,
+                  topicDiscoveryAllScopeConfirmed: udmiTopicDiscoveryAllScopeConfirmed,
+                  topicDiscoveryEnabled: udmiTopicDiscoveryEnabled,
+                  topicDiscoveryScope: udmiTopicDiscoveryScope,
                   useLiveBroker: udmiUseLiveBroker,
                   useRegister: udmiUseRegister,
                 })
@@ -1505,6 +1521,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const validationSummary = useMemo(
     () => readValidationSummary(validationRunQuery.data?.result_summary),
+    [validationRunQuery.data?.result_summary],
+  );
+  const assetTopicDiscovery = useMemo(
+    () => readAssetTopicDiscovery(validationRunQuery.data?.result_summary),
     [validationRunQuery.data?.result_summary],
   );
   const validationSummaryDisplay = useMemo(
@@ -1972,6 +1992,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const displayedValidationSummary = useMemo(
     () => filterValidationSummary(validationSummaryDisplay, currentUdmiScope, assetFacts),
     [validationSummaryDisplay, currentUdmiScope, assetFacts],
+  );
+  const displayedAssetTopicDiscovery = useMemo(
+    () =>
+      filterAssetTopicDiscovery(
+        assetTopicDiscovery,
+        displayedValidationSummary?.asset_results ?? [],
+        summaryFiltersActive,
+      ),
+    [assetTopicDiscovery, displayedValidationSummary, summaryFiltersActive],
   );
   // The selected row, resolved WITHIN the filtered view so the Inspector can
   // never show a row the table is hiding (ISSUE-4): when the active selection is
@@ -3681,7 +3710,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <label className="confirm-row">
             <input
               checked={udmiUseRegister}
-              onChange={(event) => setUdmiUseRegister(event.target.checked)}
+              onChange={(event) => {
+                const useRegister = event.target.checked;
+                setUdmiUseRegister(useRegister);
+                if (!useRegister) {
+                  setUdmiTopicDiscoveryEnabled(false);
+                  setUdmiTopicDiscoveryScope("bounded");
+                  setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                }
+              }}
               type="checkbox"
             />
             Validate against the imported MQTT register — one expected asset per row (topic, points,
@@ -3737,7 +3774,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           <label className="confirm-row">
             <input
               checked={udmiUseLiveBroker}
-              onChange={(event) => setUdmiUseLiveBroker(event.target.checked)}
+              onChange={(event) => {
+                const useLiveBroker = event.target.checked;
+                setUdmiUseLiveBroker(useLiveBroker);
+                if (!useLiveBroker) {
+                  setUdmiTopicDiscoveryEnabled(false);
+                  setUdmiTopicDiscoveryScope("bounded");
+                  setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                }
+              }}
               type="checkbox"
             />
             Capture latest state, metadata, and pointset payloads from the configured MQTT broker.
@@ -3796,6 +3841,77 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 reporting intervals: metadata is often daily), and the completion-driven safety limit is 500 distinct
                 concrete topics. Closing the app ends the run, which is then marked interrupted at next start.
               </p>
+              {udmiUseRegister ? (
+                <fieldset className="topic-discovery-controls">
+                <legend>Topic discovery</legend>
+                <label className="confirm-row">
+                  <input
+                    checked={udmiTopicDiscoveryEnabled}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      setUdmiTopicDiscoveryEnabled(enabled);
+                      if (!enabled) {
+                        setUdmiTopicDiscoveryScope("bounded");
+                        setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                      }
+                    }}
+                    type="checkbox"
+                  />
+                  Diagnose where registered asset IDs appear in MQTT topics.
+                </label>
+                {udmiTopicDiscoveryEnabled ? (
+                  <div className="topic-discovery-options">
+                    <label className="confirm-row">
+                      <input
+                        checked={udmiTopicDiscoveryAllScopeConfirmed}
+                        onChange={(event) => {
+                          const confirmed = event.target.checked;
+                          setUdmiTopicDiscoveryAllScopeConfirmed(confirmed);
+                          if (!confirmed) {
+                            setUdmiTopicDiscoveryScope("bounded");
+                          }
+                        }}
+                        type="checkbox"
+                      />
+                      I understand that an all-topic search can receive every broker topic this account is authorised to receive.
+                    </label>
+                    <label className="confirm-row">
+                      <input
+                        checked={udmiTopicDiscoveryScope === "bounded"}
+                        name="udmi-topic-discovery-scope"
+                        onChange={() => {
+                          setUdmiTopicDiscoveryScope("bounded");
+                          setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                        }}
+                        type="radio"
+                        value="bounded"
+                      />
+                      Use the register&apos;s bounded topic scope.
+                    </label>
+                    <label className="confirm-row">
+                      <input
+                        checked={udmiTopicDiscoveryScope === "all"}
+                        disabled={!udmiTopicDiscoveryAllScopeConfirmed}
+                        name="udmi-topic-discovery-scope"
+                        onChange={() => setUdmiTopicDiscoveryScope("all")}
+                        type="radio"
+                        value="all"
+                      />
+                      Search all authorised broker topics (#).
+                    </label>
+                    {!udmiTopicDiscoveryAllScopeConfirmed ? (
+                      <p className="section-copy">
+                        Acknowledge the broader scope above to enable the all-topic search.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                </fieldset>
+              ) : (
+                <p className="section-copy">
+                  Topic discovery is available for live captures that validate against the imported MQTT register.
+                </p>
+              )}
             </>
           )}
 
@@ -4216,6 +4332,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
           {displayedValidationSummary ? (
             <UdmiSummaryPanel
+              assetTopicDiscovery={displayedAssetTopicDiscovery}
               filtered={summaryFiltersActive}
               lastRunAt={validationRunQuery.data?.updated_at}
               provisional={!activeRunTerminal}
@@ -5085,6 +5202,149 @@ function readValidationSummary(
   return valid ? (candidate as unknown as UdmiValidationSummaryV1) : null;
 }
 
+const ASSET_TOPIC_DISCOVERY_STATUS_LABELS: Record<UdmiAssetTopicDiscoveryStatus, string> = {
+  expected_topic_observed: "Expected topic observed",
+  alternate_topic_observed: "Alternate topic observed",
+  no_matching_asset_id_topic_observed: "No matching asset-ID topic observed",
+  capture_incomplete: "Capture incomplete",
+  ambiguous_asset_id: "Ambiguous asset ID",
+  missing_asset_id: "Asset ID missing from the register row",
+  scope_unavailable: "Discovery scope unavailable",
+  scope_configuration_error: "Scope configuration error",
+};
+
+function isAssetTopicDiscoveryStatus(value: unknown): value is UdmiAssetTopicDiscoveryStatus {
+  return (
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(ASSET_TOPIC_DISCOVERY_STATUS_LABELS, value)
+  );
+}
+
+function readAssetTopicObservation(value: unknown): UdmiAssetTopicObservation | null {
+  if (
+    !isRecord(value) ||
+    typeof value.topic !== "string" ||
+    typeof value.message_count !== "number" ||
+    !Number.isFinite(value.message_count) ||
+    value.message_count < 0 ||
+    typeof value.last_seen !== "string"
+  ) {
+    return null;
+  }
+  return {
+    last_seen: value.last_seen,
+    message_count: value.message_count,
+    topic: value.topic,
+  };
+}
+
+function readAssetTopicDiscoveryAssetResult(
+  value: unknown,
+): UdmiAssetTopicDiscoveryAssetResult | null {
+  if (
+    !isRecord(value) ||
+    typeof value.asset_id !== "string" ||
+    typeof value.system !== "string" ||
+    typeof value.expected_topic_root !== "string" ||
+    !Array.isArray(value.expected_topics) ||
+    !value.expected_topics.every((topic) => typeof topic === "string") ||
+    !Array.isArray(value.observed_expected_topics) ||
+    !Array.isArray(value.observed_alternate_topics) ||
+    typeof value.matched_message_count !== "number" ||
+    !Number.isFinite(value.matched_message_count) ||
+    value.matched_message_count < 0 ||
+    typeof value.topic_limit_reached !== "boolean" ||
+    !isAssetTopicDiscoveryStatus(value.status)
+  ) {
+    return null;
+  }
+  const expected = value.observed_expected_topics.map(readAssetTopicObservation);
+  const alternate = value.observed_alternate_topics.map(readAssetTopicObservation);
+  if (expected.some((topic) => topic === null) || alternate.some((topic) => topic === null)) {
+    return null;
+  }
+  return {
+    asset_id: value.asset_id,
+    expected_topic_root: value.expected_topic_root,
+    expected_topics: value.expected_topics,
+    matched_message_count: value.matched_message_count,
+    observed_alternate_topics: alternate as UdmiAssetTopicObservation[],
+    observed_expected_topics: expected as UdmiAssetTopicObservation[],
+    status: value.status,
+    system: value.system,
+    topic_limit_reached: value.topic_limit_reached,
+  };
+}
+
+function readAssetTopicDiscovery(
+  resultSummary: Record<string, unknown> | undefined,
+): UdmiAssetTopicDiscovery | null {
+  const candidate = resultSummary?.asset_topic_discovery;
+  if (
+    !isRecord(candidate) ||
+    candidate.enabled !== true ||
+    (candidate.scope !== null && typeof candidate.scope !== "string") ||
+    (candidate.scope_source !== "register_common_ancestor" &&
+      candidate.scope_source !== "all" &&
+      candidate.scope_source !== "invalid" &&
+      candidate.scope_source !== "unavailable" &&
+      candidate.scope_source !== "disabled") ||
+    (candidate.scope_error !== null && typeof candidate.scope_error !== "string") ||
+    typeof candidate.topic_limit_per_asset !== "number" ||
+    !Number.isFinite(candidate.topic_limit_per_asset) ||
+    candidate.topic_limit_per_asset < 0 ||
+    typeof candidate.capture_complete !== "boolean" ||
+    typeof candidate.capture_status !== "string" ||
+    !isRecord(candidate.status_counts) ||
+    !Array.isArray(candidate.asset_results)
+  ) {
+    return null;
+  }
+  if (
+    !Object.entries(candidate.status_counts).every(
+      ([status, count]) =>
+        isAssetTopicDiscoveryStatus(status) &&
+        typeof count === "number" &&
+        Number.isFinite(count) &&
+        count >= 0,
+    )
+  ) {
+    return null;
+  }
+  const assetResults = candidate.asset_results.map(readAssetTopicDiscoveryAssetResult);
+  if (assetResults.some((asset) => asset === null)) {
+    return null;
+  }
+  return {
+    asset_results: assetResults as UdmiAssetTopicDiscoveryAssetResult[],
+    capture_complete: candidate.capture_complete,
+    capture_status: candidate.capture_status,
+    enabled: true,
+    scope: candidate.scope,
+    scope_error: candidate.scope_error,
+    scope_source: candidate.scope_source,
+    status_counts: candidate.status_counts as Partial<
+      Record<UdmiAssetTopicDiscoveryStatus, number>
+    >,
+    topic_limit_per_asset: candidate.topic_limit_per_asset,
+  };
+}
+
+function filterAssetTopicDiscovery(
+  discovery: UdmiAssetTopicDiscovery | null,
+  visibleAssets: readonly SummaryAssetResult[],
+  filtersActive: boolean,
+): UdmiAssetTopicDiscovery | null {
+  if (!discovery || !filtersActive) {
+    return discovery;
+  }
+  const visibleAssetIds = new Set(visibleAssets.map((asset) => asset.asset_id));
+  return {
+    ...discovery,
+    asset_results: discovery.asset_results.filter((asset) => visibleAssetIds.has(asset.asset_id)),
+  };
+}
+
 function buildValidationSummaryDisplay(
   summary: UdmiValidationSummaryV1 | null,
   retiredUnexpectedIssueIds: ReadonlySet<string>,
@@ -5614,12 +5874,172 @@ function PayloadMetricGroup({ summary }: { summary: UdmiSummaryDisplay }) {
   );
 }
 
+function assetTopicDiscoveryStatusLabel(status: UdmiAssetTopicDiscoveryStatus): string {
+  return ASSET_TOPIC_DISCOVERY_STATUS_LABELS[status];
+}
+
+function assetTopicDiscoveryScopeSourceLabel(
+  source: UdmiAssetTopicDiscovery["scope_source"],
+): string {
+  switch (source) {
+    case "register_common_ancestor":
+      return "Register common ancestor";
+    case "all":
+      return "Approved all-topic scope";
+    case "invalid":
+      return "Invalid";
+    case "unavailable":
+      return "Bounded scope unavailable";
+    case "disabled":
+      return "Disabled";
+  }
+}
+
+function assetTopicDiscoveryCaptureStatusLabel(status: string): string {
+  if (status === "completed") return "Completed";
+  if (status === "cancelled") return "Cancelled";
+  if (status === "primary_topic_limit_reached") return "Primary topic limit reached";
+  return status.replace(/_/g, " ");
+}
+
+function formatAssetTopicDiscoveryStatusCounts(
+  statusCounts: UdmiAssetTopicDiscovery["status_counts"],
+): string {
+  const counts = Object.entries(statusCounts)
+    .filter(
+      ([status, count]) =>
+        isAssetTopicDiscoveryStatus(status) && typeof count === "number" && count > 0,
+    )
+    .map(
+      ([status, count]) =>
+        `${formatMetricCount(count)} ${assetTopicDiscoveryStatusLabel(
+          status as UdmiAssetTopicDiscoveryStatus,
+        )}`,
+    );
+  return counts.length > 0 ? counts.join("; ") : "No asset status counts reported.";
+}
+
+function formatAssetTopicObservations(observations: readonly UdmiAssetTopicObservation[]): string {
+  if (observations.length === 0) {
+    return "None";
+  }
+  return observations
+    .map((observation) => {
+      const count = `${formatMetricCount(observation.message_count)} message${
+        observation.message_count === 1 ? "" : "s"
+      }`;
+      const lastSeen = observation.last_seen
+        ? `; last seen ${formatAbsoluteTime(observation.last_seen)}`
+        : "";
+      return `${observation.topic} (${count}${lastSeen})`;
+    })
+    .join("; ");
+}
+
+function AssetTopicDiscoveryPanel({
+  discovery,
+  filtered,
+}: {
+  discovery: UdmiAssetTopicDiscovery;
+  filtered: boolean;
+}) {
+  return (
+    <section
+      className="udmi-system-summary udmi-asset-topic-discovery"
+      aria-labelledby="udmi-asset-topic-discovery-heading"
+    >
+      <div>
+        <h4 id="udmi-asset-topic-discovery-heading">Asset topic discovery</h4>
+        <p>
+          Asset IDs are matched against case-sensitive MQTT topic segments within the approved
+          scope. Payload content is not inspected.
+          {filtered ? " Rows reflect the active result filters." : ""}
+        </p>
+      </div>
+      <dl className="udmi-summary-run-meta udmi-topic-discovery-meta">
+        <div>
+          <dt>Discovery scope</dt>
+          <dd>{discovery.scope ?? "Not available"}</dd>
+        </div>
+        <div>
+          <dt>Scope source</dt>
+          <dd>{assetTopicDiscoveryScopeSourceLabel(discovery.scope_source)}</dd>
+        </div>
+        <div>
+          <dt>Capture status</dt>
+          <dd>{assetTopicDiscoveryCaptureStatusLabel(discovery.capture_status)}</dd>
+        </div>
+        <div>
+          <dt>Topic limit per asset</dt>
+          <dd>{formatMetricCount(discovery.topic_limit_per_asset)}</dd>
+        </div>
+      </dl>
+      <p className="section-copy">
+        Status totals: {formatAssetTopicDiscoveryStatusCounts(discovery.status_counts)}
+      </p>
+      {!discovery.capture_complete ? (
+        <p className="section-copy">
+          This capture is incomplete. Topic matches only cover messages retained before it ended.
+        </p>
+      ) : null}
+      {discovery.scope_error ? (
+        <p className="section-copy">Scope configuration: {discovery.scope_error.replace(/_/g, " ")}.</p>
+      ) : null}
+      {discovery.asset_results.length > 0 ? (
+        <div className="data-table-wrap udmi-topic-discovery-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Asset</th>
+                <th>System</th>
+                <th>Discovery status</th>
+                <th>Expected topic root</th>
+                <th>Expected topics observed</th>
+                <th>Alternate topics observed</th>
+                <th>Matched messages</th>
+              </tr>
+            </thead>
+            <tbody>
+              {discovery.asset_results.map((asset) => (
+                <tr key={asset.asset_id}>
+                  <td>{asset.asset_id}</td>
+                  <td>{asset.system || "Unspecified"}</td>
+                  <td>
+                    <strong>{assetTopicDiscoveryStatusLabel(asset.status)}</strong>
+                    {asset.topic_limit_reached ? (
+                      <span>Topic limit reached for this asset.</span>
+                    ) : null}
+                  </td>
+                  <td>
+                    {asset.expected_topic_root || "Not recorded"}
+                    <span>
+                      {formatMetricCount(asset.expected_topics.length)} expected topic
+                      {asset.expected_topics.length === 1 ? "" : "s"}
+                    </span>
+                  </td>
+                  <td>{formatAssetTopicObservations(asset.observed_expected_topics)}</td>
+                  <td>{formatAssetTopicObservations(asset.observed_alternate_topics)}</td>
+                  <td>{formatMetricCount(asset.matched_message_count)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="section-copy">No asset-topic discovery rows match the current result filters.</p>
+      )}
+    </section>
+  );
+}
+
 function UdmiSummaryPanel({
+  assetTopicDiscovery,
   filtered,
   lastRunAt,
   provisional,
   summary,
 }: {
+  assetTopicDiscovery: UdmiAssetTopicDiscovery | null;
   filtered: boolean;
   lastRunAt: string | undefined;
   provisional: boolean;
@@ -5741,6 +6161,10 @@ function UdmiSummaryPanel({
             </table>
           </div>
         </section>
+      ) : null}
+
+      {assetTopicDiscovery ? (
+        <AssetTopicDiscoveryPanel discovery={assetTopicDiscovery} filtered={filtered} />
       ) : null}
 
       <p className="udmi-metric-basis">
@@ -5968,6 +6392,9 @@ function buildUdmiValidationParameters(input: {
   pointsetTopic: string;
   statePayload: string;
   stateTopic: string;
+  topicDiscoveryAllScopeConfirmed: boolean;
+  topicDiscoveryEnabled: boolean;
+  topicDiscoveryScope: "bounded" | "all";
   useLiveBroker: boolean;
   useRegister: boolean;
 }): Record<string, unknown> {
@@ -5986,6 +6413,16 @@ function buildUdmiValidationParameters(input: {
     );
   }
   const captureSeconds = rawSeconds === "" ? 0 : parsedSeconds;
+  const topicDiscoveryParameters: Record<string, unknown> = {};
+  if (input.useLiveBroker && input.useRegister && input.topicDiscoveryEnabled) {
+    if (input.topicDiscoveryScope === "all" && !input.topicDiscoveryAllScopeConfirmed) {
+      throw new Error("Confirm the broader all-topic MQTT scope before starting topic discovery.");
+    }
+    topicDiscoveryParameters.topic_discovery_enabled = true;
+    topicDiscoveryParameters.topic_discovery_scope = input.topicDiscoveryScope;
+    topicDiscoveryParameters.topic_discovery_all_scope_confirmed =
+      input.topicDiscoveryScope === "all" && input.topicDiscoveryAllScopeConfirmed;
+  }
   if (input.useRegister) {
     // Register-driven run: send no pasted schedule/payloads/topics so the
     // backend builds one expected asset per imported mqtt_register row (its
@@ -5994,6 +6431,7 @@ function buildUdmiValidationParameters(input: {
     // silently validating the packaged sample fixture.
     return {
       capture_seconds: captureSeconds,
+      ...topicDiscoveryParameters,
       use_live_broker: input.useLiveBroker,
       use_register: true,
     };
@@ -6007,6 +6445,7 @@ function buildUdmiValidationParameters(input: {
     pointset_topic: input.pointsetTopic,
     state_payload: parseJsonObject(input.statePayload, "State payload JSON"),
     state_topic: input.stateTopic,
+    ...topicDiscoveryParameters,
     use_live_broker: input.useLiveBroker,
   };
 }

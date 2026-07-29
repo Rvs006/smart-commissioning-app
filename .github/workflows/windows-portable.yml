@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.30
+        default: v0.1.31
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -21,6 +21,7 @@ on:
       - "frontend/**"
       - "scripts/**"
       - "docs/migration-rollback-v0.1.30.md"
+      - "docs/migration-rollback-v0.1.31.md"
       - ".github/workflows/windows-portable.yml"
   push:
     branches: [main]
@@ -32,6 +33,7 @@ on:
       - "frontend/**"
       - "scripts/**"
       - "docs/migration-rollback-v0.1.30.md"
+      - "docs/migration-rollback-v0.1.31.md"
       - ".github/workflows/windows-portable.yml"
 
 permissions:
@@ -42,7 +44,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.30' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.31' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -67,8 +69,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.30') {
-            throw "This workflow is pinned to v0.1.30, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.31') {
+            throw "This workflow is pinned to v0.1.31, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -149,7 +151,7 @@ jobs:
               Set-Content -LiteralPath $npmSbom -Encoding utf8
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.30.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.31.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
 
       - name: Portable acceptance path with spaces, heartbeat, Stop, report, and logs
@@ -273,7 +275,7 @@ jobs:
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/validate_v0130_release_evidence.py `
+          python scripts/validate_v0131_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `

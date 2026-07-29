@@ -132,7 +132,12 @@ class ReportsV0125RegressionTests(ApiTestCase):
         super().tearDownClass()
         cls._patcher.stop()
 
-    def _seed_source(self, summary: dict[str, object]) -> str:
+    def _seed_source(
+        self,
+        summary: dict[str, object],
+        *,
+        asset_topic_discovery: dict[str, object] | None = None,
+    ) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
         from lifecycle_helpers import finish_run
@@ -152,11 +157,10 @@ class ReportsV0125RegressionTests(ApiTestCase):
             ),
             expected_job_type="udmi_validation",
         )
-        finish_run(
-            service,
-            run.run_id,
-            summary={"validation_summary_v1": summary},
-        )
+        result_summary: dict[str, object] = {"validation_summary_v1": summary}
+        if asset_topic_discovery is not None:
+            result_summary["asset_topic_discovery"] = asset_topic_discovery
+        finish_run(service, run.run_id, summary=result_summary)
         return run.run_id
 
     def _create_report(
@@ -301,6 +305,62 @@ class ReportsV0125RegressionTests(ApiTestCase):
         self.assertEqual([row["asset_id"] for row in schedule["rows"]], selected_ids)
         self.assertNotIn("B-1", {row["asset_id"] for row in schedule["rows"]})
         self.assertNotIn("D-1", {row["asset_id"] for row in schedule["rows"]})
+
+    def test_asset_topic_discovery_is_retained_in_zip_and_combined_export(self) -> None:
+        ledger = {
+            "enabled": True,
+            "scope": "demo-site/#",
+            "capture_complete": True,
+            "asset_results": [
+                {
+                    "asset_id": "A-1",
+                    "status": "alternate_topic_observed",
+                    "observed_alternate_topics": [
+                        {
+                            "topic": "demo-site/alternate/A-1/state",
+                            "message_count": 1,
+                        }
+                    ],
+                }
+            ],
+        }
+        source_id = self._seed_source(
+            _summary(["A-1"]),
+            asset_topic_discovery=ledger,
+        )
+        report = self._create_report(source_run_ids=[source_id])
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            self.assertIn("asset_topic_discovery.json", archive.namelist())
+            discovery = json.loads(archive.read("asset_topic_discovery.json"))
+        expected = {
+            "source_runs": [
+                {
+                    "source_run_id": source_id,
+                    "asset_topic_discovery": ledger,
+                }
+            ]
+        }
+        self.assertEqual(discovery, expected)
+
+        exported = self.client.post(
+            "/api/v1/reports/export",
+            json={"report_ids": [report["report_id"]]},
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
+        with zipfile.ZipFile(io.BytesIO(exported.content)) as outer_archive:
+            with zipfile.ZipFile(io.BytesIO(outer_archive.read(report["file_name"]))) as report_archive:
+                self.assertEqual(
+                    json.loads(report_archive.read("asset_topic_discovery.json")),
+                    expected,
+                )
+
+    def test_asset_topic_discovery_member_is_omitted_without_a_source_ledger(self) -> None:
+        source_id = self._seed_source(_summary(["A-1"]))
+        report = self._create_report(source_run_ids=[source_id])
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            self.assertNotIn("asset_topic_discovery.json", archive.namelist())
 
     def test_explicit_unexpected_rows_override_a_stale_zero_metric(self) -> None:
         devices = [

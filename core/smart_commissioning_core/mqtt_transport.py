@@ -593,8 +593,10 @@ def subscribe_and_capture(
     qos: int = 0,
     retain_latest: bool = False,
     on_message: Callable[[MqttMessage], None] | None = None,
+    on_observed_message: Callable[[MqttMessage], None] | None = None,
     primary_topics: list[str] | None = None,
     secondary_max_messages: int | None = None,
+    secondary_topic_filters: list[str] | None = None,
 ) -> list[MqttMessage]:
     """Subscribe to ``topics`` and collect messages up to ``max_messages``.
 
@@ -614,10 +616,16 @@ def subscribe_and_capture(
     captures (no predicate, ``retain_latest=False``) retain every message up to
     the ordinary cap.
 
-    ``on_message`` (optional) is called with EVERY accepted message BEFORE
-    dedup, including a message that merely replaces an earlier one on the same
-    topic. It lets a caller keep an honest per-topic total that the deduped
+    ``on_message`` (optional) is called with EVERY retained/accepted message
+    BEFORE dedup, including a message that merely replaces an earlier one on the
+    same topic. It lets a caller keep an honest per-topic total that the deduped
     return list can no longer show under retention.
+
+    ``on_observed_message`` is a narrower diagnostic hook: it receives every
+    broker delivery before an observational secondary-topic budget can discard a
+    new topic. Callers must keep this work small and memory-bounded. It
+    is deliberately separate from ``on_message`` so existing callers do not
+    suddenly retain or process an unbounded observational topic stream.
 
     ``primary_topics`` gives one class of retained topics a protected budget:
     ``max_messages`` then applies only to distinct concrete topics matching
@@ -626,14 +634,44 @@ def subscribe_and_capture(
     consume a primary slot. This is used when an observational wildcard shares
     a capture with expected validation topics. Passing ``None`` preserves the
     historical single-budget behavior exactly.
+
+    ``secondary_topic_filters`` optionally narrows the secondary evidence lane
+    when ``primary_topics`` is in use. A delivery outside both lanes still
+    reaches ``on_observed_message`` but is discarded before it can call
+    ``on_message`` or consume the secondary budget. This lets a diagnostic
+    wildcard observe broad traffic without turning that traffic into ordinary
+    validation evidence.
     """
     if primary_topics is not None and not primary_topics:
         raise ValueError("primary_topics must contain at least one topic filter")
+    if secondary_topic_filters is not None and primary_topics is None:
+        raise ValueError("secondary_topic_filters requires primary_topics")
     messages: list[MqttMessage] = []
     topic_positions: dict[str, int] = {}
     expected_topics = set(topics)
     partitioned_budget = primary_topics is not None
     primary_filters = tuple(primary_topics or ())
+    secondary_filters = tuple(secondary_topic_filters or ())
+    primary_exact_topics = frozenset(
+        topic_filter
+        for topic_filter in primary_filters
+        if "+" not in topic_filter and "#" not in topic_filter
+    )
+    primary_wildcard_filters = tuple(
+        topic_filter
+        for topic_filter in primary_filters
+        if "+" in topic_filter or "#" in topic_filter
+    )
+    secondary_exact_topics = frozenset(
+        topic_filter
+        for topic_filter in secondary_filters
+        if "+" not in topic_filter and "#" not in topic_filter
+    )
+    secondary_wildcard_filters = tuple(
+        topic_filter
+        for topic_filter in secondary_filters
+        if "+" in topic_filter or "#" in topic_filter
+    )
     secondary_limit = max(
         0,
         max_messages if secondary_max_messages is None else secondary_max_messages,
@@ -679,10 +717,33 @@ def subscribe_and_capture(
             except (OSError, MqttTransportError) as error:
                 raise MqttCaptureInterrupted(messages, error) from error
             if message is not None:
-                is_primary = not partitioned_budget or any(
-                    _topic_matches_filter(message.topic, topic_filter)
-                    for topic_filter in primary_filters
+                if on_observed_message is not None:
+                    # A diagnostic consumer may need to recognise a registered
+                    # asset ID in a topic which is not retained because the
+                    # observational secondary budget is full. Keep the legacy
+                    # on_message contract below unchanged.
+                    on_observed_message(message)
+                is_primary = not partitioned_budget or (
+                    message.topic in primary_exact_topics
+                    or any(
+                        _topic_matches_filter(message.topic, topic_filter)
+                        for topic_filter in primary_wildcard_filters
+                    )
                 )
+                if (
+                    partitioned_budget
+                    and not is_primary
+                    and secondary_topic_filters is not None
+                    and message.topic not in secondary_exact_topics
+                    and not any(
+                        _topic_matches_filter(message.topic, topic_filter)
+                        for topic_filter in secondary_wildcard_filters
+                    )
+                ):
+                    # A broad diagnostic subscription saw this delivery, but
+                    # the caller did not designate it ordinary secondary
+                    # evidence. It must not consume the bounded normal lane.
+                    continue
                 existing_position = topic_positions.get(message.topic)
                 if (
                     partitioned_budget

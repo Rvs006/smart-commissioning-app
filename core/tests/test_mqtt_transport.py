@@ -611,6 +611,75 @@ class SubscribeAndCaptureCompletionTests(unittest.TestCase):
 
         self.assertEqual(messages, [unexpected[0], unexpected[1], first, second])
 
+    def test_observation_callback_sees_secondary_topic_after_its_budget_is_full(self) -> None:
+        """Diagnostic accounting can see a dropped secondary topic without retaining it."""
+
+        unexpected_first = MqttMessage(topic="site/noisy/first", payload=b"{}")
+        unexpected_second = MqttMessage(topic="site/noisy/second", payload=b"{}")
+        primary = MqttMessage(topic="site/a1/state", payload=b"{}")
+        fake = _FakeCaptureClient([unexpected_first, unexpected_second, primary])
+        observed: list[str] = []
+        retained: list[str] = []
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            messages = mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=["site/#"],
+                timeout_seconds=None,
+                max_messages=1,
+                stop_when=lambda captured: primary in captured,
+                primary_topics=[primary.topic],
+                secondary_max_messages=1,
+                on_message=lambda message: retained.append(message.topic),
+                on_observed_message=lambda message: observed.append(message.topic),
+            )
+
+        self.assertEqual(messages, [unexpected_first, primary])
+        self.assertEqual(retained, [unexpected_first.topic, primary.topic])
+        self.assertEqual(
+            observed,
+            [unexpected_first.topic, unexpected_second.topic, primary.topic],
+        )
+
+    def test_secondary_filter_keeps_diagnostic_only_topics_out_of_normal_lane(self) -> None:
+        """A broad diagnostic wildcard cannot exhaust normal observation capacity."""
+
+        diagnostic_only = [
+            MqttMessage(topic="other/site/A1/state", payload=b"{}"),
+            MqttMessage(topic="another/site/A1/state", payload=b"{}"),
+        ]
+        bounded_observation = MqttMessage(topic="site/wrong/A1/state", payload=b"{}")
+        primary = MqttMessage(topic="site/a1/state", payload=b"{}")
+        fake = _FakeCaptureClient([*diagnostic_only, bounded_observation, primary])
+        observed: list[str] = []
+        retained: list[str] = []
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            messages = mqtt_transport.subscribe_and_capture(
+                _settings(),
+                topics=["site/#", "#"],
+                timeout_seconds=None,
+                max_messages=1,
+                stop_when=lambda captured: primary in captured,
+                primary_topics=[primary.topic],
+                secondary_max_messages=1,
+                secondary_topic_filters=["site/#"],
+                on_message=lambda message: retained.append(message.topic),
+                on_observed_message=lambda message: observed.append(message.topic),
+            )
+
+        self.assertEqual(messages, [bounded_observation, primary])
+        self.assertEqual(retained, [bounded_observation.topic, primary.topic])
+        self.assertEqual(
+            observed,
+            [
+                diagnostic_only[0].topic,
+                diagnostic_only[1].topic,
+                bounded_observation.topic,
+                primary.topic,
+            ],
+        )
+
 
 class RetainLatestTests(unittest.TestCase):
     """retain_latest decouples the per-topic retention (which today only the

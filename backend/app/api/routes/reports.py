@@ -636,6 +636,27 @@ def _source_runs(run: object) -> list[object]:
     return sources
 
 
+def _asset_topic_discovery_export(run: object) -> dict[str, object] | None:
+    """Return retained per-run asset-topic ledgers for a ZIP evidence pack."""
+
+    source_runs: list[dict[str, object]] = []
+    for source in _source_runs(run):
+        if getattr(source, "job_type", None) != "udmi_validation":
+            continue
+        summary = getattr(source, "result_summary", None)
+        summary = summary if isinstance(summary, dict) else {}
+        ledger = summary.get("asset_topic_discovery")
+        if not isinstance(ledger, dict):
+            continue
+        source_runs.append(
+            {
+                "source_run_id": str(getattr(source, "run_id", "")),
+                "asset_topic_discovery": dict(ledger),
+            }
+        )
+    return {"source_runs": source_runs} if source_runs else None
+
+
 def _source_run_findings(run: object) -> list[dict[str, str]]:
     """Issues from the report's source runs, flattened + deterministically sorted.
 
@@ -2347,6 +2368,12 @@ def _build_zip_report(run: object) -> bytes:
             else _source_run_findings(run)
         )
         archive.writestr("findings.json", json.dumps(findings, indent=2))
+        asset_topic_discovery = _asset_topic_discovery_export(run)
+        if asset_topic_discovery is not None:
+            archive.writestr(
+                "asset_topic_discovery.json",
+                json.dumps(asset_topic_discovery, indent=2),
+            )
         # Parity with the document formats: the validation sections ship as
         # their own JSON members when the source runs include validation runs.
         if udmi is not None:
