@@ -102,6 +102,18 @@ class UdmiValidationResult:
     source_fixture: str
 
 
+@dataclass
+class _AssetTopicDiscoveryState:
+    """Bounded topic-only evidence for one uniquely identified register asset."""
+
+    expected_topics: dict[str, dict[str, object]]
+    alternate_topics: dict[str, dict[str, object]]
+    expected_seen: bool = False
+    alternate_seen: bool = False
+    matched_message_count: int = 0
+    topic_limit_reached: bool = False
+
+
 LiveCapture = Callable[..., list[MqttMessage]]
 CancelCheck = Callable[[], bool]
 ProgressCallback = Callable[[Callable[[], UdmiValidationResult]], None]
@@ -113,6 +125,11 @@ ProgressCallback = Callable[[Callable[[], UdmiValidationResult]], None]
 # capture before the quiet topics report.
 DEFAULT_CAPTURE_SECONDS = 5.0
 DEFAULT_MAX_MESSAGES = 500
+# Opt-in forensic topic tracing keeps no payload bodies and holds at most this
+# many distinct topic records for one registered asset. The cap is deliberately
+# small: a broad MQTT subscription may carry unrelated high-volume traffic.
+DEFAULT_ASSET_TOPIC_DISCOVERY_LIMIT = 20
+MAX_ASSET_TOPIC_DISCOVERY_LIMIT = 100
 
 
 def validate_udmi_full_report(
@@ -216,6 +233,12 @@ def validate_udmi_full_report(
         # counts that may still change.
         "provisional": False,
     }
+    asset_topic_discovery = parameters.get("asset_topic_discovery")
+    if isinstance(asset_topic_discovery, dict):
+        # Optional diagnostic evidence. It is deliberately separate from the
+        # validation metrics: seeing an asset ID on another MQTT topic is useful
+        # forensic evidence, not proof that its required UDMI payload arrived.
+        result_summary["asset_topic_discovery"] = asset_topic_discovery
     result_summary["validation_summary_v1"] = build_validation_summary_v1(
         parameters,
         issues,
@@ -1888,11 +1911,75 @@ def _capture_live_payloads_per_asset(
         )
     ]
     registered_asset_routes = _registered_asset_routes(entries)
+    diagnostic_enabled = parse_bool(parameters.get("topic_discovery_enabled"))
+    diagnostic_scope: str | None = None
+    diagnostic_scope_source = "disabled"
+    diagnostic_scope_error: str | None = None
+    diagnostic_topic_limit = max(
+        1,
+        min(
+            parse_int(
+                parameters.get("topic_discovery_max_topics_per_asset"),
+                default=DEFAULT_ASSET_TOPIC_DISCOVERY_LIMIT,
+            ),
+            MAX_ASSET_TOPIC_DISCOVERY_LIMIT,
+        ),
+    )
+    if diagnostic_enabled:
+        (
+            diagnostic_scope,
+            diagnostic_scope_source,
+            diagnostic_scope_error,
+        ) = _asset_topic_discovery_scope(parameters, measurement_scope)
+    diagnostic_states = (
+        [_AssetTopicDiscoveryState({}, {}) for _ in entries]
+        if diagnostic_enabled
+        else []
+    )
     parameters["unexpected_devices"] = []
     parameters["unexpected_devices_measured"] = False
     parameters["unexpected_devices_measurement_scope"] = measurement_scope
     parameters["wrong_topic_assets"] = []
     parameters["wrong_topic_asset_count"] = 0
+    if diagnostic_enabled and diagnostic_scope_error:
+        # Never turn a missing confirmation into a broader broker subscription.
+        # The API rejects this before a run is created; this retained core guard
+        # keeps injected/direct callers equally fail-safe.
+        status_detail = f"asset_topic_discovery_{diagnostic_scope_error}"
+        parameters["asset_topic_discovery"] = _build_asset_topic_discovery(
+            entries,
+            per_entry_validation_topics,
+            expected_publisher_roots,
+            registered_asset_routes,
+            diagnostic_states,
+            scope=None,
+            scope_source=diagnostic_scope_source,
+            scope_error=diagnostic_scope_error,
+            topic_limit=diagnostic_topic_limit,
+            capture_complete=False,
+            capture_status=status_detail,
+        )
+        return {
+            "attempted": False,
+            "status_detail": status_detail,
+            "captured_topics": [],
+            "issue": _issue(
+                [],
+                asset_id=None,
+                issue_type="payload_error",
+                severity="high",
+                description=(
+                    "Asset-topic discovery requested all MQTT topics without the required "
+                    "all-scope confirmation."
+                    if diagnostic_scope_error == "all_scope_confirmation_required"
+                    else "Asset-topic discovery scope must be 'bounded' or 'all'."
+                ),
+                suggested_action=(
+                    "Use the bounded register scope, or explicitly confirm the all-topic "
+                    "capture before retrying."
+                ),
+            ),
+        }
     topics: list[str] = []
     for entry_topics in per_entry_topics:
         for topic in entry_topics:
@@ -1905,11 +1992,26 @@ def _capture_live_payloads_per_asset(
             for topic in entry_topics
         )
     )
-    if measurement_scope and measurement_scope not in topics:
+    # Expected validation topics remain in the protected primary transport
+    # lane. The old bounded measurement scope is the only normal secondary
+    # lane. When an explicitly confirmed diagnostic ``#`` subscription is
+    # added below, a delivery in neither lane is diagnostic-only metadata,
+    # never ordinary validation evidence.
+    normal_secondary_topic_filters = [measurement_scope] if measurement_scope else []
+    if (
+        measurement_scope
+        and measurement_scope not in topics
+        and diagnostic_scope != "#"
+    ):
         # The measurement subscription is observational only. It never enters
         # ``groups`` below, so an absent unexpected publisher cannot block an
         # expected-device capture from completing.
         topics.append(measurement_scope)
+    if diagnostic_enabled and diagnostic_scope and diagnostic_scope not in topics:
+        # ``diagnostic_scope`` is either the existing bounded measurement scope
+        # or an explicitly confirmed ``#`` override. It never changes the
+        # expected validation groups below.
+        topics.append(diagnostic_scope)
     if not topics:
         return {
             "attempted": True,
@@ -1977,6 +2079,44 @@ def _capture_live_payloads_per_asset(
     def matches_validation_topic(message: MqttMessage) -> bool:
         return topic_matches_validation_filter(message.topic)
 
+    def matches_normal_capture_scope(message: MqttMessage) -> bool:
+        """Whether a delivery belongs to the normal validation subscription.
+
+        Bounded discovery reuses the normal measurement scope, so it deliberately
+        keeps the historical behavior. Only a confirmed all-topic diagnostic
+        adds ``#``; traffic outside the expected validation filters and the
+        original bounded measurement scope is diagnostic-only in that mode.
+        """
+
+        if diagnostic_scope != "#":
+            return True
+        return matches_validation_topic(message) or bool(
+            measurement_scope
+            and _topic_matches_filter(message.topic, measurement_scope)
+        )
+
+    diagnostic_callback_count = 0
+
+    def on_observed_message(message: MqttMessage) -> None:
+        """Index an exact registered asset ID without retaining its payload body."""
+
+        nonlocal diagnostic_callback_count
+        if not diagnostic_enabled or diagnostic_scope is None:
+            return
+        diagnostic_callback_count += 1
+        entry_index = _registered_asset_entry_index_from_topic(
+            message.topic,
+            registered_asset_routes,
+        )
+        if entry_index is None:
+            return
+        _record_asset_topic_discovery_message(
+            diagnostic_states[entry_index],
+            message,
+            is_expected_topic=(entry_index in matching_validation_entries(message.topic)),
+            topic_limit=diagnostic_topic_limit,
+        )
+
     def capture_cancel_check() -> bool:
         """Latch cancellation observed by the capture loop.
 
@@ -1989,6 +2129,27 @@ def _capture_live_payloads_per_asset(
         if not capture_cancelled and cancel_check is not None:
             capture_cancelled = bool(cancel_check())
         return capture_cancelled
+
+    def persist_asset_topic_discovery(
+        *,
+        capture_complete: bool,
+        capture_status: str,
+    ) -> None:
+        if not diagnostic_enabled:
+            return
+        parameters["asset_topic_discovery"] = _build_asset_topic_discovery(
+            entries,
+            per_entry_validation_topics,
+            expected_publisher_roots,
+            registered_asset_routes,
+            diagnostic_states,
+            scope=diagnostic_scope,
+            scope_source=diagnostic_scope_source,
+            scope_error=diagnostic_scope_error,
+            topic_limit=diagnostic_topic_limit,
+            capture_complete=capture_complete,
+            capture_status=capture_status,
+        )
 
     def build_progress_snapshot() -> UdmiValidationResult:
         """Build one coherent provisional view away from the socket reader."""
@@ -2041,6 +2202,12 @@ def _capture_live_payloads_per_asset(
 
     def on_message(message: MqttMessage) -> None:
         nonlocal progress_message_count
+        if not matches_normal_capture_scope(message):
+            # The transport already offered this broker delivery to the
+            # topic-only ``on_observed_message`` ledger. Do not let a message
+            # delivered solely by the diagnostic ``#`` subscription affect an
+            # in-progress validation projection.
+            return
         with progress_state_lock:
             latest_progress_messages[message.topic] = message
             matching_entries = matching_validation_entries(message.topic)
@@ -2114,6 +2281,11 @@ def _capture_live_payloads_per_asset(
             "stop_when": stop_when,
             "on_message": on_message,
         }
+        if diagnostic_enabled:
+            # This hook is invoked before observational secondary-topic retention
+            # drops a new topic. It retains only exact registered asset-ID topic
+            # metadata in its own small per-asset ledger.
+            capture_options["on_observed_message"] = on_observed_message
         if validation_topics:
             # Reserve the configured cap for the concrete expected payload
             # filters. Register wildcards and other observation-only traffic
@@ -2121,6 +2293,14 @@ def _capture_live_payloads_per_asset(
             # unrelated topics beneath an expected root can consume a slot.
             capture_options["primary_topics"] = validation_topics
             capture_options["secondary_max_messages"] = unexpected_max_messages
+            if diagnostic_scope == "#":
+                # The diagnostic wildcard is observation-only. Retain only the
+                # normal expected/measurement lanes, while the transport still
+                # invokes ``on_observed_message`` for every broker delivery.
+                # This prevents unrelated all-topic traffic consuming the
+                # secondary budget before an ordinary wrong-topic or
+                # unexpected-publisher observation arrives.
+                capture_options["secondary_topic_filters"] = normal_secondary_topic_filters
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
             **capture_options,
@@ -2131,6 +2311,10 @@ def _capture_live_payloads_per_asset(
     except (MqttTransportError, OSError, ValueError) as error:
         # Coarse status label only — raw broker error text may carry credentials.
         broker_status_detail = _broker_error_status(error)
+        persist_asset_topic_discovery(
+            capture_complete=False,
+            capture_status=broker_status_detail,
+        )
         return {
             "attempted": True,
             "status_detail": broker_status_detail,
@@ -2140,11 +2324,29 @@ def _capture_live_payloads_per_asset(
             "issue": _capture_error_issue(asset_id=None, status_detail=broker_status_detail),
         }
 
+    # Fakes and third-party transport adapters predating ``on_observed_message``
+    # may return evidence without invoking the hook. Preserve deterministic
+    # diagnostic results for those adapters without double-counting the real
+    # transport, which always invokes it before returning.
+    if diagnostic_enabled and diagnostic_callback_count == 0:
+        for message in messages:
+            on_observed_message(message)
+
+    # Third-party/fake capture adapters may not yet enforce
+    # ``secondary_topic_filters``. Preserve the same isolation at the terminal
+    # result boundary: broad diagnostic-only traffic belongs in the topic ledger
+    # and nowhere in the ordinary validation evidence path.
+    normal_messages = [
+        message for message in messages if matches_normal_capture_scope(message)
+    ]
+
     capture_observed_at = datetime.now(UTC).isoformat()
 
     with progress_state_lock:
         expected_messages = [
-            message for message in messages if matches_validation_topic(message)
+            message
+            for message in normal_messages
+            if matches_validation_topic(message)
         ]
         wrong_topic_routes = _record_wrong_topic_assets(
             parameters,
@@ -2152,19 +2354,19 @@ def _capture_live_payloads_per_asset(
             expected_publisher_roots,
             per_entry_validation_topics,
             registered_asset_routes,
-            messages,
+            normal_messages,
             topic_matches_validation_filter,
         )
         validation_messages = [
             message
-            for message in messages
+            for message in normal_messages
             if matches_validation_topic(message) or message.topic in wrong_topic_routes
         ]
         expected_topic_count = len({message.topic for message in expected_messages})
         observation_topic_count = len(
             {
                 message.topic
-                for message in messages
+                for message in normal_messages
                 if not matches_validation_topic(message)
             }
         )
@@ -2175,13 +2377,13 @@ def _capture_live_payloads_per_asset(
             entries,
             per_entry_topics,
             per_entry_validation_topics,
-            messages,
+            normal_messages,
             observed_at=capture_observed_at,
             wrong_topic_routes=wrong_topic_routes,
         )
         _measure_unexpected_publishers(
             parameters,
-            messages,
+            normal_messages,
             expected_publisher_roots,
             measurement_scope,
             registered_wrong_topic_routes=wrong_topic_routes,
@@ -2192,6 +2394,25 @@ def _capture_live_payloads_per_asset(
                 and observation_topic_count < unexpected_max_messages
             ),
         )
+
+    diagnostic_capture_complete = (
+        capture_error_status is None
+        and not capture_cancelled
+        and expected_topic_count < max_messages
+    )
+    diagnostic_capture_status = (
+        capture_error_status
+        or ("cancelled" if capture_cancelled else None)
+        or (
+            "primary_topic_limit_reached"
+            if expected_topic_count >= max_messages
+            else "completed"
+        )
+    )
+    persist_asset_topic_discovery(
+        capture_complete=diagnostic_capture_complete,
+        capture_status=diagnostic_capture_status,
+    )
 
     # Measurement-only wildcard traffic must never become a validation issue.
     # It is retained solely for the separate unexpected-device summary above.
@@ -2399,6 +2620,194 @@ def _registered_asset_routes(entries: list[dict]) -> dict[str, int]:
     }
 
 
+def _registered_asset_entry_index_from_topic(
+    topic: str,
+    registered_asset_routes: dict[str, int],
+) -> int | None:
+    """Return one exact, case-sensitive registered asset-ID segment, if safe.
+
+    This is intentionally stricter than a substring search. ``AHU-1-copy`` is
+    not ``AHU-1``; a topic naming two registered asset IDs is ambiguous; and a
+    duplicate register ID has already been removed from ``registered_asset_routes``.
+    Those cases remain unclassified instead of attaching broker traffic to the
+    wrong asset.
+    """
+
+    entry_indexes = {
+        registered_asset_routes[segment]
+        for segment in topic.strip().strip("/").split("/")
+        if segment in registered_asset_routes
+    }
+    return next(iter(entry_indexes)) if len(entry_indexes) == 1 else None
+
+
+def _asset_topic_discovery_scope(
+    parameters: dict[str, object],
+    measurement_scope: str | None,
+) -> tuple[str | None, str, str | None]:
+    """Resolve the opt-in topic-trace scope without ever widening by default.
+
+    The normal diagnostic lane observes only the existing bounded common
+    ancestor (``hv/#`` for the field register). A bare ``#`` is possible only
+    through an explicit request plus confirmation. The API rejects that request
+    early; retaining this defensive resolver keeps direct core callers fail-safe.
+    """
+
+    requested = _string(parameters.get("topic_discovery_scope")).casefold()
+    if requested in {"", "bounded"}:
+        if measurement_scope is None:
+            return None, "unavailable", None
+        return measurement_scope, "register_common_ancestor", None
+    if requested == "all":
+        if parse_bool(parameters.get("topic_discovery_all_scope_confirmed")):
+            return "#", "all", None
+        return None, "all", "all_scope_confirmation_required"
+    return None, "invalid", "invalid_scope"
+
+
+def _record_asset_topic_discovery_message(
+    state: _AssetTopicDiscoveryState,
+    message: MqttMessage,
+    *,
+    is_expected_topic: bool,
+    topic_limit: int,
+) -> None:
+    """Keep bounded, payload-free evidence for one asset-ID topic match.
+
+    Expected-topic evidence wins over alternate-topic evidence when the cap is
+    full. The status flags still record that an unretained alternate topic was
+    seen, while ``topic_limit_reached`` prevents callers from treating the
+    retained lists as a complete broker inventory.
+    """
+
+    state.matched_message_count += 1
+    if is_expected_topic:
+        state.expected_seen = True
+        bucket = state.expected_topics
+    else:
+        state.alternate_seen = True
+        bucket = state.alternate_topics
+
+    existing = bucket.get(message.topic)
+    if existing is not None:
+        existing["message_count"] = int(existing["message_count"]) + 1
+        existing["last_seen"] = message.received_at.isoformat()
+        return
+
+    retained_count = len(state.expected_topics) + len(state.alternate_topics)
+    if retained_count >= topic_limit:
+        if is_expected_topic and state.alternate_topics:
+            # Keep concrete evidence that an expected payload topic arrived;
+            # alternate discoveries can be unbounded below a broad wildcard.
+            # Dictionaries preserve insertion order, so this is the oldest
+            # retained alternate topic without adding a per-message sort to the
+            # MQTT reader path.
+            evicted = next(iter(state.alternate_topics))
+            del state.alternate_topics[evicted]
+        else:
+            state.topic_limit_reached = True
+            return
+        state.topic_limit_reached = True
+
+    bucket[message.topic] = {
+        "topic": message.topic,
+        "message_count": 1,
+        # This is the local receive clock, not an MQTT publish timestamp.
+        "last_seen": message.received_at.isoformat(),
+    }
+
+
+def _asset_topic_evidence_rows(
+    topics: dict[str, dict[str, object]],
+) -> list[dict[str, object]]:
+    return [dict(topics[topic]) for topic in sorted(topics)]
+
+
+def _build_asset_topic_discovery(
+    entries: list[dict],
+    per_entry_validation_topics: list[list[str]],
+    expected_publisher_roots: list[str | None],
+    registered_asset_routes: dict[str, int],
+    states: list[_AssetTopicDiscoveryState],
+    *,
+    scope: str | None,
+    scope_source: str,
+    scope_error: str | None,
+    topic_limit: int,
+    capture_complete: bool,
+    capture_status: str,
+) -> dict[str, object]:
+    """Build one stable, topic-only discovery ledger for the validation export."""
+
+    uniquely_routable_entries = set(registered_asset_routes.values())
+    rows: list[dict[str, object]] = []
+    for entry_index, entry in enumerate(entries):
+        expected = _dict_or_empty(entry.get("expected_schedule"))
+        asset_id = str(expected.get("asset_id") or "").strip()
+        state = states[entry_index]
+        if not asset_id:
+            status = "missing_asset_id"
+        elif entry_index not in uniquely_routable_entries:
+            status = "ambiguous_asset_id"
+        elif scope_error:
+            status = "scope_configuration_error"
+        elif scope is None:
+            status = "scope_unavailable"
+        elif state.expected_seen:
+            status = "expected_topic_observed"
+        elif state.alternate_seen:
+            status = "alternate_topic_observed"
+        elif capture_complete:
+            # This deliberately says only what this capture observed. It is not
+            # evidence that the physical device is absent or offline.
+            status = "no_matching_asset_id_topic_observed"
+        else:
+            status = "capture_incomplete"
+        rows.append(
+            {
+                "asset_id": asset_id,
+                "system": str(expected.get("system") or "").strip() or "Unspecified",
+                "expected_topic_root": str(expected_publisher_roots[entry_index] or ""),
+                "expected_topics": list(per_entry_validation_topics[entry_index]),
+                "observed_expected_topics": _asset_topic_evidence_rows(
+                    state.expected_topics
+                ),
+                "observed_alternate_topics": _asset_topic_evidence_rows(
+                    state.alternate_topics
+                ),
+                "matched_message_count": state.matched_message_count,
+                "topic_limit_reached": state.topic_limit_reached,
+                "status": status,
+            }
+        )
+
+    rows.sort(key=lambda row: (str(row["asset_id"]).casefold(), str(row["asset_id"])))
+    status_counts = {
+        status: sum(1 for row in rows if row["status"] == status)
+        for status in (
+            "expected_topic_observed",
+            "alternate_topic_observed",
+            "no_matching_asset_id_topic_observed",
+            "capture_incomplete",
+            "ambiguous_asset_id",
+            "missing_asset_id",
+            "scope_unavailable",
+            "scope_configuration_error",
+        )
+    }
+    return {
+        "enabled": True,
+        "scope": scope,
+        "scope_source": scope_source,
+        "scope_error": scope_error,
+        "topic_limit_per_asset": topic_limit,
+        "capture_complete": capture_complete,
+        "capture_status": capture_status,
+        "asset_results": rows,
+        "status_counts": status_counts,
+    }
+
+
 def _registered_wrong_topic_entry_index(
     topic: str,
     expected_roots: list[str | None],
@@ -2415,15 +2824,9 @@ def _registered_wrong_topic_entry_index(
         return None
     if validation_topic_matcher(topic):
         return None
-    segments = topic.strip().strip("/").split("/")
-    entry_indexes = {
-        registered_asset_routes[segment]
-        for segment in segments
-        if segment in registered_asset_routes
-    }
-    if len(entry_indexes) != 1:
+    entry_index = _registered_asset_entry_index_from_topic(topic, registered_asset_routes)
+    if entry_index is None:
         return None
-    entry_index = next(iter(entry_indexes))
     expected_root = expected_roots[entry_index]
     if not expected_root:
         return None

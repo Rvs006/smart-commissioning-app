@@ -256,6 +256,49 @@ export type UdmiWrongTopicAsset = {
   last_seen: string | null;
 };
 
+// Optional, opt-in ledger for diagnosing where a registered asset id appeared
+// within an approved MQTT topic scope. The ledger intentionally contains topic
+// metadata only: payload bodies are never part of this diagnostic projection.
+export type UdmiAssetTopicDiscoveryStatus =
+  | "expected_topic_observed"
+  | "alternate_topic_observed"
+  | "no_matching_asset_id_topic_observed"
+  | "capture_incomplete"
+  | "ambiguous_asset_id"
+  | "missing_asset_id"
+  | "scope_unavailable"
+  | "scope_configuration_error";
+
+export type UdmiAssetTopicObservation = {
+  topic: string;
+  message_count: number;
+  last_seen: string;
+};
+
+export type UdmiAssetTopicDiscoveryAssetResult = {
+  asset_id: string;
+  system: string;
+  expected_topic_root: string;
+  expected_topics: string[];
+  observed_expected_topics: UdmiAssetTopicObservation[];
+  observed_alternate_topics: UdmiAssetTopicObservation[];
+  matched_message_count: number;
+  topic_limit_reached: boolean;
+  status: UdmiAssetTopicDiscoveryStatus;
+};
+
+export type UdmiAssetTopicDiscovery = {
+  enabled: true;
+  scope: string | null;
+  scope_source: "register_common_ancestor" | "all" | "invalid" | "unavailable" | "disabled";
+  scope_error: string | null;
+  topic_limit_per_asset: number;
+  capture_complete: boolean;
+  capture_status: string;
+  asset_results: UdmiAssetTopicDiscoveryAssetResult[];
+  status_counts: Partial<Record<UdmiAssetTopicDiscoveryStatus, number>>;
+};
+
 export type UdmiPayloadMetrics = {
   expected: number;
   received: number;

@@ -40,7 +40,7 @@ from app.services.log_service import (
 )
 
 logger = logging.getLogger(__name__)
-APP_VERSION = "0.1.30"
+APP_VERSION = "0.1.31"
 
 settings = get_settings()
 

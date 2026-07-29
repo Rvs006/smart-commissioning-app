@@ -5,6 +5,14 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.31] - 2026-07-29
+
+### Added
+
+- Asset-topic observation evidence and a paired field reconciliation checklist
+  for registered assets found by the independent MQTT collector.
+- Versioned release, Docker, and evidence-validator contracts for v0.1.31.
+
 ## [0.1.30] - 2026-07-28
 
 ### Added

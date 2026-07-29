@@ -268,7 +268,7 @@ small set below instead of guessing from filenames.
 | Validate a running stack | [Quickstart](docs/quickstart.md) |
 | Operate or recover a deployment | [Operations runbook](docs/runbook.md) |
 | Check protocol support and live-test gaps | [Protocol conformance](docs/protocol-conformance.md) and [Phase 5 validation](docs/phase5-onsite-validation.md) |
-| Prepare the v0.1.30 field gate | [v0.1.30 field acceptance checklist](docs/v0.1.30-field-acceptance-checklist.md) |
+| Prepare the v0.1.31 field gate | [v0.1.31 field acceptance checklist](docs/v0.1.31-field-acceptance-checklist.md) |
 | Contribute code | [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) |
 
 ### Security & safety
@@ -307,18 +307,15 @@ artifact metadata, and exact report bytes through Sync v2. Per-item receipts
 advance only accepted or byte-identical items, while project/site scope failures
 remain generic and unsynchronized.
 
-The v0.1.30 candidate removes live progress work from the MQTT socket reader
-and retains the v0.1.29 scale-aware message capacity. Large-register captures
-can continue draining broker traffic while provisional reports are prepared
-and stored. It retains the corrected reporting for absent payloads and
-registered assets on wrong topics.
-It remains field-pending until an unfiltered 554-asset run and a second run
-covering the longest expected payload cadence both pass the
-[field acceptance checklist](docs/v0.1.30-field-acceptance-checklist.md).
+The v0.1.31 candidate adds asset-topic observation evidence so a registered
+asset seen by the independent collector can be reconciled against the app's
+capture and association result. It remains field-pending until an unfiltered
+scale run and a second run covering the longest expected payload cadence both
+pass the [field acceptance checklist](docs/v0.1.31-field-acceptance-checklist.md).
 
-v0.1.30 adds no database migration. Follow
-[the v0.1.30 migration and rollback guide](docs/migration-rollback-v0.1.30.md),
-then complete [the release validation record](docs/release-validation-v0.1.30.md)
+v0.1.31 adds no database migration. Follow
+[the v0.1.31 migration and rollback guide](docs/migration-rollback-v0.1.31.md),
+then complete [the release validation record](docs/release-validation-v0.1.31.md)
 against the exact merged commit. Hosted deployments should pull API, worker,
 and frontend by the immutable references in the public Docker image evidence.
 

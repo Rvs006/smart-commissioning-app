@@ -2238,6 +2238,32 @@ describe("ModulePage UDMI workbench live results", () => {
       ...udmiTerminalRun,
       result_summary: {
         ...udmiTerminalRun.result_summary,
+        asset_topic_discovery: {
+          enabled: true,
+          scope: null,
+          scope_source: "unavailable",
+          scope_error: null,
+          topic_limit_per_asset: 10,
+          capture_complete: true,
+          capture_status: "completed",
+          status_counts: { scope_unavailable: 1 },
+          asset_results: [
+            {
+              asset_id: "EM-1",
+              system: "BMS",
+              expected_topic_root: "site/registered/EM-1",
+              expected_topics: [
+                "site/registered/EM-1/metadata",
+                "site/registered/EM-1/pointset",
+              ],
+              observed_expected_topics: [],
+              observed_alternate_topics: [],
+              matched_message_count: 0,
+              topic_limit_reached: false,
+              status: "scope_unavailable",
+            },
+          ],
+        },
         validation_summary_v1: {
           schema_version: "1.1",
           asset_metrics: {
@@ -2379,6 +2405,14 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(detail).getByText("site/registered/EM-1")).toBeInTheDocument();
     expect(within(detail).getByText("site/wrong/EM-1")).toBeInTheDocument();
 
+    const discovery = within(summary)
+      .getByRole("heading", { name: "Asset topic discovery" })
+      .closest(".udmi-asset-topic-discovery") as HTMLElement;
+    expect(within(discovery).getByText("Not available")).toBeInTheDocument();
+    expect(within(discovery).getByText("Bounded scope unavailable")).toBeInTheDocument();
+    expect(within(discovery).getByText("Discovery scope unavailable")).toBeInTheDocument();
+    expect(within(discovery).getByText(/Payload content is not inspected/i)).toBeInTheDocument();
+
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
     expect(
       within(resultsTable).getByRole("columnheader", { name: "Topic status" }),
@@ -2394,6 +2428,108 @@ describe("ModulePage UDMI workbench live results", () => {
       "tr",
     ) as HTMLTableRowElement;
     expect(within(metadataRow).getByText("Expected topic")).toBeInTheDocument();
+  });
+
+  it("keeps topic discovery opt-in and requires acknowledgement before widening to all topics", async () => {
+    const postedRequest: { body: { parameters: Record<string, unknown> } | null } = { body: null };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedRequest.body = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(udmiTerminalRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    expect(screen.queryByLabelText(/Diagnose where registered asset IDs appear/i)).not.toBeInTheDocument();
+    fireEvent.click(
+      await screen.findByLabelText(/Validate against the imported MQTT register/i),
+    );
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    fireEvent.click(await screen.findByLabelText(/Diagnose where registered asset IDs appear/i));
+
+    const boundedScope = screen.getByLabelText(/Use the register's bounded topic scope/i);
+    const allScope = screen.getByLabelText(/Search all authorised broker topics/i);
+    expect(boundedScope).toBeChecked();
+    expect(allScope).toBeDisabled();
+
+    fireEvent.click(
+      screen.getByLabelText(/I understand that an all-topic search can receive every broker topic/i),
+    );
+    expect(allScope).toBeEnabled();
+    fireEvent.click(allScope);
+    fireEvent.click(screen.getByRole("button", { name: "Execute capture" }));
+
+    await waitFor(() => expect(postedRequest.body).not.toBeNull());
+    if (!postedRequest.body) {
+      throw new Error("Expected the UDMI run request to be submitted.");
+    }
+    expect(postedRequest.body.parameters).toMatchObject({
+      topic_discovery_all_scope_confirmed: true,
+      topic_discovery_enabled: true,
+      topic_discovery_scope: "all",
+      use_live_broker: true,
+      use_register: true,
+    });
+  });
+
+  it("keeps topic discovery out of manual live-payload requests", async () => {
+    const postedRequest: { body: { parameters: Record<string, unknown> } | null } = { body: null };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          postedRequest.body = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(udmiAccepted);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(udmiTerminalRun);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("udmi-validation");
+
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    expect(screen.queryByLabelText(/Diagnose where registered asset IDs appear/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Topic discovery is available for live captures that validate against the imported MQTT register/i),
+    ).toBeInTheDocument();
+
+    const runButton = screen.getByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedRequest.body).not.toBeNull());
+    if (!postedRequest.body) {
+      throw new Error("Expected the UDMI run request to be submitted.");
+    }
+    expect(postedRequest.body.parameters).toMatchObject({ use_live_broker: true });
+    expect(postedRequest.body.parameters).not.toHaveProperty("topic_discovery_enabled");
+    expect(postedRequest.body.parameters).not.toHaveProperty("topic_discovery_scope");
+    expect(postedRequest.body.parameters).not.toHaveProperty("topic_discovery_all_scope_confirmed");
   });
 
   it("shows no rows until a terminal run, then real per-asset payload rows", async () => {

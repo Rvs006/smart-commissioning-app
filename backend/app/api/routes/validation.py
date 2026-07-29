@@ -26,7 +26,11 @@ from smart_commissioning_core.mqtt_config_publish_processor import (
     process_mqtt_config_publish_run,
     process_mqtt_config_rollback_run,
 )
-from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
+from smart_commissioning_core.mqtt_settings import (
+    INDEFINITE_BACKSTOP_SECONDS,
+    parse_bool,
+    parse_capture_seconds,
+)
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 from smart_commissioning_core.udmi_validation import DEFAULT_CAPTURE_SECONDS
@@ -80,6 +84,30 @@ require_engineer = require_role(Role.ENGINEER)
 # 49h = this cap + 1h margin, and MUST stay above it) and to the frontend's
 # udmiCaptureOverCap guard (frontend/src/features/workflow/ModulePage.tsx).
 MAX_UDMI_CAPTURE_SECONDS = int(INDEFINITE_BACKSTOP_SECONDS)
+
+
+def _validate_asset_topic_discovery_request(parameters: dict[str, object]) -> None:
+    """Reject an unconfirmed/unknown broad diagnostic scope before creating a run."""
+
+    if not parse_bool(parameters.get("topic_discovery_enabled")):
+        return
+    scope = str(parameters.get("topic_discovery_scope") or "").strip().casefold()
+    if scope in {"", "bounded"}:
+        return
+    if scope == "all":
+        if parse_bool(parameters.get("topic_discovery_all_scope_confirmed")):
+            return
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "All-topic asset discovery requires topic_discovery_all_scope_confirmed = true. "
+                "Use the bounded register scope unless this broader capture is approved."
+            ),
+        )
+    raise HTTPException(
+        status_code=400,
+        detail="topic_discovery_scope must be 'bounded' or 'all'.",
+    )
 
 
 def _create_run(
@@ -357,6 +385,7 @@ def create_udmi_validation_run(
     # matcher/live capture fan out per asset. An explicit asset_id narrows the
     # list to that row.
     parameters = dict(request.parameters)
+    _validate_asset_topic_discovery_request(parameters)
     capture_seconds = parse_capture_seconds(
         parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS
     )
