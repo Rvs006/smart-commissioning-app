@@ -5,6 +5,18 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.32] - 2026-07-30
+
+### Fixed
+
+- Reports now open as a single management page rather than requiring the
+  unrelated Setup / Run / Results workflow stepper.
+- The report-list API reads report metadata in one query instead of reloading
+  each report individually, preventing the list from slowing down as report
+  history grows.
+- A failed report-list request now presents an explicit retry action rather
+  than appearing to load indefinitely.
+
 ## [0.1.31] - 2026-07-29
 
 ### Added

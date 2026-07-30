@@ -602,6 +602,42 @@ class RunService:
             for row in rows
         ]
 
+    def list_report_records(self) -> list[RunRecord]:
+        """Return report runs with their persisted metadata in one query.
+
+        The Reports list needs the stored parameters to form names and source
+        run links.  Fetching summaries and then calling ``get_run`` for every
+        row turns a simple page load into an N+1 query pattern.
+        """
+        statement = (
+            select(Run)
+            .where(Run.job_type == "report_generation")
+            .order_by(Run.created_at.desc(), Run.id.desc())
+        )
+        with session_factory(self._engine) as session:
+            rows = session.scalars(statement).all()
+            return [
+                RunRecord.model_validate(
+                    {
+                        "run_id": row.id,
+                        "project_id": row.project_id,
+                        "site_id": row.site_id,
+                        "job_type": row.job_type,
+                        "status": row.status,
+                        "stage": row.stage,
+                        "progress_percent": row.progress_percent,
+                        "created_at": row.created_at,
+                        "updated_at": row.updated_at,
+                        "edge_id": row.edge_id,
+                        "parameters": row.parameters if isinstance(row.parameters, dict) else {},
+                        "result_summary": {},
+                        "issues": [],
+                        "error_message": row.error_message,
+                    }
+                )
+                for row in rows
+            ]
+
     def runtime_ready(self) -> tuple[bool, str]:
         try:
             ensure_runtime_directories()

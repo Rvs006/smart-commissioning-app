@@ -2771,14 +2771,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         </div>
       </section>
 
-      <StepNav
-        step={step}
-        onStep={setStep}
-        hasRun={Boolean(activeRun)}
-        terminal={activeRunTerminal}
-      />
+      {module.route !== "reports" && (
+        <StepNav
+          step={step}
+          onStep={setStep}
+          hasRun={Boolean(activeRun)}
+          terminal={activeRunTerminal}
+        />
+      )}
 
-      <div className="module-steps" data-step={step}>
+      <div
+        className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}`}
+        data-step={step}
+      >
       <section className="app-grid two-col" data-stepgroup="setup run">
         <article className="surface">
           <div className="surface-heading">
@@ -4261,8 +4266,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </table>
             ) : (
               <div className="empty-workspace">
-                <strong>{reportsQuery.isLoading ? "Loading reports..." : "No reports yet"}</strong>
-                <span>Generate an Excel or Word report above; it will appear here for selection and export.</span>
+                <strong>
+                  {reportsQuery.isLoading
+                    ? "Loading reports..."
+                    : reportsQuery.isError
+                      ? "Could not load reports"
+                      : "No reports yet"}
+                </strong>
+                <span>
+                  {reportsQuery.isError
+                    ? "The report list request failed. Retry to load the stored report metadata."
+                    : "Generate an Excel or Word report above; it will appear here for selection and export."}
+                </span>
+                {reportsQuery.isError && (
+                  <button className="secondary-button compact" onClick={() => void reportsQuery.refetch()} type="button">
+                    Retry
+                  </button>
+                )}
               </div>
             )}
           </div>
