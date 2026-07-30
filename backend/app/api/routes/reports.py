@@ -33,7 +33,6 @@ from app.services.report_naming import build_report_file_name, report_content_di
 from app.services.report_pdf import PdfDocument
 from app.services.run_service import (
     DISCOVERY_JOB_TYPES,
-    REPORT_JOB_TYPES,
     VALIDATION_JOB_TYPES,
     RunService,
 )
@@ -54,10 +53,10 @@ require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
 
 
-def _to_report_summary(report_id: str) -> ReportSummary:
-    run = service.get_run(report_id)
+def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
+    run = service.get_run(report_id) if isinstance(report_id, str) else report_id
     if run.job_type != "report_generation":
-        raise FileNotFoundError(report_id)
+        raise FileNotFoundError(run.run_id)
 
     report_type = run.parameters.get("report_type", "evidence_pack")
     if not isinstance(report_type, str):
@@ -155,10 +154,7 @@ def create_report(request: ReportRequest) -> ReportSummary:
 
 @router.get("", response_model=ReportListResponse, dependencies=[Depends(require_viewer)])
 def list_reports() -> ReportListResponse:
-    reports: list[ReportSummary] = []
-    for run in service.list_runs(job_types=REPORT_JOB_TYPES):
-        reports.append(_to_report_summary(run.run_id))
-    return ReportListResponse(reports=reports)
+    return ReportListResponse(reports=[_to_report_summary(run) for run in service.list_report_records()])
 
 
 class ReportExportRequest(BaseModel):

@@ -1300,6 +1300,16 @@
   display: grid;
 }
 
+/* Reports is a management page, not a Setup / Run / Results workflow. Keep
+   its report-generation controls and report list visible together on arrival. */
+.module-steps.reports-module-steps > [data-stepgroup] {
+  display: block;
+}
+
+.module-steps.reports-module-steps > .app-grid[data-stepgroup] {
+  display: grid;
+}
+
 /* ============================================================================
    Workflow-stage grouped nav — clusters the module tabs under the stage they
    belong to (Configure / Discover / Validate / Report / Operate) so the nav
