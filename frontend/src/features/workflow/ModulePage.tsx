@@ -1,4 +1,14 @@
-import { ChangeEvent, FormEvent, Fragment, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  FormEvent,
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
@@ -104,7 +114,12 @@ type ModulePageProps = {
   moduleRoute: string;
 };
 
-const ALL_REPORT_FORMATS = ["pdf", "docx", "xlsx", "zip"] as const satisfies readonly ReportFormat[];
+const ALL_REPORT_FORMATS = [
+  "pdf",
+  "docx",
+  "xlsx",
+  "zip",
+] as const satisfies readonly ReportFormat[];
 type ReportFormatSelection = ReportFormat | "all";
 
 type CopyFeedback = {
@@ -276,10 +291,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [runOutcome, setRunOutcome] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
-  const [runController, dispatchRun] = useReducer(
-    runControllerReducer,
-    initialRunControllerState,
-  );
+  const [runController, dispatchRun] = useReducer(runControllerReducer, initialRunControllerState);
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback | null>(null);
   const [publishTopic, setPublishTopic] = useState("demo-site/b1/ahu-1000001/config");
   const [publishPayload, setPublishPayload] = useState(
@@ -293,7 +305,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [publishExtraPoints, setPublishExtraPoints] = useState<PointValuePair[]>([]);
   const [publishConfirmed, setPublishConfirmed] = useState(false);
   const [publishUseLiveBroker, setPublishUseLiveBroker] = useState(false);
-  const [publishPointsetTopic, setPublishPointsetTopic] = useState("demo-site/b1/ahu-1000001/events/pointset");
+  const [publishPointsetTopic, setPublishPointsetTopic] = useState(
+    "demo-site/b1/ahu-1000001/events/pointset",
+  );
   const [publishWaitSeconds, setPublishWaitSeconds] = useState("5");
   const [scanPorts, setScanPorts] = useState<ScanPort[]>(defaultScanPorts);
   const [scanAuthorized, setScanAuthorized] = useState(false);
@@ -320,7 +334,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     useState(false);
   const [udmiStateTopic, setUdmiStateTopic] = useState("demo-site/b1/ahu-1000001/state");
   const [udmiMetadataTopic, setUdmiMetadataTopic] = useState("demo-site/b1/ahu-1000001/metadata");
-  const [udmiPointsetTopic, setUdmiPointsetTopic] = useState("demo-site/b1/ahu-1000001/events/pointset");
+  const [udmiPointsetTopic, setUdmiPointsetTopic] = useState(
+    "demo-site/b1/ahu-1000001/events/pointset",
+  );
   // Blank (the default) = run until every expected topic has reported a
   // payload or the run is cancelled; a positive number bounds the run time.
   const [udmiCaptureSeconds, setUdmiCaptureSeconds] = useState("");
@@ -346,9 +362,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // is never presented as proof that a connected device is offline.
   const [resultsSystemFilter, setResultsSystemFilter] = useState("all");
   const [resultsObservationFilter, setResultsObservationFilter] = useState("all");
-  const [resultsCategoryFilter, setResultsCategoryFilter] = useState<
-    UdmiReportScopeV1["filters"]["category"]
-  >("all");
+  const [resultsCategoryFilter, setResultsCategoryFilter] =
+    useState<UdmiReportScopeV1["filters"]["category"]>("all");
   // Discovery routes retain their existing per-row View dialog. The UDMI
   // Workbench uses the persistent Inspector instead, so this state is never set
   // for UDMI rows.
@@ -368,15 +383,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [selectedReportIds, setSelectedReportIds] = useState<Set<string>>(new Set());
   const [reportToast, setReportToast] = useState<string | null>(null);
   const [reportToastWarning, setReportToastWarning] = useState(false);
-  const [generatedAllReportIds, setGeneratedAllReportIds] = useState<readonly string[] | null>(null);
+  const [generatedAllReportIds, setGeneratedAllReportIds] = useState<readonly string[] | null>(
+    null,
+  );
   const [reportDeleteNotice, setReportDeleteNotice] = useState<string | null>(null);
   // PDF default: the field deliverable is a human-readable handover document
   // (ask 2026-07-14); Word/Excel/zip remain for editable/evidence workflows.
   const [reportExportFormat, setReportExportFormat] = useState<ReportFormatSelection>("pdf");
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
   const [reportTitle, setReportTitle] = useState("");
-  const [reportScopeSnapshot, setReportScopeSnapshot] =
-    useState<FrozenUdmiReportScope | null>(null);
+  const [reportScopeSnapshot, setReportScopeSnapshot] = useState<FrozenUdmiReportScope | null>(
+    null,
+  );
   const [reportIntents, setReportIntents] = useState<readonly ReportIntent[] | null>(null);
   const reportDialogRef = useRef<HTMLDialogElement | null>(null);
   const reportTitleInputRef = useRef<HTMLInputElement | null>(null);
@@ -441,16 +459,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: activeRun?.ref
       ? queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref)
       : [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", module.route, "none"],
-    refetchInterval: (query) =>
-      isTerminalStatus(query.state.data?.status) ? false : 1500,
+    refetchInterval: (query) => (isTerminalStatus(query.state.data?.status) ? false : 1500),
   });
 
   // Discovery run monitor — same polling contract, against the discovery
   // status endpoint, so queued/running discovery runs update live.
   const discoveryRunQuery = useQuery({
     enabled: Boolean(activeRun) && activeRun?.kind === "discovery",
-    queryFn: ({ signal }) =>
-      getDiscoveryRun(activeRun?.runId ?? "", { client: apiClient, signal }),
+    queryFn: ({ signal }) => getDiscoveryRun(activeRun?.runId ?? "", { client: apiClient, signal }),
     queryKey: activeRun?.ref
       ? queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref)
       : [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", module.route, "none"],
@@ -470,7 +486,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const activeRunStage = (sseDriving ? sseEvent?.stage : undefined) ?? activeRunRecord?.stage;
   const activeRunProgress =
     (sseDriving ? sseEvent?.progress_percent : undefined) ?? activeRunRecord?.progress_percent ?? 0;
-  const activeRunError = (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
+  const activeRunError =
+    (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
   const activeRunTerminal = isTerminalStatus(activeRunStatus);
 
   // Elapsed timer + progress presentation for the active run (ITEM-6). The run
@@ -491,11 +508,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     typeof activeRunRecord?.parameters?.capture_seconds === "number"
       ? (activeRunRecord.parameters.capture_seconds as number)
       : undefined;
-  const boundedCapture = runIsActive && captureSecondsParam !== undefined && captureSecondsParam > 0;
+  const boundedCapture =
+    runIsActive && captureSecondsParam !== undefined && captureSecondsParam > 0;
   // Fill over the capture window while running, but never past 99% until the run
   // actually reports terminal — the real progress_percent still wins if higher.
   const progressWidth = boundedCapture
-    ? Math.max(activeRunProgress, Math.min(99, (activeRunElapsedSeconds / captureSecondsParam) * 100))
+    ? Math.max(
+        activeRunProgress,
+        Math.min(99, (activeRunElapsedSeconds / captureSecondsParam) * 100),
+      )
     : activeRunProgress;
   const progressIndeterminate = runIsActive && !boundedCapture;
 
@@ -511,14 +532,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Validation issues are replaced alongside each progressive result snapshot.
   // Poll during an active validation and stop when the polled run is terminal.
   const validationIssuesQuery = useQuery({
-    enabled:
-      Boolean(activeRun) &&
-      activeRun?.kind === "validation",
+    enabled: Boolean(activeRun) && activeRun?.kind === "validation",
     queryFn: ({ signal }) =>
       getValidationIssues(activeRun?.runId ?? "", { client: apiClient, signal }),
     queryKey: queryKeys.issues(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
-    refetchInterval: () =>
-      isTerminalStatus(validationRunQuery.data?.status) ? false : 1500,
+    refetchInterval: () => (isTerminalStatus(validationRunQuery.data?.status) ? false : 1500),
   });
 
   // Discovery results — fetched only once the discovery run is terminal.
@@ -672,9 +690,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     void (async () => {
       try {
         const runResult =
-          run.kind === "discovery"
-            ? await refetchDiscoveryRun()
-            : await refetchValidationRun();
+          run.kind === "discovery" ? await refetchDiscoveryRun() : await refetchValidationRun();
         if (runResult.isError || runResult.data?.run_id !== run.runId) {
           throw runResult.error ?? new Error("Final run evidence did not match the active run.");
         }
@@ -735,8 +751,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   ]);
 
   const finalEvidenceReady =
-    runController.phase === "settled" &&
-    runController.runRef?.runId === activeRun?.runId;
+    runController.phase === "settled" && runController.runRef?.runId === activeRun?.runId;
 
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
@@ -817,9 +832,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     // otherwise a just-completed run can display the previous run's metrics and
     // rows after navigation. A session-started run (restored not set) is never
     // replaced.
-    const replaceRestoredRun =
-      activeRun?.restored === true &&
-      activeRun.runId !== run.run_id;
+    const replaceRestoredRun = activeRun?.restored === true && activeRun.runId !== run.run_id;
     if (activeRun && !replaceRestoredRun) {
       return;
     }
@@ -834,14 +847,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     const ref = toRunRef(sessionScopeId, workspaceRef, module.route, run, "restored");
     setActiveRun({ kind: action.kind, ref, restored: true, runId: run.run_id });
     dispatchRun({ type: "restored", runRef: ref, status: run.status });
-  }, [
-    activeRun,
-    lastRunQuery.data,
-    module.route,
-    module.runActions,
-    sessionScopeId,
-    workspaceRef,
-  ]);
+  }, [activeRun, lastRunQuery.data, module.route, module.runActions, sessionScopeId, workspaceRef]);
 
   // Auto-clear ordinary report confirmations after a few seconds. Keep the
   // Generate All result available so its combined download is not easy to miss.
@@ -1009,8 +1015,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const schemaDeleteMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "udmi-schema.delete"),
-    mutationFn: (versionLabel: string) =>
-      deleteUdmiSchemaSet(versionLabel, { client: apiClient }),
+    mutationFn: (versionLabel: string) => deleteUdmiSchemaSet(versionLabel, { client: apiClient }),
     onSuccess: () => {
       void udmiSchemaSetsQuery.refetch();
     },
@@ -1108,30 +1113,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
         setLastReport(null);
         if (action?.kind === "discovery") {
-          const ref = toRunRef(
-            sessionScopeId,
-            workspaceRef,
-            module.route,
-            result,
-            "submitted",
-          );
+          const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
           setActiveRun({ kind: "discovery", ref, runId: result.run_id });
           dispatchRun({ type: "accepted", runRef: ref });
         } else if (action?.kind === "validation") {
-          const ref = toRunRef(
-            sessionScopeId,
-            workspaceRef,
-            module.route,
-            result,
-            "submitted",
-          );
+          const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
           setActiveRun({ kind: "validation", ref, runId: result.run_id });
           dispatchRun({ type: "accepted", runRef: ref });
         }
       } else {
         setLastReport(result);
         setGeneratedAllReportIds(null);
-        setRunOutcome(`Report generated. Report ID: ${result.report_id}, file: ${result.file_name}`);
+        setRunOutcome(
+          `Report generated. Report ID: ${result.report_id}, file: ${result.file_name}`,
+        );
         // Report linking (mqautz9j): confirm where the report lives and refresh
         // the reports list so the new report is selectable for export.
         setReportToast("Report generated — see the Reports list below to download or export it.");
@@ -1153,11 +1148,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         // primary plus all extra pairs as expected so the backend verifies each.
         expectedPoints: [
           { point: publishPoint, value: parsePublishValue(publishValue) },
-          ...publishExtraPoints.map((pair) => ({ point: pair.point, value: parsePublishValue(pair.value) })),
+          ...publishExtraPoints.map((pair) => ({
+            point: pair.point,
+            value: parsePublishValue(pair.value),
+          })),
         ],
         // Compose every point/value pair (primary + extras) into one config
         // payload so a single publish writes them all.
-        payload: buildMultiPointPayload(publishPayload, publishPoint, publishValue, publishExtraPoints),
+        payload: buildMultiPointPayload(
+          publishPayload,
+          publishPoint,
+          publishValue,
+          publishExtraPoints,
+        ),
         pointsetTopic: publishPointsetTopic,
         topic: publishTopic,
         useLiveBroker: publishUseLiveBroker,
@@ -1166,13 +1169,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     onSuccess: (result) => {
       setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
-      const ref = toRunRef(
-        sessionScopeId,
-        workspaceRef,
-        module.route,
-        result,
-        "submitted",
-      );
+      const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
       setActiveRun({ kind: "validation", ref, runId: result.run_id });
       dispatchRun({ type: "accepted", runRef: ref });
     },
@@ -1192,8 +1189,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const rollbackMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "mqtt-config.rollback"),
-    mutationFn: (runId: string) =>
-      rollbackMqttConfigPublish(runId, { client: apiClient }),
+    mutationFn: (runId: string) => rollbackMqttConfigPublish(runId, { client: apiClient }),
     onSuccess: (result) => {
       setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
     },
@@ -1248,7 +1244,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         requestedCount === ALL_REPORT_FORMATS.length &&
         failedFormats.length === 0 &&
         reports.length === ALL_REPORT_FORMATS.length;
-      setGeneratedAllReportIds(allFormatsSucceeded ? reports.map((report) => report.report_id) : null);
+      setGeneratedAllReportIds(
+        allFormatsSucceeded ? reports.map((report) => report.report_id) : null,
+      );
       setReportDialogOpen(false);
       setReportScopeSnapshot(null);
       setReportIntents(null);
@@ -1397,9 +1395,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Deliberately NOT clamped to 0: a -1 flows into runMutation's "Unknown run
   // action." guard, surfacing a visible error panel on this same Setup step,
   // instead of silently dispatching whatever happens to sit at index 0.
-  const udmiRunActionId = module.runActions.find(
-    (action) => action.kind === "validation" && action.runKind === "udmi",
-  )?.id ?? "udmi-validation.missing";
+  const udmiRunActionId =
+    module.runActions.find((action) => action.kind === "validation" && action.runKind === "udmi")
+      ?.id ?? "udmi-validation.missing";
 
   // Verdicts derive from the run's issues list, so an empty list only means
   // "no issues" once the issues query has actually SUCCEEDED. Payload views
@@ -1567,9 +1565,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // the only persisted evidence available. Keep those provisional rows.
       return mergedAssetGroups;
     }
-    const mergedByAsset = new Map(
-      (mergedAssetGroups ?? []).map((group) => [group.assetId, group]),
-    );
+    const mergedByAsset = new Map((mergedAssetGroups ?? []).map((group) => [group.assetId, group]));
     return validationSummary.asset_results.flatMap((asset) => {
       const group = mergedByAsset.get(asset.asset_id);
       const payloadTypes = asset.payload_results
@@ -1610,7 +1606,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Live UDMI results table: before a versioned summary exists, rows come from
   // persisted payload views and issues. Once it exists, its exact canonical
   // payload keys own the row set; missing rich evidence stays neutral.
-  const udmiLiveResults = useMemo<{ columns: string[]; rows: Array<Record<string, string>> } | null>(() => {
+  const udmiLiveResults = useMemo<{
+    columns: string[];
+    rows: Array<Record<string, string>>;
+  } | null>(() => {
     // job_type guard: mqtt_config_publish runs share this route's run monitor;
     // only a udmi_validation run may populate the per-asset payload table.
     if (
@@ -1782,7 +1781,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [module.route, discoveryResultsQuery.data]);
 
   const usingLiveResults = Boolean(discoveryView) || Boolean(udmiLiveResults);
-  const tableColumns = discoveryView?.columns ?? udmiLiveResults?.columns ?? workspace?.columns ?? [];
+  const tableColumns =
+    discoveryView?.columns ?? udmiLiveResults?.columns ?? workspace?.columns ?? [];
   // Rows come from live run results only. There is deliberately no sample-row
   // fallback here: labelling fabricated rows as a "Sample preview" was not
   // enough to stop them being read as real findings, and a head with history
@@ -1838,7 +1838,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             return false;
           }
           const topicNeedle = resultsTopicContainsFilter.trim().toLocaleLowerCase();
-          if (topicNeedle && !String(row.Topic ?? "").toLocaleLowerCase().includes(topicNeedle)) {
+          if (
+            topicNeedle &&
+            !String(row.Topic ?? "")
+              .toLocaleLowerCase()
+              .includes(topicNeedle)
+          ) {
             return false;
           }
           if (
@@ -1853,10 +1858,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           // Unexpected devices are observed by definition but deliberately have
           // no register-backed System facet.
           if (isUdmiValidation && row.__category === "unexpected-devices") {
-            return (
-              resultsSystemFilter === "all" &&
-              resultsObservationFilter !== "not-observed"
-            );
+            return resultsSystemFilter === "all" && resultsObservationFilter !== "not-observed";
           }
           return isUdmiValidation
             ? assetMatchesFacetFilter(assetFacts.get(row.Asset), {
@@ -1937,8 +1939,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         topic_contains: resultsTopicContainsFilter.trim(),
         system: resultsSystemFilter,
         observation:
-          resultsObservationFilter === "observed" ||
-          resultsObservationFilter === "not-observed"
+          resultsObservationFilter === "observed" || resultsObservationFilter === "not-observed"
             ? resultsObservationFilter
             : "all",
         category: resultsCategoryFilter,
@@ -1982,12 +1983,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         ? [{ ...group, issues: payloadTypes.flatMap((entry) => entry.issues), payloadTypes }]
         : [];
     });
-  }, [
-    resultAssetGroups,
-    isUdmiValidation,
-    isResultsFilterActive,
-    visibleResultRows,
-  ]);
+  }, [resultAssetGroups, isUdmiValidation, isResultsFilterActive, visibleResultRows]);
   const summaryFiltersActive = isUdmiValidation && isResultsFilterActive;
   const displayedValidationSummary = useMemo(
     () => filterValidationSummary(validationSummaryDisplay, currentUdmiScope, assetFacts),
@@ -2010,9 +2006,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const selectedResult =
     visibleResultRows.length === 0
       ? null
-      : (visibleResultRows.find(
-          ({ row }) => resultIdentity(module.route, row) === selectedResultId,
-        ) ?? visibleResultRows[0]).row;
+      : (
+          visibleResultRows.find(
+            ({ row }) => resultIdentity(module.route, row) === selectedResultId,
+          ) ?? visibleResultRows[0]
+        ).row;
   // In the grouped UDMI table a collapsed asset unmounts its child rows, so the
   // inspector must not keep showing a hidden row's detail (ISSUE-4). Fall back to
   // the empty state until the asset is re-expanded — selectedResult (and its
@@ -2114,9 +2112,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return;
     }
     if (
-      !visibleResultRows.some(
-        ({ row }) => resultIdentity(module.route, row) === selectedResultId,
-      )
+      !visibleResultRows.some(({ row }) => resultIdentity(module.route, row) === selectedResultId)
     ) {
       setSelectedResultId(resultIdentity(module.route, visibleResultRows[0].row));
     }
@@ -2143,7 +2139,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Gating on activeRun keeps this composable with run rehydration: a restored
   // terminal run sets activeRun and lights this state up unchanged.
   const discoveryEmptyState =
-    isDiscoveryModule && activeRun && activeRunTerminal && finalEvidenceReady && resultRows.length === 0
+    isDiscoveryModule &&
+    activeRun &&
+    activeRunTerminal &&
+    finalEvidenceReady &&
+    resultRows.length === 0
       ? discoveryEmptyStateFor(module.route, discoveryResultsQuery.data, activeRunError)
       : null;
   const validationEmptyState =
@@ -2302,7 +2302,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   };
 
   const removeExtraPublishPoint = (index: number) => {
-    setPublishExtraPoints((current) => current.filter((_entry, entryIndex) => entryIndex !== index));
+    setPublishExtraPoints((current) =>
+      current.filter((_entry, entryIndex) => entryIndex !== index),
+    );
   };
 
   const handleExport = () => {
@@ -2434,7 +2436,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       const scope = currentUdmiScope
         ? {
             ...currentUdmiScope,
-            selected_payloads: currentUdmiScope.selected_payloads.map((payload) => ({ ...payload })),
+            selected_payloads: currentUdmiScope.selected_payloads.map((payload) => ({
+              ...payload,
+            })),
             unexpected_device_ids: [...currentUdmiScope.unexpected_device_ids],
             filters: { ...currentUdmiScope.filters },
           }
@@ -2458,8 +2462,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     } else {
       setReportScopeSnapshot(null);
     }
-    const formats =
-      reportExportFormat === "all" ? ALL_REPORT_FORMATS : [reportExportFormat];
+    const formats = reportExportFormat === "all" ? ALL_REPORT_FORMATS : [reportExportFormat];
     setReportIntents(
       formats.map((format) =>
         createReportIntent({
@@ -2662,17 +2665,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     // the button reads as "holds N issues", not a bare "View" (ITEM-D). Honest:
     // the count is only claimed when the row actually has issues.
     const issueCount = row.Issues === undefined ? 0 : Number(row.Issues);
-    const viewLabel = issueCount > 0 ? `View ${issueCount} issue${issueCount === 1 ? "" : "s"}` : "View";
+    const viewLabel =
+      issueCount > 0 ? `View ${issueCount} issue${issueCount === 1 ? "" : "s"}` : "View";
     const evidenceLabel = [row.Asset, row.__payloadType || row.Payload || row.Topic]
       .filter(Boolean)
       .join(" ");
     return (
       <tr
         aria-selected={isUdmiValidation ? selected : undefined}
-        className={`${row.__tone ? `row-${row.__tone}` : ""}${
-          selected ? " row-selected" : ""
-        }${isUdmiValidation ? " result-row-selectable" : ""
-        }`.trim() || undefined}
+        className={
+          `${row.__tone ? `row-${row.__tone}` : ""}${selected ? " row-selected" : ""}${
+            isUdmiValidation ? " result-row-selectable" : ""
+          }`.trim() || undefined
+        }
         key={rowId}
         onClick={isUdmiValidation ? () => selectResultEvidence(row) : undefined}
       >
@@ -2779,1930 +2784,2019 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       />
 
       <div className="module-steps" data-step={step}>
-      <section className="app-grid two-col" data-stepgroup="setup run">
-        <article className="surface">
-          <div className="surface-heading">
-            <div>
-              <h3>Register Import</h3>
+        <section className="app-grid two-col" data-stepgroup="setup run">
+          <article className="surface">
+            <div className="surface-heading">
+              <div>
+                <h3>Register Import</h3>
+              </div>
             </div>
-          </div>
 
-          {module.importTypes.length > 0 ? (
-            <div className="form-stack">
-              <label>
-                Import profile
-                <select
-                  disabled={profilesQuery.isLoading}
-                  onChange={(event) => setSelectedImportType(event.target.value as ImportType)}
-                  value={selectedImportType}
-                >
-                  {availableProfiles.map((profile) => (
-                    <option key={profile.import_type} value={profile.import_type}>
-                      {profile.import_type.replace(/_/g, " ")}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            {module.importTypes.length > 0 ? (
+              <div className="form-stack">
+                <label>
+                  Import profile
+                  <select
+                    disabled={profilesQuery.isLoading}
+                    onChange={(event) => setSelectedImportType(event.target.value as ImportType)}
+                    value={selectedImportType}
+                  >
+                    {availableProfiles.map((profile) => (
+                      <option key={profile.import_type} value={profile.import_type}>
+                        {profile.import_type.replace(/_/g, " ")}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-              <label>
-                CSV or XLSX file
-                <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
-              </label>
-              {/* handleFileChange clears the input's value, so the native
+                <label>
+                  CSV or XLSX file
+                  <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
+                </label>
+                {/* handleFileChange clears the input's value, so the native
                   control always reads "No file chosen" — the staged file is
                   named here from state instead. */}
-              {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
-              {/* When nothing is staged in this session, surface the server's
+                {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
+                {/* When nothing is staged in this session, surface the server's
                   own record of the last import so the empty file input does not
                   imply nothing was ever uploaded (ISSUE-5). Only ever shown on a
                   real hit — a 404/error leaves data undefined. */}
-              {!selectedFile && latestImportQuery.data && (
-                <div className="state-panel success import-on-file">
-                  <strong>Register already imported</strong>
-                  <span>
-                    {latestImportQuery.data.file_name} — {latestImportQuery.data.accepted_rows} of{" "}
-                    {latestImportQuery.data.total_rows} rows accepted,{" "}
-                    {formatRelativeTime(latestImportQuery.data.created_at)}. This register is stored
-                    and used by runs on this page; upload again only if the file changed.
-                  </span>
-                </div>
-              )}
-
-              <button
-                className="primary-button"
-                disabled={!selectedFile || !selectedImportType || importMutation.isPending || !canEngineer}
-                onClick={handleImport}
-                title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-                type="button"
-              >
-                {importMutation.isPending ? "Validating..." : "Upload and validate"}
-              </button>
-
-              {selectedImportType && (
-                <div className="schema-card template-card">
-                  <div>
-                    <strong>Default import template</strong>
-                    <p>
-                      Use this format as the normal project template. It includes the required
-                      columns and one realistic example row.
-                    </p>
-                  </div>
-                  <div className="inline-actions">
-                    <button
-                      className="secondary-button compact"
-                      disabled={templateDownload.pendingKey !== null}
-                      onClick={() =>
-                        void templateDownload.download(
-                          "template-xlsx",
-                          getImportTemplatePath(selectedImportType, "xlsx"),
-                          `${selectedImportType}_template.xlsx`,
-                        )
-                      }
-                      type="button"
-                    >
-                      {templateDownload.pendingKey === "template-xlsx"
-                        ? "Downloading..."
-                        : "Download XLSX"}
-                    </button>
-                    <button
-                      className="secondary-button compact"
-                      disabled={templateDownload.pendingKey !== null}
-                      onClick={() =>
-                        void templateDownload.download(
-                          "template-csv",
-                          getImportTemplatePath(selectedImportType, "csv"),
-                          `${selectedImportType}_template.csv`,
-                        )
-                      }
-                      type="button"
-                    >
-                      {templateDownload.pendingKey === "template-csv"
-                        ? "Downloading..."
-                        : "Download CSV"}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {templateDownload.error && (
-                <div className="state-panel error">
-                  <strong>Template download failed</strong>
-                  <span>{templateDownload.error}</span>
-                </div>
-              )}
-
-              {selectedProfile && (
-                <div className="schema-card">
-                  <strong>Required columns</strong>
-                  <div className="tag-cloud">
-                    {selectedProfile.required_columns.slice(0, 8).map((column) => (
-                      <span key={column}>{column}</span>
-                    ))}
-                  </div>
-                  {(selectedProfile.optional_columns ?? []).length > 0 && (
-                    <>
-                      <strong>Optional columns</strong>
-                      <div className="tag-cloud">
-                        {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
-                          <span key={column} className="optional">{column}</span>
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {importMutation.isError && (
-                <div className="state-panel error">
-                  <strong>Import failed</strong>
-                  <span>{importMutation.error.message}</span>
-                </div>
-              )}
-
-              {importOutcome && (
-                <div className={`state-panel ${importOutcome.status}`}>
-                  <strong>{importOutcome.status.toUpperCase()}</strong>
-                  <span>
-                    {importOutcome.accepted_rows} accepted ·{" "}
-                    {importOutcome.rejected_rows} rejected
-                  </span>
-                </div>
-              )}
-
-              {importOutcome && importOutcome.status !== "accepted" && (
-                <div className="state-panel error import-errors">
-                  <strong>
-                    {importOutcome.status === "rejected"
-                      ? "Import rejected — reasons below"
-                      : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
-                  </strong>
-                  {importOutcome.missing_columns.length > 0 && (
+                {!selectedFile && latestImportQuery.data && (
+                  <div className="state-panel success import-on-file">
+                    <strong>Register already imported</strong>
                     <span>
-                      Missing required columns: {importOutcome.missing_columns.join(", ")}
+                      {latestImportQuery.data.file_name} — {latestImportQuery.data.accepted_rows} of{" "}
+                      {latestImportQuery.data.total_rows} rows accepted,{" "}
+                      {formatRelativeTime(latestImportQuery.data.created_at)}. This register is
+                      stored and used by runs on this page; upload again only if the file changed.
                     </span>
-                  )}
-                  {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
-                  {/* Never let a failed fetch look like "no reasons": say so. */}
-                  {importErrorsQuery.isError && (
-                    <span>Could not load rejection reasons: {importErrorsQuery.error.message}</span>
-                  )}
-                  {visibleImportErrors.length > 0 && (
+                  </div>
+                )}
+
+                <button
+                  className="primary-button"
+                  disabled={
+                    !selectedFile || !selectedImportType || importMutation.isPending || !canEngineer
+                  }
+                  onClick={handleImport}
+                  title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                  type="button"
+                >
+                  {importMutation.isPending ? "Validating..." : "Upload and validate"}
+                </button>
+
+                {selectedImportType && (
+                  <div className="schema-card template-card">
+                    <div>
+                      <strong>Default import template</strong>
+                      <p>
+                        Use this format as the normal project template. It includes the required
+                        columns and one realistic example row.
+                      </p>
+                    </div>
+                    <div className="inline-actions">
+                      <button
+                        className="secondary-button compact"
+                        disabled={templateDownload.pendingKey !== null}
+                        onClick={() =>
+                          void templateDownload.download(
+                            "template-xlsx",
+                            getImportTemplatePath(selectedImportType, "xlsx"),
+                            `${selectedImportType}_template.xlsx`,
+                          )
+                        }
+                        type="button"
+                      >
+                        {templateDownload.pendingKey === "template-xlsx"
+                          ? "Downloading..."
+                          : "Download XLSX"}
+                      </button>
+                      <button
+                        className="secondary-button compact"
+                        disabled={templateDownload.pendingKey !== null}
+                        onClick={() =>
+                          void templateDownload.download(
+                            "template-csv",
+                            getImportTemplatePath(selectedImportType, "csv"),
+                            `${selectedImportType}_template.csv`,
+                          )
+                        }
+                        type="button"
+                      >
+                        {templateDownload.pendingKey === "template-csv"
+                          ? "Downloading..."
+                          : "Download CSV"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {templateDownload.error && (
+                  <div className="state-panel error">
+                    <strong>Template download failed</strong>
+                    <span>{templateDownload.error}</span>
+                  </div>
+                )}
+
+                {selectedProfile && (
+                  <div className="schema-card">
+                    <strong>Required columns</strong>
+                    <div className="tag-cloud">
+                      {selectedProfile.required_columns.slice(0, 8).map((column) => (
+                        <span key={column}>{column}</span>
+                      ))}
+                    </div>
+                    {(selectedProfile.optional_columns ?? []).length > 0 && (
+                      <>
+                        <strong>Optional columns</strong>
+                        <div className="tag-cloud">
+                          {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
+                            <span key={column} className="optional">
+                              {column}
+                            </span>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {importMutation.isError && (
+                  <div className="state-panel error">
+                    <strong>Import failed</strong>
+                    <span>{importMutation.error.message}</span>
+                  </div>
+                )}
+
+                {importOutcome && (
+                  <div className={`state-panel ${importOutcome.status}`}>
+                    <strong>{importOutcome.status.toUpperCase()}</strong>
+                    <span>
+                      {importOutcome.accepted_rows} accepted · {importOutcome.rejected_rows}{" "}
+                      rejected
+                    </span>
+                  </div>
+                )}
+
+                {importOutcome && importOutcome.status !== "accepted" && (
+                  <div className="state-panel error import-errors">
+                    <strong>
+                      {importOutcome.status === "rejected"
+                        ? "Import rejected — reasons below"
+                        : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
+                    </strong>
+                    {importOutcome.missing_columns.length > 0 && (
+                      <span>
+                        Missing required columns: {importOutcome.missing_columns.join(", ")}
+                      </span>
+                    )}
+                    {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
+                    {/* Never let a failed fetch look like "no reasons": say so. */}
+                    {importErrorsQuery.isError && (
+                      <span>
+                        Could not load rejection reasons: {importErrorsQuery.error.message}
+                      </span>
+                    )}
+                    {visibleImportErrors.length > 0 && (
+                      <ul>
+                        {visibleImportErrors.map((error, index) => (
+                          <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
+                            {error.row_number != null ? `Row ${error.row_number} — ` : ""}
+                            {error.field ? `${error.field}: ` : ""}
+                            {error.message} ({error.code})
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {hiddenImportErrorCount > 0 && (
+                      <span>
+                        ...and {hiddenImportErrorCount} more rejected rows not shown — fix the rows
+                        listed above and re-upload to see the rest.
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {importWarnings.length > 0 && (
+                  <div className="state-panel warning">
+                    <strong>
+                      {importWarnings.length} warning(s) — affected rows are still accepted
+                    </strong>
                     <ul>
-                      {visibleImportErrors.map((error, index) => (
-                        <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
-                          {error.row_number != null ? `Row ${error.row_number} — ` : ""}
-                          {error.field ? `${error.field}: ` : ""}
-                          {error.message} ({error.code})
+                      {importWarnings.map((warning, index) => (
+                        <li key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}>
+                          {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
+                          {warning.message}
                         </li>
                       ))}
                     </ul>
-                  )}
-                  {hiddenImportErrorCount > 0 && (
-                    <span>
-                      ...and {hiddenImportErrorCount} more rejected rows not shown — fix the rows
-                      listed above and re-upload to see the rest.
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {importWarnings.length > 0 && (
-                <div className="state-panel warning">
-                  <strong>
-                    {importWarnings.length} warning(s) — affected rows are still accepted
-                  </strong>
-                  <ul>
-                    {importWarnings.map((warning, index) => (
-                      <li key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}>
-                        {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
-                        {warning.message}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="empty-workspace">
-              <strong>No direct import for this module</strong>
-              <span>Reports are built from completed discovery and validation runs.</span>
-            </div>
-          )}
-        </article>
-
-        <article className="surface">
-          <div className="surface-heading">
-            <div>
-              <h3>Run Controls</h3>
-            </div>
-          </div>
-
-          {isDiscoveryModule && (
-            <div className="form-stack scan-authorization">
-              <label className="confirm-row">
-                <input
-                  checked={scanDryRun}
-                  onChange={(event) => setScanDryRun(event.target.checked)}
-                  type="checkbox"
-                />
-                Dry run — preview the scan plan with no network I/O (no authorization needed).
-              </label>
-              {!scanDryRun && (
-                <label className="confirm-row">
-                  <input
-                    checked={scanAuthorized}
-                    onChange={(event) => setScanAuthorized(event.target.checked)}
-                    type="checkbox"
-                  />
-                  I am authorized to scan this network. Real scans without this are rejected (403).
-                </label>
-              )}
-            </div>
-          )}
-
-          <div className="run-list">
-            {visibleRunActions.length > 0 ? (
-              // Mapped over the FULL list and skipped in place, never
-              // filter-then-map: `index` must stay the action's real index in
-              // module.runActions or mutate(index) dispatches the wrong action.
-              module.runActions.map((action) => {
-                if (action.hiddenFromRunControls) {
-                  return null;
-                }
-                const scanBlocked = action.kind === "discovery" && discoveryBlocked;
-                const mqttOverCapBlocked =
-                  mqttCaptureOverCap && action.kind === "discovery" && action.runKind === "mqtt";
-                const overCapBlocked =
-                  (udmiCaptureOverCap && action.kind === "validation" && action.runKind === "udmi") ||
-                  mqttOverCapBlocked;
-                // A run started here now executes in the background, so block a
-                // second start while one is live (Stop run is the escape) —
-                // prevents accidental parallel captures now that POSTs return
-                // instantly (ITEM-4). Only a run started THIS session blocks; a
-                // rehydrated run never fossilizes into a permanent lock (see
-                // startedRunActive).
-                const blocked = scanBlocked || !canEngineer || overCapBlocked || startedRunActive;
-                // Role gate takes priority in the tooltip; otherwise the existing
-                // scan-authorization hint is shown for a blocked real scan.
-                const blockedTooltip = !canEngineer
-                  ? ENGINEER_REQUIRED_TOOLTIP
-                  : scanBlocked
-                    ? "Confirm scan authorization (or enable dry run) before starting a real scan."
-                    : mqttOverCapBlocked
-                      ? "Run time exceeds the 48-hour capture limit."
-                      : overCapBlocked
-                        ? "Run time exceeds the 48-hour capture limit."
-                        : startedRunActive
-                          ? "A run is already in progress — stop it before starting another."
-                          : undefined;
-                return (
-                  <div className="run-card" key={action.id}>
-                    <div>
-                      <strong>{action.label}</strong>
-                      <span>{action.helper}</span>
-                    </div>
-                    <button
-                      className="secondary-button compact"
-                      disabled={runMutation.isPending || blocked}
-                      onClick={() => runMutation.mutate(action.id)}
-                      title={blockedTooltip}
-                      type="button"
-                    >
-                      {runMutation.isPending
-                        ? "Working..."
-                        : scanDryRun && action.kind === "discovery"
-                          ? "Preview"
-                          : module.route === "reports"
-                            ? "Generate"
-                            : "Run"}
-                    </button>
                   </div>
-                );
-              })
-            ) : module.runActions.length > 0 ? (
-              // This head HAS a run action, it is just started from elsewhere.
-              // Without this pointer the Run step is a dead end: StepNav never
-              // disables steps, so an operator can land here before any run and
-              // find no start control at all.
-              <div className="empty-workspace">
-                <strong>Run controls are at the bottom of Setup</strong>
-                <span>
-                  Work through the options below, then start the run with Execute capture under Schedule and Payload
-                  Evidence.
-                </span>
+                )}
               </div>
             ) : (
               <div className="empty-workspace">
-                <strong>Saved synchronously</strong>
-                <span>This workflow does not need a background worker.</span>
+                <strong>No direct import for this module</strong>
+                <span>Reports are built from completed discovery and validation runs.</span>
               </div>
             )}
-          </div>
+          </article>
 
-          {runMutation.isError && (
-            <div className="state-panel error">
-              <strong>Run request failed</strong>
-              <span>{runMutation.error.message}</span>
+          <article className="surface">
+            <div className="surface-heading">
+              <div>
+                <h3>Run Controls</h3>
+              </div>
             </div>
-          )}
 
-          {runOutcome && (
-            <div className="state-panel success">
-              <strong>Accepted by API</strong>
-              <span>{runOutcome}</span>
-              {lastReport && (
+            {isDiscoveryModule && (
+              <div className="form-stack scan-authorization">
+                <label className="confirm-row">
+                  <input
+                    checked={scanDryRun}
+                    onChange={(event) => setScanDryRun(event.target.checked)}
+                    type="checkbox"
+                  />
+                  Dry run — preview the scan plan with no network I/O (no authorization needed).
+                </label>
+                {!scanDryRun && (
+                  <label className="confirm-row">
+                    <input
+                      checked={scanAuthorized}
+                      onChange={(event) => setScanAuthorized(event.target.checked)}
+                      type="checkbox"
+                    />
+                    I am authorized to scan this network. Real scans without this are rejected
+                    (403).
+                  </label>
+                )}
+              </div>
+            )}
+
+            <div className="run-list">
+              {visibleRunActions.length > 0 ? (
+                // Mapped over the FULL list and skipped in place, never
+                // filter-then-map: `index` must stay the action's real index in
+                // module.runActions or mutate(index) dispatches the wrong action.
+                module.runActions.map((action) => {
+                  if (action.hiddenFromRunControls) {
+                    return null;
+                  }
+                  const scanBlocked = action.kind === "discovery" && discoveryBlocked;
+                  const mqttOverCapBlocked =
+                    mqttCaptureOverCap && action.kind === "discovery" && action.runKind === "mqtt";
+                  const overCapBlocked =
+                    (udmiCaptureOverCap &&
+                      action.kind === "validation" &&
+                      action.runKind === "udmi") ||
+                    mqttOverCapBlocked;
+                  // A run started here now executes in the background, so block a
+                  // second start while one is live (Stop run is the escape) —
+                  // prevents accidental parallel captures now that POSTs return
+                  // instantly (ITEM-4). Only a run started THIS session blocks; a
+                  // rehydrated run never fossilizes into a permanent lock (see
+                  // startedRunActive).
+                  const blocked = scanBlocked || !canEngineer || overCapBlocked || startedRunActive;
+                  // Role gate takes priority in the tooltip; otherwise the existing
+                  // scan-authorization hint is shown for a blocked real scan.
+                  const blockedTooltip = !canEngineer
+                    ? ENGINEER_REQUIRED_TOOLTIP
+                    : scanBlocked
+                      ? "Confirm scan authorization (or enable dry run) before starting a real scan."
+                      : mqttOverCapBlocked
+                        ? "Run time exceeds the 48-hour capture limit."
+                        : overCapBlocked
+                          ? "Run time exceeds the 48-hour capture limit."
+                          : startedRunActive
+                            ? "A run is already in progress — stop it before starting another."
+                            : undefined;
+                  return (
+                    <div className="run-card" key={action.id}>
+                      <div>
+                        <strong>{action.label}</strong>
+                        <span>{action.helper}</span>
+                      </div>
+                      <button
+                        className="secondary-button compact"
+                        disabled={runMutation.isPending || blocked}
+                        onClick={() => runMutation.mutate(action.id)}
+                        title={blockedTooltip}
+                        type="button"
+                      >
+                        {runMutation.isPending
+                          ? "Working..."
+                          : scanDryRun && action.kind === "discovery"
+                            ? "Preview"
+                            : module.route === "reports"
+                              ? "Generate"
+                              : "Run"}
+                      </button>
+                    </div>
+                  );
+                })
+              ) : module.runActions.length > 0 ? (
+                // This head HAS a run action, it is just started from elsewhere.
+                // Without this pointer the Run step is a dead end: StepNav never
+                // disables steps, so an operator can land here before any run and
+                // find no start control at all.
+                <div className="empty-workspace">
+                  <strong>Run controls are at the bottom of Setup</strong>
+                  <span>
+                    Work through the options below, then start the run with Execute capture under
+                    Schedule and Payload Evidence.
+                  </span>
+                </div>
+              ) : (
+                <div className="empty-workspace">
+                  <strong>Saved synchronously</strong>
+                  <span>This workflow does not need a background worker.</span>
+                </div>
+              )}
+            </div>
+
+            {runMutation.isError && (
+              <div className="state-panel error">
+                <strong>Run request failed</strong>
+                <span>{runMutation.error.message}</span>
+              </div>
+            )}
+
+            {runOutcome && (
+              <div className="state-panel success">
+                <strong>Accepted by API</strong>
+                <span>{runOutcome}</span>
+                {lastReport && (
+                  <button
+                    className="secondary-button compact inline-link-button"
+                    disabled={reportDownload.pendingKey !== null}
+                    onClick={() =>
+                      void reportDownload.download(
+                        "report",
+                        getReportDownloadPath(lastReport.report_id),
+                        lastReport.file_name ||
+                          `${lastReport.report_id}.${lastReport.output_format}`,
+                      )
+                    }
+                    type="button"
+                  >
+                    {reportDownload.pendingKey === "report"
+                      ? "Downloading..."
+                      : `Download ${lastReport.output_format.toUpperCase()}`}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {reportDownload.error && (
+              <div className="state-panel error">
+                <strong>Report download failed</strong>
+                <span>{reportDownload.error}</span>
+              </div>
+            )}
+
+            {copyFeedback && (
+              <div className={`state-panel ${copyFeedback.severity}`}>
+                <strong>Payload copy</strong>
+                <span>{copyFeedback.message}</span>
+              </div>
+            )}
+
+            {activeRun && (
+              <div className="state-panel run-monitor">
+                <div className="run-monitor-heading">
+                  <div>
+                    <strong>
+                      {activeRun.kind === "discovery" ? "Discovery" : "Validation"} run monitor
+                    </strong>
+                    <span>{activeRun.runId}</span>
+                    <Link className="link-button" to="/run-history">
+                      Run history
+                    </Link>
+                  </div>
+                  <span className={`status-token ${activeStatusClass}`}>
+                    {activeRunStatus ?? "queued"}
+                  </span>
+                </div>
+
+                <div className={`progress-track${progressIndeterminate ? " indeterminate" : ""}`}>
+                  <div style={progressIndeterminate ? undefined : { width: `${progressWidth}%` }} />
+                </div>
+
+                {runController.phase === "terminal-sync" && (
+                  <div className={`state-panel ${runController.evidenceError ? "error" : ""}`}>
+                    <strong>
+                      {runController.evidenceError
+                        ? "Final evidence unavailable"
+                        : "Final evidence is synchronising"}
+                    </strong>
+                    <span>
+                      {runController.evidenceError ??
+                        "Completed metrics and exports will appear after the final run data is confirmed."}
+                    </span>
+                  </div>
+                )}
+
+                <dl className="summary-grid">
+                  <div>
+                    <dt>Stage</dt>
+                    <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
+                  </div>
+                  <div>
+                    <dt>Elapsed</dt>
+                    <dd>{formatElapsed(activeRunElapsedSeconds)}</dd>
+                  </div>
+                  {runProgressText !== null && (
+                    <div>
+                      <dt>Progress</dt>
+                      <dd>{runProgressText}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt>Expected</dt>
+                    <dd>
+                      {formatSummaryValue(validationRunQuery.data?.result_summary.expected_devices)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Publishing</dt>
+                    <dd>
+                      {formatSummaryValue(validationRunQuery.data?.result_summary.publishing_seen)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Issues</dt>
+                    <dd>
+                      {formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}
+                    </dd>
+                  </div>
+                  {captureWindow !== null && (
+                    <div>
+                      <dt>Capture window</dt>
+                      <dd>{captureWindow}</dd>
+                    </div>
+                  )}
+                </dl>
+
+                <div className="inline-actions">
+                  {canCancel && (
+                    <button
+                      className="secondary-button compact"
+                      disabled={cancelMutation.isPending}
+                      onClick={() => cancelMutation.mutate(activeRun.runId)}
+                      type="button"
+                    >
+                      {cancelMutation.isPending ? "Stopping..." : "Stop run"}
+                    </button>
+                  )}
+                  {canDownloadValidationJson && (
+                    <button
+                      className="secondary-button compact"
+                      disabled={validationJsonDownload.pendingKey !== null}
+                      onClick={handleValidationJsonDownload}
+                      type="button"
+                    >
+                      {validationJsonDownload.pendingKey === "validation-json"
+                        ? "Downloading JSON..."
+                        : "Download raw JSON"}
+                    </button>
+                  )}
+                  {canEngineer &&
+                    activeRun.kind === "validation" &&
+                    validationRunQuery.data?.job_type === "mqtt_config_publish" &&
+                    activeRunTerminal &&
+                    finalEvidenceReady && (
+                      <button
+                        className="secondary-button compact"
+                        disabled={rollbackMutation.isPending}
+                        onClick={() => rollbackMutation.mutate(activeRun.runId)}
+                        type="button"
+                      >
+                        {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
+                      </button>
+                    )}
+                  {canEngineer && activeRunTerminal && (
+                    <ReportFromRunControls
+                      format={reportExportFormat}
+                      onFormatChange={setReportExportFormat}
+                      onGenerate={handleGenerateReportFromRun}
+                      pending={reportFromRunMutation.isPending}
+                    />
+                  )}
+                </div>
+
+                {canCancel && (
+                  <span className="run-monitor-note">
+                    Stop run keeps the data collected so far — the stopped run can still generate a
+                    report.
+                  </span>
+                )}
+
+                {reportToast && (
+                  <>
+                    <span className="run-monitor-note">{reportToast}</span>
+                    {renderGeneratedAllReportDownload()}
+                  </>
+                )}
+                {reportFromRunMutation.isError && (
+                  <span className="error-text">{reportFromRunMutation.error.message}</span>
+                )}
+                {validationJsonDownload.error && (
+                  <span className="error-text">
+                    Raw JSON download failed: {validationJsonDownload.error}
+                  </span>
+                )}
+
+                {cancelMutation.isError && (
+                  <span className="error-text">{cancelMutation.error.message}</span>
+                )}
+                {rollbackMutation.isError && (
+                  <span className="error-text">{rollbackMutation.error.message}</span>
+                )}
+
+                {activeRunError && <span className="error-text">{activeRunError}</span>}
+
+                {activeRun.kind === "discovery" && discoveryResultsQuery.isError && (
+                  <span className="error-text">
+                    Could not load discovery results:{" "}
+                    {discoveryResultsQuery.error instanceof Error
+                      ? discoveryResultsQuery.error.message
+                      : "request failed"}
+                  </span>
+                )}
+
+                {activeRun.kind === "validation" && validationIssuesQuery.isError && (
+                  <span className="error-text">
+                    Could not load validation issues — verdicts stay pending:{" "}
+                    {validationIssuesQuery.error instanceof Error
+                      ? validationIssuesQuery.error.message
+                      : "request failed"}
+                  </span>
+                )}
+              </div>
+            )}
+          </article>
+        </section>
+
+        {module.route === "data-validation" && (
+          <section className="surface" data-stepgroup="setup">
+            <div className="surface-heading">
+              <div>
+                <h3>Three Checks Operators Can Understand</h3>
+              </div>
+            </div>
+            <div className="mode-grid">
+              {validationModeCards.map((mode) => (
+                <article className="mode-card" key={mode.title}>
+                  <span>{mode.step}</span>
+                  <strong>{mode.title}</strong>
+                  <p>{mode.description}</p>
+                  <small>{mode.templates}</small>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {module.route === "ip-scanner" && (
+          <section className="surface" data-stepgroup="setup">
+            <div className="surface-heading">
+              <div>
+                <h3>Port and Protocol Selection</h3>
+              </div>
+              <button className="secondary-button compact" onClick={addScanPort} type="button">
+                Add port
+              </button>
+            </div>
+            <p className="field-note">
+              The IP scanner runs a TCP connect test only. For BACnet/IP devices (UDP 47808), use
+              BACnet Discovery — it sends a real Who-Is broadcast; a TCP probe cannot detect BACnet.
+            </p>
+            <div className="port-editor">
+              {scanPorts.map((entry, index) => (
+                <div className="port-row" key={`${entry.protocol}-${index}`}>
+                  <label>
+                    Port
+                    <input
+                      inputMode="numeric"
+                      onChange={(event) => changeScanPort(index, "port", event.target.value)}
+                      placeholder="443"
+                      value={entry.port}
+                    />
+                  </label>
+                  <label>
+                    Protocol
+                    <select
+                      onChange={(event) =>
+                        changeScanPort(
+                          index,
+                          "protocol",
+                          event.target.value as ScanPort["protocol"],
+                        )
+                      }
+                      value={entry.protocol}
+                    >
+                      {/* TCP only: the sweep is a TCP connect test. UDP (e.g. BACnet
+                        47808) is handled by the dedicated BACnet Discovery module. */}
+                      <option value="tcp">TCP</option>
+                    </select>
+                  </label>
+                  <button
+                    className="secondary-button compact"
+                    disabled={scanPorts.length === 1}
+                    onClick={() => removeScanPort(index)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="section-copy">
+              Sent to the API as{" "}
+              <strong>{scanPortSpecification(scanPorts) || "common ports"}</strong>. Leave the list
+              empty to use the common TCP fallback (80, 443, 1883, 502). BACnet/IP (UDP 47808) is
+              not probed here — use BACnet Discovery.
+            </p>
+            <div className="publish-grid capture-controls">
+              <label>
+                Target override (CIDR 10.0.0.0/24, range 10.0.0.1-10.0.0.50, or blank to use the
+                imported IP register)
+                <input
+                  onChange={(event) => setScanTarget(event.target.value)}
+                  placeholder="Blank = imported IP register"
+                  value={scanTarget}
+                />
+              </label>
+            </div>
+          </section>
+        )}
+
+        {module.route === "mqtt-discovery" && (
+          <section className="surface" data-stepgroup="run">
+            <div className="surface-heading">
+              <div>
+                <h3>Incoming MQTT Payloads</h3>
+              </div>
+              <div className="inline-actions">
                 <button
-                  className="secondary-button compact inline-link-button"
-                  disabled={reportDownload.pendingKey !== null}
-                  onClick={() =>
-                    void reportDownload.download(
-                      "report",
-                      getReportDownloadPath(lastReport.report_id),
-                      lastReport.file_name ||
-                        `${lastReport.report_id}.${lastReport.output_format}`,
-                    )
+                  className="secondary-button compact"
+                  disabled={captureRows.length === 0}
+                  onClick={handleCaptureExport}
+                  title={
+                    captureRows.length === 0
+                      ? "No captured topics yet — run an MQTT discovery with this topic filter."
+                      : "Download the latest payload per topic as CSV."
                   }
                   type="button"
                 >
-                  {reportDownload.pendingKey === "report"
-                    ? "Downloading..."
-                    : `Download ${lastReport.output_format.toUpperCase()}`}
+                  Export to CSV
                 </button>
-              )}
-            </div>
-          )}
-
-          {reportDownload.error && (
-            <div className="state-panel error">
-              <strong>Report download failed</strong>
-              <span>{reportDownload.error}</span>
-            </div>
-          )}
-
-          {copyFeedback && (
-            <div className={`state-panel ${copyFeedback.severity}`}>
-              <strong>Payload copy</strong>
-              <span>{copyFeedback.message}</span>
-            </div>
-          )}
-
-          {activeRun && (
-            <div className="state-panel run-monitor">
-              <div className="run-monitor-heading">
-                <div>
-                  <strong>{activeRun.kind === "discovery" ? "Discovery" : "Validation"} run monitor</strong>
-                  <span>{activeRun.runId}</span>
-                  <Link className="link-button" to="/run-history">
-                    Run history
-                  </Link>
-                </div>
-                <span className={`status-token ${activeStatusClass}`}>
-                  {activeRunStatus ?? "queued"}
-                </span>
-              </div>
-
-              <div className={`progress-track${progressIndeterminate ? " indeterminate" : ""}`}>
-                <div style={progressIndeterminate ? undefined : { width: `${progressWidth}%` }} />
-              </div>
-
-              {runController.phase === "terminal-sync" && (
-                <div className={`state-panel ${runController.evidenceError ? "error" : ""}`}>
-                  <strong>
-                    {runController.evidenceError
-                      ? "Final evidence unavailable"
-                      : "Final evidence is synchronising"}
-                  </strong>
-                  <span>
-                    {runController.evidenceError ??
-                      "Completed metrics and exports will appear after the final run data is confirmed."}
-                  </span>
-                </div>
-              )}
-
-              <dl className="summary-grid">
-                <div>
-                  <dt>Stage</dt>
-                  <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
-                </div>
-                <div>
-                  <dt>Elapsed</dt>
-                  <dd>{formatElapsed(activeRunElapsedSeconds)}</dd>
-                </div>
-                {runProgressText !== null && (
-                  <div>
-                    <dt>Progress</dt>
-                    <dd>{runProgressText}</dd>
-                  </div>
-                )}
-                <div>
-                  <dt>Expected</dt>
-                  <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.expected_devices)}</dd>
-                </div>
-                <div>
-                  <dt>Publishing</dt>
-                  <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.publishing_seen)}</dd>
-                </div>
-                <div>
-                  <dt>Issues</dt>
-                  <dd>{formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}</dd>
-                </div>
-                {captureWindow !== null && (
-                  <div>
-                    <dt>Capture window</dt>
-                    <dd>{captureWindow}</dd>
-                  </div>
-                )}
-              </dl>
-
-              <div className="inline-actions">
-                {canCancel && (
-                  <button
-                    className="secondary-button compact"
-                    disabled={cancelMutation.isPending}
-                    onClick={() => cancelMutation.mutate(activeRun.runId)}
-                    type="button"
-                  >
-                    {cancelMutation.isPending ? "Stopping..." : "Stop run"}
-                  </button>
-                )}
-                {canDownloadValidationJson && (
-                  <button
-                    className="secondary-button compact"
-                    disabled={validationJsonDownload.pendingKey !== null}
-                    onClick={handleValidationJsonDownload}
-                    type="button"
-                  >
-                    {validationJsonDownload.pendingKey === "validation-json"
-                      ? "Downloading JSON..."
-                      : "Download raw JSON"}
-                  </button>
-                )}
-                {canEngineer &&
-                  activeRun.kind === "validation" &&
-                  validationRunQuery.data?.job_type === "mqtt_config_publish" &&
-                  activeRunTerminal &&
-                  finalEvidenceReady && (
-                    <button
-                      className="secondary-button compact"
-                      disabled={rollbackMutation.isPending}
-                      onClick={() => rollbackMutation.mutate(activeRun.runId)}
-                      type="button"
-                    >
-                      {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
-                    </button>
-                  )}
-                {canEngineer && activeRunTerminal && finalEvidenceReady && (
-                  <ReportFromRunControls
-                    format={reportExportFormat}
-                    onFormatChange={setReportExportFormat}
-                    onGenerate={handleGenerateReportFromRun}
-                    pending={reportFromRunMutation.isPending}
-                  />
-                )}
-              </div>
-
-              {canCancel && (
-                <span className="run-monitor-note">
-                  Stop run keeps the data collected so far — the stopped run can still generate a
-                  report.
-                </span>
-              )}
-
-              {reportToast && (
-                <>
-                  <span className="run-monitor-note">{reportToast}</span>
-                  {renderGeneratedAllReportDownload()}
-                </>
-              )}
-              {reportFromRunMutation.isError && (
-                <span className="error-text">{reportFromRunMutation.error.message}</span>
-              )}
-              {validationJsonDownload.error && (
-                <span className="error-text">Raw JSON download failed: {validationJsonDownload.error}</span>
-              )}
-
-              {cancelMutation.isError && (
-                <span className="error-text">{cancelMutation.error.message}</span>
-              )}
-              {rollbackMutation.isError && (
-                <span className="error-text">{rollbackMutation.error.message}</span>
-              )}
-
-              {activeRunError && (
-                <span className="error-text">{activeRunError}</span>
-              )}
-
-              {activeRun.kind === "discovery" && discoveryResultsQuery.isError && (
-                <span className="error-text">
-                  Could not load discovery results: {discoveryResultsQuery.error instanceof Error
-                    ? discoveryResultsQuery.error.message
-                    : "request failed"}
-                </span>
-              )}
-
-              {activeRun.kind === "validation" && validationIssuesQuery.isError && (
-                <span className="error-text">
-                  Could not load validation issues — verdicts stay pending: {validationIssuesQuery.error instanceof Error
-                    ? validationIssuesQuery.error.message
-                    : "request failed"}
-                </span>
-              )}
-            </div>
-          )}
-        </article>
-      </section>
-
-      {module.route === "data-validation" && (
-        <section className="surface" data-stepgroup="setup">
-          <div className="surface-heading">
-            <div>
-              <h3>Three Checks Operators Can Understand</h3>
-            </div>
-          </div>
-          <div className="mode-grid">
-            {validationModeCards.map((mode) => (
-              <article className="mode-card" key={mode.title}>
-                <span>{mode.step}</span>
-                <strong>{mode.title}</strong>
-                <p>{mode.description}</p>
-                <small>{mode.templates}</small>
-              </article>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {module.route === "ip-scanner" && (
-        <section className="surface" data-stepgroup="setup">
-          <div className="surface-heading">
-            <div>
-              <h3>Port and Protocol Selection</h3>
-            </div>
-            <button className="secondary-button compact" onClick={addScanPort} type="button">
-              Add port
-            </button>
-          </div>
-          <p className="field-note">
-            The IP scanner runs a TCP connect test only. For BACnet/IP devices (UDP 47808), use BACnet
-            Discovery — it sends a real Who-Is broadcast; a TCP probe cannot detect BACnet.
-          </p>
-          <div className="port-editor">
-            {scanPorts.map((entry, index) => (
-              <div className="port-row" key={`${entry.protocol}-${index}`}>
-                <label>
-                  Port
-                  <input
-                    inputMode="numeric"
-                    onChange={(event) => changeScanPort(index, "port", event.target.value)}
-                    placeholder="443"
-                    value={entry.port}
-                  />
-                </label>
-                <label>
-                  Protocol
-                  <select
-                    onChange={(event) => changeScanPort(index, "protocol", event.target.value as ScanPort["protocol"])}
-                    value={entry.protocol}
-                  >
-                    {/* TCP only: the sweep is a TCP connect test. UDP (e.g. BACnet
-                        47808) is handled by the dedicated BACnet Discovery module. */}
-                    <option value="tcp">TCP</option>
-                  </select>
-                </label>
                 <button
                   className="secondary-button compact"
-                  disabled={scanPorts.length === 1}
-                  onClick={() => removeScanPort(index)}
+                  disabled={captureRows.length === 0 || exportDownload.pendingKey !== null}
+                  onClick={handleCaptureExportXlsx}
+                  title={
+                    captureRows.length === 0
+                      ? "No captured topics yet — run an MQTT discovery with this topic filter."
+                      : "Download the latest payload per topic as an Excel (XLSX) file."
+                  }
                   type="button"
                 >
-                  Remove
+                  {exportDownload.pendingKey === "capture-xlsx" ? "Exporting..." : "Export to XLSX"}
                 </button>
               </div>
-            ))}
-          </div>
-          <p className="section-copy">
-            Sent to the API as <strong>{scanPortSpecification(scanPorts) || "common ports"}</strong>. Leave the
-            list empty to use the common TCP fallback (80, 443, 1883, 502). BACnet/IP (UDP 47808) is not probed
-            here — use BACnet Discovery.
-          </p>
-          <div className="publish-grid capture-controls">
-            <label>
-              Target override (CIDR 10.0.0.0/24, range 10.0.0.1-10.0.0.50, or blank to use the imported IP
-              register)
-              <input
-                onChange={(event) => setScanTarget(event.target.value)}
-                placeholder="Blank = imported IP register"
-                value={scanTarget}
-              />
-            </label>
-          </div>
-        </section>
-      )}
-
-      {module.route === "mqtt-discovery" && (
-        <section className="surface" data-stepgroup="run">
-          <div className="surface-heading">
-            <div>
-              <h3>Incoming MQTT Payloads</h3>
             </div>
-            <div className="inline-actions">
-              <button
-                className="secondary-button compact"
-                disabled={captureRows.length === 0}
-                onClick={handleCaptureExport}
-                title={
-                  captureRows.length === 0
-                    ? "No captured topics yet — run an MQTT discovery with this topic filter."
-                    : "Download the latest payload per topic as CSV."
-                }
-                type="button"
-              >
-                Export to CSV
-              </button>
-              <button
-                className="secondary-button compact"
-                disabled={captureRows.length === 0 || exportDownload.pendingKey !== null}
-                onClick={handleCaptureExportXlsx}
-                title={
-                  captureRows.length === 0
-                    ? "No captured topics yet — run an MQTT discovery with this topic filter."
-                    : "Download the latest payload per topic as an Excel (XLSX) file."
-                }
-                type="button"
-              >
-                {exportDownload.pendingKey === "capture-xlsx" ? "Exporting..." : "Export to XLSX"}
-              </button>
+            <div className="publish-grid capture-controls">
+              <label>
+                Topic filter (MQTT wildcards: + and #)
+                <input
+                  onChange={(event) => setCaptureTopicFilter(event.target.value)}
+                  placeholder="Blank = capture every topic (#)"
+                  value={captureTopicFilter}
+                />
+                <small>
+                  Leave blank to capture every topic (#). Enter a filter with MQTT wildcards (+ and
+                  #) to narrow the capture, e.g. site/asset-1/#.
+                </small>
+              </label>
+              <label>
+                Run time (blank = run until all assets/topics seen or until the user stops the run)
+                <input
+                  inputMode="numeric"
+                  onChange={(event) => setCaptureSeconds(event.target.value)}
+                  placeholder="blank = run until you stop the run"
+                  value={captureSeconds}
+                />
+              </label>
+              <label>
+                Run time unit
+                <select
+                  onChange={(event) =>
+                    setCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
+                  }
+                  value={captureUnit}
+                >
+                  <option value="seconds">seconds</option>
+                  <option value="minutes">minutes</option>
+                  <option value="hours">hours</option>
+                </select>
+              </label>
             </div>
-          </div>
-          <div className="publish-grid capture-controls">
-            <label>
-              Topic filter (MQTT wildcards: + and #)
-              <input
-                onChange={(event) => setCaptureTopicFilter(event.target.value)}
-                placeholder="Blank = capture every topic (#)"
-                value={captureTopicFilter}
-              />
-              <small>
-                Leave blank to capture every topic (#). Enter a filter with MQTT wildcards
-                (+ and #) to narrow the capture, e.g. site/asset-1/#.
-              </small>
-            </label>
-            <label>
-              Run time (blank = run until all assets/topics seen or until the user stops the run)
-              <input
-                inputMode="numeric"
-                onChange={(event) => setCaptureSeconds(event.target.value)}
-                placeholder="blank = run until you stop the run"
-                value={captureSeconds}
-              />
-            </label>
-            <label>
-              Run time unit
-              <select
-                onChange={(event) =>
-                  setCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
-                }
-                value={captureUnit}
-              >
-                <option value="seconds">seconds</option>
-                <option value="minutes">minutes</option>
-                <option value="hours">hours</option>
-              </select>
-            </label>
-          </div>
-          {mqttCaptureOverCap && (
-            <span className="error-text">
-              Run time exceeds the 48-hour capture limit — shorten the window.
-            </span>
-          )}
-          <p className="section-copy">
-            Subscribes through an MQTT discovery run and shows the latest payload seen per topic. The live
-            broker capture is on-site-untested here; with no broker reachable the run records
-            broker_unreachable and this panel stays empty rather than showing fabricated payloads. The
-            filter and run time are sent to the run; the run time is{" "}
-            <strong>{Number(captureSecondsEffective) > 0 ? `${captureSecondsEffective}s` : "blank (run until you press Stop run)"}</strong>.
-            Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety limit.
-            Closing the app ends the run, which is then marked interrupted at next start. Captured topics
-            appear here when the run completes.
-          </p>
-          {activeRunTerminal &&
-            discoveryRunQuery.data?.result_summary?.indefinite_bounded_inline === true && (
+            {mqttCaptureOverCap && (
               <span className="error-text">
-                This run requested an indefinite capture but was bounded to{" "}
-                {String(discoveryRunQuery.data?.result_summary?.capture_seconds)}s because no stop
-                control was available for it.
+                Run time exceeds the 48-hour capture limit — shorten the window.
               </span>
             )}
-          <div className="data-table-wrap results-scroll">
-            {captureRows.length > 0 ? (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Topic</th>
-                    <th>Asset</th>
-                    <th>Messages</th>
-                    <th>Latest payload</th>
-                    <th>Copy</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {captureRows.map((row) => (
-                    <tr key={row.topic}>
-                      <td>{row.topic}</td>
-                      <td>{row.asset}</td>
-                      <td>{row.messageCount}</td>
-                      <td className="payload-cell">{row.payload || "—"}</td>
-                      <td>
-                        {row.payload ? (
-                          <button
-                            className="secondary-button compact"
-                            onClick={() => handleCopyPayload(row.payload, row.topic)}
-                            type="button"
-                          >
-                            Copy payload
-                          </button>
-                        ) : (
-                          "—"
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="empty-workspace">
-                <strong>No captured payloads yet</strong>
-                <span>
-                  Run an MQTT discovery; the latest payload per topic matching the filter appears here
-                  once the run completes. Empty live results stay empty — no sample payloads are shown.
+            <p className="section-copy">
+              Subscribes through an MQTT discovery run and shows the latest payload seen per topic.
+              The live broker capture is on-site-untested here; with no broker reachable the run
+              records broker_unreachable and this panel stays empty rather than showing fabricated
+              payloads. The filter and run time are sent to the run; the run time is{" "}
+              <strong>
+                {Number(captureSecondsEffective) > 0
+                  ? `${captureSecondsEffective}s`
+                  : "blank (run until you press Stop run)"}
+              </strong>
+              . Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour
+              safety limit. Closing the app ends the run, which is then marked interrupted at next
+              start. Captured topics appear here when the run completes.
+            </p>
+            {activeRunTerminal &&
+              discoveryRunQuery.data?.result_summary?.indefinite_bounded_inline === true && (
+                <span className="error-text">
+                  This run requested an indefinite capture but was bounded to{" "}
+                  {String(discoveryRunQuery.data?.result_summary?.capture_seconds)}s because no stop
+                  control was available for it.
                 </span>
-              </div>
-            )}
-          </div>
-          {captureTopicsQuery.isError && (
-            <span className="error-text">
-              Could not load captured topics:{" "}
-              {captureTopicsQuery.error instanceof Error ? captureTopicsQuery.error.message : "request failed"}
-            </span>
-          )}
-        </section>
-      )}
-
-      {module.route === "udmi-validation" && (
-        <section className="surface" data-stepgroup="setup">
-          <div className="surface-heading">
-            <div>
-              <h3>Non-Published UDMI Schema Sets</h3>
-            </div>
-          </div>
-          <p className="section-copy">
-            Payloads declaring a non-published UDMI version (e.g. nonpub.1) are validated against
-            the uploaded schema set with that label. Download the published 1.5.2 schema set as a
-            starting point, modify it, and upload it under a nonpub label.
-          </p>
-          <div className="form-stack">
-            <button
-              className="secondary-button"
-              disabled={schemaTemplateDownload.pendingKey !== null}
-              onClick={() =>
-                void schemaTemplateDownload.download(
-                  "udmi-schema-template",
-                  getUdmiSchemaTemplatePath(),
-                  "udmi-schema-template-1.5.2.zip",
-                )
-              }
-              type="button"
-            >
-              {schemaTemplateDownload.pendingKey === "udmi-schema-template"
-                ? "Downloading..."
-                : "Download schema template (1.5.2)"}
-            </button>
-            {schemaTemplateDownload.error && (
-              <div className="state-panel error">
-                <strong>Template download failed</strong>
-                <span>{schemaTemplateDownload.error}</span>
-              </div>
-            )}
-            <label>
-              Version label
-              <input
-                onChange={(event) => setSchemaSetLabel(event.target.value)}
-                placeholder="nonpub.1"
-                type="text"
-                value={schemaSetLabel}
-              />
-            </label>
-            <label>
-              Schema JSON files
-              <input
-                accept=".json"
-                multiple
-                onChange={(event) => {
-                  setSchemaSetFiles(Array.from(event.target.files ?? []));
-                  // Same Chromium re-pick trap as the register file input above:
-                  // clear the value so re-picking the same schema files after
-                  // editing them on disk always delivers fresh File snapshots.
-                  event.target.value = "";
-                }}
-                type="file"
-              />
-            </label>
-            {schemaSetFiles.length > 0 && (
-              <p className="field-note">
-                Selected: {schemaSetFiles.map((file) => file.name).join(", ")}
-              </p>
-            )}
-            <button
-              className="primary-button"
-              disabled={
-                schemaSetLabel.trim() === "" ||
-                schemaSetFiles.length === 0 ||
-                schemaUploadMutation.isPending ||
-                !canEngineer
-              }
-              onClick={() => schemaUploadMutation.mutate()}
-              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-              type="button"
-            >
-              {schemaUploadMutation.isPending ? "Uploading..." : "Upload schema set"}
-            </button>
-
-            {schemaUploadMutation.isError && (
-              <div className="state-panel error">
-                <strong>Schema set upload failed</strong>
-                <span>{schemaUploadMutation.error.message}</span>
-              </div>
-            )}
-
-            {schemaUploadMutation.isSuccess && (
-              <div className="state-panel success">
-                <strong>ACCEPTED</strong>
-                <span>
-                  {schemaUploadMutation.data.version_label} ·{" "}
-                  {schemaUploadMutation.data.filenames.length} file
-                  {schemaUploadMutation.data.filenames.length === 1 ? "" : "s"} stored
-                </span>
-              </div>
-            )}
-
-            {(udmiSchemaSetsQuery.data ?? []).length > 0 ? (
-              <div className="data-table-wrap">
+              )}
+            <div className="data-table-wrap results-scroll">
+              {captureRows.length > 0 ? (
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Version label</th>
-                      <th>Files</th>
-                      <th>Uploaded</th>
-                      <th>Actions</th>
+                      <th>Topic</th>
+                      <th>Asset</th>
+                      <th>Messages</th>
+                      <th>Latest payload</th>
+                      <th>Copy</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(udmiSchemaSetsQuery.data ?? []).map((set) => (
-                      <tr key={set.version_label}>
-                        <td>{set.version_label}</td>
-                        <td>{set.filenames.join(", ")}</td>
-                        <td>{set.uploaded_at}</td>
+                    {captureRows.map((row) => (
+                      <tr key={row.topic}>
+                        <td>{row.topic}</td>
+                        <td>{row.asset}</td>
+                        <td>{row.messageCount}</td>
+                        <td className="payload-cell">{row.payload || "—"}</td>
                         <td>
-                          <button
-                            className="secondary-button compact"
-                            disabled={schemaDeleteMutation.isPending || !canEngineer}
-                            onClick={() => schemaDeleteMutation.mutate(set.version_label)}
-                            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-                            type="button"
-                          >
-                            Delete
-                          </button>
+                          {row.payload ? (
+                            <button
+                              className="secondary-button compact"
+                              onClick={() => handleCopyPayload(row.payload, row.topic)}
+                              type="button"
+                            >
+                              Copy payload
+                            </button>
+                          ) : (
+                            "—"
+                          )}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-              </div>
-            ) : (
-              <p className="section-copy">
-                No non-published schema sets uploaded yet. Canonical published UDMI versions need no
-                upload.
-              </p>
-            )}
-
-            {schemaDeleteMutation.isError && (
-              <span className="error-text">{schemaDeleteMutation.error.message}</span>
-            )}
-            {udmiSchemaSetsQuery.isError && (
+              ) : (
+                <div className="empty-workspace">
+                  <strong>No captured payloads yet</strong>
+                  <span>
+                    Run an MQTT discovery; the latest payload per topic matching the filter appears
+                    here once the run completes. Empty live results stay empty — no sample payloads
+                    are shown.
+                  </span>
+                </div>
+              )}
+            </div>
+            {captureTopicsQuery.isError && (
               <span className="error-text">
-                Could not load uploaded schema sets:{" "}
-                {udmiSchemaSetsQuery.error instanceof Error
-                  ? udmiSchemaSetsQuery.error.message
+                Could not load captured topics:{" "}
+                {captureTopicsQuery.error instanceof Error
+                  ? captureTopicsQuery.error.message
                   : "request failed"}
               </span>
             )}
-          </div>
-        </section>
-      )}
+          </section>
+        )}
 
-      {module.route === "udmi-validation" && (
-        <section className="surface" data-stepgroup="setup">
-          <div className="surface-heading">
-            <div>
-              <h3>Schedule and Payload Evidence</h3>
-            </div>
-          </div>
-          <label className="confirm-row">
-            <input
-              checked={udmiUseRegister}
-              onChange={(event) => {
-                const useRegister = event.target.checked;
-                setUdmiUseRegister(useRegister);
-                if (!useRegister) {
-                  setUdmiTopicDiscoveryEnabled(false);
-                  setUdmiTopicDiscoveryScope("bounded");
-                  setUdmiTopicDiscoveryAllScopeConfirmed(false);
-                }
-              }}
-              type="checkbox"
-            />
-            Validate against the imported MQTT register — one expected asset per row (topic, points,
-            units, and Expected schema version come from the register). Auto-enabled after an
-            accepted register import.
-          </label>
-
-          {udmiUseRegister ? (
-            <p className="section-copy">
-              Register-driven run: the pasted schedule and payload JSON below are ignored. Untick the
-              option above to validate the pasted values instead.
-            </p>
-          ) : null}
-          <div className="json-workbench">
-            <label>
-              Expected schedule JSON
-              <textarea
-                disabled={udmiUseRegister}
-                onChange={(event) => setUdmiExpectedSchedule(event.target.value)}
-                rows={9}
-                value={udmiExpectedSchedule}
-              />
-            </label>
-            <label>
-              State payload JSON
-              <textarea
-                disabled={udmiUseRegister}
-                onChange={(event) => setUdmiStatePayload(event.target.value)}
-                rows={9}
-                value={udmiStatePayload}
-              />
-            </label>
-            <label>
-              Metadata payload JSON
-              <textarea
-                disabled={udmiUseRegister}
-                onChange={(event) => setUdmiMetadataPayload(event.target.value)}
-                rows={9}
-                value={udmiMetadataPayload}
-              />
-            </label>
-            <label>
-              Pointset payload JSON
-              <textarea
-                disabled={udmiUseRegister}
-                onChange={(event) => setUdmiPointsetPayload(event.target.value)}
-                rows={9}
-                value={udmiPointsetPayload}
-              />
-            </label>
-          </div>
-
-          <label className="confirm-row">
-            <input
-              checked={udmiUseLiveBroker}
-              onChange={(event) => {
-                const useLiveBroker = event.target.checked;
-                setUdmiUseLiveBroker(useLiveBroker);
-                if (!useLiveBroker) {
-                  setUdmiTopicDiscoveryEnabled(false);
-                  setUdmiTopicDiscoveryScope("bounded");
-                  setUdmiTopicDiscoveryAllScopeConfirmed(false);
-                }
-              }}
-              type="checkbox"
-            />
-            Capture latest state, metadata, and pointset payloads from the configured MQTT broker.
-          </label>
-
-          {udmiUseLiveBroker && (
-            <>
-              <div className="publish-grid">
-                {!udmiUseRegister && (
-                  <>
-                    <label>
-                      State topic
-                      <input onChange={(event) => setUdmiStateTopic(event.target.value)} value={udmiStateTopic} />
-                    </label>
-                    <label>
-                      Metadata topic
-                      <input onChange={(event) => setUdmiMetadataTopic(event.target.value)} value={udmiMetadataTopic} />
-                    </label>
-                    <label>
-                      Pointset topic
-                      <input onChange={(event) => setUdmiPointsetTopic(event.target.value)} value={udmiPointsetTopic} />
-                    </label>
-                  </>
-                )}
-                <label>
-                  Run time (blank = run until all assets/topics seen or until the user stops the run)
-                  <input
-                    inputMode="numeric"
-                    onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
-                    placeholder="blank = run until all assets/topics seen or you stop the run"
-                    value={udmiCaptureSeconds}
-                  />
-                </label>
-                <label>
-                  Run time unit
-                  <select
-                    onChange={(event) =>
-                      setUdmiCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
-                    }
-                    value={udmiCaptureUnit}
-                  >
-                    <option value="seconds">seconds</option>
-                    <option value="minutes">minutes</option>
-                    <option value="hours">hours</option>
-                  </select>
-                </label>
-              </div>
-              {udmiCaptureOverCap && (
-                <span className="error-text">
-                  Run time exceeds the 48-hour capture limit — shorten the window.
-                </span>
-              )}
-              <p className="section-copy">
-                Blank runs until every expected asset/topic has reported or you press Stop run — on the portable
-                exe as well as the hosted worker. Every capture still ends at the 48-hour safety limit (real-world
-                reporting intervals: metadata is often daily), and the completion-driven safety limit is 500 distinct
-                concrete topics. Closing the app ends the run, which is then marked interrupted at next start.
-              </p>
-              {udmiUseRegister ? (
-                <fieldset className="topic-discovery-controls">
-                <legend>Topic discovery</legend>
-                <label className="confirm-row">
-                  <input
-                    checked={udmiTopicDiscoveryEnabled}
-                    onChange={(event) => {
-                      const enabled = event.target.checked;
-                      setUdmiTopicDiscoveryEnabled(enabled);
-                      if (!enabled) {
-                        setUdmiTopicDiscoveryScope("bounded");
-                        setUdmiTopicDiscoveryAllScopeConfirmed(false);
-                      }
-                    }}
-                    type="checkbox"
-                  />
-                  Diagnose where registered asset IDs appear in MQTT topics.
-                </label>
-                {udmiTopicDiscoveryEnabled ? (
-                  <div className="topic-discovery-options">
-                    <label className="confirm-row">
-                      <input
-                        checked={udmiTopicDiscoveryAllScopeConfirmed}
-                        onChange={(event) => {
-                          const confirmed = event.target.checked;
-                          setUdmiTopicDiscoveryAllScopeConfirmed(confirmed);
-                          if (!confirmed) {
-                            setUdmiTopicDiscoveryScope("bounded");
-                          }
-                        }}
-                        type="checkbox"
-                      />
-                      I understand that an all-topic search can receive every broker topic this account is authorised to receive.
-                    </label>
-                    <label className="confirm-row">
-                      <input
-                        checked={udmiTopicDiscoveryScope === "bounded"}
-                        name="udmi-topic-discovery-scope"
-                        onChange={() => {
-                          setUdmiTopicDiscoveryScope("bounded");
-                          setUdmiTopicDiscoveryAllScopeConfirmed(false);
-                        }}
-                        type="radio"
-                        value="bounded"
-                      />
-                      Use the register&apos;s bounded topic scope.
-                    </label>
-                    <label className="confirm-row">
-                      <input
-                        checked={udmiTopicDiscoveryScope === "all"}
-                        disabled={!udmiTopicDiscoveryAllScopeConfirmed}
-                        name="udmi-topic-discovery-scope"
-                        onChange={() => setUdmiTopicDiscoveryScope("all")}
-                        type="radio"
-                        value="all"
-                      />
-                      Search all authorised broker topics (#).
-                    </label>
-                    {!udmiTopicDiscoveryAllScopeConfirmed ? (
-                      <p className="section-copy">
-                        Acknowledge the broader scope above to enable the all-topic search.
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-                </fieldset>
-              ) : (
-                <p className="section-copy">
-                  Topic discovery is available for live captures that validate against the imported MQTT register.
-                </p>
-              )}
-            </>
-          )}
-
-          <div className="inline-actions execute-row">
-            <button
-              className="primary-button compact"
-              disabled={runMutation.isPending || !canEngineer || udmiCaptureOverCap || startedRunActive}
-              onClick={() => runMutation.mutate(udmiRunActionId)}
-              title={
-                !canEngineer
-                  ? ENGINEER_REQUIRED_TOOLTIP
-                  : udmiCaptureOverCap
-                    ? "Run time exceeds the 48-hour capture limit."
-                    : startedRunActive
-                      ? "A run is already in progress — stop it before starting another."
-                      : undefined
-              }
-              type="button"
-            >
-              {runMutation.isPending ? "Executing..." : "Execute capture"}
-            </button>
-            <span className="section-copy execute-note">
-              {udmiUseRegister
-                ? udmiUseLiveBroker
-                  ? "Runs the UDMI validation for every imported register row, capturing each asset's state, metadata, and pointset payloads from its register topic. With no broker reachable the engine records broker_unreachable rather than fabricating payloads."
-                  : "Runs the UDMI validation for every imported register row. Without broker capture there are no observed payloads, so expected points are reported as not received — tick the broker option to capture live payloads."
-                : udmiUseLiveBroker
-                  ? "Runs the UDMI validation, capturing the state, metadata, and pointset payloads for the topics above. Live broker capture is on-site-untested; with no broker reachable the engine records broker_unreachable rather than fabricating payloads."
-                  : "Runs the UDMI validation against the pasted state, metadata, and pointset payloads above. Tick the broker option to capture live payloads instead (on-site-untested)."}
-            </span>
-          </div>
-        </section>
-      )}
-
-      {module.route === "udmi-validation" && (
-        <section className="surface" data-stepgroup="run">
-          <div className="surface-heading">
-            <div>
-              <h3>MQTT Config Payload</h3>
-            </div>
-          </div>
-          <div className="publish-grid">
-            <label>
-              Config topic
-              <input onChange={(event) => setPublishTopic(event.target.value)} value={publishTopic} />
-            </label>
-            <label>
-              Primary point (confirmed)
-              <input onChange={(event) => setPublishPoint(event.target.value)} value={publishPoint} />
-            </label>
-            <label>
-              Primary set_value
-              <input onChange={(event) => setPublishValue(event.target.value)} value={publishValue} />
-            </label>
-            <label className="publish-payload">
-              Payload JSON
-              <textarea onChange={(event) => setPublishPayload(event.target.value)} rows={6} value={publishPayload} />
-            </label>
-          </div>
-
-          <div className="multi-point-editor">
-            <div className="surface-heading compact-heading">
+        {module.route === "udmi-validation" && (
+          <section className="surface" data-stepgroup="setup">
+            <div className="surface-heading">
               <div>
-                <h4>Write Multiple Points in One Config</h4>
+                <h3>Non-Published UDMI Schema Sets</h3>
               </div>
-              <button className="secondary-button compact" onClick={addExtraPublishPoint} type="button">
-                Add point
-              </button>
             </div>
-            {publishExtraPoints.length === 0 ? (
-              <p className="section-copy">
-                Optional. Add extra point/value pairs to write them all in a single config payload alongside
-                the primary point above.
-              </p>
-            ) : (
-              <div className="port-editor">
-                {publishExtraPoints.map((pair, index) => (
-                  <div className="port-row" key={`extra-${index}`}>
-                    <label>
-                      Point name
-                      <input
-                        onChange={(event) => changeExtraPublishPoint(index, "point", event.target.value)}
-                        placeholder="fan_enable"
-                        value={pair.point}
-                      />
-                    </label>
-                    <label>
-                      set_value
-                      <input
-                        onChange={(event) => changeExtraPublishPoint(index, "value", event.target.value)}
-                        placeholder="true"
-                        value={pair.value}
-                      />
-                    </label>
-                    <button
-                      className="secondary-button compact"
-                      onClick={() => removeExtraPublishPoint(index)}
-                      type="button"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
             <p className="section-copy">
-              All pairs are written into one config payload under <code>pointset.points</code>, and the
-              backend confirm/verify step now checks every point/value here — one issue is raised per point
-              whose value is not confirmed back. Live-broker confirmation (vs. the local verify) remains
-              on-site-untested, the same as for the primary point.
+              Payloads declaring a non-published UDMI version (e.g. nonpub.1) are validated against
+              the uploaded schema set with that label. Download the published 1.5.2 schema set as a
+              starting point, modify it, and upload it under a nonpub label.
             </p>
-          </div>
-
-          <label className="confirm-row">
-            <input
-              checked={publishUseLiveBroker}
-              onChange={(event) => setPublishUseLiveBroker(event.target.checked)}
-              type="checkbox"
-            />
-            Publish through the configured MQTT broker and wait for the next pointset message.
-          </label>
-          {publishUseLiveBroker && (
-            <div className="publish-grid">
-              <label className="publish-payload">
-                Pointset topic to verify
-                <input
-                  onChange={(event) => setPublishPointsetTopic(event.target.value)}
-                  value={publishPointsetTopic}
-                />
-              </label>
-              <label>
-                Wait seconds
-                <input
-                  inputMode="numeric"
-                  onChange={(event) => setPublishWaitSeconds(event.target.value)}
-                  value={publishWaitSeconds}
-                />
-              </label>
-            </div>
-          )}
-          <label className="confirm-row">
-            <input
-              checked={publishConfirmed}
-              onChange={(event) => setPublishConfirmed(event.target.checked)}
-              type="checkbox"
-            />
-            I confirm this config payload should be published to the selected topic.
-          </label>
-          <button
-            className="primary-button"
-            disabled={publishMutation.isPending || !publishConfirmed || !canEngineer}
-            onClick={() => publishMutation.mutate()}
-            title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-            type="button"
-          >
-            {publishMutation.isPending ? "Publishing..." : "Publish and verify next pointset"}
-          </button>
-          {publishMutation.isError && (
-            <div className="state-panel error">
-              <strong>Publish request failed</strong>
-              <span>{publishMutation.error.message}</span>
-            </div>
-          )}
-        </section>
-      )}
-
-      {module.route === "reports" && (
-        // Shown on every step, not just Results: the Reports page always lands on
-        // Setup, which used to hide this table behind a step click nobody knew to
-        // make. The Generate buttons live in the "setup run" Run Controls section,
-        // so defaulting this route to Results instead would just hide those.
-        <section className="surface" data-stepgroup="setup run results">
-          <div className="surface-heading">
-            <div>
-              <h3 className="report-list-heading" ref={reportsHeadingRef} tabIndex={-1}>
-                Generated Reports
-              </h3>
-            </div>
-            <div className="report-list-actions">
+            <div className="form-stack">
               <button
-                className="secondary-button compact"
-                disabled={
-                  selectedDownloadableReports.length === 0 ||
-                  exportDownload.pendingKey !== null
-                }
-                onClick={() => void handleExportSelected()}
-                title={
-                  selectedDownloadableReports.length === 0
-                    ? "Select one or more completed reports to export them."
-                    : `Download ${selectedDownloadableReports.length} selected completed report(s).`
+                className="secondary-button"
+                disabled={schemaTemplateDownload.pendingKey !== null}
+                onClick={() =>
+                  void schemaTemplateDownload.download(
+                    "udmi-schema-template",
+                    getUdmiSchemaTemplatePath(),
+                    "udmi-schema-template-1.5.2.zip",
+                  )
                 }
                 type="button"
               >
-                {exportDownload.pendingKey?.startsWith("selected-")
-                  ? "Exporting..."
-                  : "Export selected"}
+                {schemaTemplateDownload.pendingKey === "udmi-schema-template"
+                  ? "Downloading..."
+                  : "Download schema template (1.5.2)"}
               </button>
-              {canEngineer && (
-                <button
-                  className="secondary-button compact destructive"
-                  disabled={selectedReports.length === 0 || deleteReportsMutation.isPending}
-                  onClick={() => handleDeleteReports(selectedReports, { kind: "bulk" })}
-                  ref={reportDeleteSelectedRef}
-                  title={
-                    selectedReports.length === 0
-                      ? "Select one or more reports to delete them."
-                      : `Delete ${selectedReports.length} selected report(s).`
-                  }
-                  type="button"
-                >
-                  {deleteReportsMutation.isPending ? "Deleting..." : "Delete selected"}
-                </button>
+              {schemaTemplateDownload.error && (
+                <div className="state-panel error">
+                  <strong>Template download failed</strong>
+                  <span>{schemaTemplateDownload.error}</span>
+                </div>
               )}
-            </div>
-          </div>
-          <p className="section-copy">
-            Every report you generate here is stored against its run and listed below. Generate a report from
-            the Run Controls above, or use "Generate report from this run" on a completed discovery or
-            validation run elsewhere — it will appear here, traceable to the run it came from.
-          </p>
-          {reportToast && (
-            <div className={`state-panel ${reportToastWarning ? "warning" : "success"}`} role="status">
-              <strong>
-                {reportToastWarning
-                  ? "Report generation incomplete"
-                  : generatedAllReportIds
-                    ? "Reports ready"
-                    : "Report generated"}
-              </strong>
-              <span>{reportToast}</span>
-              {renderGeneratedAllReportDownload()}
-            </div>
-          )}
-          {reportDeleteNotice && (
-            <div className="state-panel success" role="status">
-              <strong>Reports deleted</strong>
-              <span>{reportDeleteNotice}</span>
-            </div>
-          )}
-          <div className="data-table-wrap">
-            {liveReports.length > 0 ? (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Select</th>
-                    <th>Report</th>
-                    <th>Type</th>
-                    <th>Format</th>
-                    <th>Status</th>
-                    <th>Generated</th>
-                    <th>Source runs</th>
-                    <th>File</th>
-                    <th>Download</th>
-                    {canEngineer && <th>Delete</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {liveReports.map((report) => {
-                    const downloadable = report.status === "succeeded";
-                    return (
-                      <tr key={report.report_id}>
-                        <td>
-                          <input
-                            aria-label={`Select report ${report.file_name || report.report_id}`}
-                            checked={selectedReportIds.has(report.report_id)}
-                            onChange={() => toggleReportSelection(report.report_id)}
-                            title="Select this report for export or deletion."
-                            type="checkbox"
-                          />
-                        </td>
-                        <td>
-                          <div className="report-name-cell">
-                            <strong>{report.report_title?.trim() || report.report_id}</strong>
-                            {report.report_title?.trim() ? (
-                              <small>{report.report_id}</small>
-                            ) : null}
-                          </div>
-                        </td>
-                        <td>{report.report_type}</td>
-                        <td>{report.output_format.toUpperCase()}</td>
-                        <td>
-                          <span className={`status-token ${toHealthState(report.status)}`}>
-                            {report.status}
-                          </span>
-                        </td>
-                        <td>{formatAbsoluteTime(report.created_at)}</td>
-                        {/* The source run ids in full, not a count: tracing a report back
-                            to the runs it was built from is the whole point of an ITP
-                            evidence pack, and run ids are already shown raw in the Report
-                            column and the run monitor. `?? []` because a response from an
-                            older backend (or a cached query payload) carries neither new
-                            field — formatAbsoluteTime already tolerates undefined. */}
-                        <td>{(report.source_run_ids ?? []).join(", ") || "—"}</td>
-                        <td>{report.file_name || "—"}</td>
-                        <td>
-                          <button
-                            className="secondary-button compact"
-                            disabled={!downloadable || exportDownload.pendingKey !== null}
-                            onClick={() =>
-                              void exportDownload.download(
-                                `row-${report.report_id}`,
-                                getReportDownloadPath(report.report_id),
-                                report.file_name || `${report.report_id}.${report.output_format}`,
-                              )
-                            }
-                            title={
-                              downloadable
-                                ? `Download ${report.file_name || report.report_id}`
-                                : "Only completed reports can be downloaded."
-                            }
-                            type="button"
-                          >
-                            {exportDownload.pendingKey === `row-${report.report_id}`
-                              ? "Downloading..."
-                              : "Download"}
-                          </button>
-                        </td>
-                        {canEngineer && (
+              <label>
+                Version label
+                <input
+                  onChange={(event) => setSchemaSetLabel(event.target.value)}
+                  placeholder="nonpub.1"
+                  type="text"
+                  value={schemaSetLabel}
+                />
+              </label>
+              <label>
+                Schema JSON files
+                <input
+                  accept=".json"
+                  multiple
+                  onChange={(event) => {
+                    setSchemaSetFiles(Array.from(event.target.files ?? []));
+                    // Same Chromium re-pick trap as the register file input above:
+                    // clear the value so re-picking the same schema files after
+                    // editing them on disk always delivers fresh File snapshots.
+                    event.target.value = "";
+                  }}
+                  type="file"
+                />
+              </label>
+              {schemaSetFiles.length > 0 && (
+                <p className="field-note">
+                  Selected: {schemaSetFiles.map((file) => file.name).join(", ")}
+                </p>
+              )}
+              <button
+                className="primary-button"
+                disabled={
+                  schemaSetLabel.trim() === "" ||
+                  schemaSetFiles.length === 0 ||
+                  schemaUploadMutation.isPending ||
+                  !canEngineer
+                }
+                onClick={() => schemaUploadMutation.mutate()}
+                title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                type="button"
+              >
+                {schemaUploadMutation.isPending ? "Uploading..." : "Upload schema set"}
+              </button>
+
+              {schemaUploadMutation.isError && (
+                <div className="state-panel error">
+                  <strong>Schema set upload failed</strong>
+                  <span>{schemaUploadMutation.error.message}</span>
+                </div>
+              )}
+
+              {schemaUploadMutation.isSuccess && (
+                <div className="state-panel success">
+                  <strong>ACCEPTED</strong>
+                  <span>
+                    {schemaUploadMutation.data.version_label} ·{" "}
+                    {schemaUploadMutation.data.filenames.length} file
+                    {schemaUploadMutation.data.filenames.length === 1 ? "" : "s"} stored
+                  </span>
+                </div>
+              )}
+
+              {(udmiSchemaSetsQuery.data ?? []).length > 0 ? (
+                <div className="data-table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Version label</th>
+                        <th>Files</th>
+                        <th>Uploaded</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(udmiSchemaSetsQuery.data ?? []).map((set) => (
+                        <tr key={set.version_label}>
+                          <td>{set.version_label}</td>
+                          <td>{set.filenames.join(", ")}</td>
+                          <td>{set.uploaded_at}</td>
                           <td>
                             <button
-                              aria-label={`Delete report ${report.file_name || report.report_id}`}
-                              className="secondary-button compact destructive"
-                              disabled={deleteReportsMutation.isPending}
-                              onClick={() =>
-                                handleDeleteReports([report], {
-                                  kind: "row",
-                                  reportId: report.report_id,
-                                })
-                              }
-                              ref={(el) => {
-                                if (el) {
-                                  reportDeleteButtonRefs.current.set(report.report_id, el);
-                                } else {
-                                  reportDeleteButtonRefs.current.delete(report.report_id);
-                                }
-                              }}
+                              className="secondary-button compact"
+                              disabled={schemaDeleteMutation.isPending || !canEngineer}
+                              onClick={() => schemaDeleteMutation.mutate(set.version_label)}
+                              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
                               type="button"
                             >
                               Delete
                             </button>
                           </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            ) : (
-              <div className="empty-workspace">
-                <strong>{reportsQuery.isLoading ? "Loading reports..." : "No reports yet"}</strong>
-                <span>Generate an Excel or Word report above; it will appear here for selection and export.</span>
-              </div>
-            )}
-          </div>
-          {reportsQuery.isError && (
-            <span className="error-text">
-              Could not load reports:{" "}
-              {reportsQuery.error instanceof Error ? reportsQuery.error.message : "request failed"}
-            </span>
-          )}
-          {exportDownload.error && (
-            <div className="state-panel error">
-              <strong>Export failed</strong>
-              <span>{exportDownload.error}</span>
-            </div>
-          )}
-          {deleteReportsMutation.isError && (
-            <div className="state-panel error" role="alert">
-              <strong>Delete failed</strong>
-              <span>
-                {deleteReportsMutation.error instanceof Error
-                  ? deleteReportsMutation.error.message
-                  : "The report deletion request failed."}
-              </span>
-            </div>
-          )}
-        </section>
-      )}
-
-      {isUdmiValidation && activeRun?.kind === "validation" && (
-        <section className="udmi-summary-shell" data-stepgroup="results">
-          {validationRunQuery.isError ? (
-            <div className="state-panel error" role="alert">
-              <strong>Could not load validation results</strong>
-              <span>
-                {validationRunQuery.error instanceof Error
-                  ? validationRunQuery.error.message
-                  : "The validation snapshot request failed."}
-              </span>
-            </div>
-          ) : !activeRunTerminal ? (
-            <div className="state-panel" role="status">
-              <strong>Validation in progress</strong>
-              <span>
-                Provisional results below update as payloads arrive. Counts can change until the
-                capture finishes; raw JSON and reports remain unavailable until then.
-              </span>
-            </div>
-          ) : activeRunStatus === "cancelled" ? (
-            <div className="state-panel warning" role="status">
-              <strong>{hasPersistedValidationEvidence ? "Partial results from a cancelled run" : "Run cancelled"}</strong>
-              <span>
-                {hasPersistedValidationEvidence
-                  ? "Only evidence collected before cancellation is included."
-                  : "No validation evidence was stored for this run."}
-              </span>
-            </div>
-          ) : activeRunStatus === "failed" ? (
-            <div className="state-panel error" role="alert">
-              <strong>{hasPersistedValidationEvidence ? "Partial results from a failed run" : "Validation failed"}</strong>
-              <span>
-                {hasPersistedValidationEvidence
-                  ? "Stored evidence remains available, but this is not a complete validation."
-                  : activeRunError ?? "No validation evidence was stored for this run."}
-              </span>
-            </div>
-          ) : null}
-
-          {displayedValidationSummary ? (
-            <UdmiSummaryPanel
-              assetTopicDiscovery={displayedAssetTopicDiscovery}
-              filtered={summaryFiltersActive}
-              lastRunAt={validationRunQuery.data?.updated_at}
-              provisional={!activeRunTerminal}
-              summary={displayedValidationSummary}
-            />
-          ) : activeRunTerminal && !validationRunQuery.isLoading ? (
-            <div className="empty-workspace">
-              <strong>No summary metrics available</strong>
-              <span>This legacy or empty run has no metric snapshot to display.</span>
-            </div>
-          ) : null}
-        </section>
-      )}
-
-      {/* Keep the results table full-width. The inspector follows below it so a
-          long topic or payload value never has to compete with a narrow side
-          column, and the selected evidence remains readable at normal zoom. */}
-      <section
-        className="app-grid"
-        data-stepgroup="results"
-      >
-        <article className="surface">
-          <div className="surface-heading">
-            <div>
-              <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
-            </div>
-            <button
-              className="secondary-button compact"
-              disabled={
-                !exportEnabled ||
-                exportDownload.pendingKey !== null ||
-                validationJsonDownload.pendingKey !== null
-              }
-              onClick={handleExport}
-              title={exportTooltip}
-              type="button"
-            >
-              {validationJsonDownload.pendingKey === "validation-json"
-                ? "Downloading JSON..."
-                : exportDownload.pendingKey === "export"
-                  ? "Exporting..."
-                  : canDownloadValidationJson
-                    ? "Download raw JSON"
-                    : "Export"}
-            </button>
-          </div>
-
-          {usingLiveResults && (
-            <div className="sample-banner" role="note">
-              {isDiscoveryModule ? (
-                module.route === "ip-scanner" ? (
-                  'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
-                ) : module.route === "mqtt-discovery" &&
-                  discoveryResultsQuery.data?.register_comparison ? (
-                  discoveryResultsQuery.data.register_comparison.register_available ? (
-                    <>
-                      Green rows match a topic in the uploaded MQTT register; red rows were
-                      observed on the broker but are not in the register.
-                      {mqttRegisterCompareNote(discoveryResultsQuery.data) ? (
-                        <>
-                          <br />
-                          {mqttRegisterCompareNote(discoveryResultsQuery.data)}
-                        </>
-                      ) : null}
-                    </>
-                  ) : (
-                    "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
-                  )
-                ) : (
-                  // No register comparison available (non-MQTT discovery, or an
-                  // MQTT run that observed nothing / has no register): the
-                  // discovery table shows observations, and register verdicts are
-                  // otherwise produced by validation.
-                  'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
-                )
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               ) : (
-                `${activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
-                  payloadViewSource === "live_capture"
-                    ? "captured from the MQTT broker"
-                    : "supplied directly (pasted), not captured from a broker"
-                }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}${
-                  activeRunTerminal ? "" : " Verdicts remain pending until the run finishes."
-                }`
+                <p className="section-copy">
+                  No non-published schema sets uploaded yet. Canonical published UDMI versions need
+                  no upload.
+                </p>
+              )}
+
+              {schemaDeleteMutation.isError && (
+                <span className="error-text">{schemaDeleteMutation.error.message}</span>
+              )}
+              {udmiSchemaSetsQuery.isError && (
+                <span className="error-text">
+                  Could not load uploaded schema sets:{" "}
+                  {udmiSchemaSetsQuery.error instanceof Error
+                    ? udmiSchemaSetsQuery.error.message
+                    : "request failed"}
+                </span>
               )}
             </div>
-          )}
-          {bacnetBackend &&
-            (bacnetBackend.kind === "simulated" ? (
-              <div className="sample-banner warning" role="alert">
-                {bacnetBackend.text}
-              </div>
-            ) : (
-              <div className="sample-banner" role="note">
-                {bacnetBackend.text}
-              </div>
-             ))}
+          </section>
+        )}
 
-          {validationJsonDownload.error && (
-            <div className="state-panel error" role="alert">
-              <strong>Raw JSON download failed</strong>
-              <span>{validationJsonDownload.error}</span>
+        {module.route === "udmi-validation" && (
+          <section className="surface" data-stepgroup="setup">
+            <div className="surface-heading">
+              <div>
+                <h3>Schedule and Payload Evidence</h3>
+              </div>
             </div>
-          )}
-
-          {resultRows.length > 0 && (
-            <div className="results-filter-bar">
-              <label className="results-filter-text">
-                Filter results
-                <input
-                  onChange={(event) => setResultsTextFilter(event.target.value)}
-                  placeholder={
-                    resultsTopicColumn
-                      ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
-                      : "Asset, host, status, or any visible value"
+            <label className="confirm-row">
+              <input
+                checked={udmiUseRegister}
+                onChange={(event) => {
+                  const useRegister = event.target.checked;
+                  setUdmiUseRegister(useRegister);
+                  if (!useRegister) {
+                    setUdmiTopicDiscoveryEnabled(false);
+                    setUdmiTopicDiscoveryScope("bounded");
+                    setUdmiTopicDiscoveryAllScopeConfirmed(false);
                   }
-                  value={resultsTextFilter}
+                }}
+                type="checkbox"
+              />
+              Validate against the imported MQTT register — one expected asset per row (topic,
+              points, units, and Expected schema version come from the register). Auto-enabled after
+              an accepted register import.
+            </label>
+
+            {udmiUseRegister ? (
+              <p className="section-copy">
+                Register-driven run: the pasted schedule and payload JSON below are ignored. Untick
+                the option above to validate the pasted values instead.
+              </p>
+            ) : null}
+            <div className="json-workbench">
+              <label>
+                Expected schedule JSON
+                <textarea
+                  disabled={udmiUseRegister}
+                  onChange={(event) => setUdmiExpectedSchedule(event.target.value)}
+                  rows={9}
+                  value={udmiExpectedSchedule}
                 />
               </label>
-              <label className="results-filter-tone">
-                Verdict
-                <select
-                  onChange={(event) => setResultsToneFilter(event.target.value)}
-                  value={resultsToneFilter}
-                >
-                  {resultsToneOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+              <label>
+                State payload JSON
+                <textarea
+                  disabled={udmiUseRegister}
+                  onChange={(event) => setUdmiStatePayload(event.target.value)}
+                  rows={9}
+                  value={udmiStatePayload}
+                />
               </label>
-              {/* System is register-backed; observation describes only this run. */}
-              {isUdmiValidation && (
-                <>
-                  <label className="results-filter-text results-topic-filter">
-                    Topic contains
+              <label>
+                Metadata payload JSON
+                <textarea
+                  disabled={udmiUseRegister}
+                  onChange={(event) => setUdmiMetadataPayload(event.target.value)}
+                  rows={9}
+                  value={udmiMetadataPayload}
+                />
+              </label>
+              <label>
+                Pointset payload JSON
+                <textarea
+                  disabled={udmiUseRegister}
+                  onChange={(event) => setUdmiPointsetPayload(event.target.value)}
+                  rows={9}
+                  value={udmiPointsetPayload}
+                />
+              </label>
+            </div>
+
+            <label className="confirm-row">
+              <input
+                checked={udmiUseLiveBroker}
+                onChange={(event) => {
+                  const useLiveBroker = event.target.checked;
+                  setUdmiUseLiveBroker(useLiveBroker);
+                  if (!useLiveBroker) {
+                    setUdmiTopicDiscoveryEnabled(false);
+                    setUdmiTopicDiscoveryScope("bounded");
+                    setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                  }
+                }}
+                type="checkbox"
+              />
+              Capture latest state, metadata, and pointset payloads from the configured MQTT broker.
+            </label>
+
+            {udmiUseLiveBroker && (
+              <>
+                <div className="publish-grid">
+                  {!udmiUseRegister && (
+                    <>
+                      <label>
+                        State topic
+                        <input
+                          onChange={(event) => setUdmiStateTopic(event.target.value)}
+                          value={udmiStateTopic}
+                        />
+                      </label>
+                      <label>
+                        Metadata topic
+                        <input
+                          onChange={(event) => setUdmiMetadataTopic(event.target.value)}
+                          value={udmiMetadataTopic}
+                        />
+                      </label>
+                      <label>
+                        Pointset topic
+                        <input
+                          onChange={(event) => setUdmiPointsetTopic(event.target.value)}
+                          value={udmiPointsetTopic}
+                        />
+                      </label>
+                    </>
+                  )}
+                  <label>
+                    Run time (blank = run until all assets/topics seen or until the user stops the
+                    run)
                     <input
-                      onChange={(event) => setResultsTopicContainsFilter(event.target.value)}
-                      placeholder="HV/SEC or HV/SEC/02"
-                      value={resultsTopicContainsFilter}
+                      inputMode="numeric"
+                      onChange={(event) => setUdmiCaptureSeconds(event.target.value)}
+                      placeholder="blank = run until all assets/topics seen or you stop the run"
+                      value={udmiCaptureSeconds}
                     />
                   </label>
-                  <label className="results-filter-facet">
-                    System
-                    <select
-                      onChange={(event) => setResultsSystemFilter(event.target.value)}
-                      value={resultsSystemFilter}
-                    >
-                      <option value="all">All systems</option>
-                      {systemOptions.map((system) => (
-                        <option key={system} value={system}>
-                          {system}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="results-filter-facet">
-                    Observation
-                    <select
-                      onChange={(event) => setResultsObservationFilter(event.target.value)}
-                      value={resultsObservationFilter}
-                    >
-                      <option value="all">Observed or not observed</option>
-                      <option value="observed">Observed this run</option>
-                      <option value="not-observed">Not observed this run</option>
-                    </select>
-                  </label>
-                  <label className="results-filter-facet">
-                    Category
+                  <label>
+                    Run time unit
                     <select
                       onChange={(event) =>
-                        setResultsCategoryFilter(
-                          event.target.value as UdmiReportScopeV1["filters"]["category"],
-                        )
+                        setUdmiCaptureUnit(event.target.value as "seconds" | "minutes" | "hours")
                       }
-                      value={resultsCategoryFilter}
+                      value={udmiCaptureUnit}
                     >
-                      <option value="all">Expected and unexpected</option>
-                      <option value="validation">Expected validation</option>
-                      <option value="unexpected-devices">Unexpected devices</option>
+                      <option value="seconds">seconds</option>
+                      <option value="minutes">minutes</option>
+                      <option value="hours">hours</option>
                     </select>
                   </label>
-                </>
-              )}
-              <span className="results-filter-count">
-                Showing {visibleResultRows.length} of {resultRows.length}{" "}
-                {resultRows.length === 1 ? "row" : "rows"}
-                {hasUdmiLiveResults
-                  ? ` across ${visibleUdmiCounts.expectedAssets} expected ${
-                      visibleUdmiCounts.expectedAssets === 1 ? "asset" : "assets"
-                    }${
-                      visibleUdmiCounts.unexpectedDevices > 0
-                        ? ` plus ${visibleUdmiCounts.unexpectedDevices} unexpected ${
-                            visibleUdmiCounts.unexpectedDevices === 1 ? "device" : "devices"
-                          }`
-                        : ""
-                    }`
-                  : ""}
+                </div>
+                {udmiCaptureOverCap && (
+                  <span className="error-text">
+                    Run time exceeds the 48-hour capture limit — shorten the window.
+                  </span>
+                )}
+                <p className="section-copy">
+                  Blank runs until every expected asset/topic has reported or you press Stop run —
+                  on the portable exe as well as the hosted worker. Every capture still ends at the
+                  48-hour safety limit (real-world reporting intervals: metadata is often daily),
+                  and the completion-driven safety limit is 500 distinct concrete topics. Closing
+                  the app ends the run, which is then marked interrupted at next start.
+                </p>
+                {udmiUseRegister ? (
+                  <fieldset className="topic-discovery-controls">
+                    <legend>Topic discovery</legend>
+                    <label className="confirm-row">
+                      <input
+                        checked={udmiTopicDiscoveryEnabled}
+                        onChange={(event) => {
+                          const enabled = event.target.checked;
+                          setUdmiTopicDiscoveryEnabled(enabled);
+                          if (!enabled) {
+                            setUdmiTopicDiscoveryScope("bounded");
+                            setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                          }
+                        }}
+                        type="checkbox"
+                      />
+                      Diagnose where registered asset IDs appear in MQTT topics.
+                    </label>
+                    {udmiTopicDiscoveryEnabled ? (
+                      <div className="topic-discovery-options">
+                        <label className="confirm-row">
+                          <input
+                            checked={udmiTopicDiscoveryAllScopeConfirmed}
+                            onChange={(event) => {
+                              const confirmed = event.target.checked;
+                              setUdmiTopicDiscoveryAllScopeConfirmed(confirmed);
+                              if (!confirmed) {
+                                setUdmiTopicDiscoveryScope("bounded");
+                              }
+                            }}
+                            type="checkbox"
+                          />
+                          I understand that an all-topic search can receive every broker topic this
+                          account is authorised to receive.
+                        </label>
+                        <label className="confirm-row">
+                          <input
+                            checked={udmiTopicDiscoveryScope === "bounded"}
+                            name="udmi-topic-discovery-scope"
+                            onChange={() => {
+                              setUdmiTopicDiscoveryScope("bounded");
+                              setUdmiTopicDiscoveryAllScopeConfirmed(false);
+                            }}
+                            type="radio"
+                            value="bounded"
+                          />
+                          Use the register&apos;s bounded topic scope.
+                        </label>
+                        <label className="confirm-row">
+                          <input
+                            checked={udmiTopicDiscoveryScope === "all"}
+                            disabled={!udmiTopicDiscoveryAllScopeConfirmed}
+                            name="udmi-topic-discovery-scope"
+                            onChange={() => setUdmiTopicDiscoveryScope("all")}
+                            type="radio"
+                            value="all"
+                          />
+                          Search all authorised broker topics (#).
+                        </label>
+                        {!udmiTopicDiscoveryAllScopeConfirmed ? (
+                          <p className="section-copy">
+                            Acknowledge the broader scope above to enable the all-topic search.
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </fieldset>
+                ) : (
+                  <p className="section-copy">
+                    Topic discovery is available for live captures that validate against the
+                    imported MQTT register.
+                  </p>
+                )}
+              </>
+            )}
+
+            <div className="inline-actions execute-row">
+              <button
+                className="primary-button compact"
+                disabled={
+                  runMutation.isPending || !canEngineer || udmiCaptureOverCap || startedRunActive
+                }
+                onClick={() => runMutation.mutate(udmiRunActionId)}
+                title={
+                  !canEngineer
+                    ? ENGINEER_REQUIRED_TOOLTIP
+                    : udmiCaptureOverCap
+                      ? "Run time exceeds the 48-hour capture limit."
+                      : startedRunActive
+                        ? "A run is already in progress — stop it before starting another."
+                        : undefined
+                }
+                type="button"
+              >
+                {runMutation.isPending ? "Executing..." : "Execute capture"}
+              </button>
+              <span className="section-copy execute-note">
+                {udmiUseRegister
+                  ? udmiUseLiveBroker
+                    ? "Runs the UDMI validation for every imported register row, capturing each asset's state, metadata, and pointset payloads from its register topic. With no broker reachable the engine records broker_unreachable rather than fabricating payloads."
+                    : "Runs the UDMI validation for every imported register row. Without broker capture there are no observed payloads, so expected points are reported as not received — tick the broker option to capture live payloads."
+                  : udmiUseLiveBroker
+                    ? "Runs the UDMI validation, capturing the state, metadata, and pointset payloads for the topics above. Live broker capture is on-site-untested; with no broker reachable the engine records broker_unreachable rather than fabricating payloads."
+                    : "Runs the UDMI validation against the pasted state, metadata, and pointset payloads above. Tick the broker option to capture live payloads instead (on-site-untested)."}
               </span>
-              {isResultsFilterActive && (
+            </div>
+          </section>
+        )}
+
+        {module.route === "udmi-validation" && (
+          <section className="surface" data-stepgroup="run">
+            <div className="surface-heading">
+              <div>
+                <h3>MQTT Config Payload</h3>
+              </div>
+            </div>
+            <div className="publish-grid">
+              <label>
+                Config topic
+                <input
+                  onChange={(event) => setPublishTopic(event.target.value)}
+                  value={publishTopic}
+                />
+              </label>
+              <label>
+                Primary point (confirmed)
+                <input
+                  onChange={(event) => setPublishPoint(event.target.value)}
+                  value={publishPoint}
+                />
+              </label>
+              <label>
+                Primary set_value
+                <input
+                  onChange={(event) => setPublishValue(event.target.value)}
+                  value={publishValue}
+                />
+              </label>
+              <label className="publish-payload">
+                Payload JSON
+                <textarea
+                  onChange={(event) => setPublishPayload(event.target.value)}
+                  rows={6}
+                  value={publishPayload}
+                />
+              </label>
+            </div>
+
+            <div className="multi-point-editor">
+              <div className="surface-heading compact-heading">
+                <div>
+                  <h4>Write Multiple Points in One Config</h4>
+                </div>
                 <button
                   className="secondary-button compact"
-                  onClick={() => {
-                    setResultsTextFilter("");
-                    setResultsTopicContainsFilter("");
-                    setResultsToneFilter("all");
-                    setResultsSystemFilter("all");
-                    setResultsObservationFilter("all");
-                    setResultsCategoryFilter("all");
-                  }}
+                  onClick={addExtraPublishPoint}
                   type="button"
                 >
-                  Clear filters
+                  Add point
                 </button>
+              </div>
+              {publishExtraPoints.length === 0 ? (
+                <p className="section-copy">
+                  Optional. Add extra point/value pairs to write them all in a single config payload
+                  alongside the primary point above.
+                </p>
+              ) : (
+                <div className="port-editor">
+                  {publishExtraPoints.map((pair, index) => (
+                    <div className="port-row" key={`extra-${index}`}>
+                      <label>
+                        Point name
+                        <input
+                          onChange={(event) =>
+                            changeExtraPublishPoint(index, "point", event.target.value)
+                          }
+                          placeholder="fan_enable"
+                          value={pair.point}
+                        />
+                      </label>
+                      <label>
+                        set_value
+                        <input
+                          onChange={(event) =>
+                            changeExtraPublishPoint(index, "value", event.target.value)
+                          }
+                          placeholder="true"
+                          value={pair.value}
+                        />
+                      </label>
+                      <button
+                        className="secondary-button compact"
+                        onClick={() => removeExtraPublishPoint(index)}
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="section-copy">
+                All pairs are written into one config payload under <code>pointset.points</code>,
+                and the backend confirm/verify step now checks every point/value here — one issue is
+                raised per point whose value is not confirmed back. Live-broker confirmation (vs.
+                the local verify) remains on-site-untested, the same as for the primary point.
+              </p>
+            </div>
+
+            <label className="confirm-row">
+              <input
+                checked={publishUseLiveBroker}
+                onChange={(event) => setPublishUseLiveBroker(event.target.checked)}
+                type="checkbox"
+              />
+              Publish through the configured MQTT broker and wait for the next pointset message.
+            </label>
+            {publishUseLiveBroker && (
+              <div className="publish-grid">
+                <label className="publish-payload">
+                  Pointset topic to verify
+                  <input
+                    onChange={(event) => setPublishPointsetTopic(event.target.value)}
+                    value={publishPointsetTopic}
+                  />
+                </label>
+                <label>
+                  Wait seconds
+                  <input
+                    inputMode="numeric"
+                    onChange={(event) => setPublishWaitSeconds(event.target.value)}
+                    value={publishWaitSeconds}
+                  />
+                </label>
+              </div>
+            )}
+            <label className="confirm-row">
+              <input
+                checked={publishConfirmed}
+                onChange={(event) => setPublishConfirmed(event.target.checked)}
+                type="checkbox"
+              />
+              I confirm this config payload should be published to the selected topic.
+            </label>
+            <button
+              className="primary-button"
+              disabled={publishMutation.isPending || !publishConfirmed || !canEngineer}
+              onClick={() => publishMutation.mutate()}
+              title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+              type="button"
+            >
+              {publishMutation.isPending ? "Publishing..." : "Publish and verify next pointset"}
+            </button>
+            {publishMutation.isError && (
+              <div className="state-panel error">
+                <strong>Publish request failed</strong>
+                <span>{publishMutation.error.message}</span>
+              </div>
+            )}
+          </section>
+        )}
+
+        {module.route === "reports" && (
+          // Shown on every step, not just Results: the Reports page always lands on
+          // Setup, which used to hide this table behind a step click nobody knew to
+          // make. The Generate buttons live in the "setup run" Run Controls section,
+          // so defaulting this route to Results instead would just hide those.
+          <section className="surface" data-stepgroup="setup run results">
+            <div className="surface-heading">
+              <div>
+                <h3 className="report-list-heading" ref={reportsHeadingRef} tabIndex={-1}>
+                  Generated Reports
+                </h3>
+              </div>
+              <div className="report-list-actions">
+                <button
+                  className="secondary-button compact"
+                  disabled={
+                    selectedDownloadableReports.length === 0 || exportDownload.pendingKey !== null
+                  }
+                  onClick={() => void handleExportSelected()}
+                  title={
+                    selectedDownloadableReports.length === 0
+                      ? "Select one or more completed reports to export them."
+                      : `Download ${selectedDownloadableReports.length} selected completed report(s).`
+                  }
+                  type="button"
+                >
+                  {exportDownload.pendingKey?.startsWith("selected-")
+                    ? "Exporting..."
+                    : "Export selected"}
+                </button>
+                {canEngineer && (
+                  <button
+                    className="secondary-button compact destructive"
+                    disabled={selectedReports.length === 0 || deleteReportsMutation.isPending}
+                    onClick={() => handleDeleteReports(selectedReports, { kind: "bulk" })}
+                    ref={reportDeleteSelectedRef}
+                    title={
+                      selectedReports.length === 0
+                        ? "Select one or more reports to delete them."
+                        : `Delete ${selectedReports.length} selected report(s).`
+                    }
+                    type="button"
+                  >
+                    {deleteReportsMutation.isPending ? "Deleting..." : "Delete selected"}
+                  </button>
+                )}
+              </div>
+            </div>
+            <p className="section-copy">
+              Every report you generate here is stored against its run and listed below. Generate a
+              report from the Run Controls above, or use "Generate report from this run" on a
+              completed discovery or validation run elsewhere — it will appear here, traceable to
+              the run it came from.
+            </p>
+            {reportToast && (
+              <div
+                className={`state-panel ${reportToastWarning ? "warning" : "success"}`}
+                role="status"
+              >
+                <strong>
+                  {reportToastWarning
+                    ? "Report generation incomplete"
+                    : generatedAllReportIds
+                      ? "Reports ready"
+                      : "Report generated"}
+                </strong>
+                <span>{reportToast}</span>
+                {renderGeneratedAllReportDownload()}
+              </div>
+            )}
+            {reportDeleteNotice && (
+              <div className="state-panel success" role="status">
+                <strong>Reports deleted</strong>
+                <span>{reportDeleteNotice}</span>
+              </div>
+            )}
+            <div className="data-table-wrap">
+              {liveReports.length > 0 ? (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Select</th>
+                      <th>Report</th>
+                      <th>Type</th>
+                      <th>Format</th>
+                      <th>Status</th>
+                      <th>Generated</th>
+                      <th>Source runs</th>
+                      <th>File</th>
+                      <th>Download</th>
+                      {canEngineer && <th>Delete</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {liveReports.map((report) => {
+                      const downloadable = report.status === "succeeded";
+                      return (
+                        <tr key={report.report_id}>
+                          <td>
+                            <input
+                              aria-label={`Select report ${report.file_name || report.report_id}`}
+                              checked={selectedReportIds.has(report.report_id)}
+                              onChange={() => toggleReportSelection(report.report_id)}
+                              title="Select this report for export or deletion."
+                              type="checkbox"
+                            />
+                          </td>
+                          <td>
+                            <div className="report-name-cell">
+                              <strong>{report.report_title?.trim() || report.report_id}</strong>
+                              {report.report_title?.trim() ? (
+                                <small>{report.report_id}</small>
+                              ) : null}
+                            </div>
+                          </td>
+                          <td>{report.report_type}</td>
+                          <td>{report.output_format.toUpperCase()}</td>
+                          <td>
+                            <span className={`status-token ${toHealthState(report.status)}`}>
+                              {report.status}
+                            </span>
+                          </td>
+                          <td>{formatAbsoluteTime(report.created_at)}</td>
+                          {/* The source run ids in full, not a count: tracing a report back
+                            to the runs it was built from is the whole point of an ITP
+                            evidence pack, and run ids are already shown raw in the Report
+                            column and the run monitor. `?? []` because a response from an
+                            older backend (or a cached query payload) carries neither new
+                            field — formatAbsoluteTime already tolerates undefined. */}
+                          <td>{(report.source_run_ids ?? []).join(", ") || "—"}</td>
+                          <td>{report.file_name || "—"}</td>
+                          <td>
+                            <button
+                              className="secondary-button compact"
+                              disabled={!downloadable || exportDownload.pendingKey !== null}
+                              onClick={() =>
+                                void exportDownload.download(
+                                  `row-${report.report_id}`,
+                                  getReportDownloadPath(report.report_id),
+                                  report.file_name || `${report.report_id}.${report.output_format}`,
+                                )
+                              }
+                              title={
+                                downloadable
+                                  ? `Download ${report.file_name || report.report_id}`
+                                  : "Only completed reports can be downloaded."
+                              }
+                              type="button"
+                            >
+                              {exportDownload.pendingKey === `row-${report.report_id}`
+                                ? "Downloading..."
+                                : "Download"}
+                            </button>
+                          </td>
+                          {canEngineer && (
+                            <td>
+                              <button
+                                aria-label={`Delete report ${report.file_name || report.report_id}`}
+                                className="secondary-button compact destructive"
+                                disabled={deleteReportsMutation.isPending}
+                                onClick={() =>
+                                  handleDeleteReports([report], {
+                                    kind: "row",
+                                    reportId: report.report_id,
+                                  })
+                                }
+                                ref={(el) => {
+                                  if (el) {
+                                    reportDeleteButtonRefs.current.set(report.report_id, el);
+                                  } else {
+                                    reportDeleteButtonRefs.current.delete(report.report_id);
+                                  }
+                                }}
+                                type="button"
+                              >
+                                Delete
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="empty-workspace">
+                  <strong>
+                    {reportsQuery.isLoading ? "Loading reports..." : "No reports yet"}
+                  </strong>
+                  <span>
+                    Generate an Excel or Word report above; it will appear here for selection and
+                    export.
+                  </span>
+                </div>
               )}
             </div>
-          )}
+            {reportsQuery.isError && (
+              <span className="error-text">
+                Could not load reports:{" "}
+                {reportsQuery.error instanceof Error
+                  ? reportsQuery.error.message
+                  : "request failed"}
+              </span>
+            )}
+            {exportDownload.error && (
+              <div className="state-panel error">
+                <strong>Export failed</strong>
+                <span>{exportDownload.error}</span>
+              </div>
+            )}
+            {deleteReportsMutation.isError && (
+              <div className="state-panel error" role="alert">
+                <strong>Delete failed</strong>
+                <span>
+                  {deleteReportsMutation.error instanceof Error
+                    ? deleteReportsMutation.error.message
+                    : "The report deletion request failed."}
+                </span>
+              </div>
+            )}
+          </section>
+        )}
 
-          <div className="data-table-wrap results-scroll">
-            {resultRows.length === 0 ? (
-              <div className="empty-workspace">
+        {isUdmiValidation && activeRun?.kind === "validation" && (
+          <section className="udmi-summary-shell" data-stepgroup="results">
+            {validationRunQuery.isError ? (
+              <div className="state-panel error" role="alert">
+                <strong>Could not load validation results</strong>
+                <span>
+                  {validationRunQuery.error instanceof Error
+                    ? validationRunQuery.error.message
+                    : "The validation snapshot request failed."}
+                </span>
+              </div>
+            ) : !activeRunTerminal ? (
+              <div className="state-panel" role="status">
+                <strong>Validation in progress</strong>
+                <span>
+                  Provisional results below update as payloads arrive. Counts can change until the
+                  capture finishes; raw JSON and reports remain unavailable until then.
+                </span>
+              </div>
+            ) : activeRunStatus === "cancelled" ? (
+              <div className="state-panel warning" role="status">
                 <strong>
-                  {validationEmptyState
-                    ? validationEmptyState.title
-                    : discoveryEmptyState
-                    ? discoveryEmptyState.title
-                    : isDiscoveryModule && activeRun && !activeRunTerminal
-                      ? "Run in progress..."
-                      : "No results yet"}
+                  {hasPersistedValidationEvidence
+                    ? "Partial results from a cancelled run"
+                    : "Run cancelled"}
                 </strong>
                 <span>
-                  {validationEmptyState
-                    ? validationEmptyState.detail
-                    : discoveryEmptyState
-                    ? discoveryEmptyState.detail
-                    : isDiscoveryModule
-                      ? "Run a discovery; observed devices, points, or topics appear here once it completes."
-                      : "Run a job to populate results."}
+                  {hasPersistedValidationEvidence
+                    ? "Only evidence collected before cancellation is included."
+                    : "No validation evidence was stored for this run."}
                 </span>
               </div>
-            ) : visibleResultRows.length === 0 ? (
-              // The filter matched nothing. This is a claim about the FILTER,
-              // never the scan — never fall through to the discovery empty state,
-              // whose copy asserts what the network did (ISSUE-4).
-              <div className="empty-workspace">
-                <strong>No rows match the current filters</strong>
+            ) : activeRunStatus === "failed" ? (
+              <div className="state-panel error" role="alert">
+                <strong>
+                  {hasPersistedValidationEvidence
+                    ? "Partial results from a failed run"
+                    : "Validation failed"}
+                </strong>
                 <span>
-                  Adjust or clear the filters to see the {resultRows.length}{" "}
-                  captured {resultRows.length === 1 ? "row" : "rows"}.
+                  {hasPersistedValidationEvidence
+                    ? "Stored evidence remains available, but this is not a complete validation."
+                    : (activeRunError ?? "No validation evidence was stored for this run.")}
                 </span>
               </div>
-            ) : (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    {tableColumns.map((column) => (
-                      <th key={column}>{column}</th>
+            ) : null}
+
+            {displayedValidationSummary ? (
+              <UdmiSummaryPanel
+                assetTopicDiscovery={displayedAssetTopicDiscovery}
+                filtered={summaryFiltersActive}
+                lastRunAt={validationRunQuery.data?.updated_at}
+                provisional={!activeRunTerminal}
+                summary={displayedValidationSummary}
+              />
+            ) : activeRunTerminal && !validationRunQuery.isLoading ? (
+              <div className="empty-workspace">
+                <strong>No summary metrics available</strong>
+                <span>This legacy or empty run has no metric snapshot to display.</span>
+              </div>
+            ) : null}
+          </section>
+        )}
+
+        {/* Keep the results table full-width. The inspector follows below it so a
+          long topic or payload value never has to compete with a narrow side
+          column, and the selected evidence remains readable at normal zoom. */}
+        <section className="app-grid" data-stepgroup="results">
+          <article className="surface">
+            <div className="surface-heading">
+              <div>
+                <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
+              </div>
+              <button
+                className="secondary-button compact"
+                disabled={
+                  !exportEnabled ||
+                  exportDownload.pendingKey !== null ||
+                  validationJsonDownload.pendingKey !== null
+                }
+                onClick={handleExport}
+                title={exportTooltip}
+                type="button"
+              >
+                {validationJsonDownload.pendingKey === "validation-json"
+                  ? "Downloading JSON..."
+                  : exportDownload.pendingKey === "export"
+                    ? "Exporting..."
+                    : canDownloadValidationJson
+                      ? "Download raw JSON"
+                      : "Export"}
+              </button>
+            </div>
+
+            {usingLiveResults && (
+              <div className="sample-banner" role="note">
+                {isDiscoveryModule ? (
+                  module.route === "ip-scanner" ? (
+                    'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
+                  ) : module.route === "mqtt-discovery" &&
+                    discoveryResultsQuery.data?.register_comparison ? (
+                    discoveryResultsQuery.data.register_comparison.register_available ? (
+                      <>
+                        Green rows match a topic in the uploaded MQTT register; red rows were
+                        observed on the broker but are not in the register.
+                        {mqttRegisterCompareNote(discoveryResultsQuery.data) ? (
+                          <>
+                            <br />
+                            {mqttRegisterCompareNote(discoveryResultsQuery.data)}
+                          </>
+                        ) : null}
+                      </>
+                    ) : (
+                      "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
+                    )
+                  ) : (
+                    // No register comparison available (non-MQTT discovery, or an
+                    // MQTT run that observed nothing / has no register): the
+                    // discovery table shows observations, and register verdicts are
+                    // otherwise produced by validation.
+                    'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
+                  )
+                ) : (
+                  `${activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
+                    payloadViewSource === "live_capture"
+                      ? "captured from the MQTT broker"
+                      : "supplied directly (pasted), not captured from a broker"
+                  }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}${
+                    activeRunTerminal ? "" : " Verdicts remain pending until the run finishes."
+                  }`
+                )}
+              </div>
+            )}
+            {bacnetBackend &&
+              (bacnetBackend.kind === "simulated" ? (
+                <div className="sample-banner warning" role="alert">
+                  {bacnetBackend.text}
+                </div>
+              ) : (
+                <div className="sample-banner" role="note">
+                  {bacnetBackend.text}
+                </div>
+              ))}
+
+            {validationJsonDownload.error && (
+              <div className="state-panel error" role="alert">
+                <strong>Raw JSON download failed</strong>
+                <span>{validationJsonDownload.error}</span>
+              </div>
+            )}
+
+            {resultRows.length > 0 && (
+              <div className="results-filter-bar">
+                <label className="results-filter-text">
+                  Filter results
+                  <input
+                    onChange={(event) => setResultsTextFilter(event.target.value)}
+                    placeholder={
+                      resultsTopicColumn
+                        ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
+                        : "Asset, host, status, or any visible value"
+                    }
+                    value={resultsTextFilter}
+                  />
+                </label>
+                <label className="results-filter-tone">
+                  Verdict
+                  <select
+                    onChange={(event) => setResultsToneFilter(event.target.value)}
+                    value={resultsToneFilter}
+                  >
+                    {resultsToneOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
                     ))}
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                {/* UDMI results group by asset (ITEM-7): one collapsible summary
+                  </select>
+                </label>
+                {/* System is register-backed; observation describes only this run. */}
+                {isUdmiValidation && (
+                  <>
+                    <label className="results-filter-text results-topic-filter">
+                      Topic contains
+                      <input
+                        onChange={(event) => setResultsTopicContainsFilter(event.target.value)}
+                        placeholder="HV/SEC or HV/SEC/02"
+                        value={resultsTopicContainsFilter}
+                      />
+                    </label>
+                    <label className="results-filter-facet">
+                      System
+                      <select
+                        onChange={(event) => setResultsSystemFilter(event.target.value)}
+                        value={resultsSystemFilter}
+                      >
+                        <option value="all">All systems</option>
+                        {systemOptions.map((system) => (
+                          <option key={system} value={system}>
+                            {system}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="results-filter-facet">
+                      Observation
+                      <select
+                        onChange={(event) => setResultsObservationFilter(event.target.value)}
+                        value={resultsObservationFilter}
+                      >
+                        <option value="all">Observed or not observed</option>
+                        <option value="observed">Observed this run</option>
+                        <option value="not-observed">Not observed this run</option>
+                      </select>
+                    </label>
+                    <label className="results-filter-facet">
+                      Category
+                      <select
+                        onChange={(event) =>
+                          setResultsCategoryFilter(
+                            event.target.value as UdmiReportScopeV1["filters"]["category"],
+                          )
+                        }
+                        value={resultsCategoryFilter}
+                      >
+                        <option value="all">Expected and unexpected</option>
+                        <option value="validation">Expected validation</option>
+                        <option value="unexpected-devices">Unexpected devices</option>
+                      </select>
+                    </label>
+                  </>
+                )}
+                <span className="results-filter-count">
+                  Showing {visibleResultRows.length} of {resultRows.length}{" "}
+                  {resultRows.length === 1 ? "row" : "rows"}
+                  {hasUdmiLiveResults
+                    ? ` across ${visibleUdmiCounts.expectedAssets} expected ${
+                        visibleUdmiCounts.expectedAssets === 1 ? "asset" : "assets"
+                      }${
+                        visibleUdmiCounts.unexpectedDevices > 0
+                          ? ` plus ${visibleUdmiCounts.unexpectedDevices} unexpected ${
+                              visibleUdmiCounts.unexpectedDevices === 1 ? "device" : "devices"
+                            }`
+                          : ""
+                      }`
+                    : ""}
+                </span>
+                {isResultsFilterActive && (
+                  <button
+                    className="secondary-button compact"
+                    onClick={() => {
+                      setResultsTextFilter("");
+                      setResultsTopicContainsFilter("");
+                      setResultsToneFilter("all");
+                      setResultsSystemFilter("all");
+                      setResultsObservationFilter("all");
+                      setResultsCategoryFilter("all");
+                    }}
+                    type="button"
+                  >
+                    Clear filters
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="data-table-wrap results-scroll">
+              {resultRows.length === 0 ? (
+                <div className="empty-workspace">
+                  <strong>
+                    {validationEmptyState
+                      ? validationEmptyState.title
+                      : discoveryEmptyState
+                        ? discoveryEmptyState.title
+                        : isDiscoveryModule && activeRun && !activeRunTerminal
+                          ? "Run in progress..."
+                          : "No results yet"}
+                  </strong>
+                  <span>
+                    {validationEmptyState
+                      ? validationEmptyState.detail
+                      : discoveryEmptyState
+                        ? discoveryEmptyState.detail
+                        : isDiscoveryModule
+                          ? "Run a discovery; observed devices, points, or topics appear here once it completes."
+                          : "Run a job to populate results."}
+                  </span>
+                </div>
+              ) : visibleResultRows.length === 0 ? (
+                // The filter matched nothing. This is a claim about the FILTER,
+                // never the scan — never fall through to the discovery empty state,
+                // whose copy asserts what the network did (ISSUE-4).
+                <div className="empty-workspace">
+                  <strong>No rows match the current filters</strong>
+                  <span>
+                    Adjust or clear the filters to see the {resultRows.length} captured{" "}
+                    {resultRows.length === 1 ? "row" : "rows"}.
+                  </span>
+                </div>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      {tableColumns.map((column) => (
+                        <th key={column}>{column}</th>
+                      ))}
+                      <th>Details</th>
+                    </tr>
+                  </thead>
+                  {/* UDMI results group by asset (ITEM-7): one collapsible summary
                     row per asset that expands to its per-payload-type rows,
                     instead of 3-4 flat lines per asset. Row shading (row-tone)
                     is the live UDMI/discovery verdict set on __tone; the summary
                     row carries the asset's worst visible tone. Discovery routes
                     keep the flat render. Child rows are the shared renderResultRow
                     (selection + View unchanged, ISSUE-4). */}
-                {hasUdmiLiveResults ? (
-                  <tbody>
-                    {udmiRowGroups.map((group) => {
-                      const isOpen = expandedResultAssets.has(group.asset);
-                      const isUnexpected = group.rows.every(
-                        ({ row }) => row.__category === "unexpected-devices",
-                      );
-                      return (
-                        <Fragment key={`group-${group.asset}`}>
-                          <tr
-                            className={`asset-summary-row${group.worstTone ? ` row-${group.worstTone}` : ""}`}
-                          >
-                            <td colSpan={tableColumns.length + 1}>
-                              <button
-                                aria-expanded={isOpen}
-                                className="asset-summary-toggle"
-                                onClick={() => toggleResultAsset(group.asset)}
-                                type="button"
-                              >
-                                <span aria-hidden="true" className="asset-summary-caret">
-                                  {isOpen ? "▾" : "▸"}
-                                </span>
-                                <strong>{group.asset}</strong>
-                                <span>
-                                  {isUnexpected
-                                    ? "Unexpected device · excluded from compliance"
-                                    : `${group.rows.length} payload type${
-                                        group.rows.length === 1 ? "" : "s"
-                                      } · ${group.issueTotal} issue${
-                                        group.issueTotal === 1 ? "" : "s"
-                                      }`}
-                                </span>
-                              </button>
-                            </td>
-                          </tr>
-                          {isOpen && group.rows.map(renderResultRow)}
-                        </Fragment>
-                      );
-                    })}
-                  </tbody>
-                ) : (
-                  <tbody>{visibleResultRows.map(renderResultRow)}</tbody>
-                )}
-              </table>
-            )}
-          </div>
-        </article>
+                  {hasUdmiLiveResults ? (
+                    <tbody>
+                      {udmiRowGroups.map((group) => {
+                        const isOpen = expandedResultAssets.has(group.asset);
+                        const isUnexpected = group.rows.every(
+                          ({ row }) => row.__category === "unexpected-devices",
+                        );
+                        return (
+                          <Fragment key={`group-${group.asset}`}>
+                            <tr
+                              className={`asset-summary-row${group.worstTone ? ` row-${group.worstTone}` : ""}`}
+                            >
+                              <td colSpan={tableColumns.length + 1}>
+                                <button
+                                  aria-expanded={isOpen}
+                                  className="asset-summary-toggle"
+                                  onClick={() => toggleResultAsset(group.asset)}
+                                  type="button"
+                                >
+                                  <span aria-hidden="true" className="asset-summary-caret">
+                                    {isOpen ? "▾" : "▸"}
+                                  </span>
+                                  <strong>{group.asset}</strong>
+                                  <span>
+                                    {isUnexpected
+                                      ? "Unexpected device · excluded from compliance"
+                                      : `${group.rows.length} payload type${
+                                          group.rows.length === 1 ? "" : "s"
+                                        } · ${group.issueTotal} issue${
+                                          group.issueTotal === 1 ? "" : "s"
+                                        }`}
+                                  </span>
+                                </button>
+                              </td>
+                            </tr>
+                            {isOpen && group.rows.map(renderResultRow)}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  ) : (
+                    <tbody>{visibleResultRows.map(renderResultRow)}</tbody>
+                  )}
+                </table>
+              )}
+            </div>
+          </article>
 
-        {detailRow && !isUdmiValidation && (
-          <dialog
-            aria-labelledby="result-detail-heading"
-            className="result-detail-dialog surface"
-            onCancel={(event) => {
-              event.preventDefault();
-              closeResultDetailDialog();
-            }}
-            onClick={(event) => {
-              if (event.target !== event.currentTarget) {
-                return;
-              }
-              const bounds = event.currentTarget.getBoundingClientRect();
-              const clickedBackdrop =
-                event.clientX < bounds.left ||
-                event.clientX > bounds.right ||
-                event.clientY < bounds.top ||
-                event.clientY > bounds.bottom;
-              if (clickedBackdrop) {
+          {detailRow && !isUdmiValidation && (
+            <dialog
+              aria-labelledby="result-detail-heading"
+              className="result-detail-dialog surface"
+              onCancel={(event) => {
+                event.preventDefault();
                 closeResultDetailDialog();
-              }
-            }}
-            ref={detailDialogRef}
-            tabIndex={-1}
-          >
-            <div className="surface-heading">
-              <div>
-                <h3 id="result-detail-heading">Result detail</h3>
-              </div>
-              <button
-                className="secondary-button compact"
-                onClick={closeResultDetailDialog}
-                type="button"
-              >
-                Close
-              </button>
-            </div>
-            <div className="detail-list">
-              {buildResultDetailItems(module.route, detailRow, usingLiveResults, resultAssetGroups).map((item) => (
-                <div className="detail-row" key={item.label}>
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
+              }}
+              onClick={(event) => {
+                if (event.target !== event.currentTarget) {
+                  return;
+                }
+                const bounds = event.currentTarget.getBoundingClientRect();
+                const clickedBackdrop =
+                  event.clientX < bounds.left ||
+                  event.clientX > bounds.right ||
+                  event.clientY < bounds.top ||
+                  event.clientY > bounds.bottom;
+                if (clickedBackdrop) {
+                  closeResultDetailDialog();
+                }
+              }}
+              ref={detailDialogRef}
+              tabIndex={-1}
+            >
+              <div className="surface-heading">
+                <div>
+                  <h3 id="result-detail-heading">Result detail</h3>
                 </div>
-              ))}
+                <button
+                  className="secondary-button compact"
+                  onClick={closeResultDetailDialog}
+                  type="button"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="detail-list">
+                {buildResultDetailItems(
+                  module.route,
+                  detailRow,
+                  usingLiveResults,
+                  resultAssetGroups,
+                ).map((item) => (
+                  <div className="detail-row" key={item.label}>
+                    <span>{item.label}</span>
+                    <strong>{item.value}</strong>
+                  </div>
+                ))}
+              </div>
+            </dialog>
+          )}
+
+          <aside className="surface inspector">
+            <div className="surface-heading">
+              <h3>Inspector</h3>
             </div>
-          </dialog>
-        )}
 
-        <aside className="surface inspector">
-          <div className="surface-heading">
-            <h3>Inspector</h3>
-          </div>
-
-          <>
+            <>
               <div className="detail-list">
                 {resultDetails.map((item) => (
                   <div className="detail-row" key={item.label}>
@@ -4745,133 +4839,145 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       </span>
                     </div>
                   )}
-                  {selectedInspectorAssetGroup && [selectedInspectorAssetGroup].map((group) => {
-                    const isOpen = expandedAsset === group.assetId;
-                    const typeSummary = group.payloadTypes
-                      .map((entry) => {
-                        const parts: string[] = [];
-                        if (entry.issues.length > 0) {
-                          parts.push(`${entry.issues.length} issue${entry.issues.length === 1 ? "" : "s"}`);
-                        }
-                        if (entry.hasPayloadView) {
-                          parts.push("payload");
-                        }
-                        return `${entry.payloadType} (${parts.join(", ") || "ok"})`;
-                      })
-                      .join(", ");
-                    return (
-                      <div className={`asset-group${isOpen ? " open" : ""}`} key={group.assetId}>
-                        <button
-                          aria-expanded={isOpen}
-                          className="asset-group-toggle"
-                          onClick={() => setExpandedAsset(isOpen ? null : group.assetId)}
-                          type="button"
-                        >
-                          <strong>{group.assetId}</strong>
-                          <span>
-                            {group.issues.length} issue{group.issues.length === 1 ? "" : "s"} · {typeSummary}
-                          </span>
-                        </button>
-                        {isOpen && (
-                          <div className="asset-group-detail">
-                            {group.payloadTypes.map((entry) => {
-                              const payloadKey = `${group.assetId}:${entry.payloadType}`;
-                              const payloadOpen = expandedPayloadKey === payloadKey;
-                              // Same shared (issues-gated) verdict as the
-                              // results-table row for this asset x payload type,
-                              // so scrolling the sections draws the eye to red
-                              // without re-reading the table. "Not received"
-                              // and a pending/failed issues fetch stay neutral.
-                              const sectionVerdict = gatedUdmiVerdict(
-                                entry.issues,
-                                entry.observedPresent,
-                                notObservedAssets.has(group.assetId),
-                              );
-                              const sectionTone = udmiVerdictTone(sectionVerdict.verdict);
-                              return (
-                                <div
-                                  className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
-                                  key={entry.payloadType}
-                                  ref={(el) => {
-                                    // Register/deregister this payload group so a
-                                    // row control can scroll straight to it (ITEM-D).
-                                    if (el) {
-                                      payloadGroupRefs.current.set(payloadKey, el);
-                                    } else {
-                                      payloadGroupRefs.current.delete(payloadKey);
-                                    }
-                                  }}
-                                  tabIndex={-1}
-                                >
-                                  <div className="payload-type-heading">
-                                    <h5>{entry.payloadType}</h5>
-                                    {entry.hasPayloadView &&
-                                      entry.issues.length >= LONG_PAYLOAD_ISSUE_THRESHOLD && (
+                  {selectedInspectorAssetGroup &&
+                    [selectedInspectorAssetGroup].map((group) => {
+                      const isOpen = expandedAsset === group.assetId;
+                      const typeSummary = group.payloadTypes
+                        .map((entry) => {
+                          const parts: string[] = [];
+                          if (entry.issues.length > 0) {
+                            parts.push(
+                              `${entry.issues.length} issue${entry.issues.length === 1 ? "" : "s"}`,
+                            );
+                          }
+                          if (entry.hasPayloadView) {
+                            parts.push("payload");
+                          }
+                          return `${entry.payloadType} (${parts.join(", ") || "ok"})`;
+                        })
+                        .join(", ");
+                      return (
+                        <div className={`asset-group${isOpen ? " open" : ""}`} key={group.assetId}>
+                          <button
+                            aria-expanded={isOpen}
+                            className="asset-group-toggle"
+                            onClick={() => setExpandedAsset(isOpen ? null : group.assetId)}
+                            type="button"
+                          >
+                            <strong>{group.assetId}</strong>
+                            <span>
+                              {group.issues.length} issue{group.issues.length === 1 ? "" : "s"} ·{" "}
+                              {typeSummary}
+                            </span>
+                          </button>
+                          {isOpen && (
+                            <div className="asset-group-detail">
+                              {group.payloadTypes.map((entry) => {
+                                const payloadKey = `${group.assetId}:${entry.payloadType}`;
+                                const payloadOpen = expandedPayloadKey === payloadKey;
+                                // Same shared (issues-gated) verdict as the
+                                // results-table row for this asset x payload type,
+                                // so scrolling the sections draws the eye to red
+                                // without re-reading the table. "Not received"
+                                // and a pending/failed issues fetch stay neutral.
+                                const sectionVerdict = gatedUdmiVerdict(
+                                  entry.issues,
+                                  entry.observedPresent,
+                                  notObservedAssets.has(group.assetId),
+                                );
+                                const sectionTone = udmiVerdictTone(sectionVerdict.verdict);
+                                return (
+                                  <div
+                                    className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
+                                    key={entry.payloadType}
+                                    ref={(el) => {
+                                      // Register/deregister this payload group so a
+                                      // row control can scroll straight to it (ITEM-D).
+                                      if (el) {
+                                        payloadGroupRefs.current.set(payloadKey, el);
+                                      } else {
+                                        payloadGroupRefs.current.delete(payloadKey);
+                                      }
+                                    }}
+                                    tabIndex={-1}
+                                  >
+                                    <div className="payload-type-heading">
+                                      <h5>{entry.payloadType}</h5>
+                                      {entry.hasPayloadView &&
+                                        entry.issues.length >= LONG_PAYLOAD_ISSUE_THRESHOLD && (
+                                          <button
+                                            aria-label={`Jump to ${entry.payloadType} expected versus observed comparison`}
+                                            className="secondary-button compact"
+                                            onClick={() => jumpToPayloadComparison(payloadKey)}
+                                            type="button"
+                                          >
+                                            Jump to payload comparison
+                                          </button>
+                                        )}
+                                    </div>
+                                    <p className={`payload-verdict ${sectionTone ?? "neutral"}`}>
+                                      {sectionVerdict.verdict === "pass"
+                                        ? "PASS: UDMI Compliant"
+                                        : sectionVerdict.verdict === "pass-notes"
+                                          ? "PASS WITH NOTES: minor issues below"
+                                          : sectionVerdict.verdict === "offline"
+                                            ? "NOT OBSERVED THIS RUN: no payload arrived during the capture window"
+                                            : sectionVerdict.verdict === "fail"
+                                              ? "NON-COMPLIANT: please see details below"
+                                              : sectionVerdict.label === "Not received"
+                                                ? "NOT RECEIVED: no payload arrived for this payload type"
+                                                : sectionVerdict.label}
+                                    </p>
+                                    {entry.issues.map((issue) => (
+                                      <IssueCard
+                                        key={issue.id}
+                                        context={issue.area}
+                                        issue={issue}
+                                      />
+                                    ))}
+                                    {entry.hasPayloadView && (
+                                      <div className="payload-evidence">
                                         <button
-                                          aria-label={`Jump to ${entry.payloadType} expected versus observed comparison`}
+                                          aria-expanded={payloadOpen}
                                           className="secondary-button compact"
-                                          onClick={() => jumpToPayloadComparison(payloadKey)}
+                                          onClick={() =>
+                                            setExpandedPayloadKey(payloadOpen ? null : payloadKey)
+                                          }
+                                          ref={(el) => {
+                                            if (el) {
+                                              payloadComparisonControlRefs.current.set(
+                                                payloadKey,
+                                                el,
+                                              );
+                                            } else {
+                                              payloadComparisonControlRefs.current.delete(
+                                                payloadKey,
+                                              );
+                                            }
+                                          }}
                                           type="button"
                                         >
-                                          Jump to payload comparison
+                                          {payloadOpen ? "Hide" : "Show"} expected vs observed
+                                          payload
                                         </button>
-                                      )}
+                                        {payloadOpen && (
+                                          <PayloadComparePanels
+                                            expected={entry.expected}
+                                            issues={entry.issues}
+                                            observed={entry.observed}
+                                            observedPresent={entry.observedPresent}
+                                          />
+                                        )}
+                                      </div>
+                                    )}
                                   </div>
-                                  <p
-                                    className={`payload-verdict ${sectionTone ?? "neutral"}`}
-                                  >
-                                    {sectionVerdict.verdict === "pass"
-                                      ? "PASS: UDMI Compliant"
-                                      : sectionVerdict.verdict === "pass-notes"
-                                        ? "PASS WITH NOTES: minor issues below"
-                                        : sectionVerdict.verdict === "offline"
-                                          ? "NOT OBSERVED THIS RUN: no payload arrived during the capture window"
-                                          : sectionVerdict.verdict === "fail"
-                                            ? "NON-COMPLIANT: please see details below"
-                                            : sectionVerdict.label === "Not received"
-                                              ? "NOT RECEIVED: no payload arrived for this payload type"
-                                              : sectionVerdict.label}
-                                  </p>
-                                  {entry.issues.map((issue) => (
-                                    <IssueCard key={issue.id} context={issue.area} issue={issue} />
-                                  ))}
-                                  {entry.hasPayloadView && (
-                                    <div className="payload-evidence">
-                                      <button
-                                        aria-expanded={payloadOpen}
-                                        className="secondary-button compact"
-                                        onClick={() =>
-                                          setExpandedPayloadKey(payloadOpen ? null : payloadKey)
-                                        }
-                                        ref={(el) => {
-                                          if (el) {
-                                            payloadComparisonControlRefs.current.set(payloadKey, el);
-                                          } else {
-                                            payloadComparisonControlRefs.current.delete(payloadKey);
-                                          }
-                                        }}
-                                        type="button"
-                                      >
-                                        {payloadOpen ? "Hide" : "Show"} expected vs observed payload
-                                      </button>
-                                      {payloadOpen && (
-                                        <PayloadComparePanels
-                                          expected={entry.expected}
-                                          issues={entry.issues}
-                                          observed={entry.observed}
-                                          observedPresent={entry.observedPresent}
-                                        />
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                 </div>
               ) : module.route === "mqtt-discovery" ? (
                 // Real captured payload for the selected topic, replacing the old
@@ -4893,28 +4999,28 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <span>Findings are produced by validation runs, not discovery.</span>
                 </div>
               ) : (
-              <div className="issue-list compact-list">
-                {visibleIssues.length > 0 ? (
-                  visibleIssues.map((issue) => (
-                    <IssueCard key={issue.id} context={issue.assetId} issue={issue} />
-                  ))
-                ) : (
-                  <div className="empty-workspace">
-                    <strong>No active findings</strong>
-                    <span>
-                      {liveIssues
-                        ? "This validation run reported no issues."
-                        : "Run a validation to surface live findings here."}
-                    </span>
-                  </div>
-                )}
-              </div>
+                <div className="issue-list compact-list">
+                  {visibleIssues.length > 0 ? (
+                    visibleIssues.map((issue) => (
+                      <IssueCard key={issue.id} context={issue.assetId} issue={issue} />
+                    ))
+                  ) : (
+                    <div className="empty-workspace">
+                      <strong>No active findings</strong>
+                      <span>
+                        {liveIssues
+                          ? "This validation run reported no issues."
+                          : "Run a validation to surface live findings here."}
+                      </span>
+                    </div>
+                  )}
+                </div>
               )}
             </>
-        </aside>
-      </section>
+          </aside>
+        </section>
 
-      {/* Second instance of the report controls, at the END of the Results step
+        {/* Second instance of the report controls, at the END of the Results step
           (field engineer's 2026-07-15 walkthrough: a run finishes, the step auto-advances
           to Results, and the run monitor's copy — which lives in the "setup run"
           stepgroup — vanishes with it, so the operator had to click back a step
@@ -4937,123 +5043,122 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           attach itself to the monitor, this card would toast twice on one
           screen. Cheap insurance, unreachable today; don't read it as evidence
           the case exists. */}
-      {module.route !== "reports" &&
-        canEngineer &&
-        activeRun &&
-        activeRunTerminal &&
-        finalEvidenceReady && (
-        <section className="surface" data-stepgroup="results">
-          <div className="surface-heading">
-            <div>
-              <h3>Generate Report</h3>
+        {module.route !== "reports" && canEngineer && activeRun && activeRunTerminal && (
+          <section className="surface" data-stepgroup="results">
+            <div className="surface-heading">
+              <div>
+                <h3>Generate Report</h3>
+              </div>
             </div>
-          </div>
-          <div className="inline-actions">
-            <ReportFromRunControls
-              format={reportExportFormat}
-              onFormatChange={setReportExportFormat}
-              onGenerate={handleGenerateReportFromRun}
-              pending={reportFromRunMutation.isPending}
-            />
-          </div>
-          {reportToast && (
-            <div className={`state-panel ${reportToastWarning ? "warning" : "success"}`} role="status">
-              <strong>
-                {reportToastWarning
-                  ? "Report generation incomplete"
-                  : generatedAllReportIds
-                    ? "Reports ready"
-                    : "Report generated"}
-              </strong>
-              <span>{reportToast}</span>
-              {renderGeneratedAllReportDownload()}
-            </div>
-          )}
-          {reportFromRunMutation.isError && (
-            <span className="error-text">{reportFromRunMutation.error.message}</span>
-          )}
-        </section>
-      )}
-      {reportDialogOpen && (
-        <dialog
-          aria-describedby={
-            reportScopeSnapshot
-              ? "report-title-help report-scope-help"
-              : "report-title-help"
-          }
-          aria-labelledby="report-title-heading"
-          className="report-title-dialog"
-          onCancel={(event) => {
-            event.preventDefault();
-            closeReportDialog();
-          }}
-          ref={reportDialogRef}
-        >
-          <form onSubmit={handleReportDialogSubmit}>
-            <div className="report-title-dialog-heading">
-              <h3 id="report-title-heading">Name this validation report</h3>
-              <p id="report-title-help">
-                Use a title that identifies the site, systems, or capture window. It will appear in{" "}
-                {reportIntents?.length === ALL_REPORT_FORMATS.length
-                  ? "all four generated reports"
-                  : `the generated ${(
-                      reportIntents?.[0]?.format ??
-                      (reportExportFormat === "all" ? "PDF" : reportExportFormat)
-                    ).toUpperCase()} report`}
-                , the Reports list, and{" "}
-                {reportIntents?.length === ALL_REPORT_FORMATS.length
-                  ? "each download filename"
-                  : "the download filename"}.
-              </p>
-            </div>
-            {reportScopeSnapshot && (
-              <p className="report-scope-summary" id="report-scope-help">
-                {reportScopeSnapshot.filtered ? "Filtered" : "Full run"} scope locked when this
-                dialog opened: {reportScopeSnapshot.expectedAssets} expected{" "}
-                {reportScopeSnapshot.expectedAssets === 1 ? "asset" : "assets"},{" "}
-                {reportScopeSnapshot.expectedPayloads} expected{" "}
-                {reportScopeSnapshot.expectedPayloads === 1 ? "payload" : "payloads"}, and{" "}
-                {reportScopeSnapshot.unexpectedDevices} unexpected{" "}
-                {reportScopeSnapshot.unexpectedDevices === 1 ? "device" : "devices"}. This report
-                keeps that locked scope even if the filters change behind the dialog.
-              </p>
-            )}
-            <label>
-              Report title
-              <input
-                maxLength={160}
-                onChange={(event) => setReportTitle(event.target.value)}
-                ref={reportTitleInputRef}
-                required
-                value={reportTitle}
+            <div className="inline-actions">
+              <ReportFromRunControls
+                format={reportExportFormat}
+                onFormatChange={setReportExportFormat}
+                onGenerate={handleGenerateReportFromRun}
+                pending={reportFromRunMutation.isPending}
               />
-            </label>
-            <small>{reportTitle.length}/160 characters</small>
-            {reportFromRunMutation.isError && (
-              <span className="error-text" role="alert">
-                {reportFromRunMutation.error.message}
-              </span>
-            )}
-            <div className="inline-actions report-title-dialog-actions">
-              <button
-                className="secondary-button compact"
-                disabled={reportFromRunMutation.isPending}
-                onClick={closeReportDialog}
-                type="button"
-              >
-                Cancel
-              </button>
-              <button
-                className="primary-button compact"
-                disabled={reportFromRunMutation.isPending || reportTitle.trim().length === 0}
-                type="submit"
-              >
-                {reportFromRunMutation.isPending ? "Generating..." : "Generate report"}
-              </button>
             </div>
-          </form>
-        </dialog>
-      )}
+            {reportToast && (
+              <div
+                className={`state-panel ${reportToastWarning ? "warning" : "success"}`}
+                role="status"
+              >
+                <strong>
+                  {reportToastWarning
+                    ? "Report generation incomplete"
+                    : generatedAllReportIds
+                      ? "Reports ready"
+                      : "Report generated"}
+                </strong>
+                <span>{reportToast}</span>
+                {renderGeneratedAllReportDownload()}
+              </div>
+            )}
+            {reportFromRunMutation.isError && (
+              <span className="error-text">{reportFromRunMutation.error.message}</span>
+            )}
+          </section>
+        )}
+        {reportDialogOpen && (
+          <dialog
+            aria-describedby={
+              reportScopeSnapshot ? "report-title-help report-scope-help" : "report-title-help"
+            }
+            aria-labelledby="report-title-heading"
+            className="report-title-dialog"
+            onCancel={(event) => {
+              event.preventDefault();
+              closeReportDialog();
+            }}
+            ref={reportDialogRef}
+          >
+            <form onSubmit={handleReportDialogSubmit}>
+              <div className="report-title-dialog-heading">
+                <h3 id="report-title-heading">Name this validation report</h3>
+                <p id="report-title-help">
+                  Use a title that identifies the site, systems, or capture window. It will appear
+                  in{" "}
+                  {reportIntents?.length === ALL_REPORT_FORMATS.length
+                    ? "all four generated reports"
+                    : `the generated ${(
+                        reportIntents?.[0]?.format ??
+                        (reportExportFormat === "all" ? "PDF" : reportExportFormat)
+                      ).toUpperCase()} report`}
+                  , the Reports list, and{" "}
+                  {reportIntents?.length === ALL_REPORT_FORMATS.length
+                    ? "each download filename"
+                    : "the download filename"}
+                  .
+                </p>
+              </div>
+              {reportScopeSnapshot && (
+                <p className="report-scope-summary" id="report-scope-help">
+                  {reportScopeSnapshot.filtered ? "Filtered" : "Full run"} scope locked when this
+                  dialog opened: {reportScopeSnapshot.expectedAssets} expected{" "}
+                  {reportScopeSnapshot.expectedAssets === 1 ? "asset" : "assets"},{" "}
+                  {reportScopeSnapshot.expectedPayloads} expected{" "}
+                  {reportScopeSnapshot.expectedPayloads === 1 ? "payload" : "payloads"}, and{" "}
+                  {reportScopeSnapshot.unexpectedDevices} unexpected{" "}
+                  {reportScopeSnapshot.unexpectedDevices === 1 ? "device" : "devices"}. This report
+                  keeps that locked scope even if the filters change behind the dialog.
+                </p>
+              )}
+              <label>
+                Report title
+                <input
+                  maxLength={160}
+                  onChange={(event) => setReportTitle(event.target.value)}
+                  ref={reportTitleInputRef}
+                  required
+                  value={reportTitle}
+                />
+              </label>
+              <small>{reportTitle.length}/160 characters</small>
+              {reportFromRunMutation.isError && (
+                <span className="error-text" role="alert">
+                  {reportFromRunMutation.error.message}
+                </span>
+              )}
+              <div className="inline-actions report-title-dialog-actions">
+                <button
+                  className="secondary-button compact"
+                  disabled={reportFromRunMutation.isPending}
+                  onClick={closeReportDialog}
+                  type="button"
+                >
+                  Cancel
+                </button>
+                <button
+                  className="primary-button compact"
+                  disabled={reportFromRunMutation.isPending || reportTitle.trim().length === 0}
+                  type="submit"
+                >
+                  {reportFromRunMutation.isPending ? "Generating..." : "Generate report"}
+                </button>
+              </div>
+            </form>
+          </dialog>
+        )}
       </div>
     </div>
   );
@@ -5451,9 +5556,8 @@ function buildValidationSummaryDisplay(
       asset_metrics: {
         ...system.asset_metrics,
         wrong_topic: Array.isArray(summary.wrong_topic_assets)
-          ? wrongTopicAssets.filter(
-              (asset) => (asset.system || "Unspecified") === system.system,
-            ).length
+          ? wrongTopicAssets.filter((asset) => (asset.system || "Unspecified") === system.system)
+              .length
           : (system.asset_metrics.wrong_topic ?? 0),
       },
       ...withoutRetiredFaults(
@@ -5530,9 +5634,7 @@ function summaryMetricsForAssets(
   }
   const blocking = scopeIssuesToFaults
     ? faults.filter((fault) =>
-        ["critical", "high", "medium", "blocking"].includes(
-          fault.severity.toLocaleLowerCase(),
-        ),
+        ["critical", "high", "medium", "blocking"].includes(fault.severity.toLocaleLowerCase()),
       ).length
     : assets.reduce((total, asset) => total + asset.blocking_issue_count, 0);
   const issueCount = scopeIssuesToFaults
@@ -5552,10 +5654,10 @@ function summaryMetricsForAssets(
       expected: expectedPayloads.length,
       received: expectedPayloads.filter((payload) => payload.received).length,
       not_received: expectedPayloads.filter((payload) => !payload.received).length,
-      with_issues: expectedPayloads.filter(
-        (payload) => payload.received && payload.has_issues,
-      ).length,
-      successfully_validated: expectedPayloads.filter((payload) => payload.successfully_validated).length,
+      with_issues: expectedPayloads.filter((payload) => payload.received && payload.has_issues)
+        .length,
+      successfully_validated: expectedPayloads.filter((payload) => payload.successfully_validated)
+        .length,
     },
     fault_metrics: faultMetrics,
     issue_metrics: {
@@ -5602,9 +5704,13 @@ function filterValidationSummary(
       unexpectedCount,
       wrongTopicCount,
     );
-    const systems = Array.from(new Set(reconciledAssets.map((asset) => asset.system || "Unspecified"))).sort();
+    const systems = Array.from(
+      new Set(reconciledAssets.map((asset) => asset.system || "Unspecified")),
+    ).sort();
     const systemMetrics = systems.map((system) => {
-      const systemAssets = reconciledAssets.filter((asset) => (asset.system || "Unspecified") === system);
+      const systemAssets = reconciledAssets.filter(
+        (asset) => (asset.system || "Unspecified") === system,
+      );
       const systemAssetIds = new Set(systemAssets.map((asset) => asset.asset_id));
       const systemFaults = expectedFaultRows.filter(
         (fault) => fault.asset_id !== null && systemAssetIds.has(fault.asset_id),
@@ -5614,13 +5720,7 @@ function filterValidationSummary(
       ).length;
       return {
         system,
-        ...summaryMetricsForAssets(
-          systemAssets,
-          systemFaults,
-          false,
-          0,
-          systemWrongTopicCount,
-        ),
+        ...summaryMetricsForAssets(systemAssets, systemFaults, false, 0, systemWrongTopicCount),
       };
     });
     reconciledSummary = {
@@ -5636,13 +5736,9 @@ function filterValidationSummary(
   }
 
   const selectedPayloadKeys = new Set(
-    scope.selected_payloads.map(
-      (payload) => `${payload.asset_id}\u0000${payload.payload_type}`,
-    ),
+    scope.selected_payloads.map((payload) => `${payload.asset_id}\u0000${payload.payload_type}`),
   );
-  const selectedAssetIds = new Set(
-    scope.selected_payloads.map((payload) => payload.asset_id),
-  );
+  const selectedAssetIds = new Set(scope.selected_payloads.map((payload) => payload.asset_id));
   const selectedPayloadTypesByAsset = new Map<string, Set<string>>();
   for (const payload of scope.selected_payloads) {
     const selectedTypes = selectedPayloadTypesByAsset.get(payload.asset_id) ?? new Set<string>();
@@ -5668,7 +5764,7 @@ function filterValidationSummary(
         Array.from(availableTypes).every((payloadType) => selectedTypes.has(payloadType))
         ? [asset.asset_id]
         : [];
-      }),
+    }),
   );
   const availableExpectedPayloadKeys = new Set(
     reconciledSummary.asset_results.flatMap((asset) =>
@@ -5720,9 +5816,7 @@ function filterValidationSummary(
       })
       .sort((left, right) => right.instant - left.instant);
     const blockingIssueCount = assetFaults.filter((fault) =>
-      ["critical", "high", "medium", "blocking"].includes(
-        fault.severity.toLocaleLowerCase(),
-      ),
+      ["critical", "high", "medium", "blocking"].includes(fault.severity.toLocaleLowerCase()),
     ).length;
     const issueCount = assetFaults.length;
     return {
@@ -5776,13 +5870,7 @@ function filterValidationSummary(
     ).length;
     return {
       system,
-      ...summaryMetricsForAssets(
-        systemAssets,
-        systemFaults,
-        true,
-        0,
-        systemWrongTopicCount,
-      ),
+      ...summaryMetricsForAssets(systemAssets, systemFaults, true, 0, systemWrongTopicCount),
     };
   });
   return {
@@ -5983,7 +6071,9 @@ function AssetTopicDiscoveryPanel({
         </p>
       ) : null}
       {discovery.scope_error ? (
-        <p className="section-copy">Scope configuration: {discovery.scope_error.replace(/_/g, " ")}.</p>
+        <p className="section-copy">
+          Scope configuration: {discovery.scope_error.replace(/_/g, " ")}.
+        </p>
       ) : null}
       {discovery.asset_results.length > 0 ? (
         <div className="data-table-wrap udmi-topic-discovery-scroll">
@@ -6026,7 +6116,9 @@ function AssetTopicDiscoveryPanel({
           </table>
         </div>
       ) : (
-        <p className="section-copy">No asset-topic discovery rows match the current result filters.</p>
+        <p className="section-copy">
+          No asset-topic discovery rows match the current result filters.
+        </p>
       )}
     </section>
   );
@@ -6098,9 +6190,7 @@ function UdmiSummaryPanel({
           <div>
             <dt>Issues</dt>
             <dd>
-              {formatMetricCount(
-                summary.issue_metrics.blocking + summary.issue_metrics.warning,
-              )}{" "}
+              {formatMetricCount(summary.issue_metrics.blocking + summary.issue_metrics.warning)}{" "}
               <span>({formatMetricCount(summary.issue_metrics.warning)} warnings)</span>
             </dd>
           </div>
@@ -6121,8 +6211,8 @@ function UdmiSummaryPanel({
           <div>
             <h4 id="udmi-wrong-topic-summary-heading">Registered assets on wrong topics</h4>
             <p>
-              These assets were received and identified, but their observed MQTT topic roots do
-              not match the register.
+              These assets were received and identified, but their observed MQTT topic roots do not
+              match the register.
             </p>
           </div>
           <div className="data-table-wrap">
@@ -6168,9 +6258,9 @@ function UdmiSummaryPanel({
       ) : null}
 
       <p className="udmi-metric-basis">
-        The Observed assets metric counts expected register assets with at least one retained expected payload.
-        Unexpected devices are reported separately and never enter expected, observed, compliance,
-        payload, fault, or validation-result totals.{" "}
+        The Observed assets metric counts expected register assets with at least one retained
+        expected payload. Unexpected devices are reported separately and never enter expected,
+        observed, compliance, payload, fault, or validation-result totals.{" "}
         {summary.unexpected_devices_measured === true ? (
           <strong>
             Unexpected-device measurement was available
@@ -6226,7 +6316,8 @@ function UdmiSummaryPanel({
                     <td>
                       {formatMetricCount(
                         system.issue_metrics.blocking + system.issue_metrics.warning,
-                      )} issues ({formatMetricCount(system.issue_metrics.warning)} warnings)
+                      )}{" "}
+                      issues ({formatMetricCount(system.issue_metrics.warning)} warnings)
                     </td>
                   </tr>
                 ))}
@@ -6291,7 +6382,8 @@ function udmiResultsEmptyState(input: {
   if (input.status === "failed") {
     return {
       title: "Validation failed with no result rows",
-      detail: "Check the run error above. Any stored summary evidence remains available for export.",
+      detail:
+        "Check the run error above. Any stored summary evidence remains available for export.",
     };
   }
   if (input.status === "cancelled") {
@@ -6458,7 +6550,9 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
     }
   } catch (error) {
     // eslint-disable-next-line preserve-caught-error -- caught message is embedded in the thrown error text; `{ cause }` needs the ES2022 Error lib, beyond this tsconfig's ES2020 target.
-    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : "parse failed"}`);
+    throw new Error(
+      `${label} is not valid JSON: ${error instanceof Error ? error.message : "parse failed"}`,
+    );
   }
   throw new Error(`${label} must be a JSON object.`);
 }
@@ -6478,7 +6572,9 @@ function IssueCard({ issue, context }: { issue: IssueRow; context: string }) {
         <strong>{headline}</strong>
         {issue.expectedObserved && <small>{issue.expectedObserved}</small>}
         {issue.statusDetail && <small>Status: {issue.statusDetail}</small>}
-        {issue.suggestedAction && <small className="issue-suggestion">{issue.suggestedAction}</small>}
+        {issue.suggestedAction && (
+          <small className="issue-suggestion">{issue.suggestedAction}</small>
+        )}
       </div>
     </div>
   );
@@ -6646,8 +6742,8 @@ function PayloadComparePanels({
       )}
       <p className="section-copy payload-diff-legend">
         Highlights mark keys present on only one side (amber = expected only, red = observed only).
-        {hasFlagged ? " Rows in red match exact validation evidence paths." : ""} Values are
-        not compared here — expected values are template sentinels; see the issues above for value
+        {hasFlagged ? " Rows in red match exact validation evidence paths." : ""} Values are not
+        compared here — expected values are template sentinels; see the issues above for value
         checks.
       </p>
     </>
@@ -6665,9 +6761,7 @@ function normaliseEvidencePath(path: string | null | undefined): string | null {
   const withoutRoot = trimmed.replace(/^\$\.?/, "");
   const segments = withoutRoot.split(".").filter(Boolean);
   return segments.length > 0
-    ? `/${segments
-        .map((segment) => segment.replace(/~/g, "~0").replace(/\//g, "~1"))
-        .join("/")}`
+    ? `/${segments.map((segment) => segment.replace(/~/g, "~0").replace(/\//g, "~1")).join("/")}`
     : null;
 }
 
@@ -6685,7 +6779,9 @@ function JsonTree({ value }: { value: unknown }) {
               <JsonTree value={child} />
             </details>
           ) : (
-            <><strong>{key}</strong>: {JSON.stringify(child)}</>
+            <>
+              <strong>{key}</strong>: {JSON.stringify(child)}
+            </>
           )}
         </li>
       ))}
@@ -6851,7 +6947,9 @@ function renderCell(
           {unexpected && <span className="chip amber"> Unexpected ports open: {unexpected}</span>}
           {missing && <span className="chip red"> Missing expected ports: {missing}</span>}
           {expectedOk && <span className="chip green"> Expected ports {expectedOk}</span>}
-          {expectedSilent && <span className="chip amber"> Expected by register — no response</span>}
+          {expectedSilent && (
+            <span className="chip amber"> Expected by register — no response</span>
+          )}
         </>
       );
     }
@@ -6883,10 +6981,9 @@ function buildMultiPointPayload(
   primaryValue: string,
   extras: PointValuePair[],
 ): string {
-  const pairs = [
-    { point: primaryPoint, value: primaryValue },
-    ...extras,
-  ].filter((pair) => pair.point.trim() !== "");
+  const pairs = [{ point: primaryPoint, value: primaryValue }, ...extras].filter(
+    (pair) => pair.point.trim() !== "",
+  );
   // No extra pairs and the base payload already carries the single point: leave
   // the operator's payload untouched (preserves the original single-point flow).
   if (extras.every((pair) => pair.point.trim() === "")) {
@@ -6895,9 +6992,10 @@ function buildMultiPointPayload(
   let root: Record<string, unknown>;
   try {
     const parsed = JSON.parse(basePayload) as unknown;
-    root = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
+    root =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
   } catch {
     root = {};
   }
@@ -6958,7 +7056,6 @@ function captureRowsToCsv(rows: CaptureRow[]): string {
   }
   return lines.join("\r\n");
 }
-
 
 /**
  * Drives an authenticated file download. Plain `<a download href>` anchors
@@ -7056,7 +7153,10 @@ function buildResultDetailItems(
       { label: "Network Number", value: row["Network Number"] ?? "—" },
       { label: "Vendor", value: row.Vendor ?? "—" },
       { label: "Objects indexed", value: row.Objects ?? "Pending" },
-      { label: "Last discovered", value: row.Discovered ?? row["Device Last Discovered"] ?? "Not recorded" },
+      {
+        label: "Last discovered",
+        value: row.Discovered ?? row["Device Last Discovered"] ?? "Not recorded",
+      },
       {
         label: live ? "Note" : "Object drilldown",
         value: live
@@ -7187,7 +7287,10 @@ function buildResultDetailItems(
       { label: "Source", value: row.Source ?? "Selected source" },
       { label: "Status", value: row.Status ?? "Pending" },
       { label: "File", value: row.File ?? "Not generated" },
-      { label: "Outputs", value: "Excel report for filtering and Word report for formal handover." },
+      {
+        label: "Outputs",
+        value: "Excel report for filtering and Word report for formal handover.",
+      },
     ];
   }
 

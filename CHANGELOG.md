@@ -13,6 +13,12 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   for registered assets found by the independent MQTT collector.
 - Versioned release, Docker, and evidence-validator contracts for v0.1.31.
 
+### Fixed
+
+- A completed run retains its report-generation controls when the UI cannot
+  refresh final display evidence; report generation continues to use the
+  server's frozen source-run evidence.
+
 ## [0.1.30] - 2026-07-28
 
 ### Added

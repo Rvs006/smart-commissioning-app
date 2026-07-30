@@ -817,6 +817,36 @@ label {
   gap: 12px;
 }
 
+.live-monitor-form {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.live-monitor-form label {
+  flex: 1 1 28rem;
+}
+
+.live-progress-chart {
+  height: 14rem;
+  margin-bottom: 0.75rem;
+  width: 100%;
+}
+
+.live-progress-chart line {
+  stroke: var(--line, #d7d3cd);
+  stroke-width: 0.6;
+}
+
+.live-progress-chart polyline {
+  stroke: var(--accent, #287d9e);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
 .kpi-strip article,
 .metric {
   display: grid;
@@ -2685,18 +2715,12 @@ input.field-expired {
     position: absolute;
     inset: 0;
     background-image:
-      linear-gradient(
-        to right,
-        transparent calc(100% - 1px),
-        var(--metric-rule) calc(100% - 1px)
-      ),
-      linear-gradient(
-        to bottom,
-        transparent calc(100% - 1px),
-        var(--metric-rule) calc(100% - 1px)
-      );
+      linear-gradient(to right, transparent calc(100% - 1px), var(--metric-rule) calc(100% - 1px)),
+      linear-gradient(to bottom, transparent calc(100% - 1px), var(--metric-rule) calc(100% - 1px));
     background-repeat: repeat-x, repeat-y;
-    background-size: 25% 100%, 100% 50%;
+    background-size:
+      25% 100%,
+      100% 50%;
     content: "";
     pointer-events: none;
   }
@@ -2886,7 +2910,6 @@ input.field-expired {
     width: auto;
     margin: 0 10px calc(10px + env(safe-area-inset-bottom));
   }
-
 }
 
 @media (min-width: 1080px) {

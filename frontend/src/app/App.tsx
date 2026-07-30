@@ -34,6 +34,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: "Hub", to: "/hub" },
       { label: "Run History", to: "/run-history" },
+      { label: "Live Monitor", to: "/live-monitor" },
     ],
   },
 ];
@@ -48,6 +49,7 @@ const pageTitles: Record<string, string> = {
   "/mqtt-discovery": "MQTT Discovery",
   "/reports": "Reports",
   "/run-history": "Run History",
+  "/live-monitor": "Live Run Monitor",
   "/udmi-validation": "UDMI Payload Workbench",
   "/users": "User Management",
 };
@@ -62,7 +64,10 @@ const pageSubtitles: Record<string, string> = {
   "/mqtt-discovery": "Inspect broker topics, payloads and extracted points.",
   "/reports": "Generate evidence packs and issue reports.",
   "/run-history": "Browse, sort, filter, and export every recorded run.",
-  "/udmi-validation": "Inspect state, metadata, pointset, and controlled publish evidence in detail.",
+  "/live-monitor":
+    "Read-only 30-second status, progress, and issue monitoring for one validation run.",
+  "/udmi-validation":
+    "Inspect state, metadata, pointset, and controlled publish evidence in detail.",
   "/users": "Create, list, and manage operator API keys and roles.",
 };
 
@@ -118,11 +123,7 @@ export function App() {
             >
               Brief
             </Link>
-            <Link
-              className="header-pill"
-              title="Role-based learning walkthroughs"
-              to="/learning"
-            >
+            <Link className="header-pill" title="Role-based learning walkthroughs" to="/learning">
               Learning
             </Link>
             <ThemeToggle />

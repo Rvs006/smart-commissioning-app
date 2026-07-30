@@ -346,7 +346,12 @@ describe("ModulePage discovery wiring", () => {
         if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.includes("/api/v1/imports/latest")) {
-          return { ok: false, status: 404, statusText: "Not Found", json: async () => ({ detail: "none" }) } as unknown as Response;
+          return {
+            ok: false,
+            status: 404,
+            statusText: "Not Found",
+            json: async () => ({ detail: "none" }),
+          } as unknown as Response;
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -404,7 +409,8 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.click(queueButton);
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     // CIDR override flows through as parameters.cidr; the single-address branch
     // is untouched, so no addresses key is sent.
     expect(parameters.cidr).toBe("10.20.0.0/24");
@@ -492,7 +498,8 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.click(runButton);
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters.capture_seconds).toBe(7200);
   });
 
@@ -542,7 +549,8 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.click(runButton);
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters.capture_seconds).toBe(0);
   });
 
@@ -566,9 +574,7 @@ describe("ModulePage discovery wiring", () => {
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
 
-    expect(
-      await screen.findByText(/Run time must be a positive number/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Run time must be a positive number/i)).toBeInTheDocument();
     expect(posted).toBe(false);
   });
 
@@ -590,7 +596,8 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.click(runButton);
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters).not.toHaveProperty("topic_filter");
   });
 
@@ -613,7 +620,8 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.click(runButton);
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters.topic_filter).toBe("site/asset-1/#");
   });
 
@@ -681,7 +689,10 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(mqttResultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
-          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+          return jsonResponse({
+            ...mqttTerminal,
+            result_summary: mqttResultsPayload.result_summary,
+          });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -774,7 +785,10 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(mqttResultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
-          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+          return jsonResponse({
+            ...mqttTerminal,
+            result_summary: mqttResultsPayload.result_summary,
+          });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -864,7 +878,10 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(mqttResultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
-          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+          return jsonResponse({
+            ...mqttTerminal,
+            result_summary: mqttResultsPayload.result_summary,
+          });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -1090,7 +1107,10 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(noRegisterResults);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
-          return jsonResponse({ ...mqttTerminal, result_summary: noRegisterResults.result_summary });
+          return jsonResponse({
+            ...mqttTerminal,
+            result_summary: noRegisterResults.result_summary,
+          });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -1277,7 +1297,9 @@ describe("ModulePage discovery wiring", () => {
     await waitFor(() => expect(queueButton).toBeEnabled());
     fireEvent.click(queueButton);
 
-    expect(await screen.findByText(/Scan complete — no responsive hosts found/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Scan complete — no responsive hosts found/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/254 hosts probed/i)).toBeInTheDocument();
     expect(screen.queryByText("No results yet")).not.toBeInTheDocument();
     // Honesty: a succeeded run that observed nothing is a real observation and
@@ -1588,10 +1610,7 @@ describe("ModulePage reports wiring", () => {
     await waitFor(() => expect(exportSelected).toBeEnabled());
   });
 
-  function stubReports(
-    onDownload?: (url: string) => void,
-    payload: unknown = reportsPayload,
-  ) {
+  function stubReports(onDownload?: (url: string) => void, payload: unknown = reportsPayload) {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -1823,12 +1842,12 @@ describe("ModulePage reports wiring", () => {
     stubReportDeletion(deletionBodies);
     renderModule("reports");
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Delete report handover_pack.zip" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Delete report handover_pack.zip" }));
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Delete report evidence_pack.docx" })).toHaveFocus(),
+      expect(
+        screen.getByRole("button", { name: "Delete report evidence_pack.docx" }),
+      ).toHaveFocus(),
     );
   });
 
@@ -1845,9 +1864,7 @@ describe("ModulePage reports wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete selected" }));
 
     await waitFor(() =>
-      expect(deletionBodies).toEqual([
-        { report_ids: expect.arrayContaining(["rep-1", "rep-2"]) },
-      ]),
+      expect(deletionBodies).toEqual([{ report_ids: expect.arrayContaining(["rep-1", "rep-2"]) }]),
     );
     expect(deletionBodies[0].report_ids).toHaveLength(2);
     await waitFor(() => {
@@ -1989,7 +2006,9 @@ describe("ModulePage labels and templates", () => {
   it("titles the ip-scanner hero 'IP Discovery', matching its menu entry", async () => {
     stubBasic();
     renderModule("ip-scanner");
-    expect(await screen.findByRole("heading", { level: 2, name: "IP Discovery" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "IP Discovery" }),
+    ).toBeInTheDocument();
   });
 
   it("titles the bacnet-discovery hero 'BACnet Discovery'", async () => {
@@ -1999,7 +2018,6 @@ describe("ModulePage labels and templates", () => {
       await screen.findByRole("heading", { level: 2, name: "BACnet Discovery" }),
     ).toBeInTheDocument();
   });
-
 });
 
 describe("ModulePage UDMI workbench live results", () => {
@@ -2075,7 +2093,10 @@ describe("ModulePage UDMI workbench live results", () => {
                 version: "1.5.2",
                 pointset: { points: { energy_sensor: { units: "kwh" } } },
               },
-              observed: { version: "1.5.2", pointset: { points: { energy_sensor: { units: "kilowatt_hours" } } } },
+              observed: {
+                version: "1.5.2",
+                pointset: { points: { energy_sensor: { units: "kilowatt_hours" } } },
+              },
               observed_present: true,
             },
           ],
@@ -2097,7 +2118,8 @@ describe("ModulePage UDMI workbench live results", () => {
         point_name: null,
         expected_value: "1.5.2",
         observed_value: "1.4.0",
-        suggested_action: "Align the register's Expected schema version with the device's UDMI version.",
+        suggested_action:
+          "Align the register's Expected schema version with the device's UDMI version.",
         status_detail: null,
         raw_evidence_uri: "runtime://udmi-validation/review-payloads",
       },
@@ -2223,14 +2245,18 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(
       await screen.findByRole("heading", { name: "Provisional validation summary" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Provisional results below update as payloads arrive/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provisional results below update as payloads arrive/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/Provisional live validation results/i)).toBeInTheDocument();
     expect(screen.getAllByText("ACTIVE-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
     expect(screen.getByText(/Unexpected-device measurement was unavailable/i)).toBeInTheDocument();
     expect(issuesFetches).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Download raw JSON" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Generate report from this run" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Generate report from this run" }),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps wrong-topic evidence separate from payload presence and validation", async () => {
@@ -2252,10 +2278,7 @@ describe("ModulePage UDMI workbench live results", () => {
               asset_id: "EM-1",
               system: "BMS",
               expected_topic_root: "site/registered/EM-1",
-              expected_topics: [
-                "site/registered/EM-1/metadata",
-                "site/registered/EM-1/pointset",
-              ],
+              expected_topics: ["site/registered/EM-1/metadata", "site/registered/EM-1/pointset"],
               observed_expected_topics: [],
               observed_alternate_topics: [],
               matched_message_count: 0,
@@ -2424,9 +2447,9 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(pointsetRow).getByText("site/wrong/EM-1/pointset")).toBeInTheDocument();
     expect(within(pointsetRow).getByText("Yes")).toBeInTheDocument();
     expect(within(pointsetRow).getByText(/Non-compliant/)).toBeInTheDocument();
-    const metadataRow = within(resultsTable).getByText("UDMI metadata").closest(
-      "tr",
-    ) as HTMLTableRowElement;
+    const metadataRow = within(resultsTable)
+      .getByText("UDMI metadata")
+      .closest("tr") as HTMLTableRowElement;
     expect(within(metadataRow).getByText("Expected topic")).toBeInTheDocument();
   });
 
@@ -2441,22 +2464,25 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
-          postedRequest.body = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          postedRequest.body = JSON.parse(String(init.body)) as {
+            parameters: Record<string, unknown>;
+          };
           return jsonResponse(udmiAccepted);
         }
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
           return jsonResponse(udmiIssuesPayload);
         }
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(udmiTerminalRun);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1"))
+          return jsonResponse(udmiTerminalRun);
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
     renderModule("udmi-validation");
 
-    expect(screen.queryByLabelText(/Diagnose where registered asset IDs appear/i)).not.toBeInTheDocument();
-    fireEvent.click(
-      await screen.findByLabelText(/Validate against the imported MQTT register/i),
-    );
+    expect(
+      screen.queryByLabelText(/Diagnose where registered asset IDs appear/i),
+    ).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByLabelText(/Validate against the imported MQTT register/i));
     fireEvent.click(
       await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
     );
@@ -2468,7 +2494,9 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(allScope).toBeDisabled();
 
     fireEvent.click(
-      screen.getByLabelText(/I understand that an all-topic search can receive every broker topic/i),
+      screen.getByLabelText(
+        /I understand that an all-topic search can receive every broker topic/i,
+      ),
     );
     expect(allScope).toBeEnabled();
     fireEvent.click(allScope);
@@ -2498,13 +2526,16 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
-          postedRequest.body = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          postedRequest.body = JSON.parse(String(init.body)) as {
+            parameters: Record<string, unknown>;
+          };
           return jsonResponse(udmiAccepted);
         }
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
           return jsonResponse(udmiIssuesPayload);
         }
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(udmiTerminalRun);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1"))
+          return jsonResponse(udmiTerminalRun);
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
@@ -2513,9 +2544,13 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(
       await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
     );
-    expect(screen.queryByLabelText(/Diagnose where registered asset IDs appear/i)).not.toBeInTheDocument();
     expect(
-      screen.getByText(/Topic discovery is available for live captures that validate against the imported MQTT register/i),
+      screen.queryByLabelText(/Diagnose where registered asset IDs appear/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Topic discovery is available for live captures that validate against the imported MQTT register/i,
+      ),
     ).toBeInTheDocument();
 
     const runButton = screen.getByRole("button", { name: "Execute capture" });
@@ -2598,11 +2633,21 @@ describe("ModulePage UDMI workbench live results", () => {
     const inspector = document.querySelector(".inspector") as HTMLElement;
     expect(within(inspector).queryByText("Evidence outputs")).not.toBeInTheDocument();
     fireEvent.click(within(inspector).getByRole("button", { name: /EM-1.*issue/i }));
-    fireEvent.click(screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0]);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: /Show expected vs observed payload/i })[0],
+    );
     expect(screen.getByText("Expected UDMI template")).toBeInTheDocument();
-    expect(screen.getByText(/expected timestamp is a schema-valid template value created when this result view was built/i)).toBeInTheDocument();
-    expect(screen.getByText(/freshness checks use the observed payload timestamp/i)).toBeInTheDocument();
-    expect(screen.getByText(/expected side keeps its own build value and never borrows broker data/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /expected timestamp is a schema-valid template value created when this result view was built/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/freshness checks use the observed payload timestamp/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/expected side keeps its own build value and never borrows broker data/i),
+    ).toBeInTheDocument();
 
     // Presence diff (ISSUE-8): the expected-only point spelling shades amber on
     // the expected side, the observed-only (typo'd) spelling shades red on the
@@ -2747,9 +2792,7 @@ describe("ModulePage UDMI workbench live results", () => {
       .map((cell) => cell.closest("tr"))
       .find((row): row is HTMLTableRowElement => row !== null);
     expect(metadataRow).toBeDefined();
-    fireEvent.click(
-      within(metadataRow!).getByRole("button", { name: "EM-1" }),
-    );
+    fireEvent.click(within(metadataRow!).getByRole("button", { name: "EM-1" }));
     const inspector = document.querySelector(".inspector") as HTMLElement;
     const metadataGroup = within(inspector)
       .getByRole("heading", { name: "metadata" })
@@ -2862,20 +2905,24 @@ describe("ModulePage UDMI workbench live results", () => {
       .getByText("Unexpected devices")
       .closest("div") as HTMLElement;
     expect(within(unexpectedMetric).getByText("1")).toBeInTheDocument();
-    expect(within(summaryPanel).getByText(/available for the MQTT capture window/i)).toBeInTheDocument();
+    expect(
+      within(summaryPanel).getByText(/available for the MQTT capture window/i),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Category"), {
       target: { value: "unexpected-devices" },
     });
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
-    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /device-9/i })).toBeInTheDocument();
+    expect(
+      await within(resultsTable).findByRole("button", { expanded: true, name: /device-9/i }),
+    ).toBeInTheDocument();
     expect(within(resultsTable).queryByRole("button", { name: /EM-1/i })).not.toBeInTheDocument();
-    const expectedMetric = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
+    const expectedMetric = within(summaryPanel)
+      .getByText("Expected assets")
+      .closest("div") as HTMLElement;
     expect(within(expectedMetric).getByText("0")).toBeInTheDocument();
     expect(within(unexpectedMetric).getByText("1")).toBeInTheDocument();
-    expect(
-      await screen.findByText("Observed outside the expected register"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Observed outside the expected register")).toBeInTheDocument();
   });
 
   it("shows the actual issue text in the Inspector when View issues is clicked", async () => {
@@ -2895,7 +2942,9 @@ describe("ModulePage UDMI workbench live results", () => {
     const inspector = document.querySelector(".inspector") as HTMLElement;
     expect(within(inspector).getByText("UDMI-PS-001")).toBeInTheDocument();
     expect(
-      within(inspector).getAllByText(/Expected schema version does not match the pointset payload version/i),
+      within(inspector).getAllByText(
+        /Expected schema version does not match the pointset payload version/i,
+      ),
     ).toHaveLength(2);
     const assetToggle = within(inspector).getByRole("button", {
       expanded: true,
@@ -2950,7 +2999,9 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(inspector).getByText("Pointset problem 2.")).toBeInTheDocument();
     expect(within(inspector).getByText("Pointset problem 3.")).toBeInTheDocument();
     expect(
-      within(inspector).queryByRole("button", { name: /Jump to pointset expected versus observed/i }),
+      within(inspector).queryByRole("button", {
+        name: /Jump to pointset expected versus observed/i,
+      }),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
@@ -3127,9 +3178,13 @@ describe("ModulePage UDMI workbench live results", () => {
     // Structured issue card (ITEM-9): the expected/observed comparison and the
     // suggested action render as their OWN lines, not one run-on string. The
     // empty observed value is named "empty" rather than dropped or blank.
-    expect((await screen.findAllByText("Expected 1.5.2, observed empty")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Expected 1.5.2, observed empty")).length).toBeGreaterThan(
+      0,
+    );
     expect((await screen.findAllByText("Populate the version field.")).length).toBeGreaterThan(0);
-    expect((await screen.findAllByText("Pointset payload version is blank.")).length).toBeGreaterThan(0);
+    expect(
+      (await screen.findAllByText("Pointset payload version is blank.")).length,
+    ).toBeGreaterThan(0);
   });
 
   it("shades assets not observed during the run red on a succeeded run (RAG)", async () => {
@@ -3161,8 +3216,18 @@ describe("ModulePage UDMI workbench live results", () => {
           {
             asset_id: "EM-2",
             payload_types: [
-              { payload_type: "pointset", expected: { version: "1.5.2", points: {} }, observed: null, observed_present: false },
-              { payload_type: "state", expected: { version: "1.5.2" }, observed: null, observed_present: false },
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: null,
+                observed_present: false,
+              },
+              {
+                payload_type: "state",
+                expected: { version: "1.5.2" },
+                observed: null,
+                observed_present: false,
+              },
             ],
           },
         ],
@@ -3207,8 +3272,10 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
-        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") return jsonResponse(udmiAccepted);
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(silentIssues);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST")
+          return jsonResponse(udmiAccepted);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues"))
+          return jsonResponse(silentIssues);
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(silentRun);
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -3248,17 +3315,21 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Selecting an EM-2 payload row replaces the inspector's EM-1 evidence with
     // EM-2 only; expanding that selected asset reveals its run-observation line.
-    fireEvent.click(
-      within(em2Rows[0]).getByRole("button", { name: /View/i }),
-    );
+    fireEvent.click(within(em2Rows[0]).getByRole("button", { name: /View/i }));
     const inspectorEm2 = document.querySelector(".inspector") as HTMLElement;
-    const inspectorToggle = await within(inspectorEm2).findByRole("button", { name: /EM-2.*issue/i });
+    const inspectorToggle = await within(inspectorEm2).findByRole("button", {
+      name: /EM-2.*issue/i,
+    });
     if (inspectorToggle.getAttribute("aria-expanded") !== "true") {
       fireEvent.click(inspectorToggle);
     }
     expect(within(inspectorEm2).queryByRole("button", { name: /EM-1/ })).not.toBeInTheDocument();
     expect(
-      (await screen.findAllByText("NOT OBSERVED THIS RUN: no payload arrived during the capture window")).length,
+      (
+        await screen.findAllByText(
+          "NOT OBSERVED THIS RUN: no payload arrived during the capture window",
+        )
+      ).length,
     ).toBeGreaterThan(0);
   });
 
@@ -3310,7 +3381,10 @@ describe("ModulePage UDMI workbench live results", () => {
       ...udmiTerminalRun,
       result_summary: {
         ...udmiTerminalRun.result_summary,
-        payload_views: [cleanPayload("EM-1", ["pointset", "state"]), cleanPayload("AHU-9", ["pointset"])],
+        payload_views: [
+          cleanPayload("EM-1", ["pointset", "state"]),
+          cleanPayload("AHU-9", ["pointset"]),
+        ],
       },
     };
     stubTwoAssetUdmi(twoAssetRun, { run_id: "run-udmi-1", issues: [] });
@@ -3323,8 +3397,12 @@ describe("ModulePage UDMI workbench live results", () => {
 
     const table = screen.getByRole("table");
     // One collapsible summary row per asset.
-    expect(await within(table).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
-    expect(within(table).getByRole("button", { expanded: false, name: /AHU-9/ })).toBeInTheDocument();
+    expect(
+      await within(table).findByRole("button", { expanded: true, name: /EM-1/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(table).getByRole("button", { expanded: false, name: /AHU-9/ }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/across 2 expected assets/i)).toBeInTheDocument();
 
     // EM-1 is the first (selected) asset, so it auto-expands (2 child rows).
@@ -3400,7 +3478,12 @@ describe("ModulePage UDMI workbench live results", () => {
             asset_id: "EM-2",
             system: "Lighting",
             payload_types: [
-              { payload_type: "pointset", expected: { version: "1.5.2", points: {} }, observed: null, observed_present: false },
+              {
+                payload_type: "pointset",
+                expected: { version: "1.5.2", points: {} },
+                observed: null,
+                observed_present: false,
+              },
             ],
           },
         ],
@@ -3444,12 +3527,22 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Observation = not observed hides EM-1 and keeps only the silent EM-2.
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "not-observed" } });
-    expect(within(table).queryByRole("button", { expanded: true, name: /EM-1/ })).not.toBeInTheDocument();
-    expect(await within(table).findByRole("button", { expanded: true, name: /EM-2/ })).toBeInTheDocument();
+    expect(
+      within(table).queryByRole("button", { expanded: true, name: /EM-1/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      await within(table).findByRole("button", { expanded: true, name: /EM-2/ }),
+    ).toBeInTheDocument();
     expect(screen.getByText(/across 1 expected asset\b/i)).toBeInTheDocument();
-    const summaryPanel = screen.getByRole("heading", { name: "Validation summary" }).closest(".udmi-summary") as HTMLElement;
-    const expectedAssets = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
-    const observedAssets = within(summaryPanel).getByText("Observed assets").closest("div") as HTMLElement;
+    const summaryPanel = screen
+      .getByRole("heading", { name: "Validation summary" })
+      .closest(".udmi-summary") as HTMLElement;
+    const expectedAssets = within(summaryPanel)
+      .getByText("Expected assets")
+      .closest("div") as HTMLElement;
+    const observedAssets = within(summaryPanel)
+      .getByText("Observed assets")
+      .closest("div") as HTMLElement;
     expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
     expect(within(observedAssets).getByText("0")).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "BMS" })).toBeInTheDocument();
@@ -3458,8 +3551,12 @@ describe("ModulePage UDMI workbench live results", () => {
 
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "all" } });
     fireEvent.change(screen.getByLabelText("System"), { target: { value: "BMS" } });
-    expect(await within(table).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
-    expect(within(table).queryByRole("button", { expanded: false, name: /EM-2/ })).not.toBeInTheDocument();
+    expect(
+      await within(table).findByRole("button", { expanded: true, name: /EM-1/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(table).queryByRole("button", { expanded: false, name: /EM-2/ }),
+    ).not.toBeInTheDocument();
     expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
     expect(within(observedAssets).getByText("1")).toBeInTheDocument();
   });
@@ -3571,12 +3668,22 @@ describe("ModulePage UDMI workbench live results", () => {
 
     const table = screen.getByRole("table");
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "observed" } });
-    expect(await within(table).findByRole("button", { expanded: true, name: /EM-OBSERVED/ })).toBeInTheDocument();
-    expect(within(table).queryByRole("button", { expanded: false, name: /EM-SILENT/ })).not.toBeInTheDocument();
+    expect(
+      await within(table).findByRole("button", { expanded: true, name: /EM-OBSERVED/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(table).queryByRole("button", { expanded: false, name: /EM-SILENT/ }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText(/across 1 expected asset\b/i)).toBeInTheDocument();
-    const summaryPanel = screen.getByRole("heading", { name: "Validation summary" }).closest(".udmi-summary") as HTMLElement;
-    const expectedAssets = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
-    const observedAssets = within(summaryPanel).getByText("Observed assets").closest("div") as HTMLElement;
+    const summaryPanel = screen
+      .getByRole("heading", { name: "Validation summary" })
+      .closest(".udmi-summary") as HTMLElement;
+    const expectedAssets = within(summaryPanel)
+      .getByText("Expected assets")
+      .closest("div") as HTMLElement;
+    const observedAssets = within(summaryPanel)
+      .getByText("Observed assets")
+      .closest("div") as HTMLElement;
     expect(within(expectedAssets).getByText("1")).toBeInTheDocument();
     expect(within(observedAssets).getByText("1")).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "SEC" })).toBeInTheDocument();
@@ -3793,7 +3900,9 @@ describe("ModulePage UDMI workbench live results", () => {
     const initialPayloadGroup = within(summaryPanelBeforeFilter)
       .getByRole("heading", { name: "Payload metrics" })
       .closest(".udmi-metric-group") as HTMLElement;
-    const initiallyCorrect = within(initialPayloadGroup).getByText("Payloads correct").closest("div") as HTMLElement;
+    const initiallyCorrect = within(initialPayloadGroup)
+      .getByText("Payloads correct")
+      .closest("div") as HTMLElement;
     const initialAssetGroup = within(summaryPanelBeforeFilter)
       .getByRole("heading", { name: "Asset metrics" })
       .closest(".udmi-metric-group") as HTMLElement;
@@ -3826,7 +3935,9 @@ describe("ModulePage UDMI workbench live results", () => {
     const bmsRow = within(systemSection).getByText("BMS").closest("tr") as HTMLTableRowElement;
     expect(within(bmsRow).getByText("80%")).toBeInTheDocument();
     expect(within(bmsRow).getByText("(4 / 5 assets)")).toBeInTheDocument();
-    const lightingRow = within(systemSection).getByText("Lighting").closest("tr") as HTMLTableRowElement;
+    const lightingRow = within(systemSection)
+      .getByText("Lighting")
+      .closest("tr") as HTMLTableRowElement;
     expect(within(lightingRow).getByText("N/A")).toBeInTheDocument();
     expect(within(lightingRow).getByText("(0 / 0 assets)")).toBeInTheDocument();
 
@@ -3835,39 +3946,57 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(resultsGrid).not.toHaveClass("two-col");
     expect(resultsGrid.children[1]).toHaveClass("inspector");
     expect(within(resultsTable).getByRole("columnheader", { name: "Topic" })).toBeInTheDocument();
+    expect(await within(resultsTable).findByText("HV/SEC/02/MTS-100/pointset")).toBeInTheDocument();
     expect(
-      await within(resultsTable).findByText("HV/SEC/02/MTS-100/pointset"),
+      await within(resultsTable).findByRole("button", { expanded: true, name: /EM-1/ }),
     ).toBeInTheDocument();
-    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
-    expect(within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ })).toBeInTheDocument();
+    expect(
+      within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ }),
+    ).toBeInTheDocument();
     const inspector = document.querySelector(".inspector") as HTMLElement;
     expect(within(inspector).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "hv/sec" } });
-    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
-    expect(within(resultsTable).queryByRole("button", { expanded: false, name: /EM-2/ })).not.toBeInTheDocument();
+    expect(
+      await within(resultsTable).findByRole("button", { expanded: true, name: /EM-1/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(resultsTable).queryByRole("button", { expanded: false, name: /EM-2/ }),
+    ).not.toBeInTheDocument();
     expect(within(inspector).getByRole("button", { name: /EM-1/ })).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
     const summaryPanel = screen
       .getByRole("heading", { name: "Validation summary" })
       .closest(".udmi-summary") as HTMLElement;
-    const expectedAssetsMetric = within(summaryPanel).getByText("Expected assets").closest("div") as HTMLElement;
+    const expectedAssetsMetric = within(summaryPanel)
+      .getByText("Expected assets")
+      .closest("div") as HTMLElement;
     expect(within(expectedAssetsMetric).getByText("1")).toBeInTheDocument();
     const payloadGroup = within(summaryPanel)
       .getByRole("heading", { name: "Payload metrics" })
       .closest(".udmi-metric-group") as HTMLElement;
     expect(
-      within(within(payloadGroup).getByText("Expected payloads").closest("div") as HTMLElement).getByText("1"),
+      within(
+        within(payloadGroup).getByText("Expected payloads").closest("div") as HTMLElement,
+      ).getByText("1"),
     ).toBeInTheDocument();
     expect(
-      within(within(payloadGroup).getByText("Received payloads").closest("div") as HTMLElement).getByText("1"),
+      within(
+        within(payloadGroup).getByText("Received payloads").closest("div") as HTMLElement,
+      ).getByText("1"),
     ).toBeInTheDocument();
     expect(
-      within(within(payloadGroup).getByText("Successfully validated").closest("div") as HTMLElement).getByText("0"),
+      within(
+        within(payloadGroup).getByText("Successfully validated").closest("div") as HTMLElement,
+      ).getByText("0"),
     ).toBeInTheDocument();
-    const filteredCorrect = within(payloadGroup).getByText("Payloads correct").closest("div") as HTMLElement;
-    const filteredIncorrect = within(payloadGroup).getByText("Payloads incorrect").closest("div") as HTMLElement;
+    const filteredCorrect = within(payloadGroup)
+      .getByText("Payloads correct")
+      .closest("div") as HTMLElement;
+    const filteredIncorrect = within(payloadGroup)
+      .getByText("Payloads incorrect")
+      .closest("div") as HTMLElement;
     expect(within(filteredCorrect).getByText("0%")).toBeInTheDocument();
     expect(within(filteredIncorrect).getByText("100%")).toBeInTheDocument();
     expect(
@@ -3875,19 +4004,29 @@ describe("ModulePage UDMI workbench live results", () => {
         "Expected payloads are the denominator. Unexpected received payloads are excluded.",
       ),
     ).toBeInTheDocument();
-    const issueMetric = within(summaryPanel).getByText("Issues", { selector: "dt" }).closest("div") as HTMLElement;
+    const issueMetric = within(summaryPanel)
+      .getByText("Issues", { selector: "dt" })
+      .closest("div") as HTMLElement;
     expect(within(issueMetric).getByText("1")).toBeInTheDocument();
     expect(within(issueMetric).getByText("(0 warnings)")).toBeInTheDocument();
-    expect(within(summaryPanel).getByText(/exact rows retained by every active result filter/i)).toBeInTheDocument();
+    expect(
+      within(summaryPanel).getByText(/exact rows retained by every active result filter/i),
+    ).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "" } });
-    expect(within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ })).toBeInTheDocument();
+    expect(
+      within(resultsTable).getByRole("button", { expanded: false, name: /EM-2/ }),
+    ).toBeInTheDocument();
     expect(within(inspector).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
     expect(within(expectedAssetsMetric).getByText("5")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Filter results"), { target: { value: "EM-2" } });
-    expect(within(resultsTable).queryByRole("button", { expanded: true, name: /EM-1/ })).not.toBeInTheDocument();
-    expect(await within(resultsTable).findByRole("button", { expanded: true, name: /EM-2/ })).toBeInTheDocument();
+    expect(
+      within(resultsTable).queryByRole("button", { expanded: true, name: /EM-1/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      await within(resultsTable).findByRole("button", { expanded: true, name: /EM-2/ }),
+    ).toBeInTheDocument();
     expect(within(expectedAssetsMetric).getByText("1")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Filter results"), { target: { value: "" } });
 
@@ -3896,12 +4035,16 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.change(screen.getByLabelText("Verdict"), { target: { value: "all" } });
     expect(within(expectedAssetsMetric).getByText("5")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("Topic contains"), { target: { value: "no/such/topic" } });
+    fireEvent.change(screen.getByLabelText("Topic contains"), {
+      target: { value: "no/such/topic" },
+    });
     expect(within(overallMetric).getByText("N/A")).toBeInTheDocument();
     expect(within(overallMetric).getByText("(0 / 0 assets)")).toBeInTheDocument();
     expect(within(filteredCorrect).getByText("N/A")).toBeInTheDocument();
     expect(within(filteredIncorrect).getByText("N/A")).toBeInTheDocument();
-    expect(within(inspector).getByText("No asset selected in the filtered results")).toBeInTheDocument();
+    expect(
+      within(inspector).getByText("No asset selected in the filtered results"),
+    ).toBeInTheDocument();
   });
 
   it("matches report metrics for unreceived payload issues and asset-level faults in a partial scope", async () => {
@@ -4131,7 +4274,9 @@ describe("ModulePage UDMI workbench live results", () => {
     const payloadsWithIssues = within(payloadGroup)
       .getByText("Payloads with issues")
       .closest("div") as HTMLElement;
-    const issueMetric = within(summaryPanel).getByText("Issues", { selector: "dt" }).closest("div") as HTMLElement;
+    const issueMetric = within(summaryPanel)
+      .getByText("Issues", { selector: "dt" })
+      .closest("div") as HTMLElement;
 
     // The missing metadata payload has an issue, but report metrics only count
     // issues on expected payloads that were actually received.
@@ -4157,8 +4302,12 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.change(screen.getByLabelText("Topic contains"), {
       target: { value: "metadata" },
     });
-    const observedAssets = within(assetGroup).getByText("Observed assets").closest("div") as HTMLElement;
-    const notObservedAssetsMetric = within(assetGroup).getByText("Not observed").closest("div") as HTMLElement;
+    const observedAssets = within(assetGroup)
+      .getByText("Observed assets")
+      .closest("div") as HTMLElement;
+    const notObservedAssetsMetric = within(assetGroup)
+      .getByText("Not observed")
+      .closest("div") as HTMLElement;
     expect(within(observedAssets).getByText("0")).toBeInTheDocument();
     expect(within(notObservedAssetsMetric).getByText("1")).toBeInTheDocument();
   });
@@ -4270,8 +4419,12 @@ describe("ModulePage UDMI workbench live results", () => {
     const payloadGroup = within(summaryPanel.closest(".udmi-summary") as HTMLElement)
       .getByRole("heading", { name: "Payload metrics" })
       .closest(".udmi-metric-group") as HTMLElement;
-    const withIssues = within(payloadGroup).getByText("Payloads with issues").closest("div") as HTMLElement;
-    const notReceived = within(payloadGroup).getByText("Not received").closest("div") as HTMLElement;
+    const withIssues = within(payloadGroup)
+      .getByText("Payloads with issues")
+      .closest("div") as HTMLElement;
+    const notReceived = within(payloadGroup)
+      .getByText("Not received")
+      .closest("div") as HTMLElement;
 
     expect(within(withIssues).getByText("0")).toBeInTheDocument();
     expect(within(notReceived).getByText("1")).toBeInTheDocument();
@@ -4385,12 +4538,16 @@ describe("ModulePage UDMI workbench live results", () => {
       .getByRole("heading", { name: "Fault metrics" })
       .closest(".udmi-metric-group") as HTMLElement;
     const otherIssues = within(faultGroup).getByText("Other issues").closest("div") as HTMLElement;
-    const issueMetric = within(summary).getByText("Issues", { selector: "dt" }).closest("div") as HTMLElement;
+    const issueMetric = within(summary)
+      .getByText("Issues", { selector: "dt" })
+      .closest("div") as HTMLElement;
 
     expect(within(otherIssues).getByText("0")).toBeInTheDocument();
     expect(within(issueMetric).getByText("0")).toBeInTheDocument();
     expect(screen.queryByText("Legacy unexpected publisher finding.")).not.toBeInTheDocument();
-    const unexpectedMetric = within(summary).getByText("Unexpected devices").closest("div") as HTMLElement;
+    const unexpectedMetric = within(summary)
+      .getByText("Unexpected devices")
+      .closest("div") as HTMLElement;
     expect(within(unexpectedMetric).getByText("1")).toBeInTheDocument();
   });
 
@@ -4509,7 +4666,10 @@ describe("ModulePage UDMI workbench live results", () => {
     await screen.findByText(/Live validation results/i);
 
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
-    const assetToggle = await within(resultsTable).findByRole("button", { expanded: true, name: /SUBSET-1/ });
+    const assetToggle = await within(resultsTable).findByRole("button", {
+      expanded: true,
+      name: /SUBSET-1/,
+    });
     if (assetToggle.getAttribute("aria-expanded") !== "true") {
       fireEvent.click(assetToggle);
     }
@@ -4608,7 +4768,10 @@ describe("ModulePage UDMI workbench live results", () => {
     // Mid-run device progress from result_summary.progress lights up the monitor.
     expect(screen.getByText("3 of 41 devices · 128 points read")).toBeInTheDocument();
     // The monitor links to the persistent run history (naming/reachability).
-    expect(screen.getByRole("link", { name: "Run history" })).toHaveAttribute("href", "/run-history");
+    expect(screen.getByRole("link", { name: "Run history" })).toHaveAttribute(
+      "href",
+      "/run-history",
+    );
   });
 
   it("cancels a still-live rehydrated run when a new run takes over the monitor (ITEM-4 orphan guard)", async () => {
@@ -4839,9 +5002,7 @@ describe("ModulePage UDMI workbench live results", () => {
     // EM-1 is the first (selected) asset, so it auto-expands and the inspector
     // shows its selected-row detail ("Payload type" is unique to the inspector).
     const inspector = document.querySelector(".inspector") as HTMLElement;
-    await waitFor(() =>
-      expect(within(inspector).getByText("Payload type")).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(within(inspector).getByText("Payload type")).toBeInTheDocument());
 
     // Collapse EM-1's group in the table: its child row unmounts, so the inspector
     // must stop showing that row's detail rather than describe a hidden row.
@@ -4881,13 +5042,15 @@ describe("ModulePage UDMI workbench live results", () => {
     // A failed issues fetch previously left the empty issues array in place —
     // PERMANENTLY rendering green Pass verdicts. It must instead surface the
     // failure near the results and keep every verdict surface neutral.
-    stubUdmiRunFetch(null, () =>
-      ({
-        ok: false,
-        status: 500,
-        statusText: "Internal Server Error",
-        json: async () => ({ detail: "issues backend unavailable" }),
-      }) as unknown as Response,
+    stubUdmiRunFetch(
+      null,
+      () =>
+        ({
+          ok: false,
+          status: 500,
+          statusText: "Internal Server Error",
+          json: async () => ({ detail: "issues backend unavailable" }),
+        }) as unknown as Response,
     );
     renderModule("udmi-validation");
 
@@ -4947,7 +5110,8 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     // No pasted expectation/payloads: the backend fans out one asset per
     // imported mqtt_register row (topic, points, units, schema version).
     expect(parameters).not.toHaveProperty("expected_schedule");
@@ -5020,8 +5184,12 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    const registerMode = await screen.findByLabelText(/Validate against the imported MQTT register/i);
-    const liveCapture = screen.getByLabelText(/Capture latest state, metadata, and pointset payloads/i);
+    const registerMode = await screen.findByLabelText(
+      /Validate against the imported MQTT register/i,
+    );
+    const liveCapture = screen.getByLabelText(
+      /Capture latest state, metadata, and pointset payloads/i,
+    );
     expect(registerMode).not.toBeChecked();
     expect(liveCapture).not.toBeChecked();
 
@@ -5037,7 +5205,8 @@ describe("ModulePage UDMI workbench live results", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Execute capture" }));
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters.use_register).toBe(true);
     expect(parameters.use_live_broker).toBe(true);
     expect(parameters.capture_seconds).toBe(0);
@@ -5077,10 +5246,14 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
 
     expect(
-      screen.getByText(/Blank runs until every expected asset\/topic has reported or you press Stop run/i),
+      screen.getByText(
+        /Blank runs until every expected asset\/topic has reported or you press Stop run/i,
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
@@ -5126,12 +5299,17 @@ describe("ModulePage UDMI workbench live results", () => {
     renderModule("udmi-validation");
 
     // The run-time input renders once live broker capture is ticked.
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "45" } });
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
+      target: { value: "45" },
+    });
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters.capture_seconds).toBe(45);
   });
 
@@ -5165,13 +5343,19 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "45s" } });
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
+      target: { value: "45s" },
+    });
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     // "45s" must not silently coerce to the 0 = indefinite sentinel: the run is
     // rejected client-side with a visible error and no parameters are posted.
-    expect(await screen.findByText(/Run time must be a positive number of seconds/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Run time must be a positive number of seconds/i),
+    ).toBeInTheDocument();
     expect(posted).toBe(false);
   });
 
@@ -5211,13 +5395,18 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "2" } });
-    fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
+      target: { value: "hours" },
+    });
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
 
     await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
     expect(parameters.capture_seconds).toBe(7200);
   });
 
@@ -5251,9 +5440,15 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "49" } });
-    fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
+      target: { value: "49" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
+      target: { value: "hours" },
+    });
 
     expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
     // Execute capture is now the ONLY trigger of the UDMI run action — the Run
@@ -5284,9 +5479,15 @@ describe("ModulePage UDMI workbench live results", () => {
     const view = render(tree("udmi-validation"));
 
     // Type an hours-scale window over the 48h cap on the UDMI workbench.
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
-    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "49" } });
-    fireEvent.change(await screen.findByLabelText(/Run time unit/i), { target: { value: "hours" } });
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
+      target: { value: "49" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
+      target: { value: "hours" },
+    });
     expect(await screen.findByText(/exceeds the 48-hour capture limit/i)).toBeInTheDocument();
 
     // Navigate to data-validation: the run-time control does not render there,
@@ -5364,7 +5565,9 @@ describe("ModulePage UDMI workbench live results", () => {
 
     renderModule("udmi-validation");
 
-    fireEvent.click(await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i));
+    fireEvent.click(
+      await screen.findByLabelText(/Capture latest state, metadata, and pointset payloads/i),
+    );
     fireEvent.click(await screen.findByRole("button", { name: "Execute capture" }));
     fireEvent.change(await screen.findByLabelText("Filter results"), {
       target: { value: "EM-" },
@@ -5380,19 +5583,21 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(generateButtons[1]);
     const dialog = await screen.findByRole("dialog", { name: "Name this validation report" });
     expect(
-      within(dialog).getByText(/Filtered scope locked when this dialog opened: 3 expected assets, 3 expected payloads/i),
+      within(dialog).getByText(
+        /Filtered scope locked when this dialog opened: 3 expected assets, 3 expected payloads/i,
+      ),
     ).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Filter results"), {
       target: { value: "no matching publisher" },
     });
-    fireEvent.change(within(dialog).getByLabelText("Report title"), { target: { value: "Demo Campus Smart Validation" } });
+    fireEvent.change(within(dialog).getByLabelText("Report title"), {
+      target: { value: "Demo Campus Smart Validation" },
+    });
     fireEvent.click(within(dialog).getByRole("button", { name: "Generate report" }));
     await waitFor(() => expect(reportBodies).toHaveLength(1));
     const reportBody = reportBodies[0];
     expect(reportBody.output_format).toBe("pdf");
-    expect(reportBody.report_title).toBe(
-      "Demo Campus Smart Validation",
-    );
+    expect(reportBody.report_title).toBe("Demo Campus Smart Validation");
     expect(reportBody.report_type).toBe("udmi_validation");
     expect(reportBody.udmi_scope).toEqual({
       schema_version: "1.0",
@@ -5545,7 +5750,11 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.includes("/api/v1/validation/") && url.endsWith("/runs") && init?.method === "POST") {
+        if (
+          url.includes("/api/v1/validation/") &&
+          url.endsWith("/runs") &&
+          init?.method === "POST"
+        ) {
           postedUrl = url;
           postedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
           return jsonResponse({
@@ -5556,7 +5765,11 @@ describe("ModulePage UDMI workbench live results", () => {
           });
         }
         if (url.endsWith("/api/v1/validation/runs/run-bacnet-1")) {
-          return jsonResponse({ ...udmiTerminalRun, run_id: "run-bacnet-1", job_type: "bacnet_validation" });
+          return jsonResponse({
+            ...udmiTerminalRun,
+            run_id: "run-bacnet-1",
+            job_type: "bacnet_validation",
+          });
         }
         if (url.endsWith("/api/v1/validation/runs/run-bacnet-1/issues")) {
           return jsonResponse({ run_id: "run-bacnet-1", issues: [] });
@@ -6040,10 +6253,14 @@ describe("ModulePage reports visibility", () => {
         /Select report canihazcheezeburger_udmi_validation_rep-1\.xlsx/i,
       ),
     ).toBeInTheDocument();
-    const reportName = screen.getByText("canihazcheezeburger").closest(".report-name-cell") as HTMLElement;
+    const reportName = screen
+      .getByText("canihazcheezeburger")
+      .closest(".report-name-cell") as HTMLElement;
     expect(within(reportName).getByText("rep-1")).toBeInTheDocument();
 
-    expect(screen.getByTitle("Download canihazcheezeburger_udmi_validation_rep-1.xlsx")).toBeInTheDocument();
+    expect(
+      screen.getByTitle("Download canihazcheezeburger_udmi_validation_rep-1.xlsx"),
+    ).toBeInTheDocument();
     // The page lands on Setup and stays there, so the reports table has to be
     // in the Setup step group or the CSS hides it — which is the bug this fixes.
     expect(stepOf()).toBe("setup");
@@ -6083,9 +6300,7 @@ describe("ModulePage reports visibility", () => {
         "Loading reports...",
       ),
     );
-    expect(document.querySelector(".module-metrics-empty")).not.toHaveTextContent(
-      "No reports yet",
-    );
+    expect(document.querySelector(".module-metrics-empty")).not.toHaveTextContent("No reports yet");
   });
 
   it("invalidates the reports list after generating a report from a run", async () => {
@@ -6180,8 +6395,10 @@ describe("ModulePage report controls placement", () => {
 
   // Run rehydration hands us a terminal run with no clicks at all, which is the
   // only way to put a *viewer* in front of one — viewers cannot start runs.
-  function stubTerminalRun(options: { role?: string; lastRun?: boolean } = {}) {
-    const { role = "engineer", lastRun = true } = options;
+  function stubTerminalRun(
+    options: { role?: string; lastRun?: boolean; finalEvidenceFails?: boolean } = {},
+  ) {
+    const { role = "engineer", lastRun = true, finalEvidenceFails = false } = options;
     const captured: {
       reportBodies: Record<string, unknown>[];
       reportBody: Record<string, unknown> | null;
@@ -6203,6 +6420,14 @@ describe("ModulePage report controls placement", () => {
           return jsonResponse(profilesPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          if (finalEvidenceFails) {
+            return {
+              ok: false,
+              status: 500,
+              statusText: "Internal Server Error",
+              json: async () => ({ detail: "final discovery evidence unavailable" }),
+            } as unknown as Response;
+          }
           return jsonResponse(resultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
@@ -6264,6 +6489,16 @@ describe("ModulePage report controls placement", () => {
     expect(buttons[1].closest("[data-stepgroup]")).toHaveAttribute("data-stepgroup", "results");
   });
 
+  it("keeps report generation available when final evidence refresh fails", async () => {
+    stubTerminalRun({ finalEvidenceFails: true });
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
+    expect(
+      await screen.findAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(2);
+  });
+
   // The gate is `.module-steps > [data-stepgroup]` — a DIRECT child selector. A
   // results section nested one level deeper still looks right in jsdom and in
   // the test above, but would render on every step in a real browser.
@@ -6320,15 +6555,11 @@ describe("ModulePage report controls placement", () => {
       "xlsx",
       "zip",
     ]);
+    expect(new Set(captured.reportBodies.map((body) => body.report_title))).toEqual(
+      new Set(["Building A commissioning"]),
+    );
     expect(
-      new Set(captured.reportBodies.map((body) => body.report_title)),
-    ).toEqual(new Set(["Building A commissioning"]));
-    expect(
-      new Set(
-        captured.reportBodies.map((body) =>
-          JSON.stringify(body.source_run_ids),
-        ),
-      ),
+      new Set(captured.reportBodies.map((body) => JSON.stringify(body.source_run_ids))),
     ).toEqual(new Set([JSON.stringify(["run-ip-1"])]));
     expect(
       await screen.findAllByText(
@@ -6362,15 +6593,16 @@ describe("ModulePage report controls placement", () => {
       "data-stepgroup",
       "setup run",
     );
-    expect(downloadButtons[1].closest("[data-stepgroup]")).toHaveAttribute("data-stepgroup", "results");
+    expect(downloadButtons[1].closest("[data-stepgroup]")).toHaveAttribute(
+      "data-stepgroup",
+      "results",
+    );
     expect(captured.exportBodies).toHaveLength(0);
 
     fireEvent.click(downloadButtons[1]);
 
     await waitFor(() =>
-      expect(captured.exportBodies).toEqual([
-        { report_ids: ["rep-1", "rep-2", "rep-3", "rep-4"] },
-      ]),
+      expect(captured.exportBodies).toEqual([{ report_ids: ["rep-1", "rep-2", "rep-3", "rep-4"] }]),
     );
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
@@ -6713,8 +6945,9 @@ describe("ModulePage import rejection reasons", () => {
     await uploadFile();
 
     // Row + field + message + code, with the reason the operator has to act on.
-    expect(await screen.findByText(/Row 3 — Expected topic: Topic must not contain wildcards\./))
-      .toBeInTheDocument();
+    expect(
+      await screen.findByText(/Row 3 — Expected topic: Topic must not contain wildcards\./),
+    ).toBeInTheDocument();
     expect(screen.getByText(/\(invalid_topic\)/)).toBeInTheDocument();
 
     // field is null on duplicate_row records, so no stray ": " prefix.
