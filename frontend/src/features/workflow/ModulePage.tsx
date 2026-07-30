@@ -97,6 +97,7 @@ import {
 } from "./runFormat";
 import { alignPayloadDiff, isPlainObject, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
+import { LiveRunConsole } from "./LiveRunConsole";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 import type { RunRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
@@ -3186,6 +3187,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <div style={progressIndeterminate ? undefined : { width: `${progressWidth}%` }} />
                 </div>
 
+                {activeRunRecord && (
+                  <LiveRunConsole
+                    elapsed={formatElapsed(activeRunElapsedSeconds)}
+                    issues={validationIssuesQuery.data?.issues ?? []}
+                    progress={activeRunProgress}
+                    run={activeRunRecord}
+                    stage={activeRunStage ?? ""}
+                    status={activeRunStatus ?? "queued"}
+                  />
+                )}
+
                 {runController.phase === "terminal-sync" && (
                   <div className={`state-panel ${runController.evidenceError ? "error" : ""}`}>
                     <strong>
@@ -4356,7 +4368,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       : "Generate an Excel or Word report above; it will appear here for selection and export."}
                   </span>
                   {reportsQuery.isError && (
-                    <button className="secondary-button compact" onClick={() => void reportsQuery.refetch()} type="button">
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => void reportsQuery.refetch()}
+                      type="button"
+                    >
                       Retry
                     </button>
                   )}

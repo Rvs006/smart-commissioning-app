@@ -5,6 +5,17 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.33] - 2026-07-30
+
+### Changed
+
+- Replaced the separate Live Monitor route with an embedded live run console in
+  each active workspace, keeping monitoring beside run controls and evidence.
+- The console uses the existing one-second server-sent run-progress stream,
+  adds a per-second display heartbeat, and shows a 60-second progress trace and
+  timestamped state changes. Run-state samples are explicitly not described as
+  broker-message observations.
+
 ## [0.1.32] - 2026-07-30
 
 ### Fixed
@@ -776,9 +787,9 @@ refactor (no user-visible change, real rebase risk under the dated BACnet fix).
   worker profile, which the panel states. Discovered topics are compared against
   the imported register - green if matched, red if a foreign/unmatched publisher
   - the operator's "turn the full-broker scan into a template check". Selecting a
-  topic shows its payload plus the retained flag, delivery QoS, and received-at
-  time. (Received-at, not published-at: an MQTT 3.1.1 message carries no publish
-  timestamp. Delivery QoS reflects the current subscribe QoS.)
+    topic shows its payload plus the retained flag, delivery QoS, and received-at
+    time. (Received-at, not published-at: an MQTT 3.1.1 message carries no publish
+    timestamp. Delivery QoS reflects the current subscribe QoS.)
 
 - **UDMI RAG (red / amber / green) on the results page.** Green = online,
   publishing and UDMI-compliant; amber = publishing but non-compliant; red =
@@ -822,7 +833,7 @@ refactor (no user-visible change, real rebase risk under the dated BACnet fix).
   (BACnet device/object instance, reporting interval) are unchanged.
 
 > Field note: persisted configuration snapshots do not automatically adopt new
-> seeded defaults. Fabricated *statuses* are healed on load, but any new default
+> seeded defaults. Fabricated _statuses_ are healed on load, but any new default
 > values a site should run with still need setting by hand on existing installs.
 
 ## [0.1.12] - 2026-07-16 - BACnet foreign-device registration
@@ -841,7 +852,7 @@ Second, **the live BACnet path still has not run against real hardware.** There
 is no BACnet device in CI and no Python on the machine this was written on, so
 the wire behaviour - the registration exchange with a BBMD, the replies coming
 back - is unproven until it is run on site. What follows was written to make
-that first run *diagnosable*, not to claim it will work.
+that first run _diagnosable_, not to claim it will work.
 
 ### Added
 
@@ -856,13 +867,13 @@ that first run *diagnosable*, not to claim it will work.
 
   **If the BBMD refuses or ignores the registration, the run fails and says so
   - it never quietly scans the local subnet instead.** A refusal reads "The BBMD
-  at &lt;address&gt; refused foreign-device registration (BVLL result code
-  &lt;n&gt;)" and asks you to have the BBMD administrator permit registrations
-  from this machine's IP and check the foreign-device table has a free entry. No
-  answer within 10 seconds reads "No response from the BBMD at &lt;address&gt;"
-  and points at the address, the UDP port, and UDP routing between you and the
-  BBMD. Whether the lab's BBMD will accept a registration at all is not
-  something this app can decide - it can only make the answer legible.
+    at &lt;address&gt; refused foreign-device registration (BVLL result code
+    &lt;n&gt;)" and asks you to have the BBMD administrator permit registrations
+    from this machine's IP and check the foreign-device table has a free entry. No
+    answer within 10 seconds reads "No response from the BBMD at &lt;address&gt;"
+    and points at the address, the UDP port, and UDP routing between you and the
+    BBMD. Whether the lab's BBMD will accept a registration at all is not
+    something this app can decide - it can only make the answer legible.
 
 - **A directed Who-Is to the addresses in your `bacnet_register` import.** The
   register was previously used for reporting only and never for targeting. It is
@@ -1066,7 +1077,6 @@ the truth about what it found and what it did.
 
 ### Added
 
-
 - **Red/green verdicts across the UDMI validation results** (field asks,
   2026-07-14). Result rows shade green (pass, including pass-with-notes) or
   red (fail) so passes need zero reading time; the per-asset payload sections
@@ -1115,7 +1125,6 @@ the truth about what it found and what it did.
   message points at the BACnet discovery run - the engine that really
   verifies BACnet/IP.
 
-
 - **IP scan flags hostname mismatches against the register's "Expected
   hostname".** When reverse DNS is enabled and returns a name for a responsive
   host that the IP register also carries a hostname for, the scan compares the
@@ -1128,7 +1137,6 @@ the truth about what it found and what it did.
 
 ### Fixed
 
-
 - **The hero "payload conformance" score is now fed by validation outcomes.**
   It was a publishing-liveness ratio - a device that published anything
   counted as fully conforming, and in pasted-payload mode the score was a
@@ -1137,7 +1145,6 @@ the truth about what it found and what it did.
   AND carry no blocking-severity issue; clamped below 100 whenever any
   blocking issue exists) plus `blocking_issue_count`, and the hero prefers
   them (pre-upgrade runs fall back to the old ratio, labelled honestly).
-
 
 - **IP scan actually probes the register's declared ports and verdicts
   expected-port coverage both ways.** The register's "Expected services/ports"
@@ -1165,7 +1172,7 @@ the truth about what it found and what it did.
 - **Source Interface dropdown lists virtual adapters again (ranked last)
   instead of hiding them.** On Hyper-V vSwitch / NIC-team hosts (e.g. a
   supervisor server) the machine's only routable IPv4 rides an adapter Windows
-  flags *Virtual*; the hard virtual-adapter filter introduced with NIC UX v2
+  flags _Virtual_; the hard virtual-adapter filter introduced with NIC UX v2
   (and unmasked when the net-facts timeout fix made classification actually
   succeed inside the exe) left the dropdown Auto-only with no way to bind the
   real egress NIC (field report, 2026-07-14). Virtual adapters now appear at
@@ -1346,8 +1353,8 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   and issues (labelled with whether payloads were captured or pasted) instead
   of permanently showing the "Sample preview" rows.
 - **Production scaffold (MVP baseline)** - multi-service layout: React + TypeScript
-  + Vite frontend, FastAPI backend, Dramatiq worker, `infra/` Docker Compose
-  stack, and `docs/`.
+  - Vite frontend, FastAPI backend, Dramatiq worker, `infra/` Docker Compose
+    stack, and `docs/`.
 - **Shared core package** - extracted `smart_commissioning_core`, a shared
   package for UDMI validation and MQTT logic consumed by both the backend and
   the worker.
@@ -1421,12 +1428,12 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   `POST /api/v1/users/{id}/key` regenerates a user's API key (old key stops
   working, plaintext shown once), with a **Re-issue key** button on the Users
   page - a lost key is no longer a dead end. The session badge now
-  distinguishes a *rejected* key (401/403 → "Key not recognised" + Clear key)
-  from an *unreachable server* (network/5xx → non-destructive "Server
+  distinguishes a _rejected_ key (401/403 → "Key not recognised" + Clear key)
+  from an _unreachable server_ (network/5xx → non-destructive "Server
   unreachable" state), so a backend restart or Wi-Fi blip can no longer trick
   an engineer into clearing a healthy key - the root cause of the field
   report that keys "expire after one use". Issued-key copy now says the key
-  is *displayed* once but never expires.
+  is _displayed_ once but never expires.
 - **Install-first onboarding** - README restructured around
   "Get it running (pick one path)" (Windows portable app vs Docker Desktop)
   with copy-paste steps, a prerequisites table, and a 3-step first run;
@@ -1471,8 +1478,8 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   seed = never chosen; the Auto sentinel stored only on an explicit pick).
 
 - **Source Interface - wired-first default (field feedback, 2026-07-03)**
-  *(reverses the earlier "Auto stays the default, advisory hint only" decision
-  after engineers' scans on Auto egressed via Wi-Fi)* - a configuration whose
+  _(reverses the earlier "Auto stays the default, advisory hint only" decision
+  after engineers' scans on Auto egressed via Wi-Fi)_ - a configuration whose
   Source Interface was never chosen (value absent or empty) now defaults to the
   first **up** wired adapter (Ethernet before USB-Ethernet, per the
   already-sorted enumeration), visibly pre-selected in the dropdown and saved
@@ -1485,8 +1492,8 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   falls back to Auto exactly as before, and the multi-adapter hint still
   nudges explicit-Auto users toward the wired NIC.
 
-- **Source Interface - richer NIC confirmation** *(interim step, superseded in
-  the same release by **NIC UX v2** under Added)* - first made the Source
+- **Source Interface - richer NIC confirmation** _(interim step, superseded in
+  the same release by **NIC UX v2** under Added)_ - first made the Source
   Interface control an adapter dropdown with read-only **IP / Subnet Mask /
   Gateway** confirmation fields, sourcing `gateway` from a guarded
   `Get-CimInstance` routing-table lookup. NIC UX v2 replaced that lookup with a
@@ -1566,14 +1573,14 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   wins; malformed overrides fail closed); configs saved before the control keep
   the port-based default (8883 = TLS).
 - **Real BACnet discovery in the portable exe (field bug, on-site 2026-07-09).**
-  The exe returned *simulated* devices ("Acme Controls"/"Globex BMS") for every
+  The exe returned _simulated_ devices ("Acme Controls"/"Globex BMS") for every
   BACnet scan because (a) `bacpypes3` was not bundled, (b) the route never
   requested the real backend, and (c) the UI never showed which backend ran.
   Now: an **authorized, non-dry-run** BACnet scan defaults to the real
   `bacpypes3` backend (`bacpypes3` is bundled with `--collect-all` + a frozen
   hidden-import + a `_internal\bacpypes3` boot-smoke assert); if the real stack
   or the NIC bind is unavailable the run records a **real failed status** - it
-  never silently returns simulated data. Dry-run stays a simulated *plan*;
+  never silently returns simulated data. Dry-run stays a simulated _plan_;
   explicit simulated or unknown backends on a live run are rejected with 400. The
   discovery results view now shows a prominent **"SIMULATED - demo data"**
   banner vs a **"Live bacpypes3 scan"** confirmation, driven by
@@ -1593,7 +1600,7 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   The Windows net-facts helper (`Get-NetAdapter` / `Get-NetRoute` /
   `Get-DnsClientServerAddress`) was capped at a 5s timeout, but those CIM/WMI
   queries take ~9.5s inside the frozen exe's no-window subprocess, so the call
-  *always* timed out and every adapter silently degraded to `unknown` type with
+  _always_ timed out and every adapter silently degraded to `unknown` type with
   no gateway/DNS and no virtual-adapter filtering - the entire 2026-07-03 NIC
   UX (wired-first default, "Wi-Fi not recommended" tag, gateway/DNS panel) was
   dead in the shipped exe while dev/tests passed (they mock psutil and never run
@@ -1698,7 +1705,7 @@ the MVP scaffold baseline through the phase 0–4b production-hardening work.
   (`REDIS_URL`, `DATABASE_URL`) through a settings model; that is now plain
   `os.getenv`, removing the dependency from the worker image.
 - **CI runs halved per PR commit.** `ci.yml` and `windows-compat.yml` triggered
-  on unfiltered `push` *and* `pull_request`, so same-repo PR branches ran every
+  on unfiltered `push` _and_ `pull_request`, so same-repo PR branches ran every
   workflow twice; `push` is now filtered to `main`. `windows-compat.yml` also no
   longer re-runs the ruff/eslint/tsc gates that `ci.yml` already owns.
 - Removed the dead UI prototypes and the zip-inspector dev tool (still available

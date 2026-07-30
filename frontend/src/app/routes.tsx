@@ -39,11 +39,6 @@ async function loadRunHistoryPage() {
   return { Component: RunHistoryPage };
 }
 
-async function loadLiveMonitorPage() {
-  const { LiveMonitorPage } = await import("../features/workflow/LiveMonitorPage");
-  return { Component: LiveMonitorPage };
-}
-
 async function loadUsersPage() {
   const { UsersPage } = await import("../features/workflow/UsersPage");
   return { Component: UsersPage };
@@ -78,7 +73,6 @@ export const router = createHashRouter([
       { path: "reports", lazy: loadModulePage("reports") },
       { path: "hub", lazy: loadHubPage },
       { path: "run-history", lazy: loadRunHistoryPage },
-      { path: "live-monitor", lazy: loadLiveMonitorPage },
       { path: "users", lazy: loadUsersPage },
     ],
   },

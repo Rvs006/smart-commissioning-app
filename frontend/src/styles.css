@@ -817,34 +817,112 @@ label {
   gap: 12px;
 }
 
-.live-monitor-form {
-  align-items: end;
+.live-run-console {
+  display: grid;
+  gap: 14px;
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface-raised, var(--surface));
+}
+.live-console-heading,
+.live-console-status,
+.live-console-label,
+.live-console-kpis,
+.live-console-grid {
   display: flex;
+  gap: 12px;
+}
+.live-console-heading,
+.live-console-label {
+  justify-content: space-between;
+}
+.live-console-heading h3 {
+  margin: 3px 0;
+  font-size: 16px;
+}
+.live-console-heading p,
+.live-console-chart > small,
+.live-console-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.live-console-status {
+  align-items: center;
+}
+.live-console-pulse {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px var(--green-bg);
+}
+.live-console-kpis {
   flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-bottom: 1rem;
 }
-
-.live-monitor-form label {
-  flex: 1 1 28rem;
+.live-console-kpis > div {
+  display: grid;
+  flex: 1 1 8rem;
+  gap: 3px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
 }
-
-.live-progress-chart {
-  height: 14rem;
-  margin-bottom: 0.75rem;
+.live-console-kpis span,
+.live-console-label,
+.live-console-events time {
+  color: var(--muted);
+  font-size: 11px;
+}
+.live-console-kpis strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+.live-console-grid {
+  align-items: stretch;
+}
+.live-console-chart,
+.live-console-events {
+  flex: 1 1 18rem;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--accent-bg);
+}
+.live-console-chart svg {
+  display: block;
   width: 100%;
+  height: 8rem;
+  margin: 8px 0;
 }
-
-.live-progress-chart line {
-  stroke: var(--line, #d7d3cd);
+.live-console-chart line {
+  stroke: var(--line);
   stroke-width: 0.6;
 }
-
-.live-progress-chart polyline {
-  stroke: var(--accent, #287d9e);
+.live-console-chart polyline {
+  stroke: var(--accent);
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-width: 2.5;
+}
+.live-console-events ol {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.live-console-events li {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.live-console-events li:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
 }
 
 .kpi-strip article,
@@ -2919,6 +2997,11 @@ input.field-expired {
 }
 
 @media (max-width: 720px) {
+  .live-console-heading,
+  .live-console-grid {
+    flex-direction: column;
+  }
+
   body {
     font-size: 12px;
   }
