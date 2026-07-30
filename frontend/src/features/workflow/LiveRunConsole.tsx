@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import type { RunRecord, ValidationIssueRecord } from "../../api/client";
+import type { RunRecord } from "../../api/client";
 import { formatRelativeTime, humanizeStage, toHealthState } from "./runFormat";
 
 type Sample = Readonly<{ at: number; progress: number; issues: number; stage: string }>;
 
 type LiveRunConsoleProps = Readonly<{
   elapsed: string;
-  issues: readonly ValidationIssueRecord[];
+  issueCount: number;
   progress: number;
   run: RunRecord;
   status: RunRecord["status"];
@@ -22,7 +22,7 @@ function sampleKey(sample: Sample): string {
 /** Embedded operator view; heartbeat samples real SSE/poll state, not broker messages. */
 export function LiveRunConsole({
   elapsed,
-  issues,
+  issueCount,
   progress,
   run,
   status,
@@ -34,14 +34,14 @@ export function LiveRunConsole({
   useEffect(() => setSamples([]), [run.run_id]);
   useEffect(() => {
     const capture = () => {
-      const next = { at: Date.now(), progress, issues: issues.length, stage };
+      const next = { at: Date.now(), progress, issues: issueCount, stage };
       setNow(next.at);
       setSamples((previous) => [...previous, next].slice(-MAX_SAMPLES));
     };
     capture();
     const timer = window.setInterval(capture, 1000);
     return () => window.clearInterval(timer);
-  }, [issues.length, progress, stage]);
+  }, [issueCount, progress, stage]);
 
   const progressPoints = useMemo(
     () =>
@@ -87,7 +87,7 @@ export function LiveRunConsole({
         </div>
         <div>
           <span>Open issues</span>
-          <strong>{issues.length}</strong>
+          <strong>{issueCount}</strong>
         </div>
         <div>
           <span>Last run update</span>

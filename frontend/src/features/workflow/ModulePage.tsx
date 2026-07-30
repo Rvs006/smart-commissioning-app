@@ -3190,7 +3190,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 {activeRunRecord && (
                   <LiveRunConsole
                     elapsed={formatElapsed(activeRunElapsedSeconds)}
-                    issues={validationIssuesQuery.data?.issues ?? []}
+                    issueCount={
+                      typeof activeRunRecord.result_summary.issue_count === "number"
+                        ? activeRunRecord.result_summary.issue_count
+                        : validationIssuesQuery.data?.issues.length ?? 0
+                    }
                     progress={activeRunProgress}
                     run={activeRunRecord}
                     stage={activeRunStage ?? ""}
