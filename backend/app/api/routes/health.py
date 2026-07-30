@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response
+from smart_commissioning_core import __version__
 
 from app.core.config import get_settings
 from app.core.db import get_engine
@@ -15,6 +16,7 @@ def get_health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": "smart-commissioning-api",
+        "version": __version__,
         "environment": get_settings().environment,
         "timestamp": datetime.now(UTC).isoformat(),
     }

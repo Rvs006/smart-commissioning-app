@@ -268,7 +268,7 @@ small set below instead of guessing from filenames.
 | Validate a running stack | [Quickstart](docs/quickstart.md) |
 | Operate or recover a deployment | [Operations runbook](docs/runbook.md) |
 | Check protocol support and live-test gaps | [Protocol conformance](docs/protocol-conformance.md) and [Phase 5 validation](docs/phase5-onsite-validation.md) |
-| Prepare the v0.1.31 field gate | [v0.1.31 field acceptance checklist](docs/v0.1.31-field-acceptance-checklist.md) |
+| Prepare the v0.1.36 field gate | [v0.1.36 field acceptance checklist](docs/v0.1.36-field-acceptance-checklist.md) |
 | Contribute code | [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) |
 
 ### Security & safety
@@ -288,11 +288,12 @@ small set below instead of guessing from filenames.
 
 ### Project status & roadmap
 
-> **Repo status - reviewed 2026-07-27:** GitHub Releases is authoritative for
-> publication state. Use v0.1.28 only after its matching signed tag,
-> workflow-built and boot-smoked portable bundle, hosted release-gate record,
-> immutable GHCR digests, SBOMs, and release-body SHA-256 values are present. Check
-> the live workflow badges rather than inferring CI status from this source file.
+> **Repo status - reviewed 2026-07-30:** GitHub Releases is authoritative for
+> publication state. Treat a version as published only after its matching signed
+> tag, workflow-built and boot-smoked portable bundle, hosted release-gate
+> record, immutable GHCR digests, SBOMs, and release-body SHA-256 values are
+> present. Check the live workflow badges rather than inferring CI status from
+> this source file.
 > Public fixtures use neutral demo identities. The July field review covers the
 > Results view and generated UDMI reports; live MQTT broker capture remains
 > untested pending the on-site checklist. Real BACnet hardware, hosted scale, and
@@ -307,15 +308,16 @@ artifact metadata, and exact report bytes through Sync v2. Per-item receipts
 advance only accepted or byte-identical items, while project/site scope failures
 remain generic and unsynchronized.
 
-The v0.1.31 candidate adds asset-topic observation evidence so a registered
-asset seen by the independent collector can be reconciled against the app's
-capture and association result. It remains field-pending until an unfiltered
-scale run and a second run covering the longest expected payload cadence both
-pass the [field acceptance checklist](docs/v0.1.31-field-acceptance-checklist.md).
+The v0.1.36 candidate carries asset-topic observation evidence and the embedded
+live-console breakdown so a registered asset seen by the independent collector
+can be reconciled against the app's capture and association result. The console
+labels UI/run-state samples separately from broker evidence. Field acceptance
+remains pending until an unfiltered scale run and a second run covering the
+longest expected payload cadence both pass the [field acceptance checklist](docs/v0.1.36-field-acceptance-checklist.md).
 
-v0.1.31 adds no database migration. Follow
-[the v0.1.31 migration and rollback guide](docs/migration-rollback-v0.1.31.md),
-then complete [the release validation record](docs/release-validation-v0.1.31.md)
+v0.1.36 adds no database migration. Follow
+[the v0.1.36 migration and rollback guide](docs/migration-rollback-v0.1.36.md),
+then complete [the release validation record](docs/release-validation-v0.1.36.md)
 against the exact merged commit. Hosted deployments should pull API, worker,
 and frontend by the immutable references in the public Docker image evidence.
 

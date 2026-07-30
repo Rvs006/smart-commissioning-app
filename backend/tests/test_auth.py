@@ -80,7 +80,9 @@ class ApiKeyModeTests(_AuthClientTestCase):
         self.assertEqual(response.status_code, 401)
 
     def test_health_endpoints_reachable_without_key(self) -> None:
-        self.assertEqual(self.client.get("/api/v1/health").status_code, 200)
+        health = self.client.get("/api/v1/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.json()["version"], "0.1.36")
         self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
 
     def test_import_format_helpers_reachable_without_key(self) -> None:

@@ -70,8 +70,8 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-28. v0.1.28 is published from signed
-  tag commit `ba11496`. v0.1.31 is the current release candidate; field
+- **Current handoff**: status as of 2026-07-30. v0.1.28 is published from signed
+  tag commit `ba11496`. v0.1.36 is the current release candidate; field
   acceptance is still open. Shared MQTT
   capture keeps an explicit positive
   `max_messages`; otherwise it uses the larger of 500 or the number of concrete
@@ -83,11 +83,11 @@ collection order is alphabetical - keep it so.
   synthetic point-card fan-out. Generate All, report deletion, the eight-issue
   focus jump, the continuous expanded-asset outline, a combined Generate All
   download, and non-blocking live progress snapshots are implemented with
-  tests. Before a v0.1.31 release, rerun all suites, build with the Node 24
+  tests. Before a v0.1.36 release, rerun all suites, build with the Node 24
   release runtime, visually inspect DOCX pagination on a release machine, and complete
   both the unfiltered large-register scale run and the longest-cadence field run. Do
   not claim field acceptance before both runs pass
-  `docs/v0.1.31-field-acceptance-checklist.md`.
+  `docs/v0.1.36-field-acceptance-checklist.md`.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational
