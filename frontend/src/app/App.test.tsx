@@ -7,7 +7,7 @@ import { DashboardPage } from "../features/workflow/DashboardPage";
 import { App } from "./App";
 import { SessionProvider } from "./session";
 
-const healthPayload = { status: "ok", timestamp: "2026-06-11T00:00:00Z" };
+const healthPayload = { status: "ok", version: "0.1.36", timestamp: "2026-06-11T00:00:00Z" };
 
 const profilesPayload = [
   {

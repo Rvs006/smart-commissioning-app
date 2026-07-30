@@ -2,6 +2,7 @@ import type { SessionScopeId, WorkspaceRef } from "../app/sessionScope";
 
 export type HealthStatus = {
   status: string;
+  version: string;
   timestamp: string;
 };
 

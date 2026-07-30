@@ -5,6 +5,24 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.36] - 2026-07-30
+
+### Changed
+
+- Restored the versioned Windows, hosted, Docker, evidence, and publication
+  contracts required to release a single exact commit and artifact set.
+- Aligned core, API, worker, frontend, run-context, and report-renderer version
+  identifiers with the v0.1.36 release candidate.
+
+### Fixed
+
+- The unauthenticated API health response now exposes the deployed application
+  version, so release checks can distinguish the intended build from a stale
+  process without treating liveness as field-observation evidence.
+- Documented the live-console evidence boundary: real asset and topic evidence
+  stays distinct from UI/run-state sampling, and unavailable evidence is never
+  represented as a zero or fabricated trace.
+
 ## [0.1.35] - 2026-07-30
 
 ### Changed

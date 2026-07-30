@@ -22,7 +22,7 @@ from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.0"
-REPORT_RENDERER_VERSION = "0.1.31"
+REPORT_RENDERER_VERSION = "0.1.36"
 
 _SIGNED_MANIFEST_FIELDS = (
     "schema_version",
