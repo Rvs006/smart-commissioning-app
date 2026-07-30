@@ -5,6 +5,21 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.35] - 2026-07-30
+
+### Changed
+
+- The embedded live run console now traces real registered-asset observations
+  from run-summary evidence, separates expected, alternate, and no-match topic
+  outcomes, and clearly labels its independent UI/run-state heartbeat.
+
+### Fixed
+
+- Report listing and deletion now create a database Session before entering its
+  context manager, restoring report-list API and portable acceptance behavior.
+- The run-summary Elapsed assertion is scoped to its original summary field so
+  the accessible live-console label does not create an ambiguous test query.
+
 ## [0.1.34] - 2026-07-30
 
 ### Fixed

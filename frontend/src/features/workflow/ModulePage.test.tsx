@@ -2249,6 +2249,9 @@ describe("ModulePage UDMI workbench live results", () => {
       screen.getByText(/Provisional results below update as payloads arrive/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/Provisional live validation results/i)).toBeInTheDocument();
+    const liveConsole = screen.getByRole("region", { name: "Live run console" });
+    expect(within(liveConsole).getByText("1 of 2 expected")).toBeInTheDocument();
+    expect(within(liveConsole).getAllByText("Waiting for evidence")).toHaveLength(3);
     expect(screen.getAllByText("ACTIVE-1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Verdict pending").length).toBeGreaterThan(0);
     expect(screen.getByText(/Unexpected-device measurement was unavailable/i)).toBeInTheDocument();
@@ -4763,7 +4766,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
     // Progress + elapsed (ITEM-6): the monitor shows an Elapsed entry, and an
     // indefinite-window run (capture_seconds 0) shows the indeterminate sweep.
-    expect(screen.getByText("Elapsed")).toBeInTheDocument();
+    expect(screen.getByText("Elapsed", { selector: "dt" })).toBeInTheDocument();
     expect(document.querySelector(".progress-track.indeterminate")).not.toBeNull();
     // Mid-run device progress from result_summary.progress lights up the monitor.
     expect(screen.getByText("3 of 41 devices · 128 points read")).toBeInTheDocument();

@@ -614,7 +614,7 @@ class RunService:
             .where(Run.job_type == "report_generation")
             .order_by(Run.created_at.desc(), Run.id.desc())
         )
-        with session_factory(self._engine) as session:
+        with session_factory(self._engine)() as session:
             rows = session.scalars(statement).all()
             return [
                 RunRecord.model_validate(

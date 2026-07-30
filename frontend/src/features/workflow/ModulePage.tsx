@@ -3189,6 +3189,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
                 {activeRunRecord && (
                   <LiveRunConsole
+                    key={activeRunRecord.run_id}
+                    assetTopicDiscovery={assetTopicDiscovery}
                     elapsed={formatElapsed(activeRunElapsedSeconds)}
                     issueCount={
                       typeof activeRunRecord.result_summary.issue_count === "number"
@@ -3199,6 +3201,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     run={activeRunRecord}
                     stage={activeRunStage ?? ""}
                     status={activeRunStatus ?? "queued"}
+                    validationSummary={validationSummary}
                   />
                 )}
 
