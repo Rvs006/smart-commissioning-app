@@ -1,0 +1,176 @@
+name: Historical Windows Portable Bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact release tag to rebuild, for example v0.1.33
+        required: true
+        type: string
+      release_sha:
+        description: Full 40-character commit SHA behind the release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: historical-windows-portable-${{ inputs.version }}-${{ inputs.release_sha }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_VERSION: ${{ inputs.version }}
+  RELEASE_SHA: ${{ inputs.release_sha }}
+
+jobs:
+  build-and-accept:
+    name: Build and accept ${{ inputs.version }}
+    runs-on: windows-2022
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out the exact tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove tag, commit, and clean checkout identity
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release version '$env:RELEASE_VERSION' is not a stable vX.Y.Z tag."
+          }
+          if ($env:RELEASE_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+            throw "Release SHA is not a full 40-character commit: $env:RELEASE_SHA"
+          }
+          $actual = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
+            throw "Checkout $actual does not match requested $env:RELEASE_SHA"
+          }
+          $tagCommit = (git rev-parse "$($env:RELEASE_VERSION)^{commit}").Trim().ToLowerInvariant()
+          if ($tagCommit -cne $actual) {
+            throw "Tag $env:RELEASE_VERSION points to $tagCommit, not $actual"
+          }
+          $checkoutStatus = @(git status --porcelain=v1 --untracked-files=all)
+          if ($checkoutStatus.Count -ne 0) {
+            throw 'Release checkout is dirty before build.'
+          }
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install the exact tagged runtime
+        shell: pwsh
+        run: python -m pip install './core[bacnet]' ./backend pyinstaller==6.20.0
+
+      - name: Run tagged core and backend suites
+        shell: pwsh
+        run: |
+          python -m unittest discover -s core/tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location backend
+          try {
+            python -m unittest discover -s tests
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+
+      - name: Build the version-stamped portable bundle
+        shell: pwsh
+        run: pwsh packaging/windows_portable/build.ps1 -Version "$env:RELEASE_VERSION" -Clean
+
+      - name: Verify version stamps and run the portable acceptance path
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
+          $exe = Join-Path $bundle 'SmartCommissioningApp.exe'
+          $readme = Join-Path $bundle 'README_FIRST.txt'
+          $frontendVersion = Join-Path $bundle 'frontend\dist\.app-version'
+          if (-not (Test-Path -LiteralPath $exe)) { throw 'Portable executable is missing.' }
+          if (-not (Test-Path -LiteralPath $readme)) { throw 'README_FIRST.txt is missing.' }
+          if (-not (Test-Path -LiteralPath $frontendVersion)) { throw 'Frontend version stamp is missing.' }
+          $productVersion = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
+          if ($productVersion -cne $env:RELEASE_VERSION) {
+            throw "EXE ProductVersion '$productVersion' is not '$env:RELEASE_VERSION'."
+          }
+          if (-not ((Get-Content -LiteralPath $readme -Raw) -match "Version: $([regex]::Escape($env:RELEASE_VERSION))")) {
+            throw 'README_FIRST.txt does not carry the requested release version.'
+          }
+          if ((Get-Content -LiteralPath $frontendVersion -Raw).Trim() -cne $env:RELEASE_VERSION) {
+            throw 'Frontend build stamp does not match the requested release version.'
+          }
+
+          $stateRoot = Join-Path $env:RUNNER_TEMP "historical-portable-state-$env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Path $stateRoot | Out-Null
+          $stdout = Join-Path $env:RUNNER_TEMP 'historical-portable-stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'historical-portable-stderr.log'
+          $acceptance = Join-Path $bundle 'windows-acceptance.json'
+          $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
+          $proc = Start-Process -FilePath $exe -WorkingDirectory $bundle -PassThru -NoNewWindow `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $healthUrl = $null
+          $deadline = [DateTime]::UtcNow.AddSeconds(150)
+          try {
+            while ([DateTime]::UtcNow -lt $deadline) {
+              if ($proc.HasExited) { throw "Portable executable exited early with code $($proc.ExitCode)." }
+              $match = Select-String -LiteralPath $stdout, $stderr -Pattern 'http://127\.0\.0\.1:\d+' `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($match) {
+                $healthUrl = "$($match.Matches[0].Value)/api/v1/health"
+                try {
+                  $health = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
+                  if ($health.StatusCode -eq 200) { break }
+                } catch { }
+              }
+              Start-Sleep -Seconds 2
+            }
+            if (-not $healthUrl) { throw 'Could not discover the portable API URL.' }
+            $baseUrl = $healthUrl -replace '/api/v1/health$', ''
+            python scripts/smoke_windows_portable_release.py `
+              --base-url $baseUrl --exe-path $exe --data-dir $stateRoot `
+              --lease-seconds 15 --heartbeat-seconds 2 `
+              --stdout-log $stdout --stderr-log $stderr --output $acceptance
+            if ($LASTEXITCODE -ne 0) { throw 'Portable acceptance helper failed.' }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+          }
+
+          $exeHash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+          $evidence = [ordered]@{
+            schema_version = '1.0'
+            version = $env:RELEASE_VERSION
+            commit = $env:RELEASE_SHA.ToLowerInvariant()
+            exe_product_version = $productVersion
+            exe_sha256 = $exeHash
+            workflow = $env:GITHUB_WORKFLOW
+            workflow_run_id = $env:GITHUB_RUN_ID
+            workflow_run_url = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            workflow_event = $env:GITHUB_EVENT_NAME
+            acceptance = (Get-Content -LiteralPath $acceptance -Raw | ConvertFrom-Json)
+          }
+          $evidence | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath (Join-Path $bundle 'release-evidence.windows.json') -Encoding UTF8
+          $files = Get-ChildItem -LiteralPath $bundle -File -Recurse | Sort-Object FullName | ForEach-Object {
+            [ordered]@{ name = $_.FullName.Substring($bundle.Length + 1).Replace('\','/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash; bytes = $_.Length }
+          }
+          [ordered]@{ version = $env:RELEASE_VERSION; commit = $env:RELEASE_SHA.ToLowerInvariant(); files = @($files) } |
+            ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $bundle 'SHA256SUMS.json') -Encoding UTF8
+
+      - name: Upload the exact portable bundle artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: SmartCommissioningApp-windows-portable-${{ inputs.version }}
+          path: build/Smart_Commissioning_App_Windows_Portable
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
