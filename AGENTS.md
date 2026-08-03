@@ -70,8 +70,9 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-07-30. v0.1.28 is published from signed
-  tag commit `ba11496`. v0.1.36 is the current release candidate; field
+- **Current handoff**: status as of 2026-08-03. v0.1.35 is the latest public
+  release. Historical Windows portable releases v0.1.32 through v0.1.35 are
+  published and verified. v0.1.36 is the current release candidate; field
   acceptance is still open. Shared MQTT
   capture keeps an explicit positive
   `max_messages`; otherwise it uses the larger of 500 or the number of concrete
@@ -88,6 +89,10 @@ collection order is alphabetical - keep it so.
   both the unfiltered large-register scale run and the longest-cadence field run. Do
   not claim field acceptance before both runs pass
   `docs/v0.1.36-field-acceptance-checklist.md`.
+- **Version bookkeeping**: whenever the application version changes, or a
+  release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
+  in the same commit. Keep the two files byte-for-byte identical, and record the
+  latest public release, current candidate, and field-acceptance state.
 - **This repo is PUBLIC.** Keep site names, real network addresses, device ids,
   personnel, and commercial detail out of code, docs, and commit messages.
   Technical root causes with file:line evidence are the point; operational
