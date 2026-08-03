@@ -214,6 +214,7 @@ jobs:
             --gate app_root=passed --gate frontend_build_stamp=passed `
             --gate sqlite_lease_configuration=passed --gate sqlite_heartbeat_renewals=passed `
             --test core_unittest=passed --test backend_unittest=passed `
+            --test release_heartbeat_integration=passed --test portable_readiness=passed `
             --test portable_acceptance=passed --test portable_long_heartbeat=passed `
             --test portable_cancellation=passed --test canonical_udmi=passed `
             --test portable_report_provenance=passed --test portable_report_byte_equality=passed `
