@@ -87,6 +87,12 @@
     -Version and re-verify their digests, evidence, SBOMs, and contained exe
     hash. A harmless, read-only way to exercise this script end to end.
 
+.PARAMETER Historical
+    Publish or verify a Windows-only rebuild from the historical workflow. The
+    original tag SHA remains the release identity, while the workflow may apply
+    a documented release-blocker compatibility patch. Historical releases do
+    not claim hosted image evidence or signed-tag verification.
+
 .EXAMPLE
     # Publish v0.1.28 from matching Windows and hosted release-gate runs:
     powershell -NoProfile -File scripts\release-portable.ps1 -Version v0.1.28 -RunId 123456789 -ReleaseGateRunId 123456790 -NotesFile docs\release-notes-v0.1.28.md
@@ -117,7 +123,11 @@ param(
     [string]$RepoSlug = 'Rvs006/smart-commissioning-app',
 
     [Parameter(Mandatory, ParameterSetName = 'Verify')]
-    [switch]$VerifyExisting
+    [switch]$VerifyExisting,
+
+    [Parameter(ParameterSetName = 'Publish')]
+    [Parameter(ParameterSetName = 'Verify')]
+    [switch]$Historical
 )
 
 $ErrorActionPreference = 'Stop'
@@ -128,7 +138,8 @@ $ErrorActionPreference = 'Stop'
     [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 # --- constants tied to the workflow + build.ps1 output ---
-$WorkflowName = 'Windows Portable Bundle'                       # windows-portable.yml `name:`
+$WorkflowName = if ($Historical) { 'Historical Windows Portable Bundle' } else { 'Windows Portable Bundle' }
+$WorkflowPath = if ($Historical) { '.github/workflows/historical-windows-portable.yml' } else { '.github/workflows/windows-portable.yml' }
 $ArtifactName = 'SmartCommissioningApp-windows-portable'        # upload-artifact `name:`
 $ReleaseGateWorkflowName = "$Version Release Gates"
 $ZipName      = 'Smart_Commissioning_App_Windows_Portable.zip'  # release asset filename
@@ -222,7 +233,7 @@ function Get-RunInfo {
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
         throw "Run $RunId is status='$($run.status)' conclusion='$($run.conclusion)' - refusing to publish from a run that did not complete successfully."
     }
-    if ($run.name -ne $WorkflowName -or $run.path -cne '.github/workflows/windows-portable.yml') {
+    if ($run.name -ne $WorkflowName -or $run.path -cne $WorkflowPath) {
         throw "Run $RunId is '$($run.name)' at '$($run.path)', not the $WorkflowName workflow."
     }
     if ($run.event -ne 'workflow_dispatch' -or $run.headBranch -ne 'main') {
@@ -409,13 +420,32 @@ function Assert-SignedAnnotatedTag {
     param(
         [Parameter(Mandatory)][string]$RepoSlug,
         [Parameter(Mandatory)][string]$Version,
-        [Parameter(Mandatory)][string]$ExpectedSha
+        [Parameter(Mandatory)][string]$ExpectedSha,
+        [switch]$AllowUnsigned
     )
 
     $localTagObject = (& git rev-parse "refs/tags/$Version^{tag}" 2>$null)
     if ($LASTEXITCODE -ne 0 -or $localTagObject -notmatch '^[0-9a-fA-F]{40}$') {
         throw "Local tag $Version is missing or lightweight; create a signed annotated tag first."
     }
+    if ($AllowUnsigned) {
+        $localTarget = (& git rev-parse "$Version^{commit}").Trim().ToLowerInvariant()
+        if ($LASTEXITCODE -ne 0 -or $localTarget -ine $ExpectedSha) {
+            throw "Local historical tag $Version targets $localTarget, not exact release SHA $ExpectedSha."
+        }
+        $refRaw = Invoke-Gh @('api', "repos/$RepoSlug/git/ref/tags/$Version") `
+            "resolve GitHub tag ref '$Version'"
+        $ref = ($refRaw -join "`n") | ConvertFrom-Json
+        if ([string]$ref.object.type -cne 'tag') {
+            throw "GitHub historical tag $Version is lightweight; an annotated tag is required."
+        }
+        if ([string]$ref.object.sha -ine $localTagObject.Trim()) {
+            throw "GitHub tag object '$($ref.object.sha)' does not match local '$($localTagObject.Trim())'."
+        }
+        Write-Host '    annotated tag : accepted for historical rebuild (signature not present)'
+        return
+    }
+
     # A successful SSH signature check writes "Good git signature" to stderr.
     # Windows PowerShell 5.1 promotes native stderr records according to
     # $ErrorActionPreference, so the script-wide Stop setting would throw before
@@ -508,6 +538,13 @@ function Get-TrackedReleaseNotesTemplate {
         [Parameter(Mandatory)][string]$CommitSha
     )
     $relative = "docs/release-notes-$Version.md"
+    if ($Historical) {
+        $workingPath = Join-Path (Get-Location) $relative
+        if (-not (Test-Path -LiteralPath $workingPath)) {
+            throw "Historical release notes are missing at '$workingPath'."
+        }
+        return Get-Content -LiteralPath $workingPath -Raw
+    }
     $blob = (& git rev-parse "$CommitSha`:$relative" 2>$null)
     if ($LASTEXITCODE -ne 0 -or $blob -notmatch '^[0-9a-fA-F]{40}$') {
         throw "Release commit $CommitSha has no reviewed release-notes blob at '$relative'."
@@ -557,7 +594,7 @@ function Resolve-ReleaseNotesBody {
         [pscustomobject]@{ Token = '{{ZIP_SHA256}}'; Value = $ZipSha256 }
     )
     $imageReferences = @()
-    if ([version]($Version.TrimStart('v')) -ge [version]'0.1.28') {
+    if (-not $Historical -and [version]($Version.TrimStart('v')) -ge [version]'0.1.28') {
         if ($null -eq $DockerImageEvidence) {
             throw "$Version release notes require verified Docker image evidence."
         }
@@ -1327,13 +1364,16 @@ try {
     $requireV0127 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.27')
     $requireV0128 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.28')
     $repositoryRoot = $null
-    if ($requireV0127) {
+    if ($requireV0127 -and -not $Historical) {
         $repositoryRoot = Assert-CleanReleaseRepository
     }
-    if ($requireV0127 -and
+    if ($requireV0127 -and -not $Historical -and
         (-not $PSBoundParameters.ContainsKey('RunId') -or $RunId -le 0 -or
          -not $PSBoundParameters.ContainsKey('ReleaseGateRunId') -or $ReleaseGateRunId -le 0)) {
         throw "$Version requires both -RunId and -ReleaseGateRunId; automatic workflow selection is forbidden for publish and verification."
+    }
+    if ($Historical -and (-not $PSBoundParameters.ContainsKey('RunId') -or $RunId -le 0)) {
+        throw "$Version historical publication requires the exact historical workflow -RunId."
     }
 
     if ($VerifyExisting) {
@@ -1358,7 +1398,7 @@ try {
             # advances. The immutable tag, claimed workflow runs, evidence, and
             # public bytes must still agree; current main is intentionally not
             # part of a read-only historical verification.
-            Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $tagSha
+            Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $tagSha -AllowUnsigned:$Historical
         }
         $verifiedRun = $null
         $verifiedHostedRun = $null
@@ -1373,7 +1413,7 @@ try {
             }
         }
 
-        if ($requireV0127) {
+        if ($requireV0127 -and -not $Historical) {
             $windowsArtifact = Get-ArtifactInfo -RepoSlug $RepoSlug -RunId $verifiedRun.Id -Name $ArtifactName
             $claimedWindowsArchive = Join-Path $stage 'claimed-windows-workflow-artifact.zip'
             Get-ArtifactArchive -ArchiveUrl $windowsArtifact.archive_download_url -OutFile $claimedWindowsArchive
@@ -1418,7 +1458,7 @@ try {
         if ($repeatZipHash -ine $zipHash -or [int64]$repeatZipLen -ne [int64]$zipLen) {
             throw "Repeated downloads of '$ZipName' were not byte-identical."
         }
-        if ($requireV0127) {
+        if ($requireV0127 -and -not $Historical) {
             $claimedHash = (Get-FileHash -LiteralPath $claimedWindowsArchive -Algorithm SHA256).Hash
             $claimedSize = [int64](Get-Item -LiteralPath $claimedWindowsArchive).Length
             if ($claimedHash -ine $zipHash -or $claimedSize -ne [int64]$zipLen) {
@@ -1453,7 +1493,7 @@ try {
             -ExeSha256 $bundle.ExeSha256 `
             -ZipSha256 $zipHash `
             -CommitSha $tagSha
-        if ($bundle.EvidencePath) {
+        if ($bundle.EvidencePath -and -not $Historical) {
             if (-not $requireV0127 -and $PSBoundParameters.ContainsKey('ReleaseGateRunId')) {
                 Get-ReleaseGateRunInfo `
                     -RepoSlug $RepoSlug -RunId $ReleaseGateRunId -ExpectedSha $tagSha | Out-Null
@@ -1629,7 +1669,7 @@ try {
 
         $resolvedVerificationNotes = $null
         if ($requireV0127) {
-            if (-not $bundle.EvidencePath) {
+            if (-not $bundle.EvidencePath -and -not $Historical) {
                 throw "$Version has no retained Windows evidence for exact release-body verification."
             }
             $reviewedTemplate = Get-TrackedReleaseNotesTemplate `
@@ -1709,11 +1749,13 @@ try {
     }
     $run = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $autoLocate
     $run.HeadSha = $run.HeadSha.ToLowerInvariant()
-    $mainShaBefore = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
-    if ($mainShaBefore -ine $run.HeadSha) {
-        throw "Remote main is $mainShaBefore, but workflow run $($run.Id) built $($run.HeadSha). Dispatch a fresh bundle from current main."
+    if (-not $Historical) {
+        $mainShaBefore = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+        if ($mainShaBefore -ine $run.HeadSha) {
+            throw "Remote main is $mainShaBefore, but workflow run $($run.Id) built $($run.HeadSha). Dispatch a fresh bundle from current main."
+        }
     }
-    if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27') {
+    if ([version]($Version.TrimStart('v')) -ge [version]'0.1.27' -and -not $Historical) {
         foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
             $localSha = Resolve-LocalCommitSha -Reference $localReference
             if ($localSha -ine $run.HeadSha) {
@@ -1753,7 +1795,7 @@ try {
     $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
     $zipLen  = (Get-Item -LiteralPath $zipPath).Length
     $releasePayloads = @($zipPath)
-    if ($bundle.EvidencePath) {
+    if ($bundle.EvidencePath -and -not $Historical) {
         if (-not $PSBoundParameters.ContainsKey('ReleaseGateRunId')) {
             throw "Publishing $Version requires -ReleaseGateRunId from the exact-SHA '$ReleaseGateWorkflowName' workflow."
         }
@@ -1891,7 +1933,7 @@ try {
         [string]$recheckedArtifact.digest -cne [string]$art.digest) {
         throw "Windows workflow artifact identity changed during draft verification."
     }
-    if ($bundle.EvidencePath) {
+    if ($bundle.EvidencePath -and -not $Historical) {
         $recheckedHostedRun = Get-ReleaseGateRunInfo `
             -RepoSlug $RepoSlug -RunId $hostedRun.Id -ExpectedSha $run.HeadSha
         if ($recheckedHostedRun.RunAttempt -ne $hostedRun.RunAttempt -or
@@ -1910,17 +1952,19 @@ try {
     if ($tagSha -ine $run.HeadSha) {
         throw "Draft verification mismatch: tag $Version resolves to $tagSha, not workflow commit $($run.HeadSha)."
     }
-    $mainShaAfter = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
-    if ($mainShaAfter -ine $run.HeadSha) {
-        throw "Draft verification mismatch: remote main is $mainShaAfter, not $($run.HeadSha)."
-    }
-    foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
-        $localSha = Resolve-LocalCommitSha -Reference $localReference
-        if ($localSha -ine $run.HeadSha) {
-            throw "Draft verification mismatch: $localReference is $localSha, not $($run.HeadSha)."
+    if (-not $Historical) {
+        $mainShaAfter = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+        if ($mainShaAfter -ine $run.HeadSha) {
+            throw "Draft verification mismatch: remote main is $mainShaAfter, not $($run.HeadSha)."
+        }
+        foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
+            $localSha = Resolve-LocalCommitSha -Reference $localReference
+            if ($localSha -ine $run.HeadSha) {
+                throw "Draft verification mismatch: $localReference is $localSha, not $($run.HeadSha)."
+            }
         }
     }
-    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha
+    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha -AllowUnsigned:$Historical
 
     $finalViewRaw = Invoke-Gh @(
         'release', 'view', $Version,
@@ -1989,17 +2033,22 @@ try {
         }
     }
     $publishedTagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
-    $publishedMainSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
-    if ($publishedTagSha -ine $run.HeadSha -or $publishedMainSha -ine $run.HeadSha) {
-        throw "PUBLICATION VERIFICATION FAILED: remote main/tag no longer match the workflow SHA."
+    if ($publishedTagSha -ine $run.HeadSha) {
+        throw "PUBLICATION VERIFICATION FAILED: remote tag no longer matches the workflow SHA."
     }
-    foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
-        $localSha = Resolve-LocalCommitSha -Reference $localReference
-        if ($localSha -ine $run.HeadSha) {
-            throw "PUBLICATION VERIFICATION FAILED: $localReference no longer matches the workflow SHA."
+    if (-not $Historical) {
+        $publishedMainSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
+        if ($publishedMainSha -ine $run.HeadSha) {
+            throw "PUBLICATION VERIFICATION FAILED: remote main no longer matches the workflow SHA."
+        }
+        foreach ($localReference in @('refs/heads/main', 'refs/remotes/origin/main')) {
+            $localSha = Resolve-LocalCommitSha -Reference $localReference
+            if ($localSha -ine $run.HeadSha) {
+                throw "PUBLICATION VERIFICATION FAILED: $localReference no longer matches the workflow SHA."
+            }
         }
     }
-    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha
+    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha -AllowUnsigned:$Historical
     $publishedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $run.Id -AutoLocate $false
     if ($publishedRun.HeadSha -ine $run.HeadSha -or
         $publishedRun.RunAttempt -ne $run.RunAttempt -or
@@ -2012,7 +2061,7 @@ try {
         [string]$publishedArtifact.digest -cne [string]$art.digest) {
         throw "PUBLICATION VERIFICATION FAILED: Windows artifact identity changed."
     }
-    if ($bundle.EvidencePath) {
+    if ($bundle.EvidencePath -and -not $Historical) {
         $publishedHostedRun = Get-ReleaseGateRunInfo `
             -RepoSlug $RepoSlug -RunId $hostedRun.Id -ExpectedSha $run.HeadSha
         if ($publishedHostedRun.RunAttempt -ne $hostedRun.RunAttempt -or
