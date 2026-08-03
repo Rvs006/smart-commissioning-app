@@ -203,8 +203,7 @@ jobs:
             --workflow-name "$env:GITHUB_WORKFLOW" --workflow-run-id $env:GITHUB_RUN_ID `
             --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT --workflow-run-url $runUrl `
             --workflow-event $env:GITHUB_EVENT_NAME `
-            --artifact $exe --artifact (Join-Path $bundle 'README_FIRST.txt') `
-            --artifact (Join-Path $bundle 'MIGRATION_ROLLBACK.md') `
+            --artifact $exe --artifact (Join-Path $bundle 'MIGRATION_ROLLBACK.md') `
             --artifact (Join-Path $bundle 'windows-acceptance.json') `
             --sbom $pythonSbom --sbom $npmSbom `
             --gate windows_build=passed --gate windows_readiness=passed `
