@@ -233,8 +233,15 @@ function Get-RunInfo {
     if ($run.status -ne 'completed' -or $run.conclusion -ne 'success') {
         throw "Run $RunId is status='$($run.status)' conclusion='$($run.conclusion)' - refusing to publish from a run that did not complete successfully."
     }
-    if ($run.name -ne $WorkflowName -or $run.path -cne $WorkflowPath) {
-        throw "Run $RunId is '$($run.name)' at '$($run.path)', not the $WorkflowName workflow."
+    if ($run.name -ne $WorkflowName) {
+        throw "Run $RunId is '$($run.name)', not the $WorkflowName workflow."
+    }
+    if ($Historical) {
+        if ($run.path -cne '.github/workflows/historical-windows-portable.yml') {
+            throw "Run $RunId uses '$($run.path)', not the historical Windows workflow path."
+        }
+    } elseif ($run.path -cne '.github/workflows/windows-portable.yml') {
+        throw "Run $RunId uses '$($run.path)', not the canonical Windows workflow path."
     }
     if ($run.event -ne 'workflow_dispatch' -or $run.headBranch -ne 'main') {
         throw "Run $RunId used event='$($run.event)' branch='$($run.headBranch)'; publishing requires a workflow_dispatch run from main."
