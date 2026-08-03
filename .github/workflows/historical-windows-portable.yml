@@ -208,9 +208,19 @@ jobs:
             --artifact (Join-Path $bundle 'windows-acceptance.json') `
             --sbom $pythonSbom --sbom $npmSbom `
             --gate windows_build=passed --gate windows_readiness=passed `
-            --gate path_with_spaces=passed --gate frontend_build_stamp=passed `
+            --gate windows_long_heartbeat=passed --gate windows_cancellation=passed `
+            --gate report_provenance=passed --gate report_byte_equality=passed `
+            --gate path_with_spaces=passed --gate log_thread_inspection=passed `
+            --gate app_root=passed --gate frontend_build_stamp=passed `
+            --gate sqlite_lease_configuration=passed --gate sqlite_heartbeat_renewals=passed `
             --test core_unittest=passed --test backend_unittest=passed `
-            --test portable_acceptance=passed --test portable_path_with_spaces=passed
+            --test portable_acceptance=passed --test portable_long_heartbeat=passed `
+            --test portable_cancellation=passed --test canonical_udmi=passed `
+            --test portable_report_provenance=passed --test portable_report_byte_equality=passed `
+            --test portable_path_with_spaces=passed --test portable_log_thread_inspection=passed `
+            --test portable_app_root=passed --test portable_frontend_build_stamp=passed `
+            --test portable_sqlite_lease_configuration=passed `
+            --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           $evidencePath = Join-Path $bundle 'release-evidence.json'
