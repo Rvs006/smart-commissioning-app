@@ -1408,7 +1408,7 @@ try {
         $expectedAssetNames = @($ZipName)
         if ($PSBoundParameters.ContainsKey('RunId')) {
             $verifiedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $false
-            if ($tagSha -ine $verifiedRun.HeadSha) {
+            if (-not $Historical -and $tagSha -ine $verifiedRun.HeadSha) {
                 throw "Release tag $Version resolves to $tagSha, but workflow run $RunId built $($verifiedRun.HeadSha)."
             }
         }
@@ -1749,6 +1749,11 @@ try {
     }
     $run = Get-RunInfo -RepoSlug $RepoSlug -RunId $RunId -AutoLocate $autoLocate
     $run.HeadSha = $run.HeadSha.ToLowerInvariant()
+    $releaseSha = if ($Historical) {
+        Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
+    } else {
+        $run.HeadSha
+    }
     if (-not $Historical) {
         $mainShaBefore = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
         if ($mainShaBefore -ine $run.HeadSha) {
@@ -1789,7 +1794,7 @@ try {
     # 5. Verify the archive before it can reach Releases.
     Write-Host ""
     Write-Host "Verifying bundle zip..."
-    $bundle  = Test-BundleZip -ZipPath $zipPath -Version $Version -CommitSha $run.HeadSha `
+    $bundle  = Test-BundleZip -ZipPath $zipPath -Version $Version -CommitSha $releaseSha `
         -StageDir $stage -WorkflowRunId $run.Id -WorkflowRunAttempt $run.RunAttempt `
         -WorkflowArtifactName $ArtifactName -Repository $RepoSlug
     $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash
@@ -1800,7 +1805,7 @@ try {
             throw "Publishing $Version requires -ReleaseGateRunId from the exact-SHA '$ReleaseGateWorkflowName' workflow."
         }
         $hostedRun = Get-ReleaseGateRunInfo `
-            -RepoSlug $RepoSlug -RunId $ReleaseGateRunId -ExpectedSha $run.HeadSha
+            -RepoSlug $RepoSlug -RunId $ReleaseGateRunId -ExpectedSha $releaseSha
         $hostedArtifactName = "$Version-release-evidence-$($run.HeadSha)"
         $hostedArtifact = Get-ArtifactInfo `
             -RepoSlug $RepoSlug -RunId $hostedRun.Id -Name $hostedArtifactName
@@ -1854,7 +1859,7 @@ try {
     $resolvedNotesResult = Resolve-ReleaseNotesBody `
         -Template $notesTemplate `
         -Version $Version `
-        -CommitSha $run.HeadSha `
+        -CommitSha $releaseSha `
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
         -DockerImageEvidence $(if ($requireV0128) { $hostedEvidence.DockerImageEvidence } else { $null })
@@ -1878,7 +1883,7 @@ try {
         '--repo', $RepoSlug,
         '--verify-tag',
         '--draft',
-        '--target', $run.HeadSha,
+        '--target', $releaseSha,
         '--title', $Title,
         '--notes-file', $resolvedNotes
     )
@@ -1914,7 +1919,7 @@ try {
         -Body ([string]$view.body) `
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
-        -CommitSha $run.HeadSha `
+        -CommitSha $releaseSha `
         -ExpectedBody $notes `
         -ExpectedImageReferences $expectedImageReferences
 
@@ -1949,8 +1954,8 @@ try {
         }
     }
     $tagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
-    if ($tagSha -ine $run.HeadSha) {
-        throw "Draft verification mismatch: tag $Version resolves to $tagSha, not workflow commit $($run.HeadSha)."
+    if ($tagSha -ine $releaseSha) {
+        throw "Draft verification mismatch: tag $Version resolves to $tagSha, not release source $releaseSha."
     }
     if (-not $Historical) {
         $mainShaAfter = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
@@ -1964,7 +1969,7 @@ try {
             }
         }
     }
-    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha -AllowUnsigned:$Historical
+    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $releaseSha -AllowUnsigned:$Historical
 
     $finalViewRaw = Invoke-Gh @(
         'release', 'view', $Version,
@@ -1979,7 +1984,7 @@ try {
         -Body ([string]$finalView.body) `
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
-        -CommitSha $run.HeadSha `
+        -CommitSha $releaseSha `
         -ExpectedBody $notes `
         -ExpectedImageReferences $expectedImageReferences
     $finalDraftVerifyDir = Join-Path $stage 'final-draft-asset-verification'
@@ -2012,7 +2017,7 @@ try {
         -Body ([string]$publishedView.body) `
         -ExeSha256 $bundle.ExeSha256 `
         -ZipSha256 $zipHash `
-        -CommitSha $run.HeadSha `
+        -CommitSha $releaseSha `
         -ExpectedBody $notes `
         -ExpectedImageReferences $expectedImageReferences
     foreach ($name in $payloadNames) {
@@ -2033,8 +2038,8 @@ try {
         }
     }
     $publishedTagSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference $Version
-    if ($publishedTagSha -ine $run.HeadSha) {
-        throw "PUBLICATION VERIFICATION FAILED: remote tag no longer matches the workflow SHA."
+    if ($publishedTagSha -ine $releaseSha) {
+        throw "PUBLICATION VERIFICATION FAILED: remote tag no longer matches the release source SHA."
     }
     if (-not $Historical) {
         $publishedMainSha = Resolve-CommitSha -RepoSlug $RepoSlug -Reference 'main'
@@ -2048,7 +2053,7 @@ try {
             }
         }
     }
-    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $run.HeadSha -AllowUnsigned:$Historical
+    Assert-SignedAnnotatedTag -RepoSlug $RepoSlug -Version $Version -ExpectedSha $releaseSha -AllowUnsigned:$Historical
     $publishedRun = Get-RunInfo -RepoSlug $RepoSlug -RunId $run.Id -AutoLocate $false
     if ($publishedRun.HeadSha -ine $run.HeadSha -or
         $publishedRun.RunAttempt -ne $run.RunAttempt -or
