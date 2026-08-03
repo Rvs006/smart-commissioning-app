@@ -148,6 +148,8 @@ jobs:
           $stderr = Join-Path $env:RUNNER_TEMP 'historical-portable-stderr.log'
           $acceptance = Join-Path $bundle 'windows-acceptance.json'
           $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
+          $env:RUN_LEASE_SECONDS = '15'
+          $env:RUN_HEARTBEAT_SECONDS = '2'
           $proc = Start-Process -FilePath $exe -WorkingDirectory $launchRoot -PassThru -NoNewWindow `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           $healthUrl = $null
