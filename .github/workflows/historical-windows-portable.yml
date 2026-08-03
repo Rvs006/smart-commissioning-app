@@ -94,13 +94,13 @@ jobs:
         shell: pwsh
         run: |
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
-          $exe = Join-Path $bundle 'SmartCommissioningApp.exe'
+          $bundleExe = Join-Path $bundle 'SmartCommissioningApp.exe'
           $readme = Join-Path $bundle 'README_FIRST.txt'
           $frontendVersion = Join-Path $bundle 'frontend\dist\.app-version'
-          if (-not (Test-Path -LiteralPath $exe)) { throw 'Portable executable is missing.' }
+          if (-not (Test-Path -LiteralPath $bundleExe)) { throw 'Portable executable is missing.' }
           if (-not (Test-Path -LiteralPath $readme)) { throw 'README_FIRST.txt is missing.' }
           if (-not (Test-Path -LiteralPath $frontendVersion)) { throw 'Frontend version stamp is missing.' }
-          $productVersion = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
+          $productVersion = (Get-Item -LiteralPath $bundleExe).VersionInfo.ProductVersion
           if ($productVersion -cne $env:RELEASE_VERSION) {
             throw "EXE ProductVersion '$productVersion' is not '$env:RELEASE_VERSION'."
           }
@@ -111,13 +111,20 @@ jobs:
             throw 'Frontend build stamp does not match the requested release version.'
           }
 
-          $stateRoot = Join-Path $env:RUNNER_TEMP "historical-portable-state-$env:GITHUB_RUN_ID"
-          New-Item -ItemType Directory -Path $stateRoot | Out-Null
+          # The acceptance helper deliberately proves that the portable launcher
+          # handles Windows paths containing spaces. Exercise the same condition
+          # as the user-facing launcher instead of running from the runner's
+          # space-free checkout/temp roots.
+          $launchRoot = Join-Path $env:RUNNER_TEMP "Historical portable acceptance path with spaces $env:GITHUB_RUN_ID"
+          $stateRoot = Join-Path $env:RUNNER_TEMP "Historical portable state path with spaces $env:GITHUB_RUN_ID"
+          New-Item -ItemType Directory -Path $launchRoot, $stateRoot | Out-Null
+          Copy-Item -Path (Join-Path $bundle '*') -Destination $launchRoot -Recurse -Force
+          $exe = Join-Path $launchRoot 'SmartCommissioningApp.exe'
           $stdout = Join-Path $env:RUNNER_TEMP 'historical-portable-stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'historical-portable-stderr.log'
           $acceptance = Join-Path $bundle 'windows-acceptance.json'
           $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
-          $proc = Start-Process -FilePath $exe -WorkingDirectory $bundle -PassThru -NoNewWindow `
+          $proc = Start-Process -FilePath $exe -WorkingDirectory $launchRoot -PassThru -NoNewWindow `
             -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           $healthUrl = $null
           $deadline = [DateTime]::UtcNow.AddSeconds(150)
