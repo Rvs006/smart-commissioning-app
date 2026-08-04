@@ -138,6 +138,31 @@ class ReportListProjectionTests(ApiTestCase):
         # Scoping order is the operator's; the projection must not sort it.
         self.assertEqual(listed["source_run_ids"], requested_order)
 
+    def test_report_list_honours_a_bounded_page_limit_and_offset(self) -> None:
+        baseline_total = self.client.get("/api/v1/reports").json()["total"]
+        first = self._create_report([])
+        second = self._create_report([])
+        third = self._create_report([])
+
+        limited = self.client.get("/api/v1/reports?limit=2&offset=1")
+        self.assertEqual(limited.status_code, 200, limited.text)
+        listed = limited.json()["reports"]
+        self.assertEqual(len(listed), 2)
+        self.assertEqual(
+            [row["report_id"] for row in listed],
+            [second["report_id"], first["report_id"]],
+        )
+        self.assertNotIn(third["report_id"], {row["report_id"] for row in listed})
+        body = limited.json()
+        self.assertEqual(body["total"], baseline_total + 3)
+        self.assertEqual(body["limit"], 2)
+        self.assertEqual(body["offset"], 1)
+        self.assertEqual(body["has_more"], 1 + 2 < baseline_total + 3)
+
+    def test_report_list_rejects_an_unbounded_limit(self) -> None:
+        response = self.client.get("/api/v1/reports?limit=101")
+        self.assertEqual(response.status_code, 422, response.text)
+
     def test_delete_one_report_removes_its_row_and_owned_local_artifact(self) -> None:
         from app.core.runtime import ARTIFACTS_ROOT
         from app.services.run_service import RunService

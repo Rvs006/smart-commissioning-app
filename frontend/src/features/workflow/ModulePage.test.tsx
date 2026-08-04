@@ -1554,7 +1554,7 @@ describe("ModulePage reports wiring", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse({ reports: [] });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -1584,7 +1584,7 @@ describe("ModulePage reports wiring", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse(reportsPayload);
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -1628,7 +1628,7 @@ describe("ModulePage reports wiring", () => {
           onDownload?.(url);
           return blobResponse("issue_report.xlsx");
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse(payload);
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -1698,7 +1698,7 @@ describe("ModulePage reports wiring", () => {
           hits.download.push(url);
           return blobResponse("issue_report.xlsx");
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse(reportsPayload);
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -1783,7 +1783,7 @@ describe("ModulePage reports wiring", () => {
             artifact_cleanup_warnings: [],
           });
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           if (deletionCompleted && options.failReconciliation) {
             throw new Error("Report list reconciliation failed.");
           }
@@ -1885,7 +1885,7 @@ describe("ModulePage reports wiring", () => {
           return jsonResponse({ username: "viewer-1", role: "viewer", source: "user_key" });
         }
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
-        if (url.endsWith("/api/v1/reports")) return jsonResponse(reportsPayload);
+        if (url.split("?")[0].endsWith("/api/v1/reports")) return jsonResponse(reportsPayload);
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
@@ -1965,7 +1965,7 @@ describe("ModulePage labels and templates", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse({ reports: [] });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -1982,8 +1982,12 @@ describe("ModulePage labels and templates", () => {
   it("uses Generate (not Queue) for report run actions", async () => {
     stubBasic();
     renderModule("reports");
-    expect(await screen.findByText("Generate Excel Report")).toBeInTheDocument();
-    expect(screen.getByText("Generate Word Report")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Generate Excel Report" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate Word Report" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Register Import" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Run Controls" })).not.toBeInTheDocument();
   });
 
   it("drops the duplicate all-templates section but keeps template downloads in Register Import (2026-07-20 walkthrough ITEM-3)", async () => {
@@ -3355,7 +3359,7 @@ describe("ModulePage UDMI workbench live results", () => {
           return jsonResponse(udmiAccepted);
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(issues);
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(run);
-        if (url.endsWith("/api/v1/reports") && init?.method === "POST" && reportBodies) {
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST" && reportBodies) {
           reportBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
           return jsonResponse({
             file_name: "udmi_validation_rep-subset.pdf",
@@ -5552,7 +5556,7 @@ describe("ModulePage UDMI workbench live results", () => {
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
           return jsonResponse(threeAssetRun);
         }
-        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
           reportBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
           return jsonResponse({
             file_name: "udmi_validation_rep-9.pdf",
@@ -6243,7 +6247,7 @@ describe("ModulePage reports visibility", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse(reportsPayload);
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -6285,7 +6289,7 @@ describe("ModulePage reports visibility", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           // Never resolves: the list is still loading.
           return new Promise<Response>(() => {});
         }
@@ -6329,7 +6333,7 @@ describe("ModulePage reports visibility", () => {
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
           return jsonResponse(terminalRun);
         }
-        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
           return jsonResponse({
             file_name: "ip_discovery_rep-7.pdf",
             output_format: "pdf",
@@ -6436,7 +6440,7 @@ describe("ModulePage report controls placement", () => {
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
           return jsonResponse(terminalRun);
         }
-        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
           const reportBody = JSON.parse(String(init.body)) as Record<string, unknown>;
           captured.reportBody = reportBody;
           captured.reportBodies.push(reportBody);
@@ -6465,7 +6469,7 @@ describe("ModulePage report controls placement", () => {
           } as unknown as Response;
         }
         // The reports route lists them on arrival.
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse({ reports: [] });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -6763,7 +6767,7 @@ describe("ModulePage snap-to-top when results open", () => {
         if (url.endsWith("/api/v1/imports/profiles")) {
           return jsonResponse(profilesPayload);
         }
-        if (url.endsWith("/api/v1/reports") && init?.method === "POST") {
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
           return jsonResponse({
             file_name: "issue_report.xlsx",
             output_format: "xlsx",
@@ -6772,7 +6776,7 @@ describe("ModulePage snap-to-top when results open", () => {
             status: "succeeded",
           });
         }
-        if (url.endsWith("/api/v1/reports")) {
+        if (url.split("?")[0].endsWith("/api/v1/reports")) {
           return jsonResponse({ reports: [] });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
@@ -6781,12 +6785,7 @@ describe("ModulePage snap-to-top when results open", () => {
 
     renderModule("reports");
 
-    // The reports route has one card per format and every button just says
-    // "Generate", so scope the query to the Excel card by its label.
-    const card = (await screen.findByText("Generate Excel Report")).closest(
-      ".run-card",
-    ) as HTMLElement;
-    const generate = within(card).getByRole("button", { name: "Generate" });
+    const generate = await screen.findByRole("button", { name: "Generate Excel Report" });
     await waitFor(() => expect(generate).toBeEnabled());
     expect(scrollSpy).not.toHaveBeenCalled();
 

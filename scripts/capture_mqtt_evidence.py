@@ -18,15 +18,18 @@ import hashlib
 import json
 import os
 import queue
+import re
 import sqlite3
 import sys
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS
 from smart_commissioning_core.mqtt_transport import (
     MqttClient,
     MqttConnectionSettings,
@@ -50,13 +53,21 @@ class _CaptureClient(Protocol):
 ClientFactory = Callable[[MqttConnectionSettings], _CaptureClient]
 PasswordPrompt = Callable[[str], str]
 CaptureStartedCallback = Callable[[], None]
+CaptureProgressCallback = Callable[[int], None]
 
 DEFAULT_PROJECT_ID = "demo-project"
 DEFAULT_SITE_ID = "demo-site"
+DEFAULT_MAX_PAYLOAD_BYTES = 5 * 1024 * 1024
+DEFAULT_MAX_TOTAL_BYTES = 50 * 1024 * 1024
+PROGRESS_INTERVAL_SECONDS = 30.0
 
 
 class CaptureConfigurationError(ValueError):
     """Safe, credential-free configuration error."""
+
+
+class CaptureResourceLimitError(RuntimeError):
+    """A capture reached an explicit payload or aggregate-size backstop."""
 
 
 def _positive_int(value: str) -> int:
@@ -396,13 +407,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--duration-seconds",
         default=7200.0,
         type=_non_negative_float,
-        help="Capture duration. Zero runs until the message limit or interruption.",
+        help=(
+            "Capture duration. Zero runs until cancellation, the message limit, "
+            f"or the {int(INDEFINITE_BACKSTOP_SECONDS / 3600)}-hour safety backstop."
+        ),
     )
     parser.add_argument(
         "--max-messages",
         default=100_000,
         type=_positive_int,
         help="Hard safety limit for retained timeline records.",
+    )
+    parser.add_argument(
+        "--max-payload-bytes",
+        default=DEFAULT_MAX_PAYLOAD_BYTES,
+        type=_positive_int,
+        help="Hard safety limit for one retained payload.",
+    )
+    parser.add_argument(
+        "--max-total-bytes",
+        default=DEFAULT_MAX_TOTAL_BYTES,
+        type=_positive_int,
+        help="Hard safety limit for aggregate retained payload bytes.",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        help="Optional sanitized v0.1.37 manifest to bind to the terminal marker.",
+    )
+    parser.add_argument(
+        "--run-id",
+        help="Optional sanitized run reference written to the terminal marker.",
+    )
+    parser.add_argument(
+        "--acceptance",
+        action="store_true",
+        help="Require a complete v0.1.37 manifest and matching run ID for field evidence.",
     )
     parser.add_argument(
         "--keep-alive",
@@ -525,9 +565,82 @@ def capture_to_jsonl(
     client_factory: ClientFactory = MqttClient,
     monotonic: Callable[[], float] = time.monotonic,
     on_started: CaptureStartedCallback | None = None,
+    manifest_path: Path | None = None,
+    run_id: str | None = None,
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    on_progress: CaptureProgressCallback | None = None,
+    require_provenance: bool = False,
 ) -> int:
     """Capture messages and return the number of append-only records written."""
 
+    if max_payload_bytes <= 0 or max_total_bytes <= 0:
+        raise CaptureConfigurationError("Capture byte limits must be greater than zero.")
+    if require_provenance and (manifest_path is None or not run_id):
+        raise CaptureConfigurationError("Acceptance capture requires --manifest and --run-id.")
+    manifest_identity: dict[str, Any] = {}
+    if manifest_path is not None:
+        try:
+            manifest_bytes = manifest_path.read_bytes()
+            manifest = json.loads(manifest_bytes)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise CaptureConfigurationError("The capture manifest is not valid JSON.") from error
+        if not isinstance(manifest, dict):
+            raise CaptureConfigurationError("The capture manifest root must be an object.")
+        register = manifest.get("register")
+        application = manifest.get("application")
+        approved_scope = manifest.get("approved_scope")
+        runs = manifest.get("runs")
+        if (
+            manifest.get("schema_version") != "1.0"
+            or manifest.get("release_version") != "v0.1.37"
+            or not isinstance(register, dict)
+            or not isinstance(register.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", register["sha256"])
+            or not register.get("revision")
+            or not register.get("import_identity")
+            or not isinstance(application, dict)
+            or application.get("version") != "v0.1.37"
+            or not isinstance(application.get("commit"), str)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}", application["commit"])
+            or not isinstance(approved_scope, str)
+            or not approved_scope.strip()
+            or not isinstance(runs, dict)
+            or not all(
+                isinstance(runs.get(key), dict)
+                and isinstance(runs[key].get("run_id"), str)
+                and runs[key]["run_id"].strip()
+                for key in ("gate_a", "gate_b")
+            )
+        ):
+            raise CaptureConfigurationError(
+                "The acceptance manifest is incomplete or not v0.1.37-compatible."
+            )
+        manifest_run_ids = {
+            value.get("run_id")
+            for value in runs.values()
+            if isinstance(value, dict) and isinstance(value.get("run_id"), str)
+        }
+        if require_provenance and run_id not in manifest_run_ids:
+            raise CaptureConfigurationError(
+                "The capture run ID is not present in the acceptance manifest."
+            )
+        manifest_identity = {
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "register_sha256": register.get("sha256") if isinstance(register, dict) else None,
+            "application_commit": (
+                application.get("commit") or application.get("commit_sha")
+                if isinstance(application, dict)
+                else None
+            ),
+            "scope": (
+                manifest.get("approved_scope")
+                if isinstance(manifest.get("approved_scope"), str)
+                else (manifest.get("approved_scope") or {}).get("reference")
+                if isinstance(manifest.get("approved_scope"), dict)
+                else None
+            ),
+        }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # Claim the evidence path before connecting. Opening inside the writer
     # thread leaves a race where the network loop can start before an existing
@@ -548,30 +661,65 @@ def capture_to_jsonl(
                     handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
                     handle.write("\n")
                     handle.flush()
-                    written += 1
+                    if record.get("record_type") not in {
+                        "capture_terminal",
+                        "capture_window_started",
+                        "capture_window_ended",
+                    }:
+                        written += 1
         except BaseException as error:
             writer_errors.append(error)
 
     writer = threading.Thread(target=write_records, name="mqtt-evidence-writer", daemon=True)
     writer.start()
-    deadline = None if duration_seconds == 0 else monotonic() + duration_seconds
+    capture_mode = "indefinite" if duration_seconds == 0 else "bounded"
+    effective_duration_seconds = (
+        INDEFINITE_BACKSTOP_SECONDS if duration_seconds == 0 else duration_seconds
+    )
+    start_time = monotonic()
+    deadline = start_time + effective_duration_seconds
     ping_interval = max(1.0, settings.keep_alive / 2.0)
-    last_ping_at = monotonic()
+    last_ping_at = start_time
+    next_progress_at = start_time + PROGRESS_INTERVAL_SECONDS
     accepted = 0
+    total_payload_bytes = 0
+    total_evidence_bytes = 0
+    termination_reason = "unknown_error"
+    window_completed = False
+    window_started_at: str | None = None
+    window_ended_at: str | None = None
     try:
         with client_factory(settings) as client:
             client.subscribe_many(list(topics), qos)
+            if manifest_path is not None:
+                window_started_at = datetime.now(UTC).isoformat()
+                records.put(
+                    {
+                        "record_type": "capture_window_started",
+                        "run_id": run_id,
+                        "capture_mode": capture_mode,
+                        "started_at": window_started_at,
+                    }
+                )
             if on_started is not None:
                 on_started()
             while accepted < max_messages:
                 if writer_errors:
                     raise writer_errors[0]
                 now = monotonic()
+                if now >= next_progress_at:
+                    if on_progress is not None:
+                        on_progress(accepted)
+                    next_progress_at = now + PROGRESS_INTERVAL_SECONDS
                 if now - last_ping_at >= ping_interval:
                     client.ping()
                     last_ping_at = monotonic()
-                remaining = None if deadline is None else deadline - monotonic()
-                if remaining is not None and remaining <= 0:
+                remaining = deadline - now
+                if remaining <= 0:
+                    termination_reason = (
+                        "backstop_elapsed" if capture_mode == "indefinite" else "window_elapsed"
+                    )
+                    window_completed = capture_mode == "bounded"
                     break
                 message = client.read_publish_any(
                     expected_topics=set(topics),
@@ -581,12 +729,83 @@ def capture_to_jsonl(
                 )
                 if message is None:
                     continue
-                records.put(message_record(message))
+                if len(message.payload) > max_payload_bytes:
+                    termination_reason = "payload_size_cap"
+                    raise CaptureResourceLimitError(
+                        "A received payload exceeded the configured capture limit."
+                    )
+                record = message_record(message)
+                record_bytes = len(
+                    json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ) + 1
+                if total_evidence_bytes + record_bytes > max_total_bytes:
+                    termination_reason = "aggregate_bytes_cap"
+                    raise CaptureResourceLimitError(
+                        "The capture exceeded the configured aggregate byte limit."
+                    )
+                records.put(record)
                 accepted += 1
+                total_payload_bytes += len(message.payload)
+                total_evidence_bytes += record_bytes
+            if accepted >= max_messages:
+                termination_reason = "message_cap"
+    except KeyboardInterrupt:
+        termination_reason = "cancelled"
+        raise
+    except CaptureResourceLimitError:
+        raise
+    except Exception:
+        termination_reason = "broker_interruption"
+        raise
     finally:
+        if window_started_at is not None and manifest_path is not None:
+            window_ended_at = datetime.now(UTC).isoformat()
+            records.put(
+                {
+                    "record_type": "capture_window_ended",
+                    "run_id": run_id,
+                    "capture_mode": capture_mode,
+                    "started_at": window_started_at,
+                    "ended_at": window_ended_at,
+                    "window_completed": window_completed,
+                    "termination_reason": termination_reason,
+                }
+            )
+        terminal_marker = None
+        if manifest_path is not None:
+            terminal_marker = {
+                "record_type": "capture_terminal",
+                "run_id": run_id,
+                "capture_mode": "indefinite" if duration_seconds == 0 else "bounded",
+                "window_started_at": window_started_at,
+                "window_ended_at": window_ended_at,
+                "window_completed": window_completed,
+                "termination_reason": termination_reason,
+                "message_count": accepted,
+                "aggregate_payload_bytes": total_payload_bytes,
+                "aggregate_evidence_bytes": total_evidence_bytes,
+                **manifest_identity,
+            }
+            records.put(terminal_marker)
         records.put(None)
         writer.join()
     if writer_errors:
+        if terminal_marker is not None:
+            failure_marker = {
+                **terminal_marker,
+                "termination_reason": "disk_write_error",
+                "window_completed": False,
+                "writer_error": type(writer_errors[0]).__name__,
+            }
+            sidecar = output_path.with_name(f"{output_path.name}.terminal.json")
+            try:
+                with sidecar.open("x", encoding="utf-8", newline="\n") as handle:
+                    json.dump(failure_marker, handle, ensure_ascii=False, separators=(",", ":"))
+                    handle.write("\n")
+            except OSError as error:
+                raise CaptureConfigurationError(
+                    f"The capture writer failed and its terminal marker could not be persisted: {sidecar}"
+                ) from error
         raise writer_errors[0]
     return written
 
@@ -619,15 +838,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             duration_seconds=args.duration_seconds,
             max_messages=args.max_messages,
             qos=qos,
+            manifest_path=args.manifest,
+            run_id=args.run_id,
+            max_payload_bytes=args.max_payload_bytes,
+            max_total_bytes=args.max_total_bytes,
+            require_provenance=args.acceptance,
             on_started=lambda: print(
                 "Capture started: MQTT subscription acknowledged. Start the app validation now."
+            ),
+            on_progress=lambda count: print(
+                f"Capture progress: {count} message records retained."
             ),
         )
     except CaptureConfigurationError as error:
         parser.error(str(error))
     except FileExistsError:
         parser.error("The output file already exists; choose a new evidence path.")
-    except (MqttTransportError, OSError):
+    except (MqttTransportError, OSError, CaptureResourceLimitError):
         print(
             "MQTT capture failed. Check broker reachability, authentication, TLS, and topic ACLs.",
             file=sys.stderr,

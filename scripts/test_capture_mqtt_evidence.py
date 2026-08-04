@@ -40,6 +40,11 @@ class _FakeClient:
         return self.messages.pop(0) if self.messages else None
 
 
+class _FailingClient(_FakeClient):
+    def read_publish_any(self, **_kwargs: object) -> MqttMessage | None:
+        raise RuntimeError("transport stopped")
+
+
 class CaptureMqttEvidenceTests(unittest.TestCase):
     def test_settings_read_password_from_environment_without_cli_argument(self) -> None:
         args = argparse.Namespace(
@@ -320,6 +325,319 @@ class CaptureMqttEvidenceTests(unittest.TestCase):
         self.assertEqual(count, 1)
         self.assertEqual(started, ["acknowledged"])
         self.assertEqual(fake.subscriptions, [(["site/#"], 1)])
+
+    def test_manifest_capture_appends_a_completed_terminal_marker(self) -> None:
+        fake = _FakeClient(None, [MqttMessage("site/device/state", b"{}")])
+        settings = capture.MqttConnectionSettings(
+            host="broker.example",
+            port=1883,
+            client_id="capture-test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.37",
+                        "register": {
+                            "sha256": "a" * 64,
+                            "revision": "revision-ref",
+                            "import_identity": "import-ref",
+                        },
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "capture.jsonl"
+            count = capture.capture_to_jsonl(
+                settings,
+                ["site/#"],
+                output,
+                duration_seconds=60,
+                max_messages=1,
+                qos=0,
+                client_factory=lambda _settings: fake,
+                monotonic=lambda: 0.0,
+                manifest_path=manifest,
+                run_id="run-ref",
+                require_provenance=True,
+            )
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(count, 1)
+        self.assertEqual(rows[-1]["record_type"], "capture_terminal")
+        self.assertEqual(rows[-1]["termination_reason"], "message_cap")
+        self.assertFalse(rows[-1]["window_completed"])
+        self.assertEqual(rows[-1]["run_id"], "run-ref")
+        self.assertEqual(rows[-1]["register_sha256"], "a" * 64)
+
+    def test_acceptance_rejects_a_manifest_from_another_release(self) -> None:
+        settings = capture.MqttConnectionSettings(
+            host="broker.example",
+            port=1883,
+            client_id="capture-test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.36",
+                        "register": {
+                            "sha256": "a" * 64,
+                            "revision": "revision-ref",
+                            "import_identity": "import-ref",
+                        },
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(capture.CaptureConfigurationError):
+                capture.capture_to_jsonl(
+                    settings,
+                    ["site/#"],
+                    root / "capture.jsonl",
+                    duration_seconds=60,
+                    max_messages=1,
+                    qos=0,
+                    client_factory=lambda _settings: _FakeClient(None, []),
+                    monotonic=lambda: 0.0,
+                    manifest_path=manifest,
+                    run_id="run-ref",
+                    require_provenance=True,
+                )
+
+    def test_capture_rejects_an_oversized_payload_with_a_terminal_marker(self) -> None:
+        fake = _FakeClient(None, [MqttMessage("site/device/state", b"12345")])
+        settings = capture.MqttConnectionSettings(
+            host="broker.example",
+            port=1883,
+            client_id="capture-test",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.37",
+                        "register": {
+                            "sha256": "a" * 64,
+                            "revision": "revision-ref",
+                            "import_identity": "import-ref",
+                        },
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "capture.jsonl"
+            with self.assertRaises(capture.CaptureResourceLimitError):
+                capture.capture_to_jsonl(
+                    settings,
+                    ["site/#"],
+                    output,
+                    duration_seconds=60,
+                    max_messages=1,
+                    qos=0,
+                    client_factory=lambda _settings: fake,
+                    monotonic=lambda: 0.0,
+                    manifest_path=manifest,
+                    run_id="run-ref",
+                    require_provenance=True,
+                    max_payload_bytes=4,
+                )
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(rows[-1]["termination_reason"], "payload_size_cap")
+        self.assertFalse(rows[-1]["window_completed"])
+
+    def test_indefinite_capture_uses_backstop_and_reports_progress(self) -> None:
+        fake = _FakeClient(None, [])
+        settings = capture.MqttConnectionSettings(
+            host="broker.example",
+            port=1883,
+            client_id="capture-test",
+        )
+        progress: list[int] = []
+        clock_values = iter([0.0, 31.0, 172_801.0, 172_802.0])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.37",
+                        "register": {
+                            "sha256": "a" * 64,
+                            "revision": "revision-ref",
+                            "import_identity": "import-ref",
+                        },
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "capture.jsonl"
+            count = capture.capture_to_jsonl(
+                settings,
+                ["site/#"],
+                output,
+                duration_seconds=0,
+                max_messages=10,
+                qos=0,
+                client_factory=lambda _settings: fake,
+                monotonic=lambda: next(clock_values),
+                manifest_path=manifest,
+                run_id="run-ref",
+                require_provenance=True,
+                on_progress=progress.append,
+            )
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(count, 0)
+        self.assertEqual(progress, [0, 0])
+        self.assertEqual(rows[-1]["termination_reason"], "backstop_elapsed")
+        self.assertFalse(rows[-1]["window_completed"])
+
+    def test_terminal_marker_reports_window_elapsed(self) -> None:
+        settings = capture.MqttConnectionSettings(host="broker.example", port=1883, client_id="capture-test")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.37",
+                        "register": {"sha256": "a" * 64, "revision": "revision-ref", "import_identity": "import-ref"},
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "capture.jsonl"
+            clock_values = iter([0.0, 2.0])
+            capture.capture_to_jsonl(
+                settings,
+                ["site/#"],
+                output,
+                duration_seconds=1,
+                max_messages=10,
+                qos=0,
+                client_factory=lambda _settings: _FakeClient(None, []),
+                monotonic=lambda: next(clock_values),
+                manifest_path=manifest,
+                run_id="run-ref",
+                require_provenance=True,
+            )
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            started = rows[0]
+            ended = rows[-2]
+            marker = rows[-1]
+        self.assertEqual(started["record_type"], "capture_window_started")
+        self.assertEqual(ended["record_type"], "capture_window_ended")
+        self.assertTrue(started["started_at"])
+        self.assertTrue(ended["ended_at"])
+        self.assertEqual(marker["window_started_at"], started["started_at"])
+        self.assertEqual(marker["window_ended_at"], ended["ended_at"])
+        self.assertEqual(marker["termination_reason"], "window_elapsed")
+        self.assertTrue(marker["window_completed"])
+
+    def test_terminal_marker_reports_aggregate_cap(self) -> None:
+        settings = capture.MqttConnectionSettings(host="broker.example", port=1883, client_id="capture-test")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.37",
+                        "register": {"sha256": "a" * 64, "revision": "revision-ref", "import_identity": "import-ref"},
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "capture.jsonl"
+            with self.assertRaises(capture.CaptureResourceLimitError):
+                capture.capture_to_jsonl(
+                    settings,
+                    ["site/#"],
+                    output,
+                    duration_seconds=60,
+                    max_messages=10,
+                    qos=0,
+                    client_factory=lambda _settings: _FakeClient(
+                        None, [MqttMessage("site/device/state", b"{}")]
+                    ),
+                    monotonic=lambda: 0.0,
+                    manifest_path=manifest,
+                    run_id="run-ref",
+                    require_provenance=True,
+                    max_total_bytes=1,
+                )
+            marker = json.loads(output.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(marker["termination_reason"], "aggregate_bytes_cap")
+        self.assertFalse(marker["window_completed"])
+
+    def test_terminal_marker_reports_broker_interruption(self) -> None:
+        settings = capture.MqttConnectionSettings(host="broker.example", port=1883, client_id="capture-test")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "release_version": "v0.1.37",
+                        "register": {"sha256": "a" * 64, "revision": "revision-ref", "import_identity": "import-ref"},
+                        "application": {"version": "v0.1.37", "commit": "b" * 40},
+                        "approved_scope": "scope-ref",
+                        "runs": {"gate_a": {"run_id": "run-ref"}, "gate_b": {"run_id": "run-b-ref"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = root / "capture.jsonl"
+            with self.assertRaises(RuntimeError):
+                capture.capture_to_jsonl(
+                    settings,
+                    ["site/#"],
+                    output,
+                    duration_seconds=60,
+                    max_messages=10,
+                    qos=0,
+                    client_factory=lambda _settings: _FailingClient(None, []),
+                    monotonic=lambda: 0.0,
+                    manifest_path=manifest,
+                    run_id="run-ref",
+                    require_provenance=True,
+                )
+            marker = json.loads(output.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(marker["termination_reason"], "broker_interruption")
+        self.assertFalse(marker["window_completed"])
 
 
 if __name__ == "__main__":

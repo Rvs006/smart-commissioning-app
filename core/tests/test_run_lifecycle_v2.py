@@ -217,9 +217,12 @@ class ClaimAndFencingTests(LifecycleTestCase):
             lease.claimed_at,
             released_at - timedelta(milliseconds=100),
         )
-        self.assertGreater(
-            (lease.lease_expires_at - datetime.now(UTC)).total_seconds(),
-            1.5,
+        # The lease duration is anchored to the time ownership is acquired,
+        # not to the time this assertion happens to run. Measuring from now
+        # made the test race with scheduler and database-unlock overhead.
+        self.assertGreaterEqual(
+            (lease.lease_expires_at - lease.claimed_at).total_seconds(),
+            1.99,
         )
 
     def test_every_stale_owner_write_changes_zero_lifecycle_rows(self) -> None:

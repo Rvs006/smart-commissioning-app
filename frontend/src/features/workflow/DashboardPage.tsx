@@ -165,7 +165,7 @@ export function DashboardPage() {
 
   // Reports (real) — used for the evidence-pack count KPI.
   const reportsQuery = useQuery({
-    queryFn: ({ signal }) => listReports({ client: apiClient, signal }),
+    queryFn: ({ signal }) => listReports({ limit: 100 }, { client: apiClient, signal }),
     queryKey: queryKeys.reports(sessionScopeId, workspace),
     refetchInterval: (query) =>
       query.state.data?.reports?.some((report) => !isTerminalStatus(report.status)) ? 1500 : 15000,
@@ -233,7 +233,7 @@ export function DashboardPage() {
   //  - evidence packs: report runs (any report counts as a generated pack)
   const activeRuns = runs.filter((run) => !isTerminalStatus(run.status)).length;
   const openIssues = issues.length;
-  const evidencePacks = reports.length;
+  const evidencePacks = reportsQuery.data?.total ?? reports.length;
 
   const runsLoading = runsQuery.isLoading;
   const runsError = runsQuery.isError ? runsQuery.error : null;

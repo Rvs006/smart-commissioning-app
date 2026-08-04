@@ -174,6 +174,7 @@ const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discov
 // fixing the listed rows and re-uploading surfaces the rest.
 const IMPORT_ERROR_DISPLAY_CAP = 50;
 const LONG_PAYLOAD_ISSUE_THRESHOLD = 8;
+const REPORT_PAGE_SIZE = 100;
 
 const validationModeCards = [
   {
@@ -569,7 +570,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Reports list for the reports page (per-report selection + Export selected).
   const reportsQuery = useQuery({
     enabled: module.route === "reports",
-    queryFn: ({ signal }) => listReports({ client: apiClient, signal }),
+    queryFn: ({ signal }) =>
+      listReports({ limit: REPORT_PAGE_SIZE }, { client: apiClient, signal }),
     queryKey: queryKeys.reports(sessionScopeId, workspaceRef),
   });
 
@@ -1388,6 +1390,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // branch the list shows — the map below still walks the full module.runActions
   // and each dispatch uses a stable action id rather than an array position.
   const visibleRunActions = module.runActions.filter((action) => !action.hiddenFromRunControls);
+  const reportRunActions = module.runActions.filter(
+    (action): action is Extract<ModuleRunAction, { kind: "report" }> =>
+      action.kind === "report",
+  );
 
   // Index of the UDMI validation run action, used by the Schedule & Payload
   // Evidence "Execute capture" button — the only visible trigger for this run
@@ -2659,9 +2665,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // One results-table data row. Shared by the flat (discovery) render and the
   // grouped-by-asset render (ITEM-7) so the two can never drift. Selection is
   // keyed to the evidence fields, so a response reorder cannot move it.
-  const renderResultRow = ({ row }: { row: Record<string, string>; index: number }) => {
-    const rowId = resultIdentity(module.route, row);
-    const selected = selectedResultId === rowId;
+  const renderResultRow = ({ row, index }: { row: Record<string, string>; index: number }) => {
+    const evidenceId = resultIdentity(module.route, row);
+    const rowId = `${evidenceId}:${index}`;
+    const selected = selectedResultId === evidenceId;
     // Live-UDMI rows carry a real issue count; name it on the View affordance so
     // the button reads as "holds N issues", not a bare "View" (ITEM-D). Honest:
     // the count is only claimed when the row actually has issues.
@@ -2790,7 +2797,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}`}
         data-step={step}
       >
-        <section className="app-grid two-col" data-stepgroup="setup run">
+        {module.route !== "reports" && (
+          <section className="app-grid two-col" data-stepgroup="setup run">
           <article className="surface">
             <div className="surface-heading">
               <div>
@@ -3358,7 +3366,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             )}
           </article>
-        </section>
+          </section>
+        )}
 
         {module.route === "data-validation" && (
           <section className="surface" data-stepgroup="setup">
@@ -4189,6 +4198,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </h3>
               </div>
               <div className="report-list-actions">
+                {reportRunActions.map((action) => (
+                  <button
+                    className="secondary-button compact"
+                    disabled={runMutation.isPending || !canEngineer}
+                    key={action.id}
+                    onClick={() => runMutation.mutate(action.id)}
+                    title={canEngineer ? action.helper : ENGINEER_REQUIRED_TOOLTIP}
+                    type="button"
+                  >
+                    {runMutation.isPending ? "Generating..." : action.label}
+                  </button>
+                ))}
                 <button
                   className="secondary-button compact"
                   disabled={
@@ -4225,10 +4246,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </div>
             <p className="section-copy">
-              Every report you generate here is stored against its run and listed below. Generate a
-              report from the Run Controls above, or use "Generate report from this run" on a
-              completed discovery or validation run elsewhere — it will appear here, traceable to
-              the run it came from.
+              Every report generated here is stored against its source run and listed below. Use
+              the format actions above, or generate a report from a completed discovery or
+              validation run elsewhere. Each entry remains traceable to the run it came from.
             </p>
             {reportToast && (
               <div
@@ -4252,7 +4272,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <span>{reportDeleteNotice}</span>
               </div>
             )}
-            <div className="data-table-wrap">
+            <div className="data-table-wrap results-scroll" aria-label="Generated report list">
               {liveReports.length > 0 ? (
                 <table className="data-table">
                   <thead>

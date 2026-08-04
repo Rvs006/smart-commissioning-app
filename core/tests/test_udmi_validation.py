@@ -225,6 +225,65 @@ class SchemaVersionMatchTests(unittest.TestCase):
         self.assertIn("Expected manufacturer is missing", descriptions)
         self.assertIn("Expected model is missing", descriptions)
 
+    def test_state_shaped_metadata_payload_is_one_grouped_routing_finding(self) -> None:
+        metadata = {
+            "version": "1.5.2",
+            "timestamp": "2026-07-09T10:00:00Z",
+            "system": {
+                "last_config": "2026-07-09T09:59:00Z",
+                "operation": {"operational": True},
+            },
+        }
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(
+                    metadata_topic="site/EM-1/metadata",
+                ),
+                "metadata_topic": "site/EM-1/metadata",
+                "metadata_payload": metadata,
+                "raw_evidence_uri": "runtime://evidence/run-1/metadata.json",
+            },
+            live_capture=None,
+        )
+
+        routing = [issue for issue in result.issues if issue.issue_type == "payload_routing"]
+        metadata_noise = [
+            issue
+            for issue in result.issues
+            if issue.issue_type == "metadata_validation"
+        ]
+        self.assertEqual(len(routing), 1, result.issues)
+        self.assertEqual(metadata_noise, [])
+        self.assertEqual(routing[0].topic, "site/EM-1/metadata")
+        self.assertEqual(routing[0].match_basis, "state_on_metadata")
+        self.assertIn("operational", routing[0].observed_value or "")
+        self.assertIn("last_config", routing[0].observed_value or "")
+        self.assertEqual(
+            routing[0].raw_evidence_uri,
+            "runtime://evidence/run-1/metadata.json",
+        )
+
+    def test_state_shaped_metadata_preserves_actual_topic_separately(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(metadata_topic="site/EM-1/metadata"),
+                "metadata_topic": "site/EM-1/metadata",
+                "metadata_payload_topic": "site/EM-1/state",
+                "metadata_payload": {
+                    "version": "1.5.2",
+                    "system": {"operation": {"operational": True}},
+                },
+            },
+            live_capture=None,
+        )
+
+        routing = [issue for issue in result.issues if issue.issue_type == "payload_routing"]
+        self.assertEqual(len(routing), 1, result.issues)
+        self.assertEqual(routing[0].topic, "site/EM-1/state")
+        self.assertEqual(routing[0].expected_value, "site/EM-1/metadata")
+        self.assertIn("site/EM-1/state", routing[0].description)
+        self.assertIn("site/EM-1/metadata", routing[0].description)
+
     def test_payload_view_uses_udmi_field_names_for_expectations(self) -> None:
         result = validate_udmi_full_report(
             {
@@ -2535,6 +2594,23 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         missing_issues = [issue for issue in result.issues if issue.issue_type == "not_publishing"]
         self.assertTrue(any("site/a2/state" in issue.description for issue in missing_issues))
         self.assertNotIn("UDMI assets", {issue.asset_id for issue in result.issues})
+
+    def test_shared_indefinite_backstop_is_a_non_pass_termination(self) -> None:
+        capture = RecordingCapture([_msg("site/a1/state")])
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 0,
+                "assets": [
+                    {"expected_schedule": {"asset_id": "A1"}, "state_topic": "site/a1/state"},
+                    {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(result.result_summary["termination_reason"], "backstop_elapsed")
+        self.assertFalse(result.result_summary["window_completed"])
 
     def test_unsafe_disjoint_roots_disable_unexpected_publisher_measurement(self) -> None:
         capture = RecordingCapture([_msg("site/a1/state"), _msg("other/a2/state")])

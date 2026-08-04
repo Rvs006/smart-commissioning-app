@@ -449,6 +449,10 @@ export type ReportSummary = {
 
 export type ReportListResponse = {
   reports: ReportSummary[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
 };
 
 export type DeleteReportsResponse = {
@@ -1362,8 +1366,19 @@ export function createReport(input: {
   }, input.context);
 }
 
-export function listReports(context?: ApiRequestContext): Promise<ReportListResponse> {
-  return request<ReportListResponse>("/reports", undefined, context);
+export function listReports(
+  params?: { limit?: number; offset?: number },
+  context?: ApiRequestContext,
+): Promise<ReportListResponse> {
+  const search = new URLSearchParams();
+  if (typeof params?.limit === "number") {
+    search.set("limit", String(params.limit));
+  }
+  if (typeof params?.offset === "number") {
+    search.set("offset", String(params.offset));
+  }
+  const query = search.toString();
+  return request<ReportListResponse>(`/reports${query ? `?${query}` : ""}`, undefined, context);
 }
 
 export function deleteReports(input: {

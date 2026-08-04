@@ -5,7 +5,7 @@ from io import BytesIO
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -153,8 +153,21 @@ def create_report(request: ReportRequest) -> ReportSummary:
 
 
 @router.get("", response_model=ReportListResponse, dependencies=[Depends(require_viewer)])
-def list_reports() -> ReportListResponse:
-    return ReportListResponse(reports=[_to_report_summary(run) for run in service.list_report_records()])
+def list_reports(
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> ReportListResponse:
+    total = service.count_report_records()
+    return ReportListResponse(
+        reports=[
+            _to_report_summary(run)
+            for run in service.list_report_records(limit=limit, offset=offset)
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=offset + limit < total,
+    )
 
 
 class ReportExportRequest(BaseModel):
