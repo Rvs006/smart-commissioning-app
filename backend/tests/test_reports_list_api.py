@@ -139,6 +139,7 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertEqual(listed["source_run_ids"], requested_order)
 
     def test_report_list_honours_a_bounded_page_limit_and_offset(self) -> None:
+        baseline_total = self.client.get("/api/v1/reports").json()["total"]
         first = self._create_report([])
         second = self._create_report([])
         third = self._create_report([])
@@ -153,10 +154,10 @@ class ReportListProjectionTests(ApiTestCase):
         )
         self.assertNotIn(third["report_id"], {row["report_id"] for row in listed})
         body = limited.json()
-        self.assertEqual(body["total"], 3)
+        self.assertEqual(body["total"], baseline_total + 3)
         self.assertEqual(body["limit"], 2)
         self.assertEqual(body["offset"], 1)
-        self.assertFalse(body["has_more"])
+        self.assertEqual(body["has_more"], 1 + 2 < baseline_total + 3)
 
     def test_report_list_rejects_an_unbounded_limit(self) -> None:
         response = self.client.get("/api/v1/reports?limit=101")
