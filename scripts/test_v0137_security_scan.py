@@ -34,6 +34,16 @@ class V0137SecurityScanTests(unittest.TestCase):
             failures = scan.scan([path])
         self.assertEqual(failures, [])
 
+    def test_ignores_cpe_metadata_containing_passwd_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "SBOM.json"
+            path.write_text(
+                '{"cpe":"cpe:2.3:a:base-passwd:base-passwd:3.6.7:*:*:*:*:*:*:*"}\n',
+                encoding="utf-8",
+            )
+            failures = scan.scan([path])
+        self.assertEqual(failures, [])
+
     def test_scans_zip_members_including_docx_and_xlsx_shapes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "release-evidence.docx"

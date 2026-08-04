@@ -28,7 +28,8 @@ _ASSIGNMENT = re.compile(
     r"(?i)(?<![\w.])(?:[A-Za-z][A-Za-z0-9]*(?:[_ -][A-Za-z0-9]+)*[_ -])?"
     r"(?:password|passwd|secret|private[_ -]?key|api[_ -]?key|access[_ -]?token)"
     r"(?![_A-Za-z0-9])"
-    r"\s*[=:]\s*(?:[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']|(?P<bare>[^\s,#,(){}\[\];\"']{8,}))"
+    r"\s*(?:=|:\s+|:\s*(?=[\"']))\s*"
+    r"(?:[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']|(?P<bare>[^\s,#,(){}\[\];\"']{8,}))"
 )
 _MOSQUITTO_SECRET = re.compile(r"(?i)\bmosquitto_(?:pub|sub)\b[^\r\n]*(?:\s-P|\s--password)\s+([^\s]+)")
 _SAFE_VALUE = re.compile(
