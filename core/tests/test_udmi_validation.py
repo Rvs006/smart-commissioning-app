@@ -225,6 +225,44 @@ class SchemaVersionMatchTests(unittest.TestCase):
         self.assertIn("Expected manufacturer is missing", descriptions)
         self.assertIn("Expected model is missing", descriptions)
 
+    def test_state_shaped_metadata_payload_is_one_grouped_routing_finding(self) -> None:
+        metadata = {
+            "version": "1.5.2",
+            "timestamp": "2026-07-09T10:00:00Z",
+            "system": {
+                "last_config": "2026-07-09T09:59:00Z",
+                "operation": {"operational": True},
+            },
+        }
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(
+                    metadata_topic="site/EM-1/metadata",
+                ),
+                "metadata_topic": "site/EM-1/metadata",
+                "metadata_payload": metadata,
+                "raw_evidence_uri": "runtime://evidence/run-1/metadata.json",
+            },
+            live_capture=None,
+        )
+
+        routing = [issue for issue in result.issues if issue.issue_type == "payload_routing"]
+        metadata_noise = [
+            issue
+            for issue in result.issues
+            if issue.issue_type == "metadata_validation"
+        ]
+        self.assertEqual(len(routing), 1, result.issues)
+        self.assertEqual(metadata_noise, [])
+        self.assertEqual(routing[0].topic, "site/EM-1/metadata")
+        self.assertEqual(routing[0].match_basis, "state_on_metadata")
+        self.assertIn("operational", routing[0].observed_value or "")
+        self.assertIn("last_config", routing[0].observed_value or "")
+        self.assertEqual(
+            routing[0].raw_evidence_uri,
+            "runtime://evidence/run-1/metadata.json",
+        )
+
     def test_payload_view_uses_udmi_field_names_for_expectations(self) -> None:
         result = validate_udmi_full_report(
             {

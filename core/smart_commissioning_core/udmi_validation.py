@@ -426,6 +426,95 @@ def _nested(payload: object, *keys: str) -> object:
     return node
 
 
+_STATE_SHAPED_METADATA_KEYS = frozenset({"operational", "last_config"})
+
+
+def _state_shaped_metadata_evidence(payload: dict[str, Any]) -> list[str]:
+    """Return state-only key paths found in a payload assigned to metadata.
+
+    ``operational`` and ``last_config`` are valid evidence of state content but
+    are not metadata fields in the canonical UDMI payload. Keeping the paths
+    rather than the whole body gives the operator an actionable routing hint
+    without copying private payload content into the issue row.
+    """
+
+    matches: list[str] = []
+
+    def visit(node: object, path: tuple[str, ...] = ()) -> None:
+        if not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            key_text = str(key)
+            current_path = (*path, key_text)
+            if key_text in _STATE_SHAPED_METADATA_KEYS:
+                rendered = ".".join(current_path)
+                if isinstance(value, bool):
+                    rendered += f"={str(value).lower()}"
+                elif value is not None and not isinstance(value, (dict, list)):
+                    rendered += f"={value}"
+                matches.append(rendered)
+            if isinstance(value, dict):
+                visit(value, current_path)
+
+    visit(payload)
+    return sorted(set(matches))
+
+
+def _metadata_topic_hint(parameters: dict[str, object], expected: dict[str, Any]) -> str:
+    """Return the raw/expected metadata topic when the caller recorded one."""
+
+    for source in (parameters, expected):
+        for key in ("metadata_topic", "raw_topic"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        expected_topic = source.get("expected_topic")
+        if isinstance(expected_topic, str) and expected_topic.strip().endswith("/metadata"):
+            return expected_topic.strip()
+    return ""
+
+
+def _state_on_metadata_issue(
+    *,
+    parameters: dict[str, object],
+    expected: dict[str, Any],
+    metadata_payload: dict[str, Any],
+    asset_id: str,
+    raw_evidence_uri: str,
+) -> ValidationIssueRecord | None:
+    evidence = _state_shaped_metadata_evidence(metadata_payload)
+    if not evidence:
+        return None
+    raw_topic = _metadata_topic_hint(parameters, expected)
+    # A direct payload fixture can legitimately use the metadata slot while
+    # omitting topic provenance. Without a raw/expected metadata topic there is
+    # not enough evidence to call the shape a routing error.
+    if not raw_topic:
+        return None
+    expected_topic = raw_topic
+    return _issue(
+        [],
+        asset_id=asset_id,
+        issue_type="payload_routing",
+        severity="high",
+        description=(
+            "The raw payload assigned to the metadata slot is state-shaped, which "
+            "usually means the publisher routed a state payload to the metadata "
+            f"topic. Raw payload type: metadata; raw topic: {raw_topic or 'not recorded'}; "
+            f"expected topic: {expected_topic}; key evidence: {', '.join(evidence)}."
+        ),
+        topic=raw_topic or None,
+        expected_value=expected_topic,
+        observed_value="; ".join(evidence),
+        match_basis="state_on_metadata",
+        suggested_action=(
+            "Publish the metadata payload on the register's metadata topic and keep "
+            "state fields such as operational and last_config on the state topic."
+        ),
+        raw_evidence_uri=raw_evidence_uri,
+    )
+
+
 # Register field -> (observed UDMI location, issue type, severity, description,
 # action, observed leaf key(s), canonical dot-path). manufacturer/model/serial/
 # firmware read the STATE payload; guid/site/room read METADATA. Paths follow
@@ -660,6 +749,16 @@ def _review_payload_issues(
     if uploaded_schemas is None:
         uploaded_schemas = _nonpub_schema_sets(parameters)
 
+    state_on_metadata = _state_on_metadata_issue(
+        parameters=parameters,
+        expected=expected,
+        metadata_payload=metadata_payload,
+        asset_id=asset_id,
+        raw_evidence_uri=raw_evidence_uri,
+    )
+    if state_on_metadata is not None:
+        issues.append(state_on_metadata)
+
     # Register identity values that can never fit canonical UDMI are reported
     # by name; the template embeds a schema-valid placeholder for them instead
     # of failing wholesale (see _METADATA_REGISTER_FIELDS).
@@ -710,6 +809,12 @@ def _review_payload_issues(
         ("pointset", pointset_payload, "pointset_payload" in parameters),
     ):
         if not present:
+            continue
+        if payload_type == "metadata" and state_on_metadata is not None:
+            # The raw metadata evidence is retained by the grouped routing
+            # issue. Running it through the metadata schema as well would turn
+            # one likely publisher mistake into a noisy list of secondary
+            # property/point findings.
             continue
         issue_type = _PAYLOAD_ISSUE_TYPES[payload_type]
         payload_version = declared_version(payload)
@@ -804,7 +909,7 @@ def _review_payload_issues(
     expected_location_fields = [
         field for field in ("site", "room") if expected.get(field)
     ]
-    if metadata_present and expected_location_fields:
+    if metadata_present and expected_location_fields and state_on_metadata is None:
         system_value = metadata_payload.get("system")
         location_value = (
             system_value.get("location") if isinstance(system_value, dict) else None
@@ -847,6 +952,8 @@ def _review_payload_issues(
     # manufacturer/model/serial/firmware/guid/site/room: flag missing or
     # differing expected values when the corresponding payload was captured.
     for expected_key, observed_getter, issue_type, severity, description, action, leaf_keys, canonical_path in _IDENTITY_CHECKS:
+        if issue_type == "metadata_validation" and state_on_metadata is not None:
+            continue
         expected_value = expected.get(expected_key)
         observed = observed_getter(state_payload, metadata_payload)
         # A getter may return one value or a list of candidate values (the
@@ -895,7 +1002,7 @@ def _review_payload_issues(
     # Tolerate malformed shapes (pointset/points as a non-object) so a bad
     # payload yields structural issues above instead of crashing the run.
     metadata_points = _dict_or_empty(_dict_or_empty(metadata_payload.get("pointset")).get("points")) if metadata_payload else {}
-    if metadata_payload and not metadata_points:
+    if metadata_payload and not metadata_points and state_on_metadata is None:
         # On-site 2026-07-13: a publisher nested the whole pointset under
         # 'system', so every register point read "not defined in the metadata
         # pointset" while plainly visible in MQTT Explorer. Report the wrong
@@ -1182,7 +1289,7 @@ def _review_payload_issues(
     # pointset definition, not only in the live pointset events. Checked only
     # when a metadata payload was actually supplied/captured, so a missing
     # payload is reported once (capture/not-publishing) rather than per point.
-    if metadata_payload:
+    if metadata_payload and state_on_metadata is None:
         metadata_point_names = set(str(point) for point in metadata_points)
         for point_name in sorted(expected_points - metadata_point_names):
             issues.append(
@@ -3387,6 +3494,7 @@ def _issue(
         "pointset_timestamp": "UDMI-TS",
         "state_validation": "UDMI-ST",
         "metadata_validation": "UDMI-MD",
+        "payload_routing": "UDMI-RT",
         "topic_mismatch": "UDMI-TP",
         "register_import": "UDMI-RG",
     }.get(issue_type, "UDMI-IS")

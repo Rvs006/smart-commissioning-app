@@ -185,6 +185,7 @@ def payload_type_for_issue(issue: object) -> str | None:
     direct = {
         "state_validation": "state",
         "metadata_validation": "metadata",
+        "payload_routing": "metadata",
         "pointset_validation": "pointset",
         "pointset_timestamp": "pointset",
     }.get(issue_type)
@@ -231,6 +232,7 @@ def fault_category_for_issue(issue: object) -> str:
         return "missing_points"
     if issue_type in {
         "payload_error",
+        "payload_routing",
         "state_validation",
         "metadata_validation",
         "pointset_validation",
