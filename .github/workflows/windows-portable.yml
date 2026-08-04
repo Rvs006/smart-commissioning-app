@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.36
+        default: v0.1.37
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -22,7 +22,7 @@ on:
       - "scripts/**"
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
-      - "docs/migration-rollback-v0.1.36.md"
+      - "docs/migration-rollback-v0.1.37.md"
       - ".github/workflows/windows-portable.yml"
   push:
     branches: [main]
@@ -35,7 +35,7 @@ on:
       - "scripts/**"
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
-      - "docs/migration-rollback-v0.1.36.md"
+      - "docs/migration-rollback-v0.1.37.md"
       - ".github/workflows/windows-portable.yml"
 
 permissions:
@@ -46,7 +46,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.36' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.37' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -71,8 +71,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.36') {
-            throw "This workflow is pinned to v0.1.36, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.37') {
+            throw "This workflow is pinned to v0.1.37, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -153,7 +153,7 @@ jobs:
               Set-Content -LiteralPath $npmSbom -Encoding utf8
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.36.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.37.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
 
       - name: Portable acceptance path with spaces, heartbeat, Stop, report, and logs
@@ -277,7 +277,7 @@ jobs:
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/validate_v0136_release_evidence.py `
+          python scripts/validate_v0137_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `
@@ -300,6 +300,12 @@ jobs:
             --require-test portable_frontend_build_stamp `
             --require-test portable_sqlite_lease_configuration `
             --require-test portable_sqlite_heartbeat_renewals
+
+      - name: Scan Windows portable evidence for credential material
+        shell: pwsh
+        run: |
+          python scripts/scan_v0137_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload bundle artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

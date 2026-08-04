@@ -210,6 +210,8 @@ def validate_udmi_full_report(
         # The window the capture actually ran with (None = indefinite), so an
         # operator-entered duration that was defaulted or bounded is visible.
         "capture_window_seconds": capture_summary.get("capture_window_seconds"),
+        "window_completed": capture_summary.get("window_completed"),
+        "termination_reason": capture_summary.get("termination_reason"),
         "captured_topics": capture_summary["captured_topics"],
         "subscribed_topics": capture_summary.get("subscribed_topics", []),
         "unexpected_device_count": len(_unexpected_devices(parameters)),
@@ -485,13 +487,17 @@ def _state_on_metadata_issue(
     evidence = _state_shaped_metadata_evidence(metadata_payload)
     if not evidence:
         return None
-    raw_topic = _metadata_topic_hint(parameters, expected)
+    actual_topic_value = parameters.get("metadata_payload_topic")
+    actual_topic = actual_topic_value.strip() if isinstance(actual_topic_value, str) else ""
+    configured_topic_value = parameters.get("metadata_topic") or expected.get("metadata_topic")
+    configured_topic = configured_topic_value.strip() if isinstance(configured_topic_value, str) else ""
+    raw_topic = actual_topic or _metadata_topic_hint(parameters, expected)
     # A direct payload fixture can legitimately use the metadata slot while
     # omitting topic provenance. Without a raw/expected metadata topic there is
     # not enough evidence to call the shape a routing error.
     if not raw_topic:
         return None
-    expected_topic = raw_topic
+    expected_topic = configured_topic or raw_topic
     return _issue(
         [],
         asset_id=asset_id,
@@ -1494,6 +1500,7 @@ def _route_latest_payloads(parameters: dict[str, object], messages: list[MqttMes
             latest[key] = message
     for key, message in latest.items():
         parameters[key] = message.json_payload()
+        parameters[f"{key}_topic"] = message.topic
         parameters[f"{key}_retained"] = message.retained
         parameters[f"{key}_received_at"] = message.received_at.isoformat()
 
@@ -1842,6 +1849,7 @@ def _capture_live_payloads(
     groups = _capture_topic_groups(topics)
     parameters["subscribed_topics"] = list(topics)
     capture_error_status: str | None = None
+    capture_cancelled = False
     latest_progress_messages: dict[str, MqttMessage] = {}
     progress_message_count = 0
     progress_state_lock = threading.Lock()
@@ -1874,6 +1882,12 @@ def _capture_live_payloads(
         if progress_callback is not None:
             progress_callback(build_progress_snapshot)
 
+    def capture_cancel_check() -> bool:
+        nonlocal capture_cancelled
+        if not capture_cancelled and cancel_check is not None:
+            capture_cancelled = bool(cancel_check())
+        return capture_cancelled
+
     try:
         messages = live_capture(
             build_mqtt_connection_settings(parameters),
@@ -1884,7 +1898,7 @@ def _capture_live_payloads(
             timeout_seconds=timeout_seconds if timeout_seconds is not None else INDEFINITE_BACKSTOP_SECONDS,
             max_messages=parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES),
             qos=parse_int(parameters.get("qos"), default=0),
-            cancel_check=cancel_check,
+            cancel_check=capture_cancel_check if cancel_check is not None else None,
             stop_when=_capture_stop_when(groups),
             on_message=on_message,
         )
@@ -1901,6 +1915,8 @@ def _capture_live_payloads(
             "status_detail": broker_status_detail,
             "capture_mode": capture_mode,
             "capture_window_seconds": timeout_seconds,
+            "window_completed": False,
+            "termination_reason": "broker_interruption",
             "captured_topics": [],
             "issue": _capture_error_issue(
                 asset_id=str(_dict_or_empty(parameters.get("expected_schedule")).get("asset_id") or "UDMI asset"),
@@ -1922,12 +1938,25 @@ def _capture_live_payloads(
     valid_messages = _valid_payload_messages(messages)
     valid_topics = _ordered_valid_payload_topics(messages)
     missing = _unseen_groups(groups, {message.topic for message in valid_messages})
+    if capture_cancelled:
+        termination_reason = "cancelled"
+    elif len(messages) >= parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES):
+        termination_reason = "message_cap"
+    elif timeout_seconds is not None and missing:
+        termination_reason = "window_elapsed"
+    elif missing:
+        termination_reason = "backstop_elapsed"
+    else:
+        termination_reason = "required_topics_received"
+    window_completed = termination_reason == "window_elapsed"
     if capture_error_status:
         return {
             "attempted": True,
             "status_detail": capture_error_status,
             "capture_mode": capture_mode,
             "capture_window_seconds": timeout_seconds,
+            "window_completed": False,
+            "termination_reason": "broker_interruption",
             "captured_topics": valid_topics,
             "subscribed_topics": list(topics),
             "issue": _capture_error_issue(
@@ -1942,6 +1971,8 @@ def _capture_live_payloads(
         ),
         "capture_mode": capture_mode,
         "capture_window_seconds": timeout_seconds,
+        "window_completed": window_completed,
+        "termination_reason": termination_reason,
         "captured_topics": valid_topics,
         "subscribed_topics": list(topics),
         "issue": None
@@ -2427,6 +2458,8 @@ def _capture_live_payloads_per_asset(
             "status_detail": broker_status_detail,
             "capture_mode": capture_mode,
             "capture_window_seconds": timeout_seconds,
+            "window_completed": False,
+            "termination_reason": "broker_interruption",
             "captured_topics": [],
             "issue": _capture_error_issue(asset_id=None, status_detail=broker_status_detail),
         }
@@ -2516,22 +2549,39 @@ def _capture_live_payloads_per_asset(
             else "completed"
         )
     )
-    persist_asset_topic_discovery(
-        capture_complete=diagnostic_capture_complete,
-        capture_status=diagnostic_capture_status,
-    )
-
     # Measurement-only wildcard traffic must never become a validation issue.
     # It is retained solely for the separate unexpected-device summary above.
     valid_messages = _valid_payload_messages(validation_messages)
     valid_topics = _ordered_valid_payload_topics(validation_messages)
     missing = _unseen_groups(groups, {message.topic for message in valid_messages})
     if capture_error_status:
+        termination_reason = "broker_interruption"
+    elif capture_cancelled:
+        termination_reason = "cancelled"
+    elif expected_topic_count >= max_messages:
+        termination_reason = "message_cap"
+    elif timeout_seconds is None and missing:
+        termination_reason = "backstop_elapsed"
+    elif timeout_seconds is not None and measurement_scope:
+        termination_reason = "window_elapsed"
+    elif timeout_seconds is not None and missing:
+        termination_reason = "window_elapsed"
+    else:
+        termination_reason = "required_topics_received"
+    window_completed = termination_reason == "window_elapsed"
+    persist_asset_topic_discovery(
+        capture_complete=diagnostic_capture_complete,
+        capture_status=diagnostic_capture_status,
+    )
+
+    if capture_error_status:
         return {
             "attempted": True,
             "status_detail": capture_error_status,
             "capture_mode": capture_mode,
             "capture_window_seconds": timeout_seconds,
+            "window_completed": False,
+            "termination_reason": termination_reason,
             "captured_topics": valid_topics,
             "subscribed_topics": list(topics),
             "issue": _capture_error_issue(asset_id=None, status_detail=capture_error_status),
@@ -2543,6 +2593,8 @@ def _capture_live_payloads_per_asset(
         ),
         "capture_mode": capture_mode,
         "capture_window_seconds": timeout_seconds,
+        "window_completed": window_completed,
+        "termination_reason": termination_reason,
         "captured_topics": valid_topics,
         "subscribed_topics": list(topics),
         "issue": None

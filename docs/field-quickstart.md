@@ -72,9 +72,9 @@ filter it, and hit **Export CSV** for the whole list - no digging through files.
 
 This is a field test: a successful portable smoke test does not prove the MSI broker or devices until this run completes on site.
 
-### Large-register acceptance for v0.1.36
+### Large-register acceptance for v0.1.37
 
-Use the dedicated [v0.1.36 field acceptance checklist](v0.1.36-field-acceptance-checklist.md)
+Use the dedicated [v0.1.37 field acceptance checklist](v0.1.37-field-acceptance-checklist.md)
 for the unfiltered large-register run. With no positive `max_messages` value,
 register-driven capture uses the larger of 500 or its concrete validation-filter
 count. Confirm that the automatic capacity is at least the calculated count and
@@ -88,7 +88,7 @@ the second run must cover the longest expected payload cadence.
 
 For every asset observed by the independent collector but absent from the app,
 record its raw exact topic, receive time, expected register topic, app
-classification, and approved subscription scope in the v0.1.36 reconciliation
+classification, and approved subscription scope in the v0.1.37 reconciliation
 table. An in-scope raw message that does not associate with its registered
 asset remains a defect until reproduced and resolved.
 
@@ -97,8 +97,9 @@ bounded register scope unless an all-topic capture is specifically approved;
 finding an asset ID on another topic does not make the required payload observed
 or valid.
 
-For an independent raw capture, use `scripts/capture_mqtt_evidence.py`. It writes
-one append-only JSONL record per message with the exact topic and receive time;
+For an independent raw capture, use `scripts/capture_mqtt_evidence.py`. For a
+v0.1.37 acceptance run, include `--acceptance --manifest <MANIFEST> --run-id
+<GATE_RUN_ID>`. It writes one append-only JSONL record per message with the exact topic and receive time;
 it never flattens topic paths or overwrites an earlier message. Supply the
 password through a process-scoped `SC_CAPTURE_MQTT_PASSWORD` environment
 variable (ideally injected by the site's secret manager) or the hidden prompt.

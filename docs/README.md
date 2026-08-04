@@ -7,7 +7,7 @@ old handoff still says "ready to send."
 Status meanings:
 
 - **Current**: maintained guidance for the present codebase.
-- **Candidate**: v0.1.36 material that still needs field acceptance evidence.
+- **Candidate**: v0.1.37 material that still needs field acceptance evidence.
 - **Versioned**: accurate for the named release and retained for rollback or
   audit work.
 - **Historical**: a completed plan, sent message, or dated review record.
@@ -41,23 +41,26 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Hosted Docker | v0.1.36 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.36.md) |
+| Hosted Docker | v0.1.37 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.37.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
-| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md) |
+| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.36 candidate
+## v0.1.37 candidate
 
-Field acceptance is open. These files define the evidence-led live console,
-release gate, and rollback route for the current candidate.
+Field acceptance is open. These files define the application gate, evidence
+manifest, two field gates, release gate, and rollback route for the current
+candidate.
 
-- [Release notes](release-notes-v0.1.36.md)
-- [Release validation record](release-validation-v0.1.36.md)
-- [Migration and rollback](migration-rollback-v0.1.36.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.36.md)
-- [Field acceptance checklist](v0.1.36-field-acceptance-checklist.md)
+- [Release notes](release-notes-v0.1.37.md)
+- [Release validation record](release-validation-v0.1.37.md)
+- [Migration and rollback](migration-rollback-v0.1.37.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.37.md)
+- [Field acceptance checklist](v0.1.37-field-acceptance-checklist.md)
+- [Issue matrix](v0.1.37-issue-matrix.md)
+- [Implementation handoff](handoff-v0.1.37-2026-08-04.md)
 
 ## v0.1.30 candidate record
 
@@ -93,7 +96,7 @@ Blocking release records are retained for
 [v0.1.29](release-validation-v0.1.29.md), and the
 [v0.1.30 candidate](release-validation-v0.1.30.md),
 [v0.1.31 candidate](release-validation-v0.1.31.md), and the
-[v0.1.36 candidate](release-validation-v0.1.36.md).
+[v0.1.37 candidate](release-validation-v0.1.37.md).
 
 ## Historical field communication
 

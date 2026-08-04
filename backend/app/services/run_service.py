@@ -12,7 +12,7 @@ from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.owned_run_store import OwnedRunStore
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -602,17 +602,23 @@ class RunService:
             for row in rows
         ]
 
-    def list_report_records(self) -> list[RunRecord]:
+    def list_report_records(self, *, limit: int = 100, offset: int = 0) -> list[RunRecord]:
         """Return report runs with their persisted metadata in one query.
 
         The Reports list needs the stored parameters to form names and source
         run links.  Fetching summaries and then calling ``get_run`` for every
-        row turns a simple page load into an N+1 query pattern.
+        row turns a simple page load into an N+1 query pattern. The explicit
+        page bounds keep a large historical archive from becoming an unbounded
+        response or DOM render.
         """
+        safe_limit = max(1, min(int(limit), 100))
+        safe_offset = max(0, int(offset))
         statement = (
             select(Run)
             .where(Run.job_type == "report_generation")
             .order_by(Run.created_at.desc(), Run.id.desc())
+            .offset(safe_offset)
+            .limit(safe_limit)
         )
         with session_factory(self._engine)() as session:
             rows = session.scalars(statement).all()
@@ -637,6 +643,11 @@ class RunService:
                 )
                 for row in rows
             ]
+
+    def count_report_records(self) -> int:
+        statement = select(func.count()).select_from(Run).where(Run.job_type == "report_generation")
+        with session_factory(self._engine)() as session:
+            return int(session.scalar(statement) or 0)
 
     def runtime_ready(self) -> tuple[bool, str]:
         try:

@@ -87,6 +87,11 @@
     -Version and re-verify their digests, evidence, SBOMs, and contained exe
     hash. A harmless, read-only way to exercise this script end to end.
 
+.PARAMETER PrepareOnly
+    Perform the publish-path artifact, provenance, notes, and checksum checks,
+    then print the final publish command without creating or publishing a
+    GitHub Release. This is the required pre-authorization path.
+
 .PARAMETER Historical
     Publish or verify a Windows-only rebuild from the historical workflow. The
     original tag SHA remains the release identity, while the workflow may apply
@@ -117,6 +122,9 @@ param(
 
     [Parameter(Mandatory, ParameterSetName = 'Publish')]
     [string]$NotesFile,
+
+    [Parameter(ParameterSetName = 'Publish')]
+    [switch]$PrepareOnly,
 
     [string]$Title,
 
@@ -1366,7 +1374,7 @@ try {
     Write-Host "gh       : $script:Gh"
     Write-Host "repo     : $RepoSlug"
     Write-Host "version  : $Version"
-    Write-Host "mode     : $(if ($VerifyExisting) { 'VERIFY (read-only)' } else { 'PUBLISH' })"
+    Write-Host "mode     : $(if ($VerifyExisting) { 'VERIFY (read-only)' } elseif ($PrepareOnly) { 'PREPARE (no release mutation)' } else { 'PUBLISH' })"
 
     $requireV0127 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.27')
     $requireV0128 = ([version]($Version.TrimStart('v')) -ge [version]'0.1.28')
@@ -1879,6 +1887,25 @@ try {
         (New-Object Text.UTF8Encoding($false))
     )
     Write-Host "    wrote $resolvedNotes"
+
+    if ($PrepareOnly) {
+        $publishNotesPath = [IO.Path]::GetFullPath($NotesFile)
+        $publishCommand = @(
+            'powershell -NoProfile -File scripts/release-portable.ps1',
+            "-Version $Version",
+            "-RunId $($run.Id)",
+            "-ReleaseGateRunId $(if ($hostedRun) { $hostedRun.Id } else { '<RELEASE_GATE_RUN_ID>' })",
+            "-NotesFile `"$publishNotesPath`""
+        ) -join ' '
+        Write-Host ""
+        Write-Host "PREPARE ONLY OK - no GitHub release was created or published." -ForegroundColor Green
+        Write-Host "Verified source commit: $releaseSha"
+        Write-Host "Verified portable ZIP SHA-256: $zipHash"
+        Write-Host "Final publish command after explicit authorization:"
+        Write-Host "  $publishCommand"
+        Remove-Item -LiteralPath $stage -Recurse -Force
+        exit 0
+    }
 
     # 7. Create a non-public draft. Every release-side byte is downloaded and
     #    verified while the release is still a draft; publication is the final

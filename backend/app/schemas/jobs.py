@@ -354,6 +354,10 @@ class ReportSummary(BaseModel):
 
 class ReportListResponse(BaseModel):
     reports: list[ReportSummary] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 100
+    offset: int = 0
+    has_more: bool = False
 
 
 class ReportDeleteRequest(BaseModel):

@@ -5,6 +5,21 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.37] - 2026-08-04
+
+### Changed
+
+- Added hash-bound field-acceptance manifest and two-gate release validation
+  records. Field acceptance remains open pending private Gate A and Gate B
+  evidence.
+- Bounded report listing and the generated-report table while retaining frozen
+  report provenance and prior history.
+
+### Fixed
+
+- Grouped state-shaped metadata payloads into one actionable routing diagnostic.
+- Preserved exact topic-association outcomes and missing-evidence semantics.
+
 ## [0.1.36] - 2026-07-30
 
 ### Changed
