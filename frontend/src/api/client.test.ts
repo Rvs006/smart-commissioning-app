@@ -95,7 +95,7 @@ describe("session-bound client", () => {
   });
 });
 
-const healthPayload = { status: "ok", version: "0.1.37", timestamp: "2026-06-11T00:00:00Z" };
+const healthPayload = { status: "ok", version: "0.1.38", timestamp: "2026-06-11T00:00:00Z" };
 
 const sectionFixture = { status: "complete", values: {} };
 
@@ -348,6 +348,7 @@ describe("UDMI reporting API functions", () => {
       reportTitle: "Demo Campus Smart Validation",
       reportType: "udmi_validation",
       sourceRunIds: ["run-1"],
+      udmiReportVariant: "technical",
     });
 
     const [, init] = fetchMock.mock.calls[0];
@@ -356,6 +357,7 @@ describe("UDMI reporting API functions", () => {
       report_title: "Demo Campus Smart Validation",
       report_type: "udmi_validation",
       source_run_ids: ["run-1"],
+      udmi_report_variant: "technical",
     });
     expect(body).not.toHaveProperty("udmi_scope");
   });

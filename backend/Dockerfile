@@ -6,6 +6,9 @@ ARG APP_VERSION=dev
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_REPOSITORY=https://github.com/Rvs006/smart-commissioning-app
 
+ENV SMART_COMMISSIONING_APP_VERSION="${APP_VERSION}" \
+    SMART_COMMISSIONING_SOURCE_COMMIT="${SOURCE_COMMIT}"
+
 LABEL org.opencontainers.image.title="Smart Commissioning API" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${SOURCE_COMMIT}" \

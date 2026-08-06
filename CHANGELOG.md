@@ -5,6 +5,31 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.38] - 2026-08-06
+
+### Added
+
+- Client and technical UDMI report products with bounded, redacted raw evidence
+  and deterministic finding-to-evidence mappings.
+- Selected-report bundle manifests with member hashes and shared evidence-set
+  identity.
+- Portable and Docker build provenance carrying the release version, source
+  commit, and final EXE or image identity.
+
+### Changed
+
+- Capture completion, cancellation, truncation, applicability, topic routing,
+  payload type, and mismatch outcomes are reported as separate evidence states.
+- Core, API, worker, frontend, report renderer, and portable release markers
+  now identify v0.1.38 consistently.
+
+### Fixed
+
+- A one-minute operator Stop is retained as incomplete evidence instead of being
+  presented as a completed cadence window.
+- Missing values, received falsey values, unresolved applicability, unexpected
+  publishers, and wrong-topic observations no longer collapse into one metric.
+
 ## [0.1.37] - 2026-08-04
 
 ### Changed

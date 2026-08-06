@@ -32,6 +32,8 @@ export type IssueRow = {
   statusDetail?: string | null;
   // "Expected X, observed Y", already formatted (empty -> "empty") — ITEM-9.
   expectedObserved?: string;
+  // Explicit marker used by the Results issue cards when the two sides differ.
+  mismatch?: boolean;
   suggestedAction?: string | null;
   // The engine's point_name, when the issue is point-scoped. Combined with
   // matching provenance below to derive conservative legacy evidence paths.

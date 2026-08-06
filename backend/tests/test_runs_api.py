@@ -84,6 +84,15 @@ class RunsApiTests(ApiTestCase):
                 # Additive edge attribution for the multi-project hub; null for a
                 # locally created run.
                 "edge_id",
+                "validation_incomplete",
+                "capture_mode",
+                "capture_window_seconds",
+                "capture_started_at",
+                "capture_ended_at",
+                "capture_duration_seconds",
+                "window_completed",
+                "termination_reason",
+                "acceptance_eligible",
             },
             "list endpoint returns run summaries",
         )
@@ -102,6 +111,48 @@ class RunsApiTests(ApiTestCase):
 
         self.assertEqual(self.client.get("/api/v1/runs", params={"limit": 300}).status_code, 422)
         self.assertEqual(self.client.get("/api/v1/runs", params={"offset": -1}).status_code, 422)
+
+    def test_list_runs_backfills_legacy_acceptance_from_capture_metadata(self) -> None:
+        from app.services.run_service import RunService
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
+
+        accepted = self._create_udmi_run()["run_id"]
+        cancelled = self._create_udmi_run()["run_id"]
+        service = RunService()
+        summaries = {}
+        for run_id, completed in ((accepted, True), (cancelled, False)):
+            run = service.get_run(run_id)
+            summary = dict(run.result_summary)
+            summary.pop("acceptance_eligible", None)
+            summary.update(
+                {
+                    "broker_capture_attempted": True,
+                    "window_completed": completed,
+                    "termination_reason": (
+                        "window_elapsed" if completed else "cancelled"
+                    ),
+                }
+            )
+            summaries[run_id] = summary
+
+        with service.engine.begin() as connection:
+            for run_id, status, _completed in (
+                (accepted, "succeeded", True),
+                (cancelled, "cancelled", False),
+            ):
+                connection.execute(
+                    update(Run)
+                    .where(Run.id == run_id)
+                    .values(status=status, result_summary=summaries[run_id])
+                )
+
+        listed = {
+            run["run_id"]: run
+            for run in self.client.get("/api/v1/runs").json()["runs"]
+        }
+        self.assertTrue(listed[accepted]["acceptance_eligible"])
+        self.assertFalse(listed[cancelled]["acceptance_eligible"])
 
     def test_configuration_put_get_roundtrip_with_versioning(self) -> None:
         seeded = self.client.get("/api/v1/configuration")

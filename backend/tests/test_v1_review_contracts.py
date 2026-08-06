@@ -235,6 +235,17 @@ class ImportRegisterFlexibilityTests(unittest.TestCase):
         errors = self._mqtt(**{"Asset ID": "MTR-9", "Payload type": "telemetry"})
         self.assertIn("invalid_payload_type", [error.code for error in errors])
 
+    def test_payload_type_must_match_expected_topic_suffix(self) -> None:
+        errors = self._mqtt(
+            **{
+                "Asset ID": "MTR-9",
+                "Payload type": "state",
+                "Expected topic": "site/mtr-9/metadata",
+            }
+        )
+        self.assertEqual([error.code for error in errors], ["payload_topic_mismatch"])
+        self.assertEqual(errors[0].field, "Expected topic")
+
     def test_expected_units_may_be_blank_per_point_but_not_exceed_points(self) -> None:
         self.assertEqual(self._mqtt(**{"Asset ID": "MTR-9", "Expected units": "kwh"}), [])
         self.assertEqual(

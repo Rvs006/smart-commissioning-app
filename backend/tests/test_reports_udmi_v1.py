@@ -179,6 +179,7 @@ def _expected_detail_columns() -> tuple[str, ...]:
         "Point",
         "Expected",
         "Observed",
+        "Mismatch",
         "Suggested Action",
         "Description",
     )
@@ -433,6 +434,7 @@ class UdmiV1ReportTests(ApiTestCase):
         summary: dict | None = _V1_SUMMARY,
         parameters: dict | None = None,
         issues: list[dict] | None = None,
+        result_summary_extra: dict | None = None,
     ) -> str:
         from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
@@ -455,7 +457,12 @@ class UdmiV1ReportTests(ApiTestCase):
             expected_job_type=job_type,
         )
         frozen_summary = (
-            {"validation_summary_v1": summary} if summary is not None else None
+            {
+                "validation_summary_v1": summary,
+                **(result_summary_extra or {}),
+            }
+            if summary is not None
+            else None
         )
         if status in {"succeeded", "failed", "cancelled"}:
             finish_run(
@@ -510,6 +517,7 @@ class UdmiV1ReportTests(ApiTestCase):
         title: str | None = "  Site & <A> Validation  ",
         report_type: str = "udmi_validation",
         udmi_scope: dict | None = None,
+        udmi_report_variant: str = "technical",
     ) -> dict:
         payload: dict[str, object] = {
             "project_id": "demo-project",
@@ -522,6 +530,7 @@ class UdmiV1ReportTests(ApiTestCase):
             payload["report_title"] = title
         if udmi_scope is not None:
             payload["udmi_scope"] = udmi_scope
+        payload["udmi_report_variant"] = udmi_report_variant
         response = self.client.post("/api/v1/reports", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
@@ -564,6 +573,223 @@ class UdmiV1ReportTests(ApiTestCase):
                     report_type="udmi_validation",
                     report_title=title,
                 )
+
+    def test_report_formats_share_evidence_set_and_declare_full_scope(self) -> None:
+        source_id = self._seed_run(
+            result_summary_extra={
+                "broker_capture_attempted": True,
+                "capture_mode": "bounded",
+                "capture_window_seconds": 3600,
+                "capture_started_at": "2026-08-05T08:00:00+00:00",
+                "capture_ended_at": "2026-08-05T09:00:00+00:00",
+                "window_completed": True,
+                "termination_reason": "window_elapsed",
+            },
+        )
+
+        reports = [
+            self._create_report(output_format, [source_id])
+            for output_format in ("zip", "pdf", "docx", "xlsx")
+        ]
+
+        evidence_set_ids = {report["evidence_set_id"] for report in reports}
+        self.assertEqual(len(evidence_set_ids), 1)
+        evidence_set_id = next(iter(evidence_set_ids))
+        self.assertRegex(evidence_set_id, r"^evidence_[0-9a-f]{24}$")
+        from app.services.run_service import RunService
+
+        for report in reports:
+            manifest = RunService().get_run(report["report_id"]).result_summary[
+                "artifact_manifest"
+            ]
+            self.assertEqual(manifest["evidence_set_id"], evidence_set_id)
+
+        with zipfile.ZipFile(io.BytesIO(self._download(reports[0]["report_id"]).content)) as archive:
+            validation = json.loads(archive.read("validation_summary.json"))
+
+        self.assertEqual(validation["evidence_set_id"], evidence_set_id)
+        self.assertEqual(validation["report_scope"]["scope_kind"], "full_source_run")
+        self.assertEqual(validation["report_scope"]["source_run_ids"], [source_id])
+        self.assertEqual(validation["filter_provenance"]["text"], "")
+
+    def test_technical_report_preserves_run_provenance_and_register_digest(self) -> None:
+        source_id = self._seed_run(
+            parameters={
+                "register_import_id": "imp-provenance-1",
+                "register_import_filename": "approved-register.csv",
+                "register_revision": "rev-2026-08-06",
+                "register_sha256": "a" * 64,
+                "source_commit": "b" * 40,
+                "portable_exe_sha256": "c" * 64,
+                "machine_reference": "commissioning-laptop-01",
+                "broker_reference": "broker-profile-01",
+                "operator_reference": "operator-01",
+                "topic_filter": "demo-site/#",
+            },
+            result_summary_extra={
+                "broker_capture_attempted": True,
+                "capture_mode": "bounded",
+                "capture_window_seconds": 3600,
+                "capture_started_at": "2026-08-05T08:00:00+00:00",
+                "capture_ended_at": "2026-08-05T09:00:00+00:00",
+                "capture_duration_seconds": 3600.0,
+                "window_completed": True,
+                "termination_reason": "window_elapsed",
+            },
+        )
+        report = self._create_report("zip", [source_id])
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            validation = json.loads(archive.read("validation_summary.json"))
+
+        provenance = validation["evidence_provenance"]["sources"][0]
+        self.assertEqual(provenance["source_run_id"], source_id)
+        self.assertEqual(provenance["application_version"], "0.1.38")
+        self.assertEqual(provenance["source_commit"], "b" * 40)
+        self.assertEqual(provenance["portable_exe_sha256"], "c" * 64)
+        self.assertEqual(
+            provenance["register"],
+            {
+                "filename": "approved-register.csv",
+                "revision": "rev-2026-08-06",
+                "sha256": "a" * 64,
+                "import_id": "imp-provenance-1",
+            },
+        )
+        self.assertEqual(provenance["capture"]["termination_reason"], "window_elapsed")
+        self.assertEqual(provenance["scope"]["topic_filter"], "demo-site/#")
+
+    def test_client_report_product_is_metrics_only_and_uses_same_evidence_set(self) -> None:
+        source_id = self._seed_run(
+            result_summary_extra={
+                "broker_capture_attempted": True,
+                "capture_mode": "bounded",
+                "capture_window_seconds": 3600,
+                "window_completed": True,
+                "termination_reason": "window_elapsed",
+            }
+        )
+        technical = self._create_report("zip", [source_id], udmi_report_variant="technical")
+        client = self._create_report("zip", [source_id], udmi_report_variant="client")
+        self.assertEqual(technical["evidence_set_id"], client["evidence_set_id"])
+        self.assertEqual(client["udmi_report_variant"], "client")
+        default_response = self.client.post(
+            "/api/v1/reports",
+            json={
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "report_type": "udmi_validation",
+                "output_format": "zip",
+                "source_run_ids": [source_id],
+            },
+        )
+        self.assertEqual(default_response.status_code, 200, default_response.text)
+        self.assertEqual(default_response.json()["udmi_report_variant"], "client")
+
+        with zipfile.ZipFile(io.BytesIO(self._download(client["report_id"]).content)) as archive:
+            names = set(archive.namelist())
+            client_metrics = json.loads(archive.read("client_metrics.json"))
+        self.assertIn("client_metrics.json", names)
+        self.assertNotIn("fault_details.json", names)
+        self.assertNotIn("raw_evidence/records.jsonl", names)
+        self.assertEqual(client_metrics["report_product"], "client_metrics")
+        self.assertTrue(client_metrics["metrics"])
+
+        for output_format in ("pdf", "docx", "xlsx"):
+            with self.subTest(output_format=output_format):
+                report = self._create_report(
+                    output_format,
+                    [source_id],
+                    udmi_report_variant="client",
+                )
+                content = self._download(report["report_id"]).content
+                if output_format == "xlsx":
+                    workbook = load_workbook(io.BytesIO(content))
+                    self.assertEqual(workbook.sheetnames, ["Client Metrics"])
+                elif output_format == "pdf":
+                    self.assertIn(b"Client Metrics", content)
+                    self.assertNotIn(b"Faults in Detail", content)
+                else:
+                    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                        document = archive.read("word/document.xml")
+                    self.assertIn(b"Client Metrics", document)
+                    self.assertNotIn(b"Faults in Detail", document)
+
+    def test_technical_report_zip_contains_portable_redacted_raw_evidence(self) -> None:
+        source_id = self._seed_run(
+            result_summary_extra={
+                "raw_evidence": {
+                    "records": [
+                        {
+                            "asset_id": "asset-1",
+                            "payload_type": "metadata",
+                            "topic": "site/devices/asset-1/metadata",
+                            "payload": {
+                                "timestamp": "2026-08-05T08:00:00Z",
+                                "credentials": "removed",
+                            },
+                            "payload_timestamp": "2026-08-05T08:00:00Z",
+                            "broker_received_at": "2026-08-05T08:00:01+00:00",
+                            "retained": False,
+                            "content_sha256": "a" * 64,
+                            "redaction_status": "redacted",
+                        }
+                    ],
+                    "captured_record_count": 1,
+                    "retained_bytes": 128,
+                    "truncated": False,
+                }
+            }
+        )
+        report = self._create_report("zip", [source_id], udmi_report_variant="technical")
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            manifest = json.loads(archive.read("raw_evidence/manifest.json"))
+            finding_index = json.loads(archive.read("raw_evidence/finding_index.json"))
+            records = [
+                json.loads(line)
+                for line in archive.read("raw_evidence/records.jsonl").splitlines()
+                if line
+            ]
+
+        self.assertEqual(manifest["record_count"], 1)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["source_run_id"], source_id)
+        self.assertEqual(records[0]["asset_id"], "asset-1")
+        self.assertEqual(manifest["evidence_id_field"], "evidence_id")
+        self.assertTrue(records[0]["evidence_id"].startswith("raw-"))
+        self.assertEqual(finding_index["record_id_field"], "evidence_id")
+        self.assertEqual(records[0]["payload"]["credentials"], "********")
+        self.assertEqual(records[0]["payload"]["timestamp"], "2026-08-05T08:00:00Z")
+    def test_evidence_set_id_is_stable_when_source_runs_are_reordered(self) -> None:
+        first_source = self._seed_run()
+        second_source = self._seed_run()
+
+        forward = self._create_report("zip", [first_source, second_source])
+        reverse = self._create_report("zip", [second_source, first_source])
+
+        self.assertEqual(forward["evidence_set_id"], reverse["evidence_set_id"])
+
+    def test_cancelled_source_is_ineligible_for_field_acceptance(self) -> None:
+        source_id = self._seed_run(
+            status="cancelled",
+            result_summary_extra={
+                "broker_capture_attempted": True,
+                "capture_mode": "indefinite",
+                "capture_started_at": "2026-08-05T08:00:00+00:00",
+                "capture_ended_at": "2026-08-05T08:01:00+00:00",
+                "window_completed": False,
+                "termination_reason": "cancelled",
+            },
+        )
+
+        report = self._create_report("zip", [source_id])
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            validation = json.loads(archive.read("validation_summary.json"))
+
+        self.assertFalse(validation["scope_complete"])
+        self.assertFalse(validation["acceptance_eligible"])
+        self.assertEqual(validation["source_runs"][0]["termination_reason"], "cancelled")
+        self.assertFalse(validation["source_runs"][0]["window_completed"])
 
     def test_source_run_scope_is_validated_before_report_creation(self) -> None:
         missing = self.client.post(
@@ -741,7 +967,7 @@ class UdmiV1ReportTests(ApiTestCase):
 
         self.assertEqual(header["Project"], "Site A")
         self.assertEqual(header["Site"], "Site A")
-        self.assertEqual(set(header), {"Project", "Site", "Report ID", "Generated"})
+        self.assertEqual(set(header), {"Project", "Site", "Report ID", "Evidence set ID", "Acceptance", "Generated"})
         self.assertEqual(
             summary["asset_metrics"],
             {
@@ -927,6 +1153,7 @@ class UdmiV1ReportTests(ApiTestCase):
             state_row["Actual topic(s) (report)"],
             "site/floor-0/A-1/state, site/floor-1/A-1/state",
         )
+
         self.assertNotIn(
             "Not included in this report's selected payload scope.",
             state_row["Comment (report)"],
@@ -949,6 +1176,31 @@ class UdmiV1ReportTests(ApiTestCase):
             ],
             ["state"],
         )
+
+    def test_annotated_register_redacts_private_values_in_every_export_format(self) -> None:
+        source_id = self._seed_run(
+            parameters={
+                "register_columns": ["Asset ID", "password", "private_key"],
+                "register_rows": [
+                    {
+                        "Asset ID": "A-1",
+                        "password": "fixture-secret-value",
+                        "private_key": "-----BEGIN PRIVATE KEY----- fixture-key -----END PRIVATE KEY-----",
+                    }
+                ],
+            }
+        )
+        for output_format in ("zip", "xlsx", "docx", "pdf"):
+            with self.subTest(output_format=output_format):
+                report = self._create_report(output_format, [source_id])
+                content = self._download(report["report_id"]).content
+                self.assertNotIn(b"fixture-secret-value", content)
+                self.assertNotIn(b"fixture-key", content)
+                if output_format == "zip":
+                    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                        register = json.loads(archive.read("annotated_input_register.json"))
+                    self.assertEqual(register["rows"][0]["password"], "********")
+                    self.assertEqual(register["rows"][0]["private_key"], "********")
 
     def test_partial_scope_keeps_topic_fault_without_failing_payload_content(self) -> None:
         summary = copy.deepcopy(_SCOPABLE_SUMMARY)
@@ -1494,7 +1746,7 @@ class UdmiV1ReportTests(ApiTestCase):
                         validation = json.loads(archive.read("validation_summary.json"))
                     self.assertEqual(
                         set(report_summary),
-                        {"Project", "Site", "Report ID", "Generated"},
+                        {"Project", "Site", "Report ID", "Evidence set ID", "Acceptance", "Generated"},
                     )
                     self.assertEqual(validation["report_job_status"], "succeeded")
                     self.assertFalse(validation["scope_complete"])
@@ -1678,7 +1930,7 @@ class UdmiV1ReportTests(ApiTestCase):
                         metadata = json.loads(archive.read("summary.json"))
                     self.assertEqual(metadata["Project"], "Site A")
                     self.assertEqual(metadata["Site"], "Site A")
-                    self.assertEqual(set(metadata), {"Project", "Site", "Report ID", "Generated"})
+                    self.assertEqual(set(metadata), {"Project", "Site", "Report ID", "Evidence set ID", "Acceptance", "Generated"})
                 elif output_format == "pdf":
                     self.assertIn(b"Project: Site A", content)
                     self.assertIn(b"Site: Site A", content)
@@ -1842,6 +2094,7 @@ class UdmiV1ReportTests(ApiTestCase):
                     "System",
                     "Asset ID",
                     "Expected topic",
+                    "Payload applicability",
                 ],
                 "register_rows": [
                     {
@@ -1849,6 +2102,7 @@ class UdmiV1ReportTests(ApiTestCase):
                         "System": "BMS",
                         "Asset ID": "A-1",
                         "Expected topic": "site/floor-1/A-1/#",
+                        "Payload applicability": "state,metadata,pointset",
                     }
                 ],
             },

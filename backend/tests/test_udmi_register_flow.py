@@ -4,6 +4,7 @@ register-driven run with no register import is refused rather than silently
 validating the packaged sample fixture.
 """
 
+import hashlib
 import io
 import json
 import unittest
@@ -26,8 +27,8 @@ _SITE = "udmi-register-flow-site"
 
 _REGISTER_CSV = (
     "Project/site,System,Asset ID,Expected topic,Expected schema version,"
-    "Expected points,Expected units,Expected reporting interval,Source protocol\n"
-    'Site A,BMS,EM-1,hv/ems/01/em/EM-1/#,1.5.2,"energy_sensor,status_flag,power_sensor","kwh,,kw",60,MQTT\n'
+    "Expected points,Expected units,Expected reporting interval,Source protocol,Payload applicability\n"
+    'Site A,BMS,EM-1,hv/ems/01/em/EM-1/#,1.5.2,"energy_sensor,status_flag,power_sensor","kwh,,kw",60,MQTT,"state,metadata,pointset"\n'
 )
 
 # One asset spread over one row per payload type (a real site register shape):
@@ -122,6 +123,10 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(run["parameters"]["register_import_id"], upload.json()["import_id"])
         self.assertEqual(run["parameters"]["register_import_filename"], "register.csv")
         self.assertEqual(
+            run["parameters"]["register_sha256"],
+            hashlib.sha256(_REGISTER_CSV.encode()).hexdigest(),
+        )
+        self.assertEqual(
             run["parameters"]["register_columns"],
             [
                 "Project/site",
@@ -133,6 +138,7 @@ class UdmiRegisterFlowTests(ApiTestCase):
                 "Expected units",
                 "Expected reporting interval",
                 "Source protocol",
+                "Payload applicability",
             ],
         )
         self.assertEqual(run["parameters"]["register_rows"], [
@@ -146,6 +152,7 @@ class UdmiRegisterFlowTests(ApiTestCase):
                 "Expected units": "kwh,,kw",
                 "Expected reporting interval": "60",
                 "Source protocol": "MQTT",
+                "Payload applicability": "state,metadata,pointset",
             }
         ])
         # No pointset payload was supplied. Its absence is one neutral state,
@@ -197,6 +204,7 @@ class UdmiRegisterFlowTests(ApiTestCase):
                 "report_type": "udmi_validation",
                 "output_format": "zip",
                 "source_run_ids": [run_id],
+                "udmi_report_variant": "technical",
             },
         )
         self.assertEqual(report.status_code, 200, report.text)

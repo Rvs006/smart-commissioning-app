@@ -4,6 +4,7 @@ import type {
   JobType,
   ReportFormat,
   ReportType,
+  UdmiReportVariant,
   UdmiReportScopeV1,
 } from "../../api/client";
 import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
@@ -150,6 +151,7 @@ export type ReportIntent = Readonly<{
   runId: string;
   reportType: ReportType;
   format: ReportFormat;
+  udmiReportVariant?: UdmiReportVariant;
   udmiScope?: UdmiReportScopeV1;
 }>;
 
@@ -161,6 +163,7 @@ export function createReportIntent(input: ReportIntent): ReportIntent {
     runId: input.runId,
     reportType: input.reportType,
     format: input.format,
+    ...(input.udmiReportVariant ? { udmiReportVariant: input.udmiReportVariant } : {}),
     ...(udmiScope ? { udmiScope } : {}),
   });
 }

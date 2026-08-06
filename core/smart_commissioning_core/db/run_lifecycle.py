@@ -537,21 +537,37 @@ class RunLifecycleRepository:
             # First finalization is lease-fenced at the instant the lifecycle
             # row becomes writable, not when the caller began waiting for it.
             # Identical terminal replay remains idempotent below.
-            self._load_run(session, run_id, for_update=True)
+            run = self._load_run(session, run_id, for_update=True)
+            if run.cancel_requested and terminal.status != "cancelled":
+                summary = dict(terminal.summary)
+                summary["validation_incomplete"] = True
+                summary["acceptance_eligible"] = False
+                terminal = terminal.model_copy(
+                    update={
+                        "status": "cancelled",
+                        "stage": "engine_cancelled",
+                        "summary": summary,
+                        "error_message": None,
+                    }
+                )
+                result_sha256 = terminal.sha256()
             terminal_at = now or _utcnow()
             existing = session.get(RunResult, run_id)
             if existing is None:
+                guard = [
+                    Run.id == run_id,
+                    Run.status == "running",
+                    Run.owner_token == owner_token,
+                    Run.terminal_at.is_(None),
+                    Run.result_sha256.is_(None),
+                    Run.lease_expires_at.is_not(None),
+                    Run.lease_expires_at > terminal_at,
+                ]
+                if terminal.status != "cancelled":
+                    guard.append(Run.cancel_requested.is_(False))
                 guarded = session.execute(
                     update(Run)
-                    .where(
-                        Run.id == run_id,
-                        Run.status == "running",
-                        Run.owner_token == owner_token,
-                        Run.terminal_at.is_(None),
-                        Run.result_sha256.is_(None),
-                        Run.lease_expires_at.is_not(None),
-                        Run.lease_expires_at > terminal_at,
-                    )
+                    .where(*guard)
                     .values(status=terminal.status)
                     .execution_options(synchronize_session=False)
                 )

@@ -21,8 +21,8 @@ from app.core.runtime import ARTIFACTS_ROOT, ensure_runtime_directories
 from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
-ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.0"
-REPORT_RENDERER_VERSION = "0.1.37"
+ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.1"
+REPORT_RENDERER_VERSION = "0.1.38"
 
 _SIGNED_MANIFEST_FIELDS = (
     "schema_version",
@@ -37,10 +37,23 @@ _SIGNED_MANIFEST_FIELDS = (
     "origin",
     "signing_key_id",
     "signed_at",
+    "evidence_set_id",
+)
+_LEGACY_SIGNED_MANIFEST_FIELDS = tuple(
+    field for field in _SIGNED_MANIFEST_FIELDS if field != "evidence_set_id"
 )
 _COMPLETE_MANIFEST_FIELDS = frozenset(
     {
         *_SIGNED_MANIFEST_FIELDS,
+        "signature_algorithm",
+        "signature",
+        "public_key_pem",
+        "signed_manifest_sha256",
+    }
+)
+_LEGACY_COMPLETE_MANIFEST_FIELDS = frozenset(
+    {
+        *_LEGACY_SIGNED_MANIFEST_FIELDS,
         "signature_algorithm",
         "signature",
         "public_key_pem",
@@ -79,6 +92,7 @@ def store_report_artifact(
     artifact: bytes,
     origin: str,
     signed_at: str,
+    evidence_set_id: str | None = None,
 ) -> dict[str, Any]:
     """Durably store exact bytes and return a signed ArtifactManifestV1.
 
@@ -123,6 +137,7 @@ def store_report_artifact(
         "origin": origin,
         "signing_key_id": key.public_key_fingerprint(),
         "signed_at": signed_at,
+        "evidence_set_id": evidence_set_id,
     }
     signed_body = canonical_json_bytes(manifest)
     manifest.update(
@@ -234,9 +249,21 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
 
     if not cryptography_available():
         return False
-    if set(manifest) != _COMPLETE_MANIFEST_FIELDS:
+    manifest_fields = (
+        _SIGNED_MANIFEST_FIELDS
+        if set(manifest) == _COMPLETE_MANIFEST_FIELDS
+        else _LEGACY_SIGNED_MANIFEST_FIELDS
+        if set(manifest) == _LEGACY_COMPLETE_MANIFEST_FIELDS
+        else None
+    )
+    if manifest_fields is None:
         return False
-    if manifest.get("schema_version") != ARTIFACT_MANIFEST_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {"1.0", ARTIFACT_MANIFEST_SCHEMA_VERSION}:
+        return False
+    if schema_version == ARTIFACT_MANIFEST_SCHEMA_VERSION and manifest_fields != _SIGNED_MANIFEST_FIELDS:
+        return False
+    if schema_version == "1.0" and manifest_fields != _LEGACY_SIGNED_MANIFEST_FIELDS:
         return False
     if manifest.get("signature_algorithm") != "ed25519":
         return False
@@ -252,6 +279,7 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
         origin = manifest["origin"]
         signing_key_id = manifest["signing_key_id"]
         signed_at = manifest["signed_at"]
+        evidence_set_id = manifest.get("evidence_set_id")
         if not isinstance(report_id, str) or not 1 <= len(report_id) <= 64:
             return False
         if not isinstance(snapshot_hash, str) or not _SHA256_RE.fullmatch(snapshot_hash):
@@ -294,10 +322,15 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
             return False
         if not isinstance(signed_at, str):
             return False
+        if evidence_set_id is not None and (
+            not isinstance(evidence_set_id, str)
+            or not re.fullmatch(r"evidence_[0-9a-f]{24}", evidence_set_id)
+        ):
+            return False
         signed_timestamp = datetime.fromisoformat(signed_at)
         if signed_timestamp.tzinfo is None:
             return False
-        unsigned = {field: manifest[field] for field in _SIGNED_MANIFEST_FIELDS}
+        unsigned = {field: manifest[field] for field in manifest_fields}
         raw_signature = manifest["signature"]
         public_key = manifest["public_key_pem"]
         if not isinstance(raw_signature, str) or len(raw_signature) > 1024:

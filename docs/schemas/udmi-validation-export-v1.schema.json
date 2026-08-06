@@ -13,10 +13,11 @@
     "run",
     "result_summary",
     "issues",
+    "raw_evidence",
     "evidence_limitations"
   ],
   "properties": {
-    "schema_version": { "const": "1.0" },
+    "schema_version": { "enum": ["1.0", "1.1"] },
     "schema": { "const": "docs/schemas/udmi-validation-export-v1.schema.json" },
     "exported_at": { "type": "string", "minLength": 1 },
     "project_id": { "type": "string" },
@@ -33,6 +34,9 @@
         "created_at",
         "updated_at",
         "partial",
+        "capture_outcome",
+        "window_completed",
+        "termination_reason",
         "error_message"
       ],
       "properties": {
@@ -44,6 +48,11 @@
         "created_at": { "type": "string", "minLength": 1 },
         "updated_at": { "type": "string", "minLength": 1 },
         "partial": { "type": "boolean" },
+        "capture_outcome": {
+          "enum": ["complete", "incomplete", "cancelled", "failed", "not_applicable"]
+        },
+        "window_completed": { "type": ["boolean", "null"] },
+        "termination_reason": { "type": ["string", "null"] },
         "error_message": { "type": ["string", "null"] }
       }
     },
@@ -69,6 +78,7 @@
         "additionalProperties": true
       }
     },
+    "raw_evidence": { "$ref": "#/$defs/rawEvidence" },
     "evidence_limitations": {
       "type": "array",
       "minItems": 1,
@@ -76,6 +86,59 @@
     }
   },
   "$defs": {
+    "rawEvidenceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "asset_id",
+        "payload_type",
+        "topic",
+        "payload_encoding",
+        "payload_size_bytes",
+        "content_sha256",
+        "payload_timestamp",
+        "retained",
+        "broker_received_at",
+        "redaction_status"
+      ],
+      "properties": {
+        "asset_id": { "type": ["string", "null"] },
+        "payload_type": { "enum": ["state", "metadata", "pointset", null] },
+        "topic": { "type": "string", "minLength": 1 },
+        "payload": { "type": ["object", "null"] },
+        "payload_encoding": { "enum": ["json", "omitted_non_json"] },
+        "payload_size_bytes": { "type": "integer", "minimum": 0 },
+        "content_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "payload_timestamp": { "type": ["string", "null"] },
+        "retained": { "type": "boolean" },
+        "broker_received_at": { "type": "string", "minLength": 1 },
+        "received_at": { "type": "string", "minLength": 1 },
+        "qos": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "redaction_status": { "enum": ["none", "redacted"] }
+      }
+    },
+    "rawEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "records",
+        "record_count",
+        "captured_record_count",
+        "truncated",
+        "retained_bytes",
+        "redaction_policy"
+      ],
+      "properties": {
+        "schema_version": { "const": "1.0" },
+        "records": { "type": "array", "items": { "$ref": "#/$defs/rawEvidenceRecord" } },
+        "record_count": { "type": "integer", "minimum": 0 },
+        "captured_record_count": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "retained_bytes": { "type": "integer", "minimum": 0 },
+        "redaction_policy": { "type": "string", "minLength": 1 }
+      }
+    },
     "assetMetrics": {
       "type": "object",
       "additionalProperties": false,
@@ -169,7 +232,19 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
-        "received_at": { "type": ["string", "null"] }
+        "received_at": { "type": ["string", "null"] },
+        "retained": { "type": "boolean" },
+        "saw_non_retained": { "type": "boolean" },
+        "cadence_status": {
+          "enum": [
+            "passed",
+            "stale",
+            "not_received",
+            "not_evaluated",
+            "retained_only",
+            "not_required"
+          ]
+        }
       }
     },
     "assetResult": {
@@ -235,6 +310,7 @@
         "point_name": { "type": ["string", "null"] },
         "expected_value": { "type": ["string", "null"] },
         "observed_value": { "type": ["string", "null"] },
+        "mismatch": { "type": "boolean" },
         "suggested_action": { "type": ["string", "null"] },
         "raw_evidence_uri": { "type": ["string", "null"] }
       }

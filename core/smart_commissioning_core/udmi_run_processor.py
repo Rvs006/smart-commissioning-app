@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
 from smart_commissioning_core.engines.base import make_cancel_checker
 from smart_commissioning_core.mqtt_settings import parse_bool, parse_capture_seconds
 from smart_commissioning_core.mqtt_transport import subscribe_and_capture
@@ -363,11 +364,35 @@ def process_udmi_validation_run(
         if fallback_reason:
             result_summary["fallback_reason"] = fallback_reason
 
+        cancel_observed = cancel_check is not None and cancel_check()
+        if cancel_observed:
+            result_summary["validation_incomplete"] = True
+
+        broker_status_detail = str(
+            result_summary.get("broker_status_detail") or "capture_failed"
+        )
+        capture_failed = (
+            result_summary.get("broker_capture_attempted")
+            and broker_status_detail not in _CAPTURE_COMPLETED_STATUSES
+        )
+        terminal_status = (
+            "cancelled" if cancel_observed else "failed" if capture_failed else "succeeded"
+        )
+        result_summary["acceptance_eligible"] = capture_acceptance_eligible(
+            terminal_status,
+            result_summary,
+        )
+
         terminal_summary = result_summary
         terminal_issues = list(validation_result.issues)
         run_store.update_result_summary(run_id, result_summary, merge=False)
         run_store.replace_issues(run_id, terminal_issues)
-        if cancel_check is not None and cancel_check():
+        if not cancel_observed and cancel_check is not None and cancel_check():
+            cancel_observed = True
+            result_summary["validation_incomplete"] = True
+            result_summary["acceptance_eligible"] = False
+            run_store.update_result_summary(run_id, result_summary, merge=False)
+        if cancel_observed:
             # Cancel observed during the run: keep the real partial results but
             # finish under a cancelled status — the cancel route only sets the
             # flag; the observing engine flips the terminal status.
@@ -377,11 +402,7 @@ def process_udmi_validation_run(
                 stage="udmi_validation_cancelled",
                 progress_percent=100,
             )
-        broker_status_detail = str(result_summary.get("broker_status_detail") or "capture_failed")
-        if (
-            result_summary.get("broker_capture_attempted")
-            and broker_status_detail not in _CAPTURE_COMPLETED_STATUSES
-        ):
+        if capture_failed:
             return run_store.update_run_status(
                 run_id,
                 status="failed",

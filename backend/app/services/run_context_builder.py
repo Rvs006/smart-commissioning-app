@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any
 
 from smart_commissioning_core.db.repositories import ImportRepository
@@ -21,7 +22,7 @@ from app.services.configuration_service import (
     write_secret_material,
 )
 
-_APP_VERSION = "0.1.37"
+_APP_VERSION = "0.1.38"
 _SENSITIVE_KEYS = {
     "password",
     "broker_password",
@@ -62,6 +63,13 @@ def build_run_context(
         references=references,
         path=("engine_parameters",),
     )
+    for parameter_name, environment_name in (
+        ("source_commit", "SMART_COMMISSIONING_SOURCE_COMMIT"),
+        ("portable_exe_sha256", "SMART_COMMISSIONING_PORTABLE_EXE_SHA256"),
+    ):
+        runtime_value = os.environ.get(environment_name, "").strip()
+        if runtime_value and runtime_value.casefold() != "unknown":
+            frozen_parameters.setdefault(parameter_name, runtime_value)
     configuration_digest = hashlib.sha256(
         canonical_json_bytes(frozen_configuration)
     ).hexdigest()
@@ -84,7 +92,9 @@ def build_run_context(
         connection_settings=connection_settings,
         secret_references=references,
         requesting_principal=requesting_principal,
-        application_version=_APP_VERSION,
+        application_version=(
+            os.environ.get("SMART_COMMISSIONING_APP_VERSION") or _APP_VERSION
+        ),
         protocol_key=protocol_key,
     )
 

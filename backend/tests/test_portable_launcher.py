@@ -24,6 +24,7 @@ stdlib, so this is cheap and side-effect free).
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import sys
 import tempfile
@@ -40,6 +41,7 @@ _MANAGED_VARS = (
     "ENVIRONMENT",
     "AUTH_MODE",
     "JOB_EXECUTION_MODE",
+    "SMART_COMMISSIONING_APP_VERSION",
 )
 
 
@@ -125,6 +127,29 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         )
         self.assertEqual(os.environ["SMART_COMMISSIONING_SECRETS_ROOT"], str(stable / "secrets"))
         self.assertEqual(os.environ["SMART_COMMISSIONING_RUNTIME_ROOT"], str(stable))
+
+    def test_bundle_version_marker_is_exported_before_backend_import(self) -> None:
+        root = self._make_root()
+        for name in _MANAGED_VARS:
+            os.environ.pop(name, None)
+        (root / "APP_VERSION.txt").write_text("v0.1.38\n", encoding="utf-8")
+        (root / "BUILD_PROVENANCE.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "application_version": "v0.1.38",
+                    "source_commit": "a" * 40,
+                    "portable_exe_sha256": "b" * 64,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        self.launcher.configure_environment(root)
+
+        self.assertEqual(os.environ["SMART_COMMISSIONING_APP_VERSION"], "v0.1.38")
+        self.assertEqual(os.environ["SMART_COMMISSIONING_SOURCE_COMMIT"], "a" * 40)
+        self.assertEqual(os.environ["SMART_COMMISSIONING_PORTABLE_EXE_SHA256"], "b" * 64)
 
 
 class DataRootTests(unittest.TestCase):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as _dt
 import faulthandler
 import importlib
+import json
 import os
 import shutil
 import socket
@@ -207,6 +208,33 @@ def _set_env_default(name: str, value: str) -> None:
     os.environ.setdefault(name, value)
 
 
+def _bundle_app_version(root: Path) -> str | None:
+    """Read the release version stamped beside a portable bundle.
+
+    The source tree keeps its development fallback for direct local runs. A
+    packaged bundle carries ``APP_VERSION.txt`` so the backend run context,
+    API metadata, and generated evidence identify the same bytes as the EXE
+    and frontend.
+    """
+    marker = root / "APP_VERSION.txt"
+    try:
+        version = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return version or None
+
+
+def _bundle_provenance(root: Path) -> dict[str, object]:
+    """Read optional build provenance without allowing it to block startup."""
+    try:
+        payload = json.loads(
+            (root / "BUILD_PROVENANCE.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     backend_root = root / "backend"
     core_root = root / "core"
@@ -219,6 +247,21 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
         raise FileNotFoundError(f"Backend folder missing: {backend_root}")
     if not (frontend_dist / "index.html").exists():
         raise FileNotFoundError(f"Built frontend missing: {frontend_dist / 'index.html'}")
+
+    provenance = _bundle_provenance(root)
+    bundle_version = (
+        str(provenance.get("application_version") or "").strip()
+        or _bundle_app_version(root)
+    )
+    if bundle_version is not None:
+        _set_env_default("SMART_COMMISSIONING_APP_VERSION", bundle_version)
+    for field, environment_name in (
+        ("source_commit", "SMART_COMMISSIONING_SOURCE_COMMIT"),
+        ("portable_exe_sha256", "SMART_COMMISSIONING_PORTABLE_EXE_SHA256"),
+    ):
+        value = provenance.get(field)
+        if isinstance(value, str) and value.strip() and value.casefold() != "unknown":
+            _set_env_default(environment_name, value.strip())
 
     sys.path.insert(0, str(backend_root))
     if core_root.exists():

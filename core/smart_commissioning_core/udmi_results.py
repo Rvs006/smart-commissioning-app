@@ -251,6 +251,25 @@ def _is_blocking(issue: object) -> bool:
 
 
 def _expected_payload_types(source: dict[str, object], *, synthetic: bool) -> set[str]:
+    schedule = _dict_value(source.get("expected_schedule"))
+    explicit_types = source.get("payload_types")
+    if not isinstance(explicit_types, list):
+        explicit_types = schedule.get("payload_types")
+    applicability_status = str(
+        source.get("payload_applicability_status")
+        or schedule.get("payload_applicability_status")
+        or ""
+    ).strip().casefold()
+    if isinstance(explicit_types, list):
+        # An explicit empty list is a real unresolved/approved-zero contract,
+        # never a reason to invent all three UDMI facets.
+        return {
+            str(payload_type).strip().casefold()
+            for payload_type in explicit_types
+            if str(payload_type).strip().casefold() in _PAYLOAD_TYPES
+        }
+    if applicability_status in {"unresolved", "invalid"}:
+        return set()
     expected = {
         payload_type
         for payload_type in _PAYLOAD_TYPES
@@ -270,6 +289,8 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
             "topic": str(source.get(f"{payload_type}_topic") or "") or None,
             "topics": [],
             "received_at": None,
+            "retained": False,
+            "saw_non_retained": False,
         }
         for payload_type in _PAYLOAD_TYPES
     }
@@ -284,6 +305,10 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
             # Presence is evidence even when the body is an empty object or an
             # invalid JSON string. Validation issues explain why it failed.
             observations[payload_type]["received"] = True
+            observations[payload_type]["retained"] = bool(
+                source.get(f"{key}_retained") is True
+            )
+            observations[payload_type]["saw_non_retained"] = not observations[payload_type]["retained"]
             received_at = source.get(f"{key}_received_at")
             timestamp = parsed.get("timestamp")
             observations[payload_type]["received_at"] = (
@@ -298,6 +323,11 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
         if message_payload_type is None:
             continue
         observations[message_payload_type]["received"] = True
+        retained = message.get("retained") is True
+        observations[message_payload_type]["retained"] = retained
+        observations[message_payload_type]["saw_non_retained"] = (
+            bool(observations[message_payload_type]["saw_non_retained"]) or not retained
+        )
         observed_topic = str(message.get("topic") or "")
         if observed_topic:
             observed_topics[message_payload_type].add(observed_topic)
@@ -317,6 +347,41 @@ def _payload_observations(source: dict[str, object]) -> dict[str, dict[str, obje
                 expected_topic if expected_topic in topics else topics[0]
             )
     return observations
+
+
+def _cadence_status(
+    parameters: dict[str, object],
+    payload_type: str,
+    *,
+    expected: bool,
+    received: bool,
+    retained: bool,
+    saw_non_retained: bool,
+    issues: list[object],
+) -> str:
+    if not expected:
+        return "not_required"
+    if not received:
+        return "not_received"
+    if any(
+        payload_type_for_issue(issue) == payload_type
+        and any(
+            marker in str(_issue_value(issue, "issue_type") or "").casefold()
+            for marker in ("timestamp", "cadence", "stale")
+        )
+        for issue in issues
+    ):
+        return "stale"
+    if parameters.get("broker_capture_attempted") is True:
+        if not (
+            parameters.get("window_completed") is True
+            and parameters.get("termination_reason") == "window_elapsed"
+        ):
+            return "not_evaluated"
+        if retained and not saw_non_retained:
+            return "retained_only"
+        return "passed"
+    return "not_required"
 
 
 def _asset_sources(
@@ -409,6 +474,12 @@ def _fault_row(issue: object, system_by_asset: dict[str, str]) -> dict[str, obje
         "point_name": _issue_value(issue, "point_name"),
         "expected_value": _issue_value(issue, "expected_value"),
         "observed_value": _issue_value(issue, "observed_value"),
+        "mismatch": (
+            _issue_value(issue, "expected_value") is not None
+            and _issue_value(issue, "observed_value") is not None
+            and str(_issue_value(issue, "expected_value"))
+            != str(_issue_value(issue, "observed_value"))
+        ),
         "suggested_action": _issue_value(issue, "suggested_action"),
         "raw_evidence_uri": _issue_value(issue, "raw_evidence_uri"),
     }
@@ -472,6 +543,17 @@ def build_validation_summary_v1(
                 issue for issue in asset_issues if payload_type_for_issue(issue) == payload_type
             ]
             payload_blocking = sum(1 for issue in payload_issues if _is_blocking(issue))
+            retained = bool(observations[payload_type]["retained"])
+            saw_non_retained = bool(observations[payload_type]["saw_non_retained"])
+            cadence_status = _cadence_status(
+                parameters,
+                payload_type,
+                expected=is_expected,
+                received=received,
+                retained=retained,
+                saw_non_retained=saw_non_retained,
+                issues=asset_issues,
+            )
             payload_results.append(
                 {
                     "payload_type": payload_type,
@@ -479,10 +561,17 @@ def build_validation_summary_v1(
                     "received": received,
                     "has_issues": bool(payload_issues),
                     "blocking_issue_count": payload_blocking,
-                    "successfully_validated": received and payload_blocking == 0,
+                    "successfully_validated": (
+                        received
+                        and payload_blocking == 0
+                        and cadence_status in {"passed", "not_required"}
+                    ),
                     "topic": observations[payload_type]["topic"],
                     "topics": observations[payload_type]["topics"],
                     "received_at": observations[payload_type]["received_at"],
+                    "retained": retained,
+                    "saw_non_retained": saw_non_retained,
+                    "cadence_status": cadence_status,
                 }
             )
 
@@ -512,7 +601,11 @@ def build_validation_summary_v1(
                 "received_payloads": received_payloads,
                 "all_expected_payloads_received": all_expected_received,
                 "all_received_payloads_successfully_validated": all_received_validated,
-                "successfully_validated": all_expected_received and asset_blocking == 0,
+                "successfully_validated": (
+                    all_expected_received
+                    and all_received_validated
+                    and asset_blocking == 0
+                ),
                 "issue_count": len(asset_issues),
                 "blocking_issue_count": asset_blocking,
                 "last_observed_at": _latest_observed_at(expected_received_results),

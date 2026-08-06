@@ -124,13 +124,19 @@ describe("frontend run and session isolation", () => {
       format: "pdf",
       reportType: "udmi_validation",
       runId: "run-1",
+      udmiReportVariant: "technical",
       udmiScope: scope,
     });
 
     scope.selected_payloads[0].asset_id = "asset-b";
     scope.filters.text = "changed";
 
-    expect(intent).toMatchObject({ format: "pdf", reportType: "udmi_validation", runId: "run-1" });
+    expect(intent).toMatchObject({
+      format: "pdf",
+      reportType: "udmi_validation",
+      runId: "run-1",
+      udmiReportVariant: "technical",
+    });
     expect(intent.udmiScope?.selected_payloads[0].asset_id).toBe("asset-a");
     expect(intent.udmiScope?.filters.text).toBe("ahu");
     expect(Object.isFrozen(intent)).toBe(true);

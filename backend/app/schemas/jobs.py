@@ -98,6 +98,18 @@ class JobSummary(BaseModel):
     # from another edge's signed bundle. Additive: defaults to None so the field
     # is absent-as-null for local runs and existing callers that don't set it.
     edge_id: str | None = None
+    # Additive capture outcome projection for run history. These fields are
+    # populated from the terminal result summary when the run is UDMI; older
+    # runs and other job types remain null rather than gaining inferred data.
+    validation_incomplete: bool | None = None
+    capture_mode: str | None = None
+    capture_window_seconds: float | None = None
+    capture_started_at: str | None = None
+    capture_ended_at: str | None = None
+    capture_duration_seconds: float | None = None
+    window_completed: bool | None = None
+    termination_reason: str | None = None
+    acceptance_eligible: bool | None = None
 
 
 class ObservedPort(BaseModel):
@@ -300,6 +312,9 @@ class ReportRequest(BaseModel):
     source_run_ids: list[str] = Field(default_factory=list)
     report_title: str | None = None
     udmi_scope: UdmiReportScope | None = None
+    # Client output is the safe default for new UDMI reports. The technical
+    # product remains available when the engineer needs the full finding pack.
+    udmi_report_variant: Literal["client", "technical"] = "client"
 
     @model_validator(mode="after")
     def validate_udmi_scope_compatibility(self) -> "ReportRequest":
@@ -346,10 +361,14 @@ class ReportSummary(BaseModel):
     # mask a construction site that forgot to pass it.
     created_at: datetime
     source_run_ids: list[str] = Field(default_factory=list)
+    # Stable identity for the underlying evidence selection. The same source
+    # run and scope must keep this value across ZIP, PDF, DOCX, and XLSX views.
+    evidence_set_id: str | None = None
     # Optional on the response model so older persisted report runs still
     # validate; API projections resolve those records to the format-specific
     # default title before returning them.
     report_title: str | None = None
+    udmi_report_variant: Literal["client", "technical"] = "client"
 
 
 class ReportListResponse(BaseModel):

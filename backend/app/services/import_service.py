@@ -1,5 +1,6 @@
 import codecs
 import csv
+import hashlib
 import io
 import ipaddress
 import re
@@ -25,6 +26,7 @@ from app.schemas.imports import (
     ImportProfileSummary,
     ImportType,
 )
+from app.services.register_topics import normalise_payload_applicability
 
 # Back-compatible export for callers that inspect the profile vocabulary. Row
 # validation itself uses ``canonical_unit`` so DBO underscore/hyphen forms and
@@ -253,13 +255,56 @@ def _validate_mqtt_asset_topic(
 def _validate_payload_type(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
     value = row.get("Payload type", "").strip().casefold()
     if value in {"", "state", "metadata", "pointset"}:
-        return []
+        expected_topic = row.get("Expected topic", "").strip()
+        if not value or not expected_topic:
+            return []
+        suffixes = {
+            "state": ("/state",),
+            "metadata": ("/metadata",),
+            "pointset": ("/pointset",),
+        }[value]
+        topics = [topic.strip() for topic in expected_topic.split(",") if topic.strip()]
+        if all(topic.endswith("/#") or topic.endswith(suffixes) for topic in topics):
+            return []
+        return [
+            ImportErrorRecord(
+                row_number=row_number,
+                field="Expected topic",
+                code="payload_topic_mismatch",
+                message=(
+                    f"Payload type '{value}' must use an Expected topic ending in "
+                    f"{', '.join(suffixes)}, or a /# register filter."
+                ),
+            )
+        ]
     return [
         ImportErrorRecord(
             row_number=row_number,
             field="Payload type",
             code="invalid_payload_type",
             message="Payload type must be blank, state, metadata, or pointset.",
+        )
+    ]
+
+
+def _validate_payload_applicability(
+    row: dict[str, str], row_number: int
+) -> list[ImportErrorRecord]:
+    value = row.get("Payload applicability", "").strip()
+    if not value:
+        return []
+    _types, status = normalise_payload_applicability(
+        row.get("Payload type"),
+        value,
+    )
+    if status == "approved":
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="Payload applicability",
+            code="invalid_payload_applicability",
+            message="Payload applicability must be a comma-separated subset of state, metadata, and pointset.",
         )
     ]
 
@@ -496,18 +541,21 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Source protocol",
         ),
         # Asset ID / Asset name are one-of (_validate_asset_identity). Notes and
-        # Payload type are optional: a blank Payload type means "check metadata,
-        # state and pointset". Make/Model/GUID feed the UDMI metadata/state match
+        # Payload type/applicability are optional at import time so the row can
+        # be retained and reported as an explicit external decision blocker.
+        # Make/Model/GUID feed the UDMI metadata/state match
         # (udmi_validation expected_schedule); Site/Serial/Room/Firmware are
         # captured for the same comparison surface.
         optional_columns=(
             "Asset ID",
             "Asset name",
             "Payload type",
+            "Payload applicability",
             "Notes",
             "Site",
             "Serial number",
             "Room",
+            "Floor",
             "GUID",
             "Make",
             "Model",
@@ -520,6 +568,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
             _field_check("Expected topic", _validate_mqtt_asset_topic),
             _field_check("Expected reporting interval", _validate_positive_numeric),
             _validate_payload_type,
+            _validate_payload_applicability,
             _validate_mqtt_units,
             _validate_mqtt_point_unit_pairs,
         ),
@@ -880,6 +929,10 @@ class ImportService:
         # them for the exact register snapshot captured by validation runs.
         stored_summary["source_columns"] = source_columns
         stored_summary["accepted_source_rows"] = accepted_source_rows
+        # The original upload is the authoritative register artifact. Keep its
+        # content digest beside the frozen row snapshot so every validation run
+        # and report can prove which bytes supplied the expected schedule.
+        stored_summary["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
 
         self._repository.create(
             import_id=import_id,
