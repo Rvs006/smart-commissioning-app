@@ -113,10 +113,9 @@ class RunsApiTests(ApiTestCase):
         self.assertEqual(self.client.get("/api/v1/runs", params={"offset": -1}).status_code, 422)
 
     def test_list_runs_backfills_legacy_acceptance_from_capture_metadata(self) -> None:
-        from sqlalchemy import update
-
         from app.services.run_service import RunService
         from smart_commissioning_core.db.models import Run
+        from sqlalchemy import update
 
         accepted = self._create_udmi_run()["run_id"]
         cancelled = self._create_udmi_run()["run_id"]

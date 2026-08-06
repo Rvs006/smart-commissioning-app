@@ -4,9 +4,9 @@ register-driven run with no register import is refused rather than silently
 validating the packaged sample fixture.
 """
 
+import hashlib
 import io
 import json
-import hashlib
 import unittest
 from zipfile import ZipFile
 

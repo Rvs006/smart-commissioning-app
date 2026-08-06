@@ -1,6 +1,7 @@
 import logging
 from datetime import UTC, datetime, timedelta
 
+from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
 from smart_commissioning_core.db.db_run_store import (
     WORKER_STALE_OBSERVED_AT_KEY,
     DbRunStore,
@@ -9,7 +10,6 @@ from smart_commissioning_core.db.engine import session_factory
 from smart_commissioning_core.db.models import Run, RunResult, RunSeal
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
-from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.owned_run_store import OwnedRunStore
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
@@ -39,11 +39,11 @@ from app.services.report_artifacts import (
 )
 from app.services.report_naming import build_report_file_name
 from app.services.run_context_builder import build_run_context
-from app.services.validation_export import build_validation_export
 from app.services.udmi_report_model import (
     build_udmi_report_model,
     normalise_udmi_report_scope,
 )
+from app.services.validation_export import build_validation_export
 
 logger = logging.getLogger(__name__)
 

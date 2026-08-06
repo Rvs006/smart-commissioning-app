@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from smart_commissioning_core.capture_provenance import capture_acceptance_eligible, capture_outcome
+
 from app.services.register_topics import normalise_payload_applicability
 from app.services.validation_export import redact_export_value
 

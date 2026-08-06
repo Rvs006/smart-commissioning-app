@@ -32,7 +32,6 @@ from app.services.report_artifacts import (
 )
 from app.services.report_naming import build_report_file_name, report_content_disposition
 from app.services.report_pdf import PdfDocument
-from app.services.validation_export import redact_export_value
 from app.services.run_service import (
     DISCOVERY_JOB_TYPES,
     VALIDATION_JOB_TYPES,
@@ -45,6 +44,7 @@ from app.services.udmi_report_model import (
     PAYLOAD_METRIC_LABELS,
     build_udmi_report_model,
 )
+from app.services.validation_export import redact_export_value
 
 router = APIRouter()
 service = RunService()
@@ -881,8 +881,8 @@ def _source_run_findings(run: object) -> list[dict[str, str]]:
                         "Yes"
                         if getattr(issue, "expected_value", None) is not None
                         and getattr(issue, "observed_value", None) is not None
-                        and str(getattr(issue, "expected_value"))
-                        != str(getattr(issue, "observed_value"))
+                        and str(issue.expected_value)
+                        != str(issue.observed_value)
                         else "No"
                     ),
                     "Topic Payload Type": "",

@@ -60,6 +60,8 @@ from app.services.job_queue import JobQueueService
 # test_v1_review_contracts.py both keep working unchanged.
 from app.services.register_topics import (
     capture_topics_from_expected as _capture_topics_from_expected,
+)
+from app.services.register_topics import (
     normalise_payload_applicability as _normalise_payload_applicability,
 )
 from app.services.run_dispatch import dispatch_run

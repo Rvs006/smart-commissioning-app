@@ -38,12 +38,12 @@ from smart_commissioning_core.mqtt_transport import (
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_results import build_validation_summary_v1
 from smart_commissioning_core.udmi_schema import (
+    _is_rfc3339_datetime,
     declared_version,
     is_nonpub_version,
     nonpub_version_key,
     structural_issues,
     structural_version_available,
-    _is_rfc3339_datetime,
     versions_match,
 )
 
@@ -2922,9 +2922,7 @@ def _capture_validation_topics(
     validation_topics = [
         topic for topic in candidates if topic and _payload_key_for_topic(topic)
     ]
-    if not validation_topics and publisher_root and not (
-        applicability_status in {"unresolved", "invalid"}
-    ):
+    if not validation_topics and publisher_root and applicability_status not in {"unresolved", "invalid"}:
         validation_topics = [
             f"{publisher_root}/state",
             f"{publisher_root}/metadata",

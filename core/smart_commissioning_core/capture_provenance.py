@@ -2,7 +2,6 @@
 
 from collections.abc import Mapping
 
-
 _FAILED_TERMINATION_REASONS = frozenset(
     {
         "capture_unavailable",
