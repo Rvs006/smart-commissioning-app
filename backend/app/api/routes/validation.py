@@ -60,6 +60,7 @@ from app.services.job_queue import JobQueueService
 # test_v1_review_contracts.py both keep working unchanged.
 from app.services.register_topics import (
     capture_topics_from_expected as _capture_topics_from_expected,
+    normalise_payload_applicability as _normalise_payload_applicability,
 )
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import VALIDATION_JOB_TYPES, RunService
@@ -174,10 +175,21 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
         "guid": row.get("GUID"),
         "site": row.get("Site"),
         "room": row.get("Room"),
+        # Floor is deliberately separate from Room. A missing Floor remains
+        # missing in the evidence model; Room is never promoted to Floor.
+        "floor": row.get("Floor"),
         "udmi_version": row.get("Expected schema version"),
         "reporting_interval_seconds": row.get("Expected reporting interval"),
     }
     schedule = {key: value for key, value in fields.items() if value}
+    payload_types, applicability_status = _normalise_payload_applicability(
+        row.get("Payload type"),
+        row.get("Payload applicability"),
+    )
+    # The empty list is intentional. It records that applicability was not
+    # approved rather than silently expanding the expected set to all facets.
+    schedule["payload_types"] = payload_types
+    schedule["payload_applicability_status"] = applicability_status
     if points:
         schedule["points"] = points
     units_map = {point: units[index] for index, point in enumerate(points) if index < len(units) and units[index]}
@@ -190,7 +202,11 @@ def _asset_entry_from_row(row: dict) -> dict:
     """One UDMI `assets` fan-out entry: expected_schedule + per-asset capture topics."""
     return {
         "expected_schedule": _expected_schedule_from_register_row(row),
-        **_capture_topics_from_expected(row.get("Expected topic"), row.get("Payload type")),
+        **_capture_topics_from_expected(
+            row.get("Expected topic"),
+            row.get("Payload type"),
+            row.get("Payload applicability"),
+        ),
     }
 
 
@@ -227,6 +243,18 @@ def _merge_entry_into(existing: dict, entry: dict) -> None:
             )
         elif field == "units":
             existing_schedule["units"] = {**value, **existing_schedule.get("units", {})}
+        elif field == "payload_types":
+            existing_types = existing_schedule.get("payload_types")
+            existing_types = existing_types if isinstance(existing_types, list) else []
+            merged = list(dict.fromkeys([*existing_types, *(value if isinstance(value, list) else [])]))
+            existing_schedule["payload_types"] = [
+                payload_type
+                for payload_type in ("state", "metadata", "pointset")
+                if payload_type in merged
+            ]
+        elif field == "payload_applicability_status":
+            if value == "approved" or existing_schedule.get(field) not in {"approved", "invalid"}:
+                existing_schedule[field] = value
         elif not existing_schedule.get(field):
             existing_schedule[field] = value
 
@@ -363,6 +391,7 @@ def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[
                 {
                     "register_import_id": record.get("import_id"),
                     "register_import_filename": record.get("original_filename"),
+                    "register_sha256": summary.get("file_sha256"),
                     "register_columns": register_columns,
                     "register_rows": register_rows,
                 }

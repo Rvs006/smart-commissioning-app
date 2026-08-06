@@ -47,6 +47,7 @@ import {
   ReportSummary,
   ReportFormat,
   ReportType,
+  UdmiReportVariant,
   UdmiAssetTopicDiscovery,
   UdmiAssetTopicDiscoveryAssetResult,
   UdmiAssetTopicDiscoveryStatus,
@@ -91,6 +92,7 @@ import {
   formatAbsoluteTime,
   formatRelativeTime,
   formatRunProgress,
+  humanizeStage,
   isTerminalStatus,
   runPollInterval,
   toHealthState,
@@ -392,6 +394,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // PDF default: the field deliverable is a human-readable handover document
   // (ask 2026-07-14); Word/Excel/zip remain for editable/evidence workflows.
   const [reportExportFormat, setReportExportFormat] = useState<ReportFormatSelection>("pdf");
+  const [udmiReportVariant, setUdmiReportVariant] = useState<UdmiReportVariant>("client");
   const [reportDialogOpen, setReportDialogOpen] = useState(false);
   const [reportTitle, setReportTitle] = useState("");
   const [reportScopeSnapshot, setReportScopeSnapshot] = useState<FrozenUdmiReportScope | null>(
@@ -1218,6 +1221,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             reportTitle: title,
             reportType: intent.reportType,
             sourceRunIds: [intent.runId],
+            udmiReportVariant: intent.udmiReportVariant,
             udmiScope: intent.udmiScope,
             workspace: workspaceRef,
           }),
@@ -1522,6 +1526,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const captureWindow =
     activeRun?.kind === "validation" && validationRunQuery.data
       ? formatCaptureWindow(validationRunQuery.data.result_summary)
+      : null;
+  const captureOutcome =
+    activeRun?.kind === "validation" && validationRunQuery.data
+      ? formatCaptureOutcome(validationRunQuery.data.status, validationRunQuery.data.result_summary)
       : null;
 
   const validationSummary = useMemo(
@@ -2332,6 +2340,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // All reports remain selectable for deletion. Export derives its own subset
   // because only succeeded reports have bytes behind the download endpoint.
   const liveReports = reportsQuery.data?.reports ?? [];
+  const hasUdmiReports = liveReports.some((report) => report.report_type === "udmi_validation");
   const downloadableReports = liveReports.filter((report) => report.status === "succeeded");
   const selectedReports = liveReports.filter((report) => selectedReportIds.has(report.report_id));
   const selectedDownloadableReports = downloadableReports.filter((report) =>
@@ -2476,6 +2485,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           format,
           reportType,
           runId,
+          ...(reportType === "udmi_validation"
+            ? { udmiReportVariant }
+            : {}),
           ...(frozenScope ? { udmiScope: frozenScope } : {}),
         }),
       ),
@@ -3308,6 +3320,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   {canEngineer && activeRunTerminal && (
                     <ReportFromRunControls
                       format={reportExportFormat}
+                      isUdmiRun={
+                        activeRun.kind === "validation" &&
+                        validationRunQuery.data?.job_type === "udmi_validation"
+                      }
+                      udmiVariant={udmiReportVariant}
+                      onUdmiVariantChange={setUdmiReportVariant}
                       onFormatChange={setReportExportFormat}
                       onGenerate={handleGenerateReportFromRun}
                       pending={reportFromRunMutation.isPending}
@@ -4280,6 +4298,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       <th>Select</th>
                       <th>Report</th>
                       <th>Type</th>
+                      {hasUdmiReports && <th>Product</th>}
                       <th>Format</th>
                       <th>Status</th>
                       <th>Generated</th>
@@ -4309,9 +4328,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               {report.report_title?.trim() ? (
                                 <small>{report.report_id}</small>
                               ) : null}
+                              {report.evidence_set_id ? (
+                                <small>Evidence: {report.evidence_set_id}</small>
+                              ) : null}
                             </div>
                           </td>
                           <td>{report.report_type}</td>
+                          {hasUdmiReports && (
+                            <td>
+                              {report.report_type === "udmi_validation"
+                                ? report.udmi_report_variant === "client"
+                                  ? "Client summary"
+                                  : "Technical evidence"
+                                : "—"}
+                            </td>
+                          )}
                           <td>{report.output_format.toUpperCase()}</td>
                           <td>
                             <span className={`status-token ${toHealthState(report.status)}`}>
@@ -4461,7 +4492,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </strong>
                 <span>
                   {hasPersistedValidationEvidence
-                    ? "Only evidence collected before cancellation is included."
+                    ? `Only evidence collected before cancellation is included.${captureOutcome ? ` ${captureOutcome}.` : ""}`
                     : "No validation evidence was stored for this run."}
                 </span>
               </div>
@@ -4474,7 +4505,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </strong>
                 <span>
                   {hasPersistedValidationEvidence
-                    ? "Stored evidence remains available, but this is not a complete validation."
+                    ? `Stored evidence remains available, but this is not a complete validation.${captureOutcome ? ` ${captureOutcome}.` : ""}`
                     : (activeRunError ?? "No validation evidence was stored for this run.")}
                 </span>
               </div>
@@ -4556,12 +4587,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
                   )
                 ) : (
-                  `${activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
+                  `${activeRunStatus === "cancelled" || activeRunStatus === "failed" ? "Partial" : activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
                     payloadViewSource === "live_capture"
                       ? "captured from the MQTT broker"
                       : "supplied directly (pasted), not captured from a broker"
                   }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}${
-                    activeRunTerminal ? "" : " Verdicts remain pending until the run finishes."
+                    captureOutcome ? ` ${captureOutcome}.` : activeRunTerminal ? "" : " Verdicts remain pending until the run finishes."
                   }`
                 )}
               </div>
@@ -5111,6 +5142,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             <div className="inline-actions">
               <ReportFromRunControls
                 format={reportExportFormat}
+                isUdmiRun={
+                  activeRun.kind === "validation" &&
+                  validationRunQuery.data?.job_type === "udmi_validation"
+                }
+                udmiVariant={udmiReportVariant}
+                onUdmiVariantChange={setUdmiReportVariant}
                 onFormatChange={setReportExportFormat}
                 onGenerate={handleGenerateReportFromRun}
                 pending={reportFromRunMutation.isPending}
@@ -5274,17 +5311,38 @@ function StepNav({
 // the one the POST reads.
 function ReportFromRunControls({
   format,
+  isUdmiRun,
+  udmiVariant,
+  onUdmiVariantChange,
   onFormatChange,
   onGenerate,
   pending,
 }: {
   format: ReportFormatSelection;
+  isUdmiRun: boolean;
+  udmiVariant: UdmiReportVariant;
+  onUdmiVariantChange: (next: UdmiReportVariant) => void;
   onFormatChange: (next: ReportFormatSelection) => void;
   onGenerate: (opener: HTMLButtonElement) => void;
   pending: boolean;
 }) {
   return (
     <div className="report-from-run-controls">
+      {isUdmiRun && (
+        <label className="report-format-picker">
+          Report product
+          <select
+            aria-label="UDMI report product"
+            onChange={(event) =>
+              onUdmiVariantChange(event.target.value as UdmiReportVariant)
+            }
+            value={udmiVariant}
+          >
+            <option value="client">Client summary</option>
+            <option value="technical">Technical evidence</option>
+          </select>
+        </label>
+      )}
       <label className="report-format-picker">
         Report format
         <select
@@ -6628,6 +6686,7 @@ function IssueCard({ issue, context }: { issue: IssueRow; context: string }) {
       <div className="issue-card-body">
         <span>{context ? `${issue.id} · ${context}` : issue.id}</span>
         <strong>{headline}</strong>
+        {issue.mismatch && <em className="issue-mismatch">Mismatch</em>}
         {issue.expectedObserved && <small>{issue.expectedObserved}</small>}
         {issue.statusDetail && <small>Status: {issue.statusDetail}</small>}
         {issue.suggestedAction && (
@@ -6861,6 +6920,9 @@ function toIssueRow(issue: ValidationIssueRecord): IssueRow {
     issue.expected_value != null || issue.observed_value != null
       ? `Expected ${issueDisplayValue(issue.expected_value)}, observed ${issueDisplayValue(issue.observed_value)}`
       : undefined;
+  const mismatch =
+    (issue.expected_value != null || issue.observed_value != null) &&
+    String(issue.expected_value ?? "") !== String(issue.observed_value ?? "");
   // The joined one-liner is still built for the Inspector detail list;
   // the same fragments are also carried structured so the issue CARDS can render
   // them as separate lines instead of one run-on string (ITEM-9).
@@ -6881,6 +6943,7 @@ function toIssueRow(issue: ValidationIssueRecord): IssueRow {
     description: issue.description,
     statusDetail: issue.status_detail ?? null,
     expectedObserved,
+    mismatch,
     suggestedAction: issue.suggested_action ?? null,
     pointName: issue.point_name ?? null,
     matchBasis: issue.match_basis ?? null,
@@ -6971,6 +7034,29 @@ function formatCaptureWindow(summary: Record<string, unknown>): string | null {
     return `capped at ${seconds} s (indefinite requested; no cancel path)`;
   }
   return null;
+}
+
+function formatCaptureOutcome(
+  status: string | undefined,
+  summary: Record<string, unknown>,
+): string | null {
+  if (summary.broker_capture_attempted !== true) {
+    return null;
+  }
+  const terminationReason =
+    typeof summary.termination_reason === "string" ? summary.termination_reason : null;
+  const eligible =
+    typeof summary.acceptance_eligible === "boolean"
+      ? status === "succeeded" && summary.acceptance_eligible
+      : status === "succeeded" &&
+        summary.validation_incomplete !== true &&
+        summary.window_completed === true &&
+        terminationReason === "window_elapsed";
+  if (eligible) {
+    return "Cadence acceptance: eligible";
+  }
+  const reason = terminationReason ? humanizeStage(terminationReason) : "capture incomplete";
+  return `Cadence acceptance: ineligible (${reason})`;
 }
 
 function renderCell(

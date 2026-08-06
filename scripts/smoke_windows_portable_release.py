@@ -841,6 +841,7 @@ def smoke(args: argparse.Namespace) -> dict[str, object]:
             "output_format": "zip",
             "source_run_ids": [source_run_id],
             "report_title": "Portable Release Validation",
+            "udmi_report_variant": "technical",
         },
     )
     report_id = str(report.get("report_id") or "")

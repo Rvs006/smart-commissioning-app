@@ -123,6 +123,41 @@ class EvidenceVerifyApiTests(ApiTestCase):
                 self.assertIsNotNone(body["public_key_fingerprint"])
                 self.assertEqual(body["stored_hash"], body["computed_hash"])
 
+    def test_manifest_verifier_accepts_legacy_and_rejects_bad_evidence_id(self) -> None:
+        import base64
+
+        from app.services.report_artifacts import (
+            canonical_json_bytes,
+            verify_signed_manifest,
+        )
+        from app.services.reports_integrity import load_signing_key
+        from app.services.run_service import RunService
+        from smart_commissioning_core.integrity import sha256_bytes
+
+        report_id = self._create_report("zip")
+        manifest = dict(RunService().get_run(report_id).result_summary["artifact_manifest"])
+        self.assertTrue(verify_signed_manifest(manifest))
+
+        legacy = dict(manifest)
+        legacy["schema_version"] = "1.0"
+        legacy.pop("evidence_set_id")
+        unsigned = {
+            key: value
+            for key, value in legacy.items()
+            if key not in {"signature_algorithm", "signature", "public_key_pem", "signed_manifest_sha256"}
+        }
+        signing_key = load_signing_key()
+        signed_body = canonical_json_bytes(unsigned)
+        legacy["signature"] = base64.b64encode(signing_key.sign(signed_body)).decode("ascii")
+        legacy["public_key_pem"] = signing_key.public_key_pem()
+        legacy["signing_key_id"] = signing_key.public_key_fingerprint()
+        legacy["signed_manifest_sha256"] = sha256_bytes(signed_body)
+        self.assertTrue(verify_signed_manifest(legacy))
+
+        malformed = dict(manifest)
+        malformed["evidence_set_id"] = "evidence_invalid"
+        self.assertFalse(verify_signed_manifest(malformed))
+
     def test_unscoped_evidence_pack_labels_source_runs_honestly(self) -> None:
         # Audit fix: an evidence pack generated with no selected source runs must
         # NOT claim to cover "All completed runs" while carrying zero findings.

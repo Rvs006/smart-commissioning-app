@@ -22,7 +22,9 @@ In-process against the shared temporary SQLite DB (no live infra). The evidence
 signing key is pointed at a temp secrets dir because export persists integrity.
 """
 
+import hashlib
 import io
+import json
 import zipfile
 
 from harness import ApiTestCase
@@ -127,7 +129,10 @@ class ReportsExportApiTests(ApiTestCase):
         self.assertIn("reports_export.zip", response.headers["content-disposition"])
 
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            self.assertEqual(set(archive.namelist()), {report_a["file_name"], report_b["file_name"]})
+            self.assertEqual(
+                set(archive.namelist()),
+                {report_a["file_name"], report_b["file_name"], "report_set_manifest.json"},
+            )
             # Each member is byte-identical to that report's own direct download.
             self.assertEqual(
                 archive.read(report_a["file_name"]), self._download(report_a["report_id"])
@@ -135,6 +140,19 @@ class ReportsExportApiTests(ApiTestCase):
             self.assertEqual(
                 archive.read(report_b["file_name"]), self._download(report_b["report_id"])
             )
+            manifest = json.loads(archive.read("report_set_manifest.json"))
+            self.assertEqual(manifest["manifest_type"], "selected_reports_bundle")
+            self.assertEqual(
+                manifest["report_ids"], [report_a["report_id"], report_b["report_id"]]
+            )
+            self.assertEqual(
+                [member["file_name"] for member in manifest["members"]],
+                [report_a["file_name"], report_b["file_name"]],
+            )
+            for member in manifest["members"]:
+                content = archive.read(member["file_name"])
+                self.assertEqual(member["byte_size"], len(content))
+                self.assertEqual(member["sha256"], hashlib.sha256(content).hexdigest())
 
     def test_duplicate_report_id_yields_one_member(self) -> None:
         run_id = self._seed_validation_run()
@@ -145,7 +163,9 @@ class ReportsExportApiTests(ApiTestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-            self.assertEqual(archive.namelist(), [report["file_name"]])
+            self.assertEqual(
+                archive.namelist(), [report["file_name"], "report_set_manifest.json"]
+            )
 
     def test_unknown_id_among_valid_ones_404s_the_whole_request(self) -> None:
         run_id = self._seed_validation_run()

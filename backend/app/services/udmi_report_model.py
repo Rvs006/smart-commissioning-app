@@ -10,6 +10,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from smart_commissioning_core.capture_provenance import capture_acceptance_eligible, capture_outcome
+from app.services.register_topics import normalise_payload_applicability
+from app.services.validation_export import redact_export_value
+
 ASSET_METRIC_LABELS = (
     ("expected", "Expected Assets"),
     ("observed", "Observed Assets"),
@@ -238,6 +242,89 @@ def _optional_text(value: object) -> str | None:
     return str(value) if value is not None and str(value) else None
 
 
+def _source_evidence_provenance(
+    source: object,
+    context_provenance: dict[str, object] | None,
+) -> dict[str, object]:
+    """Project the auditable identity fields shared by every report product.
+
+    Values that cannot be derived from the stored run remain explicitly null.
+    The report must show that a field was not recorded rather than borrowing a
+    value from current configuration or from a later register import.
+    """
+
+    source_id = _text(getattr(source, "run_id", ""))
+    parameters = getattr(source, "parameters", None)
+    parameters = parameters if isinstance(parameters, dict) else {}
+    summary = getattr(source, "result_summary", None)
+    summary = summary if isinstance(summary, dict) else {}
+    context = context_provenance if isinstance(context_provenance, dict) else {}
+
+    def value(*keys: str) -> str | None:
+        for key in keys:
+            candidate = parameters.get(key)
+            if candidate is not None and str(candidate).strip():
+                return str(candidate).strip()
+        return None
+
+    requested_duration = parameters.get("capture_seconds")
+    if requested_duration in (None, ""):
+        requested_duration = None
+    elif isinstance(requested_duration, bool) or not isinstance(
+        requested_duration, (int, float, str)
+    ):
+        requested_duration = None
+
+    topic_filters = parameters.get("topic_filters")
+    if not isinstance(topic_filters, list):
+        topic_filters = []
+    topic_filters = [str(topic).strip() for topic in topic_filters if str(topic).strip()]
+    topic_filter = value("topic_filter", "register_topic_filter")
+    if topic_filter and topic_filter not in topic_filters:
+        topic_filters.insert(0, topic_filter)
+
+    return {
+        "source_run_id": source_id,
+        "application_version": context.get("application_version") or value("application_version"),
+        "source_commit": value("source_commit", "application_source_commit"),
+        "portable_exe_sha256": value("portable_exe_sha256", "exe_sha256", "portable_hash"),
+        "machine_reference": value("machine_reference", "machine_id"),
+        "broker_reference": value("broker_reference", "broker_id"),
+        "operator_reference": value("operator_reference", "operator_id"),
+        "register": {
+            "filename": value("register_import_filename"),
+            "revision": value("register_revision"),
+            "sha256": value("register_sha256", "register_hash"),
+            "import_id": value("register_import_id"),
+        },
+        "scope": {
+            "topic_filter": topic_filter,
+            "topic_filters": topic_filters,
+            "filter_provenance": parameters.get("filter_provenance"),
+        },
+        "capture": {
+            "requested_duration_seconds": requested_duration,
+            "actual_duration_seconds": summary.get("capture_duration_seconds"),
+            "capture_mode": summary.get("capture_mode"),
+            "capture_started_at": summary.get("capture_started_at"),
+            "capture_ended_at": summary.get("capture_ended_at"),
+            "window_completed": summary.get("window_completed"),
+            "termination_reason": summary.get("termination_reason"),
+        },
+        "context_sha256": context.get("context_sha256"),
+        "configuration_version": context.get("configuration_version"),
+        "schema_versions": context.get("schema_versions", {}),
+    }
+
+
+def _fault_has_mismatch(value: dict[str, Any]) -> bool:
+    expected = value.get("expected_value")
+    observed = value.get("observed_value")
+    if expected is None and observed is None:
+        return False
+    return str(expected) != str(observed)
+
+
 def _register_row_value(row: dict[str, Any], *headings: str) -> object:
     """Read canonical fields while retaining exact source headings in output."""
 
@@ -460,6 +547,24 @@ def _normalise_payload_results(value: object) -> list[dict[str, Any]] | None:
             for field in ("topic", "received_at")
         ):
             return None
+        if any(
+            raw.get(field) is not None and not isinstance(raw.get(field), bool)
+            for field in ("retained", "saw_non_retained")
+        ):
+            return None
+        # Historical pasted/synthetic summaries have no live-capture cadence
+        # field. They are content-only evidence, so preserve their old verdict
+        # semantics instead of turning them into an unevaluated failure.
+        cadence_status = raw.get("cadence_status", "not_required")
+        if cadence_status not in {
+            "passed",
+            "stale",
+            "not_received",
+            "not_evaluated",
+            "retained_only",
+            "not_required",
+        }:
+            return None
         raw_topics = raw.get("topics", [])
         if not isinstance(raw_topics, list) or any(
             not isinstance(topic, str) or not topic.strip()
@@ -482,6 +587,9 @@ def _normalise_payload_results(value: object) -> list[dict[str, Any]] | None:
                 "topic": _optional_text(raw.get("topic")),
                 "topics": topics,
                 "received_at": _optional_text(raw.get("received_at")),
+                "retained": bool(raw.get("retained", False)),
+                "saw_non_retained": bool(raw.get("saw_non_retained", False)),
+                "cadence_status": str(cadence_status),
             }
         )
     rows.sort(key=lambda row: _PAYLOAD_ORDER[row["payload_type"]])
@@ -896,6 +1004,7 @@ def _computed_system_metrics(
 def build_udmi_report_model(
     sources: list[object],
     scope: object = None,
+    source_context_provenance: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, Any] | None:
     """Aggregate source contracts, or return ``None`` for the legacy renderer.
 
@@ -907,9 +1016,13 @@ def build_udmi_report_model(
     udmi_sources = [
         source for source in sources if getattr(source, "job_type", None) == "udmi_validation"
     ]
-    canonical_scope = (
-        normalise_udmi_report_scope(scope, udmi_sources) if scope is not None else None
-    )
+    canonical_scope = None
+    if scope is not None:
+        canonical_scope = normalise_udmi_report_scope(scope, udmi_sources)
+        canonical_scope["scope_kind"] = "selected_payloads"
+        canonical_scope["source_run_ids"] = sorted(
+            _text(getattr(source, "run_id", "")) for source in udmi_sources
+        )
     contracts: list[tuple[object, dict[str, Any]]] = []
     source_rows: list[dict[str, Any]] = []
     incomplete_source_runs: list[dict[str, Any]] = []
@@ -946,8 +1059,37 @@ def build_udmi_report_model(
             "schema_version": contract["schema_version"] if contract is not None else None,
             "metrics_included": contract is not None,
         }
+        source_row["evidence_provenance"] = _source_evidence_provenance(
+            source,
+            (source_context_provenance or {}).get(source_id),
+        )
+        source_row.update(
+            {
+                "capture_mode": _optional_text(summary.get("capture_mode")),
+                "capture_window_seconds": (
+                    summary.get("capture_window_seconds")
+                    if isinstance(summary.get("capture_window_seconds"), (int, float))
+                    and not isinstance(summary.get("capture_window_seconds"), bool)
+                    else None
+                ),
+                "capture_started_at": _optional_text(summary.get("capture_started_at")),
+                "capture_ended_at": _optional_text(summary.get("capture_ended_at")),
+                "capture_duration_seconds": (
+                    summary.get("capture_duration_seconds")
+                    if isinstance(summary.get("capture_duration_seconds"), (int, float))
+                    and not isinstance(summary.get("capture_duration_seconds"), bool)
+                    else None
+                ),
+                "window_completed": summary.get("window_completed")
+                if isinstance(summary.get("window_completed"), bool)
+                else None,
+                "termination_reason": _optional_text(summary.get("termination_reason")),
+            }
+        )
+        source_row["capture_outcome"] = capture_outcome(status, summary)
+        source_row["acceptance_eligible"] = capture_acceptance_eligible(status, summary)
         source_rows.append(source_row)
-        if status != "succeeded" or contract is None:
+        if source_row["capture_outcome"] in {"incomplete", "cancelled", "failed"} or contract is None:
             incomplete_source_runs.append(dict(source_row))
 
     asset_metrics = _empty_metrics(_ASSET_KEYS)
@@ -998,6 +1140,7 @@ def build_udmi_report_model(
     unexpected_devices_measured = bool(contracts)
     unexpected_measurement_scopes: set[str] = set()
     project_sites: set[str] = set()
+    floor_values: set[str] = set()
     for source, contract in contracts:
         source_id = _text(getattr(source, "run_id", ""))
         retired_issue_ids = _unexpected_issue_ids(source)
@@ -1058,20 +1201,18 @@ def build_udmi_report_model(
         for wrong_asset in contract["wrong_topic_assets"]:
             wrong_by_asset.setdefault(wrong_asset["asset_id"], []).append(wrong_asset)
         for register_row in source_register_rows:
+            floor_value = _text(_register_row_value(register_row, "Floor")).strip()
+            if floor_value:
+                floor_values.add(floor_value)
             asset_id = _text(
                 _register_row_value(register_row, "Asset ID", "Asset name")
             ).strip()
             asset = source_assets.get(asset_id)
-            register_payload_type = (
-                _text(_register_row_value(register_row, "Payload type"))
-                .strip()
-                .casefold()
+            relevant_payload_types_list, applicability_status = normalise_payload_applicability(
+                _register_row_value(register_row, "Payload type"),
+                _register_row_value(register_row, "Payload applicability"),
             )
-            relevant_payload_types = (
-                {register_payload_type}
-                if register_payload_type in _PAYLOAD_TYPES
-                else set(_PAYLOAD_TYPES)
-            )
+            relevant_payload_types = set(relevant_payload_types_list)
             payload_results = [
                 payload
                 for payload in (asset.get("payload_results", []) if asset else [])
@@ -1120,6 +1261,12 @@ def build_udmi_report_model(
                 if observed
                 else "Not observed during this run."
             )
+            if applicability_status != "approved":
+                comment = (
+                    f"Payload applicability decision is {applicability_status}; "
+                    "no expected payload types were inferred. "
+                    + comment
+                )
             observed_times = [
                 parsed
                 for payload in payload_results
@@ -1142,9 +1289,12 @@ def build_udmi_report_model(
                     default=None,
                     key=lambda item: item[0],
                 )
+            safe_register_row = redact_export_value(
+                {str(key): value for key, value in register_row.items()}
+            )
             annotated_register_rows.append(
                 {
-                    **{str(key): value for key, value in register_row.items()},
+                    **(safe_register_row if isinstance(safe_register_row, dict) else {}),
                     register_annotation_columns["Observed in run"]: (
                         "Yes" if observed else "No"
                     ),
@@ -1309,6 +1459,7 @@ def build_udmi_report_model(
                     "point_name": _optional_text(raw_fault.get("point_name")),
                     "expected_value": _optional_text(raw_fault.get("expected_value")),
                     "observed_value": _optional_text(raw_fault.get("observed_value")),
+                    "mismatch": _fault_has_mismatch(raw_fault),
                     "suggested_action": _optional_text(raw_fault.get("suggested_action")),
                     "raw_evidence_uri": _optional_text(raw_fault.get("raw_evidence_uri")),
                 }
@@ -1415,7 +1566,12 @@ def build_udmi_report_model(
                         **payload,
                         "has_issues": bool(payload_faults),
                         "blocking_issue_count": blocking,
-                        "successfully_validated": payload["received"] is True and blocking == 0,
+                        "successfully_validated": (
+                            payload["received"] is True
+                            and blocking == 0
+                            and payload.get("cadence_status")
+                            in {"passed", "not_required"}
+                        ),
                     }
                 )
             expected_payloads = [
@@ -1423,6 +1579,11 @@ def build_udmi_report_model(
             ]
             received_payloads = [
                 payload for payload in selected_payloads if payload["received"] is True
+            ]
+            expected_received_payloads = [
+                payload
+                for payload in selected_payloads
+                if payload["expected"] is True and payload["received"] is True
             ]
             all_expected_received = bool(expected_payloads) and all(
                 payload["received"] is True for payload in expected_payloads
@@ -1446,12 +1607,21 @@ def build_udmi_report_model(
                         payload["received"] is True for payload in expected_payloads
                     ),
                     "all_expected_payloads_received": all_expected_received,
-                    "all_received_payloads_successfully_validated": bool(received_payloads)
+                    "all_received_payloads_successfully_validated": bool(expected_received_payloads)
                     and all(
                         payload["successfully_validated"] is True
-                        for payload in received_payloads
+                        for payload in expected_received_payloads
                     ),
-                    "successfully_validated": all_expected_received and blocking == 0,
+                    "successfully_validated": (
+                        all_expected_received
+                        and bool(
+                            all(
+                                payload["successfully_validated"] is True
+                                for payload in expected_received_payloads
+                            )
+                        )
+                        and blocking == 0
+                    ),
                     "issue_count": len(asset_faults),
                     "blocking_issue_count": blocking,
                     "last_observed_at": latest_observed[1] if latest_observed else None,
@@ -1616,6 +1786,7 @@ def build_udmi_report_model(
         "Observed means retained expected payload evidence was seen during the validation window.",
         "Not observed does not prove an asset's connection state.",
         "Asset timestamps are shown only when retained evidence contains one.",
+        "Floor is reported only from the explicit register Floor column; Room is never used as Floor.",
     ]
     if not udmi_sources:
         notes.append("No UDMI validation source runs were selected.")
@@ -1626,12 +1797,34 @@ def build_udmi_report_model(
             "Metrics exclude source runs without a retained validation_summary_v1 contract: "
             f"{excluded_ids}."
         )
-    if canonical_scope is not None:
+    report_scope = canonical_scope or {
+        "schema_version": "1.0",
+        "scope_kind": "full_source_run",
+        "source_run_ids": sorted(
+            _text(getattr(source, "run_id", "")) for source in udmi_sources
+        ),
+        "selected_payloads": [],
+        "unexpected_device_ids": [],
+        "filters": {
+            "text": "",
+            "verdict": "all",
+            "topic_contains": "",
+            "system": "all",
+            "observation": "all",
+            "category": "all",
+        },
+    }
+    if report_scope["scope_kind"] == "selected_payloads":
         notes.append(
             "This report uses the exact Results payload selection captured when export was "
             "requested. Filter labels are provenance only."
         )
-        notes.append(f"Active Results filters: {_filter_summary(canonical_scope['filters'])}.")
+    else:
+        notes.append(
+            "This report covers every retained payload in the selected source run(s); no "
+            "Results payload selection was applied."
+        )
+    notes.append(f"Active Results filters: {_filter_summary(report_scope['filters'])}.")
     if not unexpected_devices_measured:
         notes.append(
             "Unexpected devices were not measured for every selected source run."
@@ -1662,12 +1855,21 @@ def build_udmi_report_model(
             "Selected source schedules contain more than one Project/site value; all values "
             "are shown in the report header."
         )
+    acceptance_eligible = bool(udmi_sources) and all(
+        row["acceptance_eligible"] is True for row in source_rows
+    )
     return {
         "schema_version": schema_version,
         "source_runs": source_rows,
+        "evidence_provenance": {
+            "schema_version": "1.0",
+            "evidence_set_id": None,
+            "sources": [row["evidence_provenance"] for row in source_rows],
+        },
         "scope_complete": scope_complete,
         "scope_status": "complete" if scope_complete else "incomplete",
         "scope_summary": scope_summary,
+        "acceptance_eligible": acceptance_eligible,
         "incomplete_source_runs": incomplete_source_runs,
         "last_validation_run_at": latest[1] if latest is not None else None,
         "asset_metrics": asset_metrics,
@@ -1694,9 +1896,14 @@ def build_udmi_report_model(
         ),
         "project_label": project_site or None,
         "site_label": project_site or None,
-        "report_scope": canonical_scope,
-        "filter_provenance": canonical_scope["filters"] if canonical_scope else None,
-        "filter_summary": _filter_summary(canonical_scope["filters"]) if canonical_scope else None,
+        "floor_reporting": {
+            "status": "reported" if floor_values else "not_provided",
+            "values": sorted(floor_values, key=str.casefold),
+            "source": "explicit register Floor column",
+        },
+        "report_scope": report_scope,
+        "filter_provenance": report_scope["filters"],
+        "filter_summary": _filter_summary(report_scope["filters"]),
         "metric_definitions": list(METRIC_DEFINITIONS),
         "notes": notes,
     }

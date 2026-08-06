@@ -7,7 +7,9 @@ import math
 import re
 from datetime import datetime
 
-EXPORT_SCHEMA_VERSION = "1.0"
+from smart_commissioning_core.capture_provenance import capture_outcome
+
+EXPORT_SCHEMA_VERSION = "1.1"
 EXPORT_SCHEMA_PATH = "docs/schemas/udmi-validation-export-v1.schema.json"
 _REDACTED = "********"
 _SECRET_KEY_PARTS = (
@@ -97,8 +99,28 @@ def build_validation_export(run: object) -> dict[str, object]:
     updated_at = _timestamp(getattr(run, "updated_at", None))
     created_at = _timestamp(getattr(run, "created_at", None))
     status = str(getattr(run, "status", ""))
+    summary = getattr(run, "result_summary", None)
+    summary = summary if isinstance(summary, dict) else {}
+    outcome = capture_outcome(status, summary)
     issues = list(getattr(run, "issues", []) or [])
     result_summary = getattr(run, "result_summary", {})
+    result_summary = result_summary if isinstance(result_summary, dict) else {}
+    raw_evidence = result_summary.get("raw_evidence")
+    if not isinstance(raw_evidence, dict):
+        raw_evidence = {
+            "records": [],
+            "record_count": 0,
+            "captured_record_count": 0,
+            "truncated": False,
+            "retained_bytes": 0,
+        }
+    raw_evidence_export = redact_export_value(raw_evidence)
+    # Keep the portable raw area at the envelope level. The summary remains a
+    # metrics contract, so a consumer can load the report without walking a
+    # potentially large payload list twice.
+    summary_export = redact_export_value(result_summary)
+    if isinstance(summary_export, dict):
+        summary_export.pop("raw_evidence", None)
     return {
         "schema_version": EXPORT_SCHEMA_VERSION,
         "schema": EXPORT_SCHEMA_PATH,
@@ -115,21 +137,39 @@ def build_validation_export(run: object) -> dict[str, object]:
             "progress_percent": int(getattr(run, "progress_percent", 0) or 0),
             "created_at": created_at,
             "updated_at": updated_at,
-            "partial": status in {"cancelled", "failed"},
+            "partial": outcome in {"incomplete", "cancelled", "failed"},
+            "capture_outcome": outcome,
+            "window_completed": (
+                summary.get("window_completed")
+                if isinstance(summary.get("window_completed"), bool)
+                else None
+            ),
+            "termination_reason": (
+                str(summary.get("termination_reason"))
+                if summary.get("termination_reason") is not None
+                else None
+            ),
             "error_message": redact_export_value(
                 getattr(run, "error_message", None),
                 key="error_message",
             ),
         },
-        "result_summary": redact_export_value(result_summary),
+        "result_summary": summary_export,
         "issues": redact_export_value(issues),
+        "raw_evidence": {
+            **raw_evidence_export,
+            "schema_version": "1.0",
+            "redaction_policy": (
+                "JSON bodies are recursively redacted by credential-shaped keys; "
+                "non-JSON bodies are represented by hash and metadata only."
+            ),
+        },
         "evidence_limitations": [
             (
-                "The full MQTT message stream is not retained. The validation snapshot "
-                "stores counts, captured topics, issues, and at most the latest structured "
-                "payload for each asset and payload type."
+                "The raw evidence area is bounded by the capture record and byte caps; "
+                "a true truncated flag is retained when those caps are reached."
             ),
-            "Non-JSON MQTT bodies are represented by validation findings rather than raw bytes.",
+            "Non-JSON MQTT bodies are represented by content hash and transport metadata, not raw bytes.",
             "Credential-shaped fields and private-key PEM text are redacted from this export.",
             "Non-finite numeric values in legacy evidence are preserved as descriptive strings.",
             "Invalid lone UTF-16 surrogate code units are represented as escaped text.",

@@ -40,7 +40,8 @@ from app.services.log_service import (
 )
 
 logger = logging.getLogger(__name__)
-APP_VERSION = "0.1.37"
+APP_VERSION = "0.1.38"
+_RUNTIME_APP_VERSION = os.environ.get("SMART_COMMISSIONING_APP_VERSION") or APP_VERSION
 
 settings = get_settings()
 
@@ -139,6 +140,7 @@ app = FastAPI(
     summary="Production scaffold for commissioning configuration, discovery, validation, and reporting.",
     lifespan=lifespan,
 )
+app.version = _RUNTIME_APP_VERSION
 
 
 @app.exception_handler(Exception)

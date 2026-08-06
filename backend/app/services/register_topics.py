@@ -13,8 +13,38 @@ metadata topic when its register row lists only ``.../state``.
 These are pure functions: no service, repository, or route imports.
 """
 
+PAYLOAD_TYPES = ("state", "metadata", "pointset")
 
-def capture_topics_from_expected(expected_topic: object, payload_type: object = None) -> dict:
+
+def normalise_payload_applicability(
+    payload_type: object = None,
+    payload_applicability: object = None,
+) -> tuple[list[str], str]:
+    """Return the explicit applicability matrix and its contract status.
+
+    A blank field is intentionally unresolved. It is no longer interpreted as
+    permission to expect every UDMI facet; the capture layer may still collect
+    broad diagnostic traffic, but validation and acceptance must wait for an
+    approved matrix.
+    """
+    raw = payload_applicability
+    if raw is None or not str(raw).strip():
+        raw = payload_type
+    text = str(raw or "").strip().casefold()
+    if not text:
+        return [], "unresolved"
+    requested = [part.strip() for part in text.replace(";", ",").split(",") if part.strip()]
+    if not requested or any(part not in PAYLOAD_TYPES for part in requested):
+        return [], "invalid"
+    ordered = [payload for payload in PAYLOAD_TYPES if payload in requested]
+    return ordered, "approved"
+
+
+def capture_topics_from_expected(
+    expected_topic: object,
+    payload_type: object = None,
+    payload_applicability: object = None,
+) -> dict:
     """Derive state/metadata/pointset capture topics from a register Expected topic.
 
     Accepts a ``prefix/#`` wildcard (covers all three), an explicit per-type topic,
@@ -25,7 +55,13 @@ def capture_topics_from_expected(expected_topic: object, payload_type: object = 
     topics: dict[str, object] = {}
     extra_topics: list[str] = []
     roots: set[str] = set()
-    requested_type = str(payload_type or "").strip().casefold()
+    payload_types, applicability_status = normalise_payload_applicability(
+        payload_type,
+        payload_applicability,
+    )
+    # Keep broad subscription behavior for evidence collection, while the
+    # explicit matrix below controls what validation expects.
+    requested_types = set(payload_types) if payload_types else set(PAYLOAD_TYPES)
     for part in str(expected_topic or "").split(","):
         topic = part.strip()
         if not topic:
@@ -39,30 +75,30 @@ def capture_topics_from_expected(expected_topic: object, payload_type: object = 
         if topic.endswith("/#"):
             prefix = topic[:-2].rstrip("/")
             roots.add(prefix)
-            if requested_type in {"", "state"}:
+            if "state" in requested_types:
                 topics.setdefault("state_topic", prefix + "/state")
-            if requested_type in {"", "metadata"}:
+            if "metadata" in requested_types:
                 topics.setdefault("metadata_topic", prefix + "/metadata")
-            if requested_type in {"", "pointset"}:
+            if "pointset" in requested_types:
                 topics.setdefault("pointset_topic", prefix + "/events/pointset")
                 extra_topics.append(prefix + "/event/pointset")
-        elif topic.endswith("/state") and requested_type in {"", "state"}:
+        elif topic.endswith("/state") and "state" in requested_types:
             roots.add(topic.removesuffix("/state"))
             topics["state_topic"] = topic
-        elif topic.endswith("/metadata") and requested_type in {"", "metadata"}:
+        elif topic.endswith("/metadata") and "metadata" in requested_types:
             roots.add(topic.removesuffix("/metadata"))
             topics["metadata_topic"] = topic
-        elif topic.endswith("/events/pointset") and requested_type in {"", "pointset"}:
+        elif topic.endswith("/events/pointset") and "pointset" in requested_types:
             roots.add(topic.removesuffix("/events/pointset"))
             topics["pointset_topic"] = topic
-        elif topic.endswith("/event/pointset") and requested_type in {"", "pointset"}:
+        elif topic.endswith("/event/pointset") and "pointset" in requested_types:
             roots.add(topic.removesuffix("/event/pointset"))
             topics["pointset_topic"] = topic
 
     # field engineer's register contract: blank Payload type represents one WHOLE asset,
     # so even one explicit sibling topic must require all three payload slots.
     required_slots = {"state_topic", "metadata_topic", "pointset_topic"}
-    if not requested_type and roots and not required_slots.issubset(topics):
+    if not payload_types and roots and not required_slots.issubset(topics):
         if len(roots) == 1:
             prefix = next(iter(roots))
             topics.setdefault("state_topic", prefix + "/state")
@@ -71,6 +107,8 @@ def capture_topics_from_expected(expected_topic: object, payload_type: object = 
             extra_topics.append(prefix + "/event/pointset")
     if extra_topics:
         topics["extra_capture_topics"] = list(dict.fromkeys(extra_topics))
+    topics["payload_types"] = payload_types
+    topics["payload_applicability_status"] = applicability_status
     return topics
 
 
@@ -102,7 +140,11 @@ def expected_topic_filters(rows: list[dict]) -> list[tuple[str, str]]:
         if not isinstance(row, dict):
             continue
         identity = str(row.get("Asset ID") or row.get("Asset name") or "").strip()
-        topics = capture_topics_from_expected(row.get("Expected topic"), row.get("Payload type"))
+        topics = capture_topics_from_expected(
+            row.get("Expected topic"),
+            row.get("Payload type"),
+            row.get("Payload applicability"),
+        )
         wildcard = topics.get("register_topic_filter")
         if wildcard:
             ordered: list[str] = [str(wildcard)]

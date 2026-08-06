@@ -132,7 +132,7 @@ _SAFE_SENSITIVE_KEY_SUFFIXES = frozenset(
 _MAX_ARTIFACT_ARCHIVE_MEMBERS = 4096
 _MAX_ARTIFACT_ARCHIVE_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 _MAX_ARTIFACT_ARCHIVE_DEPTH = 3
-_REPORT_PARAMETER_KEYS = (
+_LEGACY_REPORT_PARAMETER_KEYS = (
     "output_format",
     "report_type",
     "source_run_ids",
@@ -143,7 +143,12 @@ _REPORT_PARAMETER_KEYS = (
     "report_snapshot_v2",
     "report_snapshot_sha256",
 )
-_REPORT_SNAPSHOT_KEYS = frozenset(
+_REPORT_PARAMETER_KEYS = (
+    *_LEGACY_REPORT_PARAMETER_KEYS,
+    "evidence_set_id",
+    "udmi_report_variant",
+)
+_LEGACY_REPORT_SNAPSHOT_KEYS = frozenset(
     {
         "schema_version",
         "project_id",
@@ -166,7 +171,10 @@ _REPORT_SNAPSHOT_KEYS = frozenset(
         "udmi_scope",
     }
 )
-_REPORT_METADATA_KEYS = frozenset(
+_REPORT_SNAPSHOT_KEYS = frozenset(
+    {*_LEGACY_REPORT_SNAPSHOT_KEYS, "evidence_set_id"}
+)
+_LEGACY_REPORT_METADATA_KEYS = frozenset(
     {
         "output_format",
         "report_type",
@@ -175,6 +183,9 @@ _REPORT_METADATA_KEYS = frozenset(
         "report_generated_at",
         "renderer_version",
     }
+)
+_REPORT_METADATA_KEYS = frozenset(
+    {*_LEGACY_REPORT_METADATA_KEYS, "evidence_set_id", "udmi_report_variant"}
 )
 
 
@@ -392,15 +403,23 @@ def _validate_wire_parameters(
             raise SyncV2Error("malformed_item")
         return
 
-    if set(parameters) != set(_REPORT_PARAMETER_KEYS):
+    parameter_keys = set(parameters)
+    if parameter_keys not in (
+        set(_LEGACY_REPORT_PARAMETER_KEYS),
+        set(_REPORT_PARAMETER_KEYS),
+    ):
         raise SyncV2Error("malformed_item")
+    has_evidence_set_id = parameter_keys == set(_REPORT_PARAMETER_KEYS)
     if not isinstance(report_snapshot, dict) or not isinstance(artifact_manifest, dict):
         raise SyncV2Error("malformed_item")
     if parameters["report_snapshot_v2"] != report_snapshot:
         raise SyncV2Error("malformed_item")
     if parameters["report_snapshot_sha256"] != context_hash:
         raise SyncV2Error("malformed_item")
-    if set(report_snapshot) != _REPORT_SNAPSHOT_KEYS:
+    expected_snapshot_keys = (
+        _REPORT_SNAPSHOT_KEYS if has_evidence_set_id else _LEGACY_REPORT_SNAPSHOT_KEYS
+    )
+    if set(report_snapshot) != expected_snapshot_keys:
         raise SyncV2Error("malformed_item")
     if (
         report_snapshot.get("schema_version") != "2.0"
@@ -411,12 +430,20 @@ def _validate_wire_parameters(
         or report_snapshot.get("source_run_ids") != parameters["source_run_ids"]
         or report_snapshot.get("renderer_version") != parameters["renderer_version"]
         or artifact_manifest.get("renderer_version") != parameters["renderer_version"]
+        or (
+            has_evidence_set_id
+            and report_snapshot.get("evidence_set_id")
+            != parameters["evidence_set_id"]
+        )
     ):
         raise SyncV2Error("malformed_item")
     metadata = report_snapshot.get("report_metadata")
-    if not isinstance(metadata, dict) or set(metadata) != _REPORT_METADATA_KEYS:
+    expected_metadata_keys = (
+        _REPORT_METADATA_KEYS if has_evidence_set_id else _LEGACY_REPORT_METADATA_KEYS
+    )
+    if not isinstance(metadata, dict) or set(metadata) != expected_metadata_keys:
         raise SyncV2Error("malformed_item")
-    if any(metadata[key] != parameters[key] for key in _REPORT_METADATA_KEYS):
+    if any(metadata[key] != parameters[key] for key in expected_metadata_keys):
         raise SyncV2Error("malformed_item")
 
 

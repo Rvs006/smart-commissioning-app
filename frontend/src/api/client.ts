@@ -421,6 +421,7 @@ export type DiscoveryRunKind = "ip" | "bacnet" | "mqtt";
 export type ValidationRunKind = "udmi" | "bacnet" | "mapping";
 export type ImportTemplateFormat = "csv" | "xlsx";
 export type ReportFormat = "zip" | "xlsx" | "docx" | "pdf";
+export type UdmiReportVariant = "client" | "technical";
 
 export type ReportType =
   | "ip_discovery"
@@ -444,7 +445,9 @@ export type ReportSummary = {
   // query payload, carries neither.
   created_at: string;
   source_run_ids: string[];
+  evidence_set_id?: string | null;
   report_title?: string | null;
+  udmi_report_variant?: UdmiReportVariant;
 };
 
 export type ReportListResponse = {
@@ -474,6 +477,15 @@ export type JobSummary = {
   // Originating edge id; null for a run created on the local edge, populated for
   // runs ingested from another edge. Additive field — see RunRecord.
   edge_id: string | null;
+  validation_incomplete?: boolean | null;
+  capture_mode?: string | null;
+  capture_window_seconds?: number | null;
+  capture_started_at?: string | null;
+  capture_ended_at?: string | null;
+  capture_duration_seconds?: number | null;
+  window_completed?: boolean | null;
+  termination_reason?: string | null;
+  acceptance_eligible?: boolean | null;
 };
 
 export type RunListResponse = {
@@ -1348,6 +1360,7 @@ export function createReport(input: {
   sourceRunIds?: string[];
   reportTitle?: string;
   udmiScope?: UdmiReportScopeV1;
+  udmiReportVariant?: UdmiReportVariant;
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<ReportSummary> {
@@ -1360,6 +1373,7 @@ export function createReport(input: {
       source_run_ids: input.sourceRunIds ?? [],
       ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
       ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
+      ...(input.udmiReportVariant ? { udmi_report_variant: input.udmiReportVariant } : {}),
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",

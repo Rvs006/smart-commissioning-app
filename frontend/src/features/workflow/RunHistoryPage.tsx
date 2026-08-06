@@ -12,6 +12,7 @@ import {
   formatAbsoluteTime,
   formatDuration,
   humanizeJobType,
+  humanizeStage,
   isTerminalStatus,
   statusTokenLabels,
   toHealthState,
@@ -305,15 +306,25 @@ export function RunHistoryPage() {
                       <td>{terminal ? formatDuration(run.created_at, run.updated_at) : "—"}</td>
                       <td>
                         {terminal && run.job_type === "udmi_validation" ? (
-                          <button
-                            aria-label={`Download raw JSON for ${run.run_id}`}
-                            className="secondary-button compact"
-                            disabled={jsonPendingRunId !== null}
-                            onClick={() => void downloadValidationJson(run.run_id)}
-                            type="button"
-                          >
-                            {jsonPendingRunId === run.run_id ? "Downloading..." : "Raw JSON"}
-                          </button>
+                          <div className="run-history-evidence">
+                            <button
+                              aria-label={`Download raw JSON for ${run.run_id}`}
+                              className="secondary-button compact"
+                              disabled={jsonPendingRunId !== null}
+                              onClick={() => void downloadValidationJson(run.run_id)}
+                              type="button"
+                            >
+                              {jsonPendingRunId === run.run_id ? "Downloading..." : "Raw JSON"}
+                            </button>
+                            {run.acceptance_eligible === false ? (
+                              <small>Cadence: ineligible</small>
+                            ) : run.acceptance_eligible === true ? (
+                              <small>Cadence: eligible</small>
+                            ) : null}
+                            {run.termination_reason ? (
+                              <small>Ended: {humanizeStage(run.termination_reason ?? undefined)}</small>
+                            ) : null}
+                          </div>
                         ) : (
                           "—"
                         )}

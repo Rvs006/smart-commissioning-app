@@ -176,6 +176,7 @@ class ReportsV0125RegressionTests(ApiTestCase):
             "report_type": "udmi_validation",
             "output_format": "zip",
             "source_run_ids": source_run_ids,
+            "udmi_report_variant": "technical",
         }
         if report_title is not None:
             payload["report_title"] = report_title
@@ -217,7 +218,9 @@ class ReportsV0125RegressionTests(ApiTestCase):
         )
         self.assertEqual(exported.status_code, 200, exported.text)
         with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
-            self.assertEqual(archive.namelist(), [expected_name])
+            self.assertEqual(
+                archive.namelist(), [expected_name, "report_set_manifest.json"]
+            )
             self.assertEqual(archive.read(expected_name), download.content)
 
     def test_default_blank_and_pre_marker_runs_keep_compatible_names(self) -> None:

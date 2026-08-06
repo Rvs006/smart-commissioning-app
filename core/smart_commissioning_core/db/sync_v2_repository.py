@@ -304,6 +304,8 @@ class SyncV2Repository:
                     "renderer_version",
                     "report_snapshot_v2",
                     "report_snapshot_sha256",
+                    "evidence_set_id",
+                    "udmi_report_variant",
                 )
                 if key in (existing_run.parameters or {})
             }

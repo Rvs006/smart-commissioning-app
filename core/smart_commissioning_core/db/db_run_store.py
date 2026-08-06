@@ -231,6 +231,10 @@ class DbRunStore:
                     attempted_status=status,
                 )
                 return _run_to_dict(run)
+            if run.cancel_requested and status != "cancelled":
+                status = "cancelled"
+                stage = "engine_cancelled"
+                error_message = None
             _clear_worker_stale_observation(run)
             run.status = status
             if stage is not None:

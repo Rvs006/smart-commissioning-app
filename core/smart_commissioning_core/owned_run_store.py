@@ -97,7 +97,11 @@ class OwnedRunStore:
                     self._ownership_lost.set()
             return {
                 "run_id": run_id,
-                "status": status if not outcome.conflict else "ownership_lost",
+                "status": (
+                    terminal.status if outcome.applied else "ownership_lost"
+                    if outcome.conflict
+                    else status
+                ),
                 "stage": terminal.stage,
                 "progress_percent": 100,
                 "result_summary": dict(self._summary),

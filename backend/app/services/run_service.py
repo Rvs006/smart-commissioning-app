@@ -9,6 +9,7 @@ from smart_commissioning_core.db.engine import session_factory
 from smart_commissioning_core.db.models import Run, RunResult, RunSeal
 from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.owned_run_store import OwnedRunStore
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
@@ -38,6 +39,7 @@ from app.services.report_artifacts import (
 )
 from app.services.report_naming import build_report_file_name
 from app.services.run_context_builder import build_run_context
+from app.services.validation_export import build_validation_export
 from app.services.udmi_report_model import (
     build_udmi_report_model,
     normalise_udmi_report_scope,
@@ -54,6 +56,29 @@ VALIDATION_JOB_TYPES: set[JobType] = {
 }
 REPORT_JOB_TYPES: set[JobType] = {"report_generation"}
 _DEFAULT_REPORT_TITLE = "Smart Commissioning Report"
+
+
+def _build_evidence_set_id(
+    *,
+    project_id: str,
+    site_id: str,
+    report_type: str,
+    source_run_ids: list[str],
+    source_result_hashes: dict[str, str],
+    report_scope: object,
+) -> str:
+    """Return a format-independent identity for one evidence selection."""
+
+    identity = {
+        "schema_version": "1.0",
+        "project_id": project_id,
+        "site_id": site_id,
+        "report_type": report_type,
+        "source_run_ids": sorted(set(source_run_ids)),
+        "source_result_hashes": dict(sorted(source_result_hashes.items())),
+        "report_scope": report_scope,
+    }
+    return f"evidence_{snapshot_sha256(identity)[:24]}"
 _DEFAULT_UDMI_REPORT_TITLE = "UDMI Validation Report"
 _TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
 
@@ -280,6 +305,7 @@ class RunService:
             ),
             "report_generated_at": datetime.now(UTC).isoformat(),
             "renderer_version": REPORT_RENDERER_VERSION,
+            "udmi_report_variant": request.udmi_report_variant,
         }
         snapshot_sources: list[RunRecord] = []
         seen_source_ids: set[str] = set()
@@ -300,6 +326,7 @@ class RunService:
             report_snapshot = build_udmi_report_model(
                 snapshot_source_objects,
                 parameters.get("udmi_scope"),
+                source_context_provenance=source_context_provenance,
             )
             parameters["udmi_report_snapshot"] = report_snapshot
         source_snapshots = [
@@ -307,6 +334,17 @@ class RunService:
             for source in snapshot_sources
         ]
         parameters["source_run_snapshots"] = source_snapshots
+        if request.report_type == "udmi_validation":
+            # Renderer snapshots deliberately omit raw payload bodies. Keep a
+            # separate redacted evidence channel so technical ZIP exports can
+            # remain portable without weakening the general renderer scrubber.
+            parameters["source_raw_evidence"] = {
+                source.run_id: build_validation_export(source).get(
+                    "raw_evidence",
+                    {"records": [], "record_count": 0},
+                )
+                for source in snapshot_sources
+            }
         parameters["source_run_seals"] = {
             source.run_id: source_seals[source.run_id]
             for source in snapshot_sources
@@ -329,6 +367,34 @@ class RunService:
             },
             key=str.casefold,
         )
+        source_result_hashes = {
+            source.run_id: (
+                source_seals[source.run_id]["result_sha256"]
+                if source.run_id in source_seals
+                else sha256_bytes(canonical_json_bytes(snapshot))
+            )
+            for source, snapshot in zip(snapshot_sources, source_snapshots, strict=True)
+        }
+        evidence_set_id = _build_evidence_set_id(
+            project_id=request.project_id,
+            site_id=request.site_id,
+            report_type=request.report_type,
+            source_run_ids=[source.run_id for source in snapshot_sources],
+            source_result_hashes=source_result_hashes,
+            report_scope=(
+                parameters.get("udmi_report_snapshot", {}).get("report_scope")
+                if isinstance(parameters.get("udmi_report_snapshot"), dict)
+                else parameters.get("udmi_scope") or {}
+            ),
+        )
+        parameters["evidence_set_id"] = evidence_set_id
+        if isinstance(parameters.get("udmi_report_snapshot"), dict):
+            parameters["udmi_report_snapshot"]["evidence_set_id"] = evidence_set_id
+            evidence_provenance = parameters["udmi_report_snapshot"].get(
+                "evidence_provenance"
+            )
+            if isinstance(evidence_provenance, dict):
+                evidence_provenance["evidence_set_id"] = evidence_set_id
         report_snapshot_v2 = {
             "schema_version": REPORT_SNAPSHOT_SCHEMA_VERSION,
             "project_id": request.project_id,
@@ -336,14 +402,8 @@ class RunService:
             "report_type": request.report_type,
             "output_format": request.output_format,
             "source_run_ids": [source.run_id for source in snapshot_sources],
-            "source_result_hashes": {
-                source.run_id: (
-                    source_seals[source.run_id]["result_sha256"]
-                    if source.run_id in source_seals
-                    else sha256_bytes(canonical_json_bytes(snapshot))
-                )
-                for source, snapshot in zip(snapshot_sources, source_snapshots, strict=True)
-            },
+            "source_result_hashes": source_result_hashes,
+            "evidence_set_id": evidence_set_id,
             "selected_assets": selected_assets,
             "filters": parameters.get("udmi_scope") or {},
             "configuration_provenance": {
@@ -369,8 +429,10 @@ class RunService:
                     "report_type": request.report_type,
                     "report_title_custom": custom_report_title,
                     "report_title": parameters["report_title"],
+                    "udmi_report_variant": request.udmi_report_variant,
                     "report_generated_at": parameters["report_generated_at"],
                     "renderer_version": REPORT_RENDERER_VERSION,
+                    "evidence_set_id": evidence_set_id,
                 },
                 "udmi_report_snapshot": parameters.get("udmi_report_snapshot"),
                 "source_run_snapshots": source_snapshots,
@@ -416,7 +478,9 @@ class RunService:
             # GET of the same report.
             created_at=run.created_at,
             source_run_ids=list(request.source_run_ids),
+            evidence_set_id=evidence_set_id,
             report_title=report_title,
+            udmi_report_variant=request.udmi_report_variant,
         )
         return run, report
 
@@ -570,6 +634,30 @@ class RunService:
             Run.created_at,
             Run.updated_at,
             Run.edge_id,
+            Run.result_summary["validation_incomplete"].as_boolean().label(
+                "validation_incomplete"
+            ),
+            Run.result_summary["capture_mode"].as_string().label("capture_mode"),
+            Run.result_summary["capture_window_seconds"].as_float().label(
+                "capture_window_seconds"
+            ),
+            Run.result_summary["capture_started_at"].as_string().label(
+                "capture_started_at"
+            ),
+            Run.result_summary["capture_ended_at"].as_string().label("capture_ended_at"),
+            Run.result_summary["capture_duration_seconds"].as_float().label(
+                "capture_duration_seconds"
+            ),
+            Run.result_summary["broker_capture_attempted"].as_boolean().label(
+                "broker_capture_attempted"
+            ),
+            Run.result_summary["window_completed"].as_boolean().label("window_completed"),
+            Run.result_summary["termination_reason"].as_string().label(
+                "termination_reason"
+            ),
+            Run.result_summary["acceptance_eligible"].as_boolean().label(
+                "acceptance_eligible"
+            ),
         ).order_by(Run.created_at.desc(), Run.id.desc())
         if project_id is not None:
             statement = statement.where(Run.project_id == project_id)
@@ -598,9 +686,34 @@ class RunService:
                 created_at=row.created_at,
                 updated_at=row.updated_at,
                 edge_id=row.edge_id,
+                **self._capture_summary_projection(row),
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _capture_summary_projection(row: object) -> dict[str, object]:
+        if getattr(row, "job_type", None) != "udmi_validation":
+            return {}
+        fields = (
+            "validation_incomplete",
+            "capture_mode",
+            "capture_window_seconds",
+            "capture_started_at",
+            "capture_ended_at",
+            "capture_duration_seconds",
+            "broker_capture_attempted",
+            "window_completed",
+            "termination_reason",
+            "acceptance_eligible",
+        )
+        projection = {field: getattr(row, field, None) for field in fields}
+        if projection["acceptance_eligible"] is None:
+            projection["acceptance_eligible"] = capture_acceptance_eligible(
+                getattr(row, "status", None),
+                projection,
+            )
+        return projection
 
     def list_report_records(self, *, limit: int = 100, offset: int = 0) -> list[RunRecord]:
         """Return report runs with their persisted metadata in one query.

@@ -207,7 +207,9 @@ class UdmiValidationExportApiTests(ApiTestCase):
         self.assertNotIn("/", disposition)
 
         body = json.loads(first.content)
-        self.assertEqual(body["schema_version"], "1.0")
+        self.assertEqual(body["schema_version"], "1.1")
+        self.assertIn("raw_evidence", body)
+        self.assertEqual(body["raw_evidence"]["record_count"], 0)
         self.assertEqual(
             body["result_summary"]["validation_summary_v1"]["schema_version"],
             "1.1",

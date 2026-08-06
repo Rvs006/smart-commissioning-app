@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -31,6 +32,7 @@ from app.services.report_artifacts import (
 )
 from app.services.report_naming import build_report_file_name, report_content_disposition
 from app.services.report_pdf import PdfDocument
+from app.services.validation_export import redact_export_value
 from app.services.run_service import (
     DISCOVERY_JOB_TYPES,
     VALIDATION_JOB_TYPES,
@@ -75,6 +77,9 @@ def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
         if isinstance(raw_source_run_ids, list)
         else []
     )
+    evidence_set_id = run.parameters.get("evidence_set_id")
+    if not isinstance(evidence_set_id, str) or not evidence_set_id.strip():
+        evidence_set_id = None
     stored_title = run.parameters.get("report_title")
     report_title = (
         stored_title.strip()
@@ -83,6 +88,9 @@ def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
         if report_type == "udmi_validation"
         else _BRAND_DOC_TITLE
     )
+    udmi_report_variant = run.parameters.get("udmi_report_variant", "technical")
+    if udmi_report_variant not in {"client", "technical"}:
+        udmi_report_variant = "technical"
     return ReportSummary(
         report_id=run.run_id,
         report_type=report_type,
@@ -99,7 +107,9 @@ def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
         ),
         created_at=run.created_at,
         source_run_ids=source_run_ids,
+        evidence_set_id=evidence_set_id,
         report_title=report_title,
+        udmi_report_variant=udmi_report_variant,
     )
 
 
@@ -127,6 +137,7 @@ def create_report(request: ReportRequest) -> ReportSummary:
             artifact=content,
             origin=str(run.edge_id or "api"),
             signed_at=generated_at,
+            evidence_set_id=report.evidence_set_id,
         )
         service.complete_report_run(run.run_id, manifest)
     except Exception as error:
@@ -243,6 +254,7 @@ def export_reports(request: ReportExportRequest) -> Response:
         runs.append(run)
 
     buffer = BytesIO()
+    manifest_members: list[dict[str, object]] = []
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         for run in runs:
             report = _to_report_summary(run.run_id)
@@ -254,6 +266,37 @@ def export_reports(request: ReportExportRequest) -> Response:
             info.compress_type = ZIP_DEFLATED
             info.external_attr = 0o600 << 16
             archive.writestr(info, content)
+            manifest_members.append(
+                {
+                    "report_id": report.report_id,
+                    "file_name": report.file_name,
+                    "output_format": report.output_format,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "byte_size": len(content),
+                    "evidence_set_id": report.evidence_set_id,
+                }
+            )
+        manifest = {
+            "schema_version": "1.0",
+            "manifest_type": "selected_reports_bundle",
+            "report_ids": [member["report_id"] for member in manifest_members],
+            "evidence_set_ids": sorted(
+                {
+                    member["evidence_set_id"]
+                    for member in manifest_members
+                    if isinstance(member["evidence_set_id"], str)
+                    and member["evidence_set_id"]
+                }
+            ),
+            "members": manifest_members,
+        }
+        manifest_info = ZipInfo(filename="report_set_manifest.json", date_time=_ZIP_EPOCH)
+        manifest_info.compress_type = ZIP_DEFLATED
+        manifest_info.external_attr = 0o600 << 16
+        archive.writestr(
+            manifest_info,
+            json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"),
+        )
     return Response(
         content=buffer.getvalue(),
         media_type="application/zip",
@@ -403,6 +446,13 @@ def _report_rows(
             ("Project", str(udmi_data.get("project_label") or "Not recorded")),
             ("Site", str(udmi_data.get("site_label") or "Not recorded")),
             ("Report ID", str(run.run_id)),
+            ("Evidence set ID", str(udmi_data.get("evidence_set_id") or "Not recorded")),
+            (
+                "Acceptance",
+                "Eligible for field acceptance"
+                if udmi_data.get("acceptance_eligible") is True
+                else "Not eligible for field acceptance",
+            ),
             ("Generated", _generated_at(run)),
         ]
     rows = [
@@ -435,6 +485,12 @@ def _report_title(run: object) -> str:
 def _is_udmi_report(run: object) -> bool:
     parameters = run.parameters if isinstance(run.parameters, dict) else {}
     return parameters.get("report_type") == "udmi_validation"
+
+
+def _udmi_report_variant(run: object) -> str:
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    value = parameters.get("udmi_report_variant", "technical")
+    return value if value in {"client", "technical"} else "technical"
 
 
 def _udmi_report_data(run: object) -> dict[str, object] | None:
@@ -509,6 +565,7 @@ _FINDING_COLUMNS = (
     "Point",
     "Expected",
     "Observed",
+    "Mismatch",
     "Suggested Action",
     "Description",
 )
@@ -666,6 +723,139 @@ def _asset_topic_discovery_export(run: object) -> dict[str, object] | None:
     return {"source_runs": source_runs} if source_runs else None
 
 
+def _raw_evidence_export(run: object) -> dict[str, object]:
+    """Build the redacted, portable raw-evidence area for a report ZIP."""
+    report_parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    portable_snapshots = report_parameters.get("source_raw_evidence")
+    portable_snapshots = portable_snapshots if isinstance(portable_snapshots, dict) else {}
+    records: list[dict[str, object]] = []
+    source_runs: list[dict[str, object]] = []
+    captured_count = 0
+    retained_bytes = 0
+    truncated = False
+    for source in _source_runs(run):
+        if getattr(source, "job_type", None) != "udmi_validation":
+            continue
+        summary = getattr(source, "result_summary", None)
+        summary = summary if isinstance(summary, dict) else {}
+        raw = portable_snapshots.get(str(getattr(source, "run_id", "")))
+        if not isinstance(raw, dict):
+            raw = summary.get("raw_evidence")
+        if not isinstance(raw, dict):
+            continue
+        source_id = str(getattr(source, "run_id", ""))
+        raw_records = raw.get("records")
+        if not isinstance(raw_records, list):
+            raw_records = []
+        source_runs.append(
+            {
+                "source_run_id": source_id,
+                "record_count": len(raw_records),
+                "captured_record_count": int(raw.get("captured_record_count") or 0),
+                "truncated": bool(raw.get("truncated")),
+            }
+        )
+        captured_count += int(raw.get("captured_record_count") or 0)
+        retained_bytes += int(raw.get("retained_bytes") or 0)
+        truncated = truncated or bool(raw.get("truncated"))
+        for raw_record in raw_records:
+            if not isinstance(raw_record, dict):
+                continue
+            record = dict(raw_record)
+            record["source_run_id"] = source_id
+            records.append(record)
+    records.sort(
+        key=lambda record: (
+            str(record.get("source_run_id") or ""),
+            str(record.get("asset_id") or ""),
+            str(record.get("broker_received_at") or record.get("received_at") or ""),
+            str(record.get("topic") or ""),
+            str(record.get("content_sha256") or ""),
+        )
+    )
+    for index, record in enumerate(records, start=1):
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                record,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+        record["evidence_id"] = f"raw-{fingerprint}-{index:06d}"
+    return redact_export_value(
+        {
+            "schema_version": "1.0",
+            "evidence_id_field": "evidence_id",
+            "source_runs": source_runs,
+            "records": records,
+            "record_count": len(records),
+            "captured_record_count": captured_count,
+            "retained_bytes": retained_bytes,
+            "truncated": truncated,
+            "redaction_policy": (
+                "JSON bodies are recursively redacted by credential-shaped keys; "
+                "non-JSON bodies are represented by hash and metadata only."
+            ),
+        }
+    )
+
+
+def _raw_finding_index(
+    findings: list[dict[str, object]],
+    raw_records: list[dict[str, object]],
+) -> dict[str, object]:
+    """Map each exported finding to portable raw-record ids.
+
+    The URI is retained as provenance, but it is often a capture-scope URI
+    rather than a file path. Asset, payload type, and topic are therefore used
+    as deterministic fallback keys so a clean-machine unzip can still locate
+    the relevant raw record without access to the original runtime database.
+    """
+
+    entries: list[dict[str, object]] = []
+    for finding in findings:
+        source_id = str(finding.get("source_run_id") or finding.get("Source Run") or "")
+        issue_id = str(finding.get("issue_id") or finding.get("Issue ID") or "")
+        asset_id = str(finding.get("asset_id") or finding.get("Asset") or "")
+        payload_type = str(
+            finding.get("payload_type") or finding.get("Payload") or ""
+        ).strip().casefold()
+        raw_uri = str(finding.get("raw_evidence_uri") or "")
+        matching_ids: list[str] = []
+        for record in raw_records:
+            if str(record.get("source_run_id") or "") != source_id:
+                continue
+            record_asset = str(record.get("asset_id") or "")
+            record_payload = str(record.get("payload_type") or "").strip().casefold()
+            record_topic = str(record.get("topic") or "")
+            uri_match = bool(raw_uri and record_topic and record_topic in raw_uri)
+            identity_match = (
+                (not asset_id or not record_asset or asset_id == record_asset)
+                and (not payload_type or not record_payload or payload_type == record_payload)
+            )
+            if uri_match or identity_match:
+                evidence_id = record.get("evidence_id")
+                if isinstance(evidence_id, str) and evidence_id not in matching_ids:
+                    matching_ids.append(evidence_id)
+        entries.append(
+            {
+                "source_run_id": source_id,
+                "issue_id": issue_id,
+                "raw_evidence_uri": raw_uri or None,
+                "evidence_ids": matching_ids,
+                "match_status": "matched" if matching_ids else "unmatched",
+            }
+        )
+    entries.sort(key=lambda entry: (str(entry["source_run_id"]), str(entry["issue_id"])))
+    return {
+        "schema_version": "1.0",
+        "record_id_field": "evidence_id",
+        "matching_policy": "source_run_id plus asset_id/payload_type, with topic URI match when available",
+        "entries": entries,
+    }
+
+
 def _source_run_findings(run: object) -> list[dict[str, str]]:
     """Issues from the report's source runs, flattened + deterministically sorted.
 
@@ -687,6 +877,16 @@ def _source_run_findings(run: object) -> list[dict[str, str]]:
                     "Point": str(getattr(issue, "point_name", "") or ""),
                     "Expected": str(getattr(issue, "expected_value", "") or ""),
                     "Observed": str(getattr(issue, "observed_value", "") or ""),
+                    "Mismatch": (
+                        "Yes"
+                        if getattr(issue, "expected_value", None) is not None
+                        and getattr(issue, "observed_value", None) is not None
+                        and str(getattr(issue, "expected_value"))
+                        != str(getattr(issue, "observed_value"))
+                        else "No"
+                    ),
+                    "Topic Payload Type": "",
+                    "Raw Evidence URI": str(getattr(issue, "raw_evidence_uri", "") or ""),
                     "Suggested Action": str(getattr(issue, "suggested_action", "") or ""),
                     "Description": str(getattr(issue, "description", "") or ""),
                 }
@@ -1134,6 +1334,7 @@ _UDMI_FAULT_DETAIL_COLUMNS = (
     "Point",
     "Expected",
     "Observed",
+    "Mismatch",
     "Suggested Action",
     "Description",
 )
@@ -1247,6 +1448,46 @@ def _udmi_supporting_metric_rows(
                 "Metric": "Last Validation Run",
                 "Value": _display_timestamp(data.get("last_validation_run_at")),
             },
+            {"Metric": "Report Generated", "Value": _display_timestamp(_generated_at(run))},
+        ]
+    )
+    return rows
+
+
+def _udmi_client_metric_rows(run: object, data: dict[str, object]) -> list[dict[str, str]]:
+    """Small metrics-only projection shared by the client renderers."""
+
+    rows: list[dict[str, str]] = []
+    for section, labels, key in (
+        ("Assets", ASSET_METRIC_LABELS, "asset_metrics"),
+        ("Payloads", PAYLOAD_METRIC_LABELS, "payload_metrics"),
+        ("Findings", FAULT_METRIC_LABELS, "fault_metrics"),
+        ("Issues", ISSUE_METRIC_LABELS, "issue_metrics"),
+    ):
+        metrics = data.get(key)
+        if not isinstance(metrics, dict):
+            continue
+        for row in _udmi_metric_rows(metrics, labels):
+            rows.append({"Metric": f"{section}: {row['Metric']}", "Value": row["Value"]})
+    rows.extend(
+        [
+            {"Metric": "Overall Compliance", "Value": _completion(data["asset_metrics"])},
+            {"Metric": "Payloads Correct %", "Value": _payload_correctness(data["payload_metrics"])[0]},
+            {"Metric": "Payloads Incorrect %", "Value": _payload_correctness(data["payload_metrics"])[1]},
+            {"Metric": "Validation Scope", "Value": str(data.get("scope_status", "unknown"))},
+            {
+                "Metric": "Acceptance",
+                "Value": "Eligible" if data.get("acceptance_eligible") is True else "Not eligible",
+            },
+            {
+                "Metric": "Floor reporting",
+                "Value": str(
+                    (data.get("floor_reporting") or {}).get("status", "not_provided")
+                    if isinstance(data.get("floor_reporting"), dict)
+                    else "not_provided"
+                ),
+            },
+            {"Metric": "Last Validation Run", "Value": _display_timestamp(data.get("last_validation_run_at"))},
             {"Metric": "Report Generated", "Value": _display_timestamp(_generated_at(run))},
         ]
     )
@@ -1392,6 +1633,7 @@ def _udmi_fault_detail_rows(data: dict[str, object]) -> list[dict[str, str]]:
                 "Point": str(fault.get("point_name") or ""),
                 "Expected": str(fault.get("expected_value") or ""),
                 "Observed": str(fault.get("observed_value") or ""),
+                "Mismatch": "Yes" if fault.get("mismatch") is True else "No",
                 "Suggested Action": str(fault.get("suggested_action") or ""),
                 "Description": str(fault.get("description") or ""),
             }
@@ -1413,6 +1655,7 @@ def _udmi_fault_json_rows(data: dict[str, object]) -> list[dict[str, object]]:
                 "point_name": fault.get("point_name"),
                 "expected_value": fault.get("expected_value"),
                 "observed_value": fault.get("observed_value"),
+                "mismatch": fault.get("mismatch") is True,
                 "suggested_action": fault.get("suggested_action"),
                 "description": str(fault.get("description", "")),
             }
@@ -1438,6 +1681,8 @@ def _udmi_audit_finding_rows(data: dict[str, object]) -> list[dict[str, object]]
                 "point_name": fault.get("point_name"),
                 "expected_value": fault.get("expected_value"),
                 "observed_value": fault.get("observed_value"),
+                "mismatch": fault.get("mismatch") is True,
+                "topic_compliance_payload_type": fault.get("topic_compliance_payload_type"),
                 "suggested_action": fault.get("suggested_action"),
                 "description": str(fault.get("description", "")),
                 "raw_evidence_uri": fault.get("raw_evidence_uri"),
@@ -1621,7 +1866,32 @@ def _append_xlsx_summary_section(
     _style_xlsx_header(sheet, header_row)
 
 
+def _build_udmi_client_xlsx_report(run: object, data: dict[str, object]) -> bytes:
+    workbook = Workbook()
+    workbook.properties.created = _ARTIFACT_PROPERTIES_EPOCH
+    workbook.properties.modified = _ARTIFACT_PROPERTIES_EPOCH
+    sheet = workbook.active
+    sheet.title = "Client Metrics"
+    _append_xlsx_row(sheet, ["Metric", "Value"])
+    for row in _udmi_client_metric_rows(run, data):
+        _append_xlsx_row(sheet, [row["Metric"], row["Value"]])
+    _configure_xlsx_sheet(
+        sheet,
+        widths={"A": 42, "B": 34},
+        freeze_panes="A2",
+        auto_filter=True,
+    )
+    _style_xlsx_table(sheet)
+    _style_xlsx_header(sheet)
+    _apply_xlsx_branding(workbook, str(run.run_id), _report_title(run))
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def _build_udmi_xlsx_report(run: object, data: dict[str, object]) -> bytes:
+    if _udmi_report_variant(run) == "client":
+        return _build_udmi_client_xlsx_report(run, data)
     workbook = Workbook()
     workbook.properties.created = _ARTIFACT_PROPERTIES_EPOCH
     workbook.properties.modified = _ARTIFACT_PROPERTIES_EPOCH
@@ -2132,7 +2402,38 @@ def _assemble_docx(
     return buffer.getvalue()
 
 
+def _build_udmi_client_docx_report(run: object, data: dict[str, object]) -> bytes:
+    title = _report_title(run)
+    blocks: list[str] = [_docx_paragraph(title, bold=True)]
+    blocks.extend(
+        _docx_paragraph(f"{label}: {value}")
+        for label, value in _report_rows(run, udmi_data=data)
+    )
+    if data["scope_complete"] is not True:
+        blocks.append(_docx_paragraph(_UDMI_INCOMPLETE_SCOPE_TITLE, bold=True))
+        blocks.append(_docx_paragraph(str(data["scope_summary"]), bold=True))
+    rows = _udmi_client_metric_rows(run, data)
+    blocks.extend(
+        [
+            _docx_paragraph("Client Metrics", bold=True, keep_with_next=True),
+            _docx_table(
+                ("Metric", "Value"),
+                rows,
+                widths=_docx_content_widths(("Metric", "Value"), rows),
+                center_cells=True,
+            ),
+            _docx_paragraph(
+                "This client product contains metrics and acceptance status only. "
+                "Use the technical product for asset and finding detail."
+            ),
+        ]
+    )
+    return _assemble_docx(run, blocks, document_title=title, landscape=False)
+
+
 def _build_udmi_docx_report(run: object, data: dict[str, object]) -> bytes:
+    if _udmi_report_variant(run) == "client":
+        return _build_udmi_client_docx_report(run, data)
     title = _report_title(run)
     blocks: list[str] = [_docx_paragraph(title, bold=True)]
     blocks.extend(
@@ -2360,10 +2661,41 @@ def _build_docx_report(run: object) -> bytes:
     )
 
 
+def _build_udmi_client_zip_report(run: object, data: dict[str, object]) -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "summary.json",
+            json.dumps(dict(_report_rows(run, udmi_data=data)), indent=2),
+        )
+        archive.writestr(
+            "client_metrics.json",
+            json.dumps(
+                {
+                    "schema_version": data["schema_version"],
+                    "report_product": "client_metrics",
+                    "report_title": _report_title(run),
+                    "evidence_set_id": data.get("evidence_set_id"),
+                    "scope_status": data.get("scope_status"),
+                    "scope_summary": data.get("scope_summary"),
+                    "acceptance_eligible": data.get("acceptance_eligible") is True,
+                    "metrics": _udmi_client_metric_rows(run, data),
+                    "floor_reporting": data.get("floor_reporting"),
+                    "evidence_provenance": data.get("evidence_provenance"),
+                    "notes": data.get("notes", []),
+                },
+                indent=2,
+            ),
+        )
+    return buffer.getvalue()
+
+
 def _build_zip_report(run: object) -> bytes:
     buffer = BytesIO()
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         udmi = _udmi_report_data(run)
+        if udmi is not None and _udmi_report_variant(run) == "client":
+            return _build_udmi_client_zip_report(run, udmi)
         archive.writestr(
             "summary.json",
             json.dumps(dict(_report_rows(run, udmi_data=udmi)), indent=2),
@@ -2395,6 +2727,7 @@ def _build_zip_report(run: object) -> bytes:
                         "report_title": _report_title(run),
                         "report_job_status": str(run.status),
                         "scope_complete": udmi["scope_complete"],
+                        "acceptance_eligible": udmi["acceptance_eligible"],
                         "scope_status": udmi["scope_status"],
                         "scope_summary": udmi["scope_summary"],
                         "incomplete_source_runs": udmi["incomplete_source_runs"],
@@ -2416,6 +2749,8 @@ def _build_zip_report(run: object) -> bytes:
                             "unexpected_devices_measurement_scope"
                         ],
                         "report_scope": udmi["report_scope"],
+                        "evidence_set_id": udmi.get("evidence_set_id"),
+                        "evidence_provenance": udmi.get("evidence_provenance"),
                         "filter_provenance": udmi["filter_provenance"],
                         "notes": udmi["notes"],
                     },
@@ -2521,6 +2856,34 @@ def _build_zip_report(run: object) -> bytes:
                     indent=2,
                 ),
             )
+        raw_evidence = _raw_evidence_export(run)
+        raw_records = raw_evidence.get("records")
+        raw_records = raw_records if isinstance(raw_records, list) else []
+        raw_manifest = dict(raw_evidence)
+        raw_manifest.pop("records", None)
+        archive.writestr(
+            "raw_evidence/manifest.json",
+            json.dumps(raw_manifest, indent=2, sort_keys=True),
+        )
+        archive.writestr(
+            "raw_evidence/records.jsonl",
+            "".join(
+                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                for record in raw_records
+                if isinstance(record, dict)
+            ),
+        )
+        archive.writestr(
+            "raw_evidence/finding_index.json",
+            json.dumps(
+                _raw_finding_index(
+                    findings if isinstance(findings, list) else [],
+                    [record for record in raw_records if isinstance(record, dict)],
+                ),
+                indent=2,
+                sort_keys=True,
+            ),
+        )
     return buffer.getvalue()
 
 
@@ -2575,7 +2938,41 @@ def _pdf_metric_pairs(rows: list[dict[str, str]]) -> list[list[str]]:
     return pairs
 
 
+def _build_udmi_client_pdf_report(run: object, data: dict[str, object]) -> bytes:
+    title = _report_title(run)
+    document = PdfDocument(
+        header_left=_BRAND_NAME,
+        header_right=title,
+        footer_left=_BRAND_NAME,
+        footer_right=str(run.run_id),
+    )
+    document.add_heading(title, level=1)
+    for label, value in _report_rows(run, udmi_data=data):
+        document.add_paragraph(f"{label}: {value}")
+    if data["scope_complete"] is not True:
+        document.add_heading(_UDMI_INCOMPLETE_SCOPE_TITLE)
+        document.add_paragraph(str(data["scope_summary"]), bold=True)
+    rows = _udmi_client_metric_rows(run, data)
+    document.add_heading("Client Metrics", level=1)
+    document.add_table(
+        ("Metric", "Value"),
+        [[row["Metric"], row["Value"]] for row in rows],
+        widths=(3.4, 2.6),
+        size=9,
+        wrap_cells=True,
+        center_cells=True,
+        draw_grid=True,
+    )
+    document.add_paragraph(
+        "Metrics-only client product. The technical product contains asset, topic, "
+        "payload, and finding detail."
+    )
+    return document.render()
+
+
 def _build_udmi_pdf_report(run: object, data: dict[str, object]) -> bytes:
+    if _udmi_report_variant(run) == "client":
+        return _build_udmi_client_pdf_report(run, data)
     title = _report_title(run)
     document = PdfDocument(
         header_left=_BRAND_NAME,

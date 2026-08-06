@@ -93,6 +93,11 @@ if (-not $BuildVersion -and $Git) {
     $BuildVersion = (& $Git.Source -C $RepoRoot describe --tags --always --dirty 2>$null | Select-Object -First 1).Trim()
 }
 if ([string]::IsNullOrWhiteSpace($BuildVersion)) { $BuildVersion = "unversioned" }
+$SourceCommit = "unknown"
+if ($Git) {
+    $SourceCommit = (& $Git.Source -C $RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1).Trim()
+    if ([string]::IsNullOrWhiteSpace($SourceCommit)) { $SourceCommit = "unknown" }
+}
 $VersionParts = if ($BuildVersion -match '^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?') {
     @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]($Matches[4] ?? 0))
 } else {
@@ -282,6 +287,18 @@ if ($Clean -and (Test-Path -LiteralPath $OutputDir)) {
 }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
+# The backend source tree is copied into the bundle after the EXE is frozen.
+# Carry the same build version beside it so the launcher can stamp API metadata
+# and run evidence with the version shown by the EXE and frontend.
+Set-Content -LiteralPath (Join-Path $OutputDir "APP_VERSION.txt") -Value $BuildVersion -Encoding UTF8 -NoNewline
+$BuildProvenance = [ordered]@{
+    schema_version = "1.0"
+    application_version = $BuildVersion
+    source_commit = $SourceCommit
+    portable_exe_sha256 = $null
+}
+$BuildProvenance | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDir "BUILD_PROVENANCE.json") -Encoding UTF8
+
 # 3a. frozen exe + _internal
 Write-Host "    copy frozen exe + _internal"
 Copy-Item -Path (Join-Path $FreezeDist "*") -Destination $OutputDir -Recurse -Force
@@ -328,6 +345,7 @@ Smart Commissioning App $BuildVersion - Windows portable (tester build)
 
 Build identification:
   Version: $BuildVersion
+  Runtime marker: APP_VERSION.txt
   Executable: SmartCommissioningApp.exe
   Description: Smart Commissioning App portable desktop launcher
   Windows details: right-click SmartCommissioningApp.exe -> Properties -> Details
@@ -354,6 +372,8 @@ finds one beside the exe.
 
 # --- done ---
 $BundleExe = Join-Path $OutputDir "$AppName.exe"
+$BuildProvenance.portable_exe_sha256 = (Get-FileHash -LiteralPath $BundleExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$BuildProvenance | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDir "BUILD_PROVENANCE.json") -Encoding UTF8
 Write-Step "DONE"
 Write-Host "  bundle : $OutputDir"
 Write-Host "  exe    : $BundleExe"

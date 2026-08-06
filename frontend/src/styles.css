@@ -2971,6 +2971,23 @@ input.field-expired {
   color: var(--text);
 }
 
+.issue-card .issue-mismatch {
+  color: var(--red);
+  font-style: normal;
+  font-weight: 760;
+}
+
+.run-history-evidence {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.run-history-evidence small {
+  color: var(--text);
+  font-size: 11px;
+}
+
 .report-title-dialog-heading {
   display: grid;
   gap: 6px;

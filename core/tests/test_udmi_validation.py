@@ -1916,6 +1916,85 @@ class CaptureTopicTests(unittest.TestCase):
         )
 
 
+class PayloadApplicabilityTests(unittest.TestCase):
+    def test_explicit_state_only_schedule_does_not_expect_other_facets(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(
+                    payload_types=["state"],
+                    payload_applicability_status="approved",
+                ),
+                "state_payload": _state(),
+                # A received facet outside the approved matrix is evidence, not
+                # an extra expected payload.
+                "metadata_payload": _metadata(),
+            },
+            live_capture=None,
+        )
+        payloads = result.result_summary["payload_views"][0]["payload_types"]
+        self.assertEqual(
+            {row["payload_type"] for row in payloads if row["expected"]},
+            {"state"},
+        )
+        self.assertTrue(any(issue.issue_type == "payload_not_applicable" for issue in result.issues))
+
+    def test_blank_applicability_is_a_blocker_and_does_not_infer_all_facets(self) -> None:
+        result = validate_udmi_full_report(
+            {
+                "expected_schedule": _schedule(
+                    payload_types=[],
+                    payload_applicability_status="unresolved",
+                ),
+                "state_payload": _state(),
+            },
+            live_capture=None,
+        )
+        payloads = result.result_summary["payload_views"][0]["payload_types"]
+        self.assertFalse(any(row["expected"] for row in payloads))
+        self.assertTrue(any(issue.issue_type == "payload_applicability" for issue in result.issues))
+
+    def test_unresolved_live_applicability_does_not_complete_on_broad_topics(self) -> None:
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                **_TOPICS,
+                "capture_seconds": 1,
+                "expected_schedule": _schedule(
+                    payload_types=[],
+                    payload_applicability_status="unresolved",
+                ),
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        self.assertFalse(capture.calls[-1]["stop_when"](_ALL_TOPIC_MESSAGES))
+        payloads = result.result_summary["payload_views"][0]["payload_types"]
+        self.assertFalse(any(row["expected"] for row in payloads))
+        self.assertTrue(any(issue.issue_type == "payload_applicability" for issue in result.issues))
+
+    def test_raw_evidence_is_redacted_hashed_and_retains_delivery_metadata(self) -> None:
+        secret_payload = json.dumps(
+            {"timestamp": "2026-07-09T10:00:00Z", "password": "hunter2"}
+        ).encode()
+        capture = RecordingCapture(
+            [MqttMessage("a/b/state", secret_payload, retained=True, qos=1)]
+        )
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 1},
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+        raw = result.result_summary["raw_evidence"]
+        self.assertEqual(raw["record_count"], 1)
+        record = raw["records"][0]
+        self.assertEqual(record["payload_type"], "state")
+        self.assertTrue(record["retained"])
+        self.assertEqual(record["qos"], 1)
+        self.assertNotIn("hunter2", json.dumps(raw))
+        self.assertEqual(len(record["content_sha256"]), 64)
+
+
 class RecordingCapture:
     """Fake live_capture that records every call's kwargs and returns canned messages."""
 
@@ -2050,6 +2129,12 @@ class CaptureRunTimeTests(unittest.TestCase):
         self.assertEqual(capture.calls[-1]["timeout_seconds"], 45.0)
         self.assertEqual(result.result_summary["capture_mode"], "bounded")
         self.assertEqual(result.result_summary["capture_window_seconds"], 45.0)
+        started_at = result.result_summary["capture_started_at"]
+        ended_at = result.result_summary["capture_ended_at"]
+        self.assertIsInstance(started_at, str)
+        self.assertIsInstance(ended_at, str)
+        self.assertLessEqual(datetime.fromisoformat(started_at), datetime.fromisoformat(ended_at))
+        self.assertGreaterEqual(result.result_summary["capture_duration_seconds"], 0.0)
 
     def test_indefinite_without_cancel_path_is_bounded_and_labelled(self) -> None:
         # No cancel mechanism reachable => an indefinite request would be
@@ -3182,6 +3267,17 @@ class PointsetTimestampDiagnosisTests(unittest.TestCase):
             raw_evidence_uri="mqtt://capture/pointset",
         )
 
+    def test_missing_receive_time_is_not_reclassified_as_stale(self) -> None:
+        issue = _pointset_freshness_issue(
+            parameters={},
+            expected={"reporting_interval_seconds": "60"},
+            pointset_payload={"timestamp": "2020-01-01T00:00:00Z"},
+            issues=[],
+            asset_id="EM-1",
+            raw_evidence_uri="mqtt://capture/pointset",
+        )
+        self.assertIsNone(issue)
+
     def test_whole_hour_future_names_clock_labelling_offset(self) -> None:
         # Stamp reads one hour AHEAD of the capture clock (age -3600s): the future
         # trigger fires and the whole-hour cause is named, but it is still reported.
@@ -3239,6 +3335,14 @@ class PointsetTimestampDiagnosisTests(unittest.TestCase):
         self.assertEqual(issue.issue_type, "pointset_timestamp")
         self.assertIn("reporting interval", issue.description)
         self.assertNotIn("clock-labelling", issue.description)
+
+    def test_malformed_timestamp_does_not_create_cadence_issue(self) -> None:
+        issue = self._freshness(
+            payload_ts="2026-07-09 09:00:00Z",
+            observed_ts="2026-07-09T10:00:00Z",
+            interval="60",
+        )
+        self.assertIsNone(issue)
 
 
 class _FakeRunStore:
@@ -4197,6 +4301,9 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
 
         self.assertEqual(record["status"], "cancelled")
         self.assertEqual(store.summaries[-1]["captured_topics"], ["a/b/state"])
+        self.assertTrue(store.summaries[-1]["validation_incomplete"])
+        self.assertFalse(store.summaries[-1]["acceptance_eligible"])
+        self.assertFalse(store.summaries[-1]["window_completed"])
         self.assertTrue(any(issue.issue_type == "not_publishing" for issue in store.issues))
         cancelled_index = operations.index(("status", "cancelled"))
         terminal_summary_index = max(
@@ -4217,6 +4324,29 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
                 for operation in operations[cancelled_index + 1 :]
             )
         )
+
+    def test_cancel_requested_during_terminal_summary_write_stays_cancelled(self) -> None:
+        class LateCancelStore(_FakeRunStore):
+            def update_result_summary(
+                self, run_id: str, summary: dict, merge: bool = True
+            ) -> None:
+                super().update_result_summary(run_id, summary, merge)
+                if not merge and summary.get("provisional") is not True:
+                    self.cancel = True
+
+        store = LateCancelStore()
+        capture = RecordingCapture(list(_ALL_TOPIC_MESSAGES))
+        record = process_udmi_validation_run(
+            "run-late-cancel",
+            dict(_PROCESSOR_PARAMS),
+            run_store=store,
+            execution_mode="dramatiq_worker",
+            live_capture=capture,
+        )
+
+        self.assertEqual(record["status"], "cancelled")
+        self.assertTrue(store.summaries[-1]["validation_incomplete"])
+        self.assertFalse(store.summaries[-1]["acceptance_eligible"])
 
     def test_store_without_cancel_api_falls_back_to_bounded(self) -> None:
         store = _FakeRunStore(cancellable=False)
