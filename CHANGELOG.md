@@ -5,6 +5,22 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.39] - 2026-08-07
+
+### Changed
+
+- Published the corrected asset-register reconciliation behavior as a
+  non-destructive patch release while retaining v0.1.38 for rollback.
+- Runtime, package, frontend, portable, Docker, and evidence identities now
+  identify v0.1.39 consistently.
+
+### Fixed
+
+- A newer fully rejected MQTT register remains authoritative and returns its
+  row-level rejection details instead of falling back to an older register.
+- The optional `Floor` column remains report metadata and does not change asset
+  identity, expected topics, or payload capture scope.
+
 ## [0.1.38] - 2026-08-06
 
 ### Added

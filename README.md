@@ -268,7 +268,7 @@ small set below instead of guessing from filenames.
 | Validate a running stack | [Quickstart](docs/quickstart.md) |
 | Operate or recover a deployment | [Operations runbook](docs/runbook.md) |
 | Check protocol support and live-test gaps | [Protocol conformance](docs/protocol-conformance.md) and [Phase 5 validation](docs/phase5-onsite-validation.md) |
-| Prepare the v0.1.38 field gate | [v0.1.38 field acceptance checklist](docs/v0.1.38-field-acceptance-checklist.md) |
+| Prepare the v0.1.39 field gate | [v0.1.39 field acceptance checklist](docs/v0.1.39-field-acceptance-checklist.md) |
 | Contribute code | [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) |
 
 ### Security & safety
@@ -308,16 +308,15 @@ artifact metadata, and exact report bytes through Sync v2. Per-item receipts
 advance only accepted or byte-identical items, while project/site scope failures
 remain generic and unsynchronized.
 
-The v0.1.38 candidate carries exact association semantics, grouped payload
-routing diagnostics, bounded report history, redacted technical raw evidence,
-client and technical report products, deterministic report-set manifests, and
-portable/Docker provenance. Field acceptance remains pending until the
-approved register, applicability matrix, paired collector evidence, and
-complete cadence run pass the [field acceptance checklist](docs/v0.1.38-field-acceptance-checklist.md).
+The v0.1.39 candidate carries the corrected register reconciliation behavior,
+optional Floor metadata, exact association semantics, and portable/Docker
+provenance. Field acceptance remains pending until the approved register,
+applicability matrix, paired collector evidence, and complete cadence run pass
+the [field acceptance checklist](docs/v0.1.39-field-acceptance-checklist.md).
 
-v0.1.38 adds no database migration. Follow
-[the v0.1.38 migration and rollback guide](docs/migration-rollback-v0.1.38.md),
-then complete [the release validation record](docs/release-validation-v0.1.38.md)
+v0.1.39 adds no database migration. Follow
+[the v0.1.39 migration and rollback guide](docs/migration-rollback-v0.1.39.md),
+then complete [the release validation record](docs/release-validation-v0.1.39.md)
 against the exact merged commit. Hosted deployments should pull API, worker,
 and frontend by the immutable references in the public Docker image evidence.
 

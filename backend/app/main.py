@@ -40,7 +40,7 @@ from app.services.log_service import (
 )
 
 logger = logging.getLogger(__name__)
-APP_VERSION = "0.1.38"
+APP_VERSION = "0.1.39"
 _RUNTIME_APP_VERSION = os.environ.get("SMART_COMMISSIONING_APP_VERSION") or APP_VERSION
 
 settings = get_settings()
