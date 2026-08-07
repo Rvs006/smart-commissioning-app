@@ -252,12 +252,12 @@ def _is_blocking(issue: object) -> bool:
 
 def _expected_payload_types(source: dict[str, object], *, synthetic: bool) -> set[str]:
     schedule = _dict_value(source.get("expected_schedule"))
-    explicit_types = source.get("payload_types")
+    explicit_types = schedule.get("payload_types")
     if not isinstance(explicit_types, list):
-        explicit_types = schedule.get("payload_types")
+        explicit_types = source.get("payload_types")
     applicability_status = str(
-        source.get("payload_applicability_status")
-        or schedule.get("payload_applicability_status")
+        schedule.get("payload_applicability_status")
+        or source.get("payload_applicability_status")
         or ""
     ).strip().casefold()
     if isinstance(explicit_types, list):

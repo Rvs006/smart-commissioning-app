@@ -29,11 +29,14 @@ from smart_commissioning_core.mqtt_settings import (
     parse_int,
 )
 from smart_commissioning_core.mqtt_transport import (
+    DEFAULT_PRIMARY_RETAINED_BYTES,
+    DEFAULT_SECONDARY_RETAINED_BYTES,
     MqttCaptureInterrupted,
+    MqttCaptureOutcome,
     MqttMessage,
     MqttTransportError,
     _topic_matches_filter,
-    subscribe_and_capture,
+    subscribe_and_capture_with_outcome,
 )
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_results import build_validation_summary_v1
@@ -115,7 +118,7 @@ class _AssetTopicDiscoveryState:
     topic_limit_reached: bool = False
 
 
-LiveCapture = Callable[..., list[MqttMessage]]
+LiveCapture = Callable[..., list[MqttMessage] | MqttCaptureOutcome]
 CancelCheck = Callable[[], bool]
 ProgressCallback = Callable[[Callable[[], UdmiValidationResult]], None]
 
@@ -142,7 +145,7 @@ MAX_ASSET_TOPIC_DISCOVERY_LIMIT = 100
 def validate_udmi_full_report(
     parameters: dict[str, object] | None = None,
     *,
-    live_capture: LiveCapture | None = subscribe_and_capture,
+    live_capture: LiveCapture | None = subscribe_and_capture_with_outcome,
     cancel_check: CancelCheck | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> UdmiValidationResult:
@@ -233,6 +236,7 @@ def validate_udmi_full_report(
         "capture_duration_seconds": capture_summary.get("capture_duration_seconds"),
         "window_completed": capture_summary.get("window_completed"),
         "termination_reason": capture_summary.get("termination_reason"),
+        "capture_retention": capture_summary.get("capture_retention"),
         "captured_topics": capture_summary["captured_topics"],
         "subscribed_topics": capture_summary.get("subscribed_topics", []),
         "unexpected_device_count": len(_unexpected_devices(parameters)),
@@ -1647,7 +1651,7 @@ def _capture_error_issue(*, asset_id: str | None, status_detail: str) -> Validat
         [],
         asset_id=asset_id,
         issue_type="payload_error",
-        severity="critical",
+        severity="high",
         description=f"Live MQTT capture failed ({status_detail}).",
         suggested_action=_CAPTURE_ERROR_ACTIONS.get(status_detail, _DEFAULT_CAPTURE_ERROR_ACTION),
     )
@@ -2006,6 +2010,70 @@ def _snapshot_progress_parameters(
     return snapshot
 
 
+def _capture_result_details(
+    result: list[MqttMessage] | MqttCaptureOutcome,
+    *,
+    finite_window: bool,
+) -> tuple[list[MqttMessage], str, bool, dict[str, object]]:
+    """Translate transport truth into the public validation contract.
+
+    A legacy list-only adapter deliberately cannot prove that a finite capture
+    reached its deadline.  It remains injectable for older tests and callers,
+    but is incomplete rather than silently successful.
+    """
+    if not isinstance(result, MqttCaptureOutcome):
+        return (
+            list(result),
+            "capture_outcome_unavailable" if finite_window else "required_topics_received",
+            False,
+            {"capture_outcome_available": False},
+        )
+    external_reason = {
+        "deadline_elapsed": "window_elapsed",
+        "cancelled": "cancelled",
+        "broker_interruption": "broker_interruption",
+        "primary_topic_cap": "message_cap",
+        "primary_byte_cap": "byte_cap",
+        "required_topics_received": "required_topics_received",
+        "indefinite_backstop": "backstop_elapsed",
+    }.get(result.termination, "capture_outcome_unavailable")
+    deadline_proven = (
+        finite_window
+        and result.termination == "deadline_elapsed"
+        and result.deadline_requested
+        and result.deadline_elapsed
+        and not result.cancelled
+        and not result.primary_cap_reached
+        and not result.primary_byte_cap_reached
+        and result.interruption_cause is None
+    )
+    if result.termination == "deadline_elapsed" and not deadline_proven:
+        # An indefinite capture receives a transport backstop for safety. An
+        # inconsistent adapter outcome is likewise not proof of completion.
+        external_reason = "backstop_elapsed" if not finite_window else "capture_outcome_unavailable"
+    telemetry = {
+        "capture_outcome_available": True,
+        "capture_termination_internal": result.termination,
+        "primary_cap_reached": result.primary_cap_reached,
+        "primary_byte_cap_reached": result.primary_byte_cap_reached,
+        "secondary_truncated": result.secondary_truncated,
+        "secondary_count_truncated": result.secondary_count_truncated,
+        "secondary_byte_truncated": result.secondary_byte_truncated,
+        "primary_retained_count": result.primary_retained_count,
+        "secondary_retained_count": result.secondary_retained_count,
+        "primary_retained_bytes": result.primary_retained_bytes,
+        "secondary_retained_bytes": result.secondary_retained_bytes,
+        "deadline_requested": result.deadline_requested,
+        "deadline_elapsed": result.deadline_elapsed,
+    }
+    return (
+        list(result.messages),
+        external_reason,
+        deadline_proven,
+        telemetry,
+    )
+
+
 def _capture_live_payloads(
     parameters: dict[str, object],
     *,
@@ -2112,7 +2180,7 @@ def _capture_live_payloads(
         return capture_cancelled
 
     try:
-        messages = live_capture(
+        capture_result = live_capture(
             build_mqtt_connection_settings(parameters),
             topics=topics,
             # timeout_seconds stays None in the summary (capture_mode "indefinite");
@@ -2124,13 +2192,14 @@ def _capture_live_payloads(
             cancel_check=capture_cancel_check if cancel_check is not None else None,
             stop_when=(
                 _capture_stop_when(groups)
-                if groups
+                if timeout_seconds is None and groups
                 else (lambda _messages: False)
             ),
             on_message=on_message,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
+        capture_result = messages
         capture_error_status = _broker_error_status(error.cause)
     except (MqttTransportError, OSError, ValueError) as error:
         # Use the coarse status label only; the raw exception text may carry
@@ -2151,6 +2220,14 @@ def _capture_live_payloads(
             ),
         }
 
+    messages, transport_termination, transport_window_completed, transport_telemetry = _capture_result_details(
+        capture_result,
+        finite_window=timeout_seconds is not None,
+    )
+    if transport_termination == "broker_interruption" and isinstance(capture_result, MqttCaptureOutcome):
+        capture_error_status = _broker_error_status(
+            capture_result.interruption_cause or MqttTransportError("MQTT capture interrupted.")
+        )
     capture_observed_at = datetime.now(UTC).isoformat()
     with progress_state_lock:
         parameters["capture_observed_at"] = capture_observed_at
@@ -2165,17 +2242,10 @@ def _capture_live_payloads(
     valid_messages = _valid_payload_messages(messages)
     valid_topics = _ordered_valid_payload_topics(messages)
     missing = _unseen_groups(groups, {message.topic for message in valid_messages})
-    if capture_cancelled:
-        termination_reason = "cancelled"
-    elif len(messages) >= parse_int(parameters.get("max_messages"), default=DEFAULT_MAX_MESSAGES):
-        termination_reason = "message_cap"
-    elif timeout_seconds is not None and missing:
-        termination_reason = "window_elapsed"
-    elif missing:
+    termination_reason = "cancelled" if capture_cancelled else transport_termination
+    if timeout_seconds is None and termination_reason == "required_topics_received" and missing:
         termination_reason = "backstop_elapsed"
-    else:
-        termination_reason = "required_topics_received"
-    window_completed = termination_reason == "window_elapsed"
+    window_completed = transport_window_completed and not capture_cancelled
     if capture_error_status:
         return {
             "attempted": True,
@@ -2200,6 +2270,7 @@ def _capture_live_payloads(
         "capture_window_seconds": timeout_seconds,
         "window_completed": window_completed,
         "termination_reason": termination_reason,
+        "capture_retention": transport_telemetry,
         "captured_topics": valid_topics,
         "subscribed_topics": list(topics),
         "issue": None
@@ -2627,15 +2698,10 @@ def _capture_live_payloads_per_asset(
 
     try:
         expected_complete = _capture_stop_when(groups)
-        # A bounded observation with a safe sibling scope needs the whole
-        # configured window; stopping when expected publishers arrive would
-        # systematically miss later unexpected siblings. Indefinite captures
-        # retain their established expected-complete stop behavior.
-        stop_when = (
-            (lambda _messages: False)
-            if measurement_scope and capture_mode != "indefinite"
-            else expected_complete
-        )
+        # Finite validation is a measurement window, never an early-success
+        # check. Expected-topic completeness remains useful for indefinite
+        # operator captures only.
+        stop_when = expected_complete if capture_mode == "indefinite" else (lambda _messages: False)
         capture_options: dict[str, object] = {
             "topics": topics,
             # timeout_seconds stays None in the summary (capture_mode "indefinite");
@@ -2666,20 +2732,27 @@ def _capture_live_payloads_per_asset(
             # unrelated topics beneath an expected root can consume a slot.
             capture_options["primary_topics"] = validation_topics
             capture_options["secondary_max_messages"] = unexpected_max_messages
+            # Make the separate retention budgets part of the validation
+            # contract instead of relying on the transport's implementation
+            # defaults.  Expected payload evidence is deliberately much larger
+            # than the bounded discovery lane.
+            capture_options["primary_max_bytes"] = DEFAULT_PRIMARY_RETAINED_BYTES
+            capture_options["secondary_max_bytes"] = DEFAULT_SECONDARY_RETAINED_BYTES
             if diagnostic_scope == "#":
-                # The diagnostic wildcard is observation-only. Retain only the
-                # normal expected/measurement lanes, while the transport still
-                # invokes ``on_observed_message`` for every broker delivery.
-                # This prevents unrelated all-topic traffic consuming the
-                # secondary budget before an ordinary wrong-topic or
-                # unexpected-publisher observation arrives.
-                capture_options["secondary_topic_filters"] = normal_secondary_topic_filters
-        messages = live_capture(
+                # Prefer the bounded measurement lane when one exists. With no
+                # common bounded scope, the operator's explicit all-topic
+                # confirmation must retain ``#`` in the independent secondary
+                # lane; an empty filter list would discard every diagnostic.
+                capture_options["secondary_topic_filters"] = (
+                    normal_secondary_topic_filters or ["#"]
+                )
+        capture_result = live_capture(
             build_mqtt_connection_settings(parameters),
             **capture_options,
         )
     except MqttCaptureInterrupted as error:
         messages = error.messages
+        capture_result = messages
         capture_error_status = _broker_error_status(error.cause)
     except (MqttTransportError, OSError, ValueError) as error:
         # Coarse status label only — raw broker error text may carry credentials.
@@ -2698,6 +2771,15 @@ def _capture_live_payloads_per_asset(
             "captured_topics": [],
             "issue": _capture_error_issue(asset_id=None, status_detail=broker_status_detail),
         }
+
+    messages, transport_termination, transport_window_completed, transport_telemetry = _capture_result_details(
+        capture_result,
+        finite_window=timeout_seconds is not None,
+    )
+    if transport_termination == "broker_interruption" and isinstance(capture_result, MqttCaptureOutcome):
+        capture_error_status = _broker_error_status(
+            capture_result.interruption_cause or MqttTransportError("MQTT capture interrupted.")
+        )
 
     # Fakes and third-party transport adapters predating ``on_observed_message``
     # may return evidence without invoking the hook. Preserve deterministic
@@ -2765,23 +2847,48 @@ def _capture_live_payloads_per_asset(
             measured=(
                 capture_error_status is None
                 and not capture_cancelled
+                and transport_window_completed
                 and expected_topic_count < max_messages
                 and observation_topic_count < unexpected_max_messages
+                and not transport_telemetry.get("primary_cap_reached", False)
+                and not transport_telemetry.get("primary_byte_cap_reached", False)
+                and not transport_telemetry.get("secondary_truncated", False)
             ),
         )
 
     diagnostic_capture_complete = (
         capture_error_status is None
         and not capture_cancelled
-        and expected_topic_count < max_messages
+        and transport_window_completed
+        and not transport_telemetry.get("primary_cap_reached", False)
+        and not transport_telemetry.get("primary_byte_cap_reached", False)
+        and not transport_telemetry.get("secondary_truncated", False)
     )
     diagnostic_capture_status = (
         capture_error_status
         or ("cancelled" if capture_cancelled else None)
+        # A topic ledger may contain useful observations from an old list-only
+        # adapter or from an indefinite transport backstop, but neither result
+        # proves that the requested measurement window completed.  Do not mark
+        # the diagnostic capture as ``completed`` merely because it avoided a
+        # retention cap.
+        or (None if transport_window_completed else transport_termination)
         or (
             "primary_topic_limit_reached"
-            if expected_topic_count >= max_messages
-            else "completed"
+            if transport_telemetry.get("primary_cap_reached", False)
+            else (
+                "primary_byte_limit_reached"
+                if transport_telemetry.get("primary_byte_cap_reached", False)
+                else (
+                    "secondary_byte_limit_reached"
+                    if transport_telemetry.get("secondary_byte_truncated", False)
+                    else (
+                        "secondary_topic_limit_reached"
+                        if transport_telemetry.get("secondary_count_truncated", False)
+                        else "completed"
+                    )
+                )
+            )
         )
     )
     # Measurement-only wildcard traffic must never become a validation issue.
@@ -2793,17 +2900,11 @@ def _capture_live_payloads_per_asset(
         termination_reason = "broker_interruption"
     elif capture_cancelled:
         termination_reason = "cancelled"
-    elif expected_topic_count >= max_messages:
-        termination_reason = "message_cap"
-    elif timeout_seconds is None and missing:
-        termination_reason = "backstop_elapsed"
-    elif timeout_seconds is not None and measurement_scope:
-        termination_reason = "window_elapsed"
-    elif timeout_seconds is not None and missing:
-        termination_reason = "window_elapsed"
     else:
-        termination_reason = "required_topics_received"
-    window_completed = termination_reason == "window_elapsed"
+        termination_reason = transport_termination
+    if timeout_seconds is None and termination_reason == "required_topics_received" and missing:
+        termination_reason = "backstop_elapsed"
+    window_completed = transport_window_completed and not capture_cancelled and capture_error_status is None
     persist_asset_topic_discovery(
         capture_complete=diagnostic_capture_complete,
         capture_status=diagnostic_capture_status,
@@ -2830,6 +2931,7 @@ def _capture_live_payloads_per_asset(
         "capture_window_seconds": timeout_seconds,
         "window_completed": window_completed,
         "termination_reason": termination_reason,
+        "capture_retention": transport_telemetry,
         "captured_topics": valid_topics,
         "subscribed_topics": list(topics),
         "issue": None
@@ -2890,14 +2992,16 @@ def _capture_validation_topics(
         "metadata": _string(parameters.get("metadata_topic")),
         "pointset": _string(parameters.get("pointset_topic")),
     }
-    raw_payload_types = parameters.get("payload_types")
-    applicability_status = _string(parameters.get("payload_applicability_status")).casefold()
+    expected = _dict_or_empty(parameters.get("expected_schedule"))
+    # The schedule is the merged per-asset contract. Its ordered effective
+    # types must win over a first register row's top-level convenience fields.
+    raw_payload_types = expected.get("payload_types")
+    applicability_status = _string(expected.get("payload_applicability_status")).casefold()
     if not isinstance(raw_payload_types, list):
-        expected = _dict_or_empty(parameters.get("expected_schedule"))
-        raw_payload_types = expected.get("payload_types")
+        raw_payload_types = parameters.get("payload_types")
         if not applicability_status:
             applicability_status = _string(
-                expected.get("payload_applicability_status")
+                parameters.get("payload_applicability_status")
             ).casefold()
     if applicability_status in {"unresolved", "invalid"}:
         # The register may still be subscribed broadly for evidence, but no

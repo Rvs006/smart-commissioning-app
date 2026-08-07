@@ -7,7 +7,7 @@ old handoff still says "ready to send."
 Status meanings:
 
 - **Current**: maintained guidance for the present codebase.
-- **Candidate**: v0.1.39 material that still needs field acceptance evidence.
+- **Candidate**: v0.1.40 material that still needs field acceptance evidence.
 - **Versioned**: accurate for the named release and retained for rollback or
   audit work.
 - **Historical**: a completed plan, sent message, or dated review record.
@@ -41,18 +41,33 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Hosted Docker | v0.1.39 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.39.md) |
+| Hosted Docker | v0.1.40 release | [Docker deployment and rollback](docker-deployment-rollback-v0.1.40.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.39 candidate
+## v0.1.40 release
 
 Field acceptance is open. These files define the application gate, evidence
 manifest, two field gates, release gate, and rollback route for the current
-candidate.
+release.
+
+- [Release notes](release-notes-v0.1.40.md)
+- [Release validation record](release-validation-v0.1.40.md)
+- [Migration and rollback](migration-rollback-v0.1.40.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.40.md)
+- [Field acceptance checklist](v0.1.40-field-acceptance-checklist.md)
+- [Baseline comparison](v0.1.40-baseline-comparison.md)
+- [Evidence manifest](v0.1.40-evidence-manifest.md)
+- [Capture contract](v0.1.40-capture-contract.md)
+- [UDMI regression postmortem](v0.1.40-udmi-regression-postmortem.md)
+- [Meeting-note disposition](v0.1.40-meeting-note-disposition.md)
+
+## v0.1.39 versioned release record
+
+v0.1.39 remains available for audit and rollback comparison.
 
 - [Release notes](release-notes-v0.1.39.md)
 - [Release validation record](release-validation-v0.1.39.md)
@@ -61,9 +76,6 @@ candidate.
 - [Field acceptance checklist](v0.1.39-field-acceptance-checklist.md)
 - [Baseline comparison](v0.1.39-baseline-comparison.md)
 - [Evidence manifest](v0.1.39-evidence-manifest.md)
-- [Reconciliation decision log](v0.1.39-reconciliation-decision-log.md)
-- [Issue matrix](v0.1.37-issue-matrix.md)
-- [Implementation handoff](handoff-v0.1.37-2026-08-04.md)
 
 ## v0.1.38 release record
 

@@ -63,9 +63,7 @@ from app.services.job_queue import JobQueueService
 from app.services.register_topics import (
     capture_topics_from_expected as _capture_topics_from_expected,
 )
-from app.services.register_topics import (
-    normalise_payload_applicability as _normalise_payload_applicability,
-)
+from app.services.register_topics import resolve_payload_applicability as _resolve_payload_applicability
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import VALIDATION_JOB_TYPES, RunService
 from app.services.validation_export import stable_validation_export_bytes, validation_export_filename
@@ -186,14 +184,13 @@ def _expected_schedule_from_register_row(row: dict) -> dict:
         "reporting_interval_seconds": row.get("Expected reporting interval"),
     }
     schedule = {key: value for key, value in fields.items() if value}
-    payload_types, applicability_status = _normalise_payload_applicability(
+    applicability = _resolve_payload_applicability(
         row.get("Payload type"),
         row.get("Payload applicability"),
     )
-    # The empty list is intentional. It records that applicability was not
-    # approved rather than silently expanding the expected set to all facets.
-    schedule["payload_types"] = payload_types
-    schedule["payload_applicability_status"] = applicability_status
+    schedule["payload_types"] = applicability.payload_types
+    schedule["payload_applicability_status"] = applicability.status
+    schedule["payload_applicability_source"] = applicability.source
     if points:
         schedule["points"] = points
     units_map = {point: units[index] for index, point in enumerate(points) if index < len(units) and units[index]}

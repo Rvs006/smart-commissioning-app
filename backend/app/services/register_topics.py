@@ -13,7 +13,18 @@ metadata topic when its register row lists only ``.../state``.
 These are pure functions: no service, repository, or route imports.
 """
 
+from dataclasses import dataclass
+
 PAYLOAD_TYPES = ("state", "metadata", "pointset")
+
+
+@dataclass(frozen=True)
+class PayloadApplicabilityResolution:
+    """Canonical payload applicability plus the register field that supplied it."""
+
+    payload_types: list[str]
+    status: str
+    source: str
 
 
 def normalise_payload_applicability(
@@ -40,6 +51,38 @@ def normalise_payload_applicability(
     return ordered, "approved"
 
 
+def resolve_payload_applicability(
+    payload_type: object = None,
+    payload_applicability: object = None,
+) -> PayloadApplicabilityResolution:
+    """Resolve effective expected facets without losing blank-register provenance.
+
+    ``normalise_payload_applicability`` retains its historical unresolved-blank
+    response for compatibility. New register consumers use this resolver so the
+    v0.1.37 field contract (both cells blank means all UDMI payload families)
+    is explicit and auditable, never an accidental fallback for invalid input.
+    """
+    if payload_applicability is not None and str(payload_applicability).strip():
+        payload_types, status = normalise_payload_applicability(None, payload_applicability)
+        return PayloadApplicabilityResolution(
+            payload_types,
+            status,
+            "explicit_applicability" if status == "approved" else "invalid_applicability",
+        )
+    if payload_type is not None and str(payload_type).strip():
+        payload_types, status = normalise_payload_applicability(payload_type, None)
+        return PayloadApplicabilityResolution(
+            payload_types,
+            status,
+            "explicit_payload_type" if status == "approved" else "invalid_payload_type",
+        )
+    return PayloadApplicabilityResolution(
+        list(PAYLOAD_TYPES),
+        "approved",
+        "legacy_blank_default",
+    )
+
+
 def capture_topics_from_expected(
     expected_topic: object,
     payload_type: object = None,
@@ -55,13 +98,13 @@ def capture_topics_from_expected(
     topics: dict[str, object] = {}
     extra_topics: list[str] = []
     roots: set[str] = set()
-    payload_types, applicability_status = normalise_payload_applicability(
+    resolution = resolve_payload_applicability(
         payload_type,
         payload_applicability,
     )
     # Keep broad subscription behavior for evidence collection, while the
     # explicit matrix below controls what validation expects.
-    requested_types = set(payload_types) if payload_types else set(PAYLOAD_TYPES)
+    requested_types = set(resolution.payload_types)
     for part in str(expected_topic or "").split(","):
         topic = part.strip()
         if not topic:
@@ -98,7 +141,7 @@ def capture_topics_from_expected(
     # field engineer's register contract: blank Payload type represents one WHOLE asset,
     # so even one explicit sibling topic must require all three payload slots.
     required_slots = {"state_topic", "metadata_topic", "pointset_topic"}
-    if not payload_types and roots and not required_slots.issubset(topics):
+    if resolution.source == "legacy_blank_default" and roots and not required_slots.issubset(topics):
         if len(roots) == 1:
             prefix = next(iter(roots))
             topics.setdefault("state_topic", prefix + "/state")
@@ -107,8 +150,9 @@ def capture_topics_from_expected(
             extra_topics.append(prefix + "/event/pointset")
     if extra_topics:
         topics["extra_capture_topics"] = list(dict.fromkeys(extra_topics))
-    topics["payload_types"] = payload_types
-    topics["payload_applicability_status"] = applicability_status
+    topics["payload_types"] = resolution.payload_types
+    topics["payload_applicability_status"] = resolution.status
+    topics["payload_applicability_source"] = resolution.source
     return topics
 
 

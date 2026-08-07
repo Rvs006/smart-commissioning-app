@@ -16,6 +16,7 @@ from unittest import mock
 
 from smart_commissioning_core import mqtt_transport
 from smart_commissioning_core.mqtt_transport import (
+    MqttCaptureOutcome,
     MqttClient,
     MqttConnectionSettings,
     MqttMessage,
@@ -761,6 +762,234 @@ class RetainLatestTests(unittest.TestCase):
             )
 
         self.assertEqual(messages, [first, first, second])
+
+
+class CaptureOutcomeTests(unittest.TestCase):
+    def test_primary_default_budget_covers_780_by_three_latest_payloads(self) -> None:
+        self.assertGreaterEqual(
+            mqtt_transport.DEFAULT_PRIMARY_RETAINED_BYTES,
+            780 * 3 * 112 * 1024,
+        )
+
+    def test_outcome_proves_a_monotonic_deadline(self) -> None:
+        class QuietCapture(_FakeCaptureClient):
+            def read_publish_any(self, **_kwargs: object) -> MqttMessage | None:
+                return None
+
+        fake = QuietCapture([])
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            with mock.patch.object(
+                mqtt_transport.time,
+                "monotonic",
+                side_effect=[0.0, 0.0, 0.0, 0.0, 2.0, 2.0],
+            ):
+                outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                    _settings(), topics=["ASSET-1/state"], timeout_seconds=1, max_messages=1
+                )
+        self.assertEqual(outcome.termination, "deadline_elapsed")
+        self.assertTrue(outcome.deadline_elapsed)
+
+    def test_finite_deadline_starts_after_slow_connect_and_subscribe(self) -> None:
+        class SlowSetup(_FakeCaptureClient):
+            subscribed = False
+            capture_deadlines: list[float | None] = []
+
+            def subscribe_many(self, topics: list[str], qos: int = 0) -> None:
+                super().subscribe_many(topics, qos)
+                self.subscribed = True
+
+            def read_publish_any(self, **kwargs: object) -> MqttMessage | None:
+                self.capture_deadlines.append(kwargs.get("capture_deadline"))
+                return None
+
+        fake = SlowSetup([])
+        # Setup consumes 100 monotonic seconds. The requested one-second window
+        # must still reach read_publish_any with a post-SUBACK deadline of 101.
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            clock = iter([0.0, 100.0, 100.0, 100.5, 100.5])
+            with mock.patch.object(
+                mqtt_transport.time,
+                "monotonic",
+                side_effect=lambda: next(clock, 101.1),
+            ):
+                outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                    _settings(), topics=["ASSET-1/state"], timeout_seconds=1, max_messages=1
+                )
+        self.assertEqual(outcome.termination, "deadline_elapsed")
+        self.assertEqual(fake.capture_deadlines, [101.0])
+
+    def test_primary_replacements_continue_after_topic_capacity(self) -> None:
+        first = MqttMessage("ASSET-1/state", b'{"value": 1}')
+        latest = MqttMessage("ASSET-1/state", b'{"value": 2}')
+        fake = _FakeCaptureClient([first, latest])
+        seen = 0
+
+        def cancel() -> bool:
+            return seen >= 2
+
+        def observed(_message: MqttMessage) -> None:
+            nonlocal seen
+            seen += 1
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                _settings(),
+                topics=["ASSET-1/#"],
+                timeout_seconds=None,
+                max_messages=1,
+                primary_topics=["ASSET-1/#"],
+                cancel_check=cancel,
+                on_observed_message=observed,
+            )
+        self.assertEqual(outcome.messages, [latest])
+        self.assertFalse(outcome.primary_cap_reached)
+
+    def test_primary_oversize_replacement_keeps_previous_evidence_and_ends(self) -> None:
+        first = MqttMessage("ASSET-1/state", b"a")
+        replacement = MqttMessage("ASSET-1/state", b"payload-too-large")
+        fake = _FakeCaptureClient([first, replacement])
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                _settings(),
+                topics=["ASSET-1/#"],
+                timeout_seconds=None,
+                max_messages=1,
+                primary_topics=["ASSET-1/#"],
+                primary_max_bytes=len(first.topic.encode()) + len(first.payload) + 1,
+            )
+        self.assertEqual(outcome.termination, "primary_byte_cap")
+        self.assertEqual(outcome.messages, [first])
+
+    def test_unpartitioned_retain_latest_replacements_update_bytes_and_obey_cap(self) -> None:
+        first = MqttMessage("ASSET-1/state", b"a")
+        latest = MqttMessage("ASSET-1/state", b"abcd")
+        oversize = MqttMessage("ASSET-1/state", b"abcdef")
+        latest_bytes = len(latest.topic.encode()) + len(latest.payload)
+        fake = _FakeCaptureClient([first, latest, oversize])
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                _settings(),
+                topics=["ASSET-1/#"],
+                timeout_seconds=None,
+                max_messages=2,
+                retain_latest=True,
+                primary_max_bytes=latest_bytes,
+            )
+
+        self.assertEqual(outcome.termination, "primary_byte_cap")
+        self.assertEqual(outcome.messages, [latest])
+        self.assertEqual(outcome.primary_retained_bytes, latest_bytes)
+
+    def test_secondary_oversize_replacement_keeps_previous_evidence_and_continues(self) -> None:
+        primary = MqttMessage("ASSET-1/state", b"{}")
+        first = MqttMessage("noise/1", b"a")
+        replacement = MqttMessage("noise/1", b"payload-too-large")
+        fake = _FakeCaptureClient([primary, first, replacement])
+        delivered = 0
+
+        def observed(_message: MqttMessage) -> None:
+            nonlocal delivered
+            delivered += 1
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                _settings(),
+                topics=["ASSET-1/#", "#"],
+                timeout_seconds=None,
+                max_messages=1,
+                primary_topics=["ASSET-1/#"],
+                secondary_topic_filters=["#"],
+                secondary_max_bytes=len(first.topic.encode()) + len(first.payload) + 1,
+                cancel_check=lambda: delivered >= 3,
+                on_observed_message=observed,
+            )
+        self.assertEqual(outcome.termination, "cancelled")
+        self.assertTrue(outcome.secondary_byte_truncated)
+        self.assertEqual(outcome.messages, [primary, first])
+
+    def test_diagnostic_saturation_never_ends_primary_capture(self) -> None:
+        primary = MqttMessage("ASSET-1/state", b"{}")
+        diagnostics = [MqttMessage(f"noise/{index}", b"{}") for index in range(501)]
+        fake = _FakeCaptureClient([primary, *diagnostics])
+        delivered = 0
+
+        def observed(_message: MqttMessage) -> None:
+            nonlocal delivered
+            delivered += 1
+
+        def cancel() -> bool:
+            return delivered >= 502
+
+        with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+            outcome = mqtt_transport.subscribe_and_capture_with_outcome(
+                _settings(),
+                topics=["ASSET-1/#", "#"],
+                timeout_seconds=None,
+                max_messages=1,
+                primary_topics=["ASSET-1/#"],
+                secondary_max_messages=5,
+                secondary_topic_filters=["#"],
+                cancel_check=cancel,
+                on_observed_message=observed,
+            )
+        self.assertEqual(outcome.termination, "cancelled")
+        self.assertEqual(outcome.messages[0], primary)
+        self.assertTrue(outcome.secondary_truncated)
+        self.assertEqual(outcome.secondary_retained_count, 5)
+
+    def test_confirmed_all_topic_lane_has_independent_count_and_byte_limits(self) -> None:
+        """The ``#`` diagnostic lane cannot consume expected-topic evidence."""
+
+        primary = MqttMessage("site/a1/state", b"{}")
+        first_noise = MqttMessage("noise/1", b"{}")
+        second_noise = MqttMessage("noise/2", b"{}")
+
+        def run_with(
+            messages: list[MqttMessage],
+            **limits: int,
+        ) -> MqttCaptureOutcome:
+            fake = _FakeCaptureClient(messages)
+            primary_delivered = False
+
+            def observed(message: MqttMessage) -> None:
+                nonlocal primary_delivered
+                primary_delivered = primary_delivered or message.topic == primary.topic
+
+            with mock.patch.object(mqtt_transport, "MqttClient", lambda _settings: fake):
+                return mqtt_transport.subscribe_and_capture_with_outcome(
+                    _settings(),
+                    topics=["site/a1/state", "other/a2/state", "#"],
+                    timeout_seconds=None,
+                    max_messages=2,
+                    primary_topics=["site/a1/state", "other/a2/state"],
+                    secondary_topic_filters=["#"],
+                    # Let the primary delivery enter its protected lane, then
+                    # stop before the fake client would block for more input.
+                    cancel_check=lambda: primary_delivered,
+                    on_observed_message=observed,
+                    **limits,
+                )
+
+        count_limited = run_with(
+            [first_noise, second_noise, primary],
+            secondary_max_messages=1,
+            secondary_max_bytes=1024,
+        )
+        self.assertTrue(count_limited.secondary_count_truncated)
+        self.assertFalse(count_limited.secondary_byte_truncated)
+        self.assertEqual(count_limited.secondary_retained_count, 1)
+        self.assertIn(primary, count_limited.messages)
+
+        byte_limited = run_with(
+            [first_noise, MqttMessage("noise/2", b"x" * 20), primary],
+            secondary_max_messages=4,
+            secondary_max_bytes=len(first_noise.topic.encode()) + len(first_noise.payload) + 1,
+        )
+        self.assertFalse(byte_limited.secondary_count_truncated)
+        self.assertTrue(byte_limited.secondary_byte_truncated)
+        self.assertEqual(byte_limited.secondary_retained_count, 1)
+        self.assertIn(primary, byte_limited.messages)
 
 
 if __name__ == "__main__":

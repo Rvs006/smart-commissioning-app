@@ -312,8 +312,17 @@ def _validate_payload_applicability(
 def _validate_mqtt_point_unit_pairs(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
     points_value = row.get("Expected points", "").strip()
     units_value = row.get("Expected units", "").strip()
-    if not points_value or not units_value:
-        return []  # Required-field validation already reports blanks.
+    if not units_value:
+        return []  # Blank points + units is valid for gateway/DDC assets.
+    if not points_value:
+        return [
+            ImportErrorRecord(
+                row_number=row_number,
+                field="Expected units",
+                code="unit_without_point",
+                message="Expected units has an entry without a corresponding Expected point.",
+            )
+        ]
     point_count = len([value for value in points_value.split(",") if value.strip()])
     unit_slots = [value.strip() for value in units_value.split(",")]
     last_unit_index = max((index for index, value in enumerate(unit_slots) if value), default=-1)
@@ -535,8 +544,6 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "System",
             "Expected topic",
             "Expected schema version",
-            "Expected points",
-            "Expected units",
             "Expected reporting interval",
             "Source protocol",
         ),
@@ -551,6 +558,8 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Asset name",
             "Payload type",
             "Payload applicability",
+            "Expected points",
+            "Expected units",
             "Notes",
             "Site",
             "Serial number",

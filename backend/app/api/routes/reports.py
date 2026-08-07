@@ -801,6 +801,117 @@ def _raw_evidence_export(run: object) -> dict[str, object]:
     )
 
 
+def _safe_evidence_file_component(value: object, *, fallback: str) -> str:
+    """Return a deterministic, filesystem-safe evidence-file component."""
+
+    text = str(value or "").strip()
+    text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip(".-")
+    return (text[:48] or fallback).casefold()
+
+
+def _raw_evidence_payload_files(
+    records: list[dict[str, object]],
+) -> tuple[list[tuple[str, bytes]], dict[str, object]]:
+    """Project latest redacted JSON payloads into individually addressable files.
+
+    The source record remains in records.jsonl for compatibility. The payload
+    file body is the JSON payload itself, while the manifest carries its topic,
+    asset, timestamp and integrity metadata. Non-JSON records are metadata-only
+    because synthesising a JSON payload would misrepresent captured evidence.
+    """
+
+    files: list[tuple[str, bytes]] = []
+    entries: list[dict[str, object]] = []
+    used_names: set[str] = set()
+    latest_by_topic: dict[tuple[str, str], dict[str, object]] = {}
+    for record in records:
+        source_run_id = str(record.get("source_run_id") or "source")
+        topic = str(record.get("topic") or "")
+        key = (source_run_id, topic or str(record.get("evidence_id") or "raw"))
+        previous = latest_by_topic.get(key)
+        # Latest evidence follows broker receipt order, never an embedded
+        # payload timestamp that may be stale or supplied out of order.
+        timestamp = str(record.get("broker_received_at") or record.get("received_at") or "")
+        previous_timestamp = str(
+            (previous or {}).get("broker_received_at") or (previous or {}).get("received_at") or ""
+        )
+        if previous is None or (timestamp, str(record.get("evidence_id") or "")) > (
+            previous_timestamp,
+            str(previous.get("evidence_id") or ""),
+        ):
+            latest_by_topic[key] = record
+
+    for record in latest_by_topic.values():
+        evidence_id = str(record.get("evidence_id") or "raw")
+        source_run_id = str(record.get("source_run_id") or "source")
+        asset_id = str(record.get("asset_id") or "asset")
+        payload_type = str(record.get("payload_type") or "payload")
+        topic = str(record.get("topic") or "")
+        identity_hash = hashlib.sha256(
+            f"{evidence_id}\0{source_run_id}\0{asset_id}\0{payload_type}\0{topic}".encode()
+        ).hexdigest()
+        base_name = "-".join(
+            (
+                _safe_evidence_file_component(source_run_id, fallback="source"),
+                _safe_evidence_file_component(asset_id, fallback="asset"),
+                _safe_evidence_file_component(payload_type, fallback="payload"),
+                identity_hash[:20],
+            )
+        )
+        payload = record.get("payload")
+        is_json_payload = record.get("payload_encoding") == "json" and (
+            payload is None or isinstance(payload, (dict, list, str, int, float, bool))
+        )
+        entry: dict[str, object] = {
+            "evidence_id": evidence_id,
+            "source_run_id": source_run_id,
+            "topic": topic,
+            "asset_id": record.get("asset_id"),
+            "payload_type": record.get("payload_type"),
+            "timestamp": record.get("payload_timestamp")
+            or record.get("broker_received_at")
+            or record.get("received_at"),
+            "payload_timestamp": record.get("payload_timestamp"),
+            "broker_received_at": record.get("broker_received_at") or record.get("received_at"),
+            "content_sha256": record.get("content_sha256"),
+        }
+        if not is_json_payload:
+            entry.update(
+                {
+                    "filename": None,
+                    "byte_count": None,
+                    "sha256": None,
+                    "export_status": "metadata_only_non_json",
+                }
+            )
+            entries.append(entry)
+            continue
+        filename = f"raw_evidence/payloads/{base_name}.json"
+        suffix = 2
+        while filename in used_names:
+            filename = f"raw_evidence/payloads/{base_name}-{suffix}.json"
+            suffix += 1
+        used_names.add(filename)
+        content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8")
+        files.append((filename, content))
+        entry.update(
+            {
+                "filename": filename,
+                "byte_count": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "export_status": "payload_json",
+            }
+        )
+        entries.append(entry)
+    return files, {
+        "schema_version": "1.0",
+        "record_id_field": "evidence_id",
+        "selection_policy": "Latest retained record per source run and concrete topic.",
+        "redaction_policy": "Payload files contain redacted JSON only; non-JSON evidence is metadata-only.",
+        "entries": entries,
+    }
+
+
 def _raw_finding_index(
     findings: list[dict[str, object]],
     raw_records: list[dict[str, object]],
@@ -2859,18 +2970,26 @@ def _build_zip_report(run: object) -> bytes:
         raw_evidence = _raw_evidence_export(run)
         raw_records = raw_evidence.get("records")
         raw_records = raw_records if isinstance(raw_records, list) else []
+        portable_raw_records = [record for record in raw_records if isinstance(record, dict)]
+        payload_files, payload_manifest = _raw_evidence_payload_files(portable_raw_records)
         raw_manifest = dict(raw_evidence)
         raw_manifest.pop("records", None)
+        raw_manifest["payload_file_manifest"] = "raw_evidence/payload_manifest.json"
         archive.writestr(
             "raw_evidence/manifest.json",
-            json.dumps(raw_manifest, indent=2, sort_keys=True),
+                json.dumps(raw_manifest, indent=2, sort_keys=True),
+            )
+        for filename, content in payload_files:
+            archive.writestr(filename, content)
+        archive.writestr(
+            "raw_evidence/payload_manifest.json",
+            json.dumps(payload_manifest, indent=2, sort_keys=True),
         )
         archive.writestr(
             "raw_evidence/records.jsonl",
             "".join(
                 json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
-                for record in raw_records
-                if isinstance(record, dict)
+                for record in portable_raw_records
             ),
         )
         archive.writestr(
@@ -2878,7 +2997,7 @@ def _build_zip_report(run: object) -> bytes:
             json.dumps(
                 _raw_finding_index(
                     findings if isinstance(findings, list) else [],
-                    [record for record in raw_records if isinstance(record, dict)],
+                    portable_raw_records,
                 ),
                 indent=2,
                 sort_keys=True,
@@ -2962,10 +3081,6 @@ def _build_udmi_client_pdf_report(run: object, data: dict[str, object]) -> bytes
         wrap_cells=True,
         center_cells=True,
         draw_grid=True,
-    )
-    document.add_paragraph(
-        "Metrics-only client product. The technical product contains asset, topic, "
-        "payload, and finding detail."
     )
     return document.render()
 

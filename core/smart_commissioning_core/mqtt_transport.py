@@ -117,6 +117,42 @@ class MqttCaptureInterrupted(MqttTransportError):
         self.cause = cause
 
 
+# Retention is deliberately bounded independently for validation evidence and
+# broad diagnostic evidence.  A 780-asset register has 2,340 expected payload
+# families; 256 MiB safely holds roughly 112 KiB per latest payload while still
+# bounding production memory. Callers can override both limits for an approved
+# site-specific evidence budget.
+DEFAULT_PRIMARY_RETAINED_BYTES = 256 * 1024 * 1024
+DEFAULT_SECONDARY_RETAINED_BYTES = 2 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class MqttCaptureOutcome:
+    """Truthful result of one MQTT capture loop.
+
+    ``messages`` contains the retained latest evidence.  The outcome separates
+    termination from retention telemetry so a full diagnostic lane never looks
+    like a completed validation window.  ``deadline_elapsed`` is the sole proof
+    that a finite requested window completed.
+    """
+
+    messages: list[MqttMessage]
+    termination: str
+    deadline_requested: bool
+    deadline_elapsed: bool
+    cancelled: bool
+    primary_cap_reached: bool
+    primary_byte_cap_reached: bool
+    secondary_truncated: bool
+    secondary_count_truncated: bool
+    secondary_byte_truncated: bool
+    primary_retained_count: int
+    secondary_retained_count: int
+    primary_retained_bytes: int
+    secondary_retained_bytes: int
+    interruption_cause: Exception | None = None
+
+
 def _resolve_socket_factory(
     socket_factory: Callable[[tuple[str, int], float], socket.socket] | None,
     source_address: tuple[str, int] | None,
@@ -582,7 +618,7 @@ def read_retained_config(
     return message.payload.decode("utf-8", errors="replace")
 
 
-def subscribe_and_capture(
+def subscribe_and_capture_with_outcome(
     settings: MqttConnectionSettings,
     *,
     topics: list[str],
@@ -597,7 +633,9 @@ def subscribe_and_capture(
     primary_topics: list[str] | None = None,
     secondary_max_messages: int | None = None,
     secondary_topic_filters: list[str] | None = None,
-) -> list[MqttMessage]:
+    primary_max_bytes: int | None = None,
+    secondary_max_bytes: int | None = None,
+) -> MqttCaptureOutcome:
     """Subscribe to ``topics`` and collect messages up to ``max_messages``.
 
     ``timeout_seconds`` bounds the capture window; pass ``None`` for an
@@ -678,104 +716,181 @@ def subscribe_and_capture(
     )
     primary_retained = 0
     secondary_retained = 0
-    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    primary_retained_bytes = 0
+    secondary_retained_bytes = 0
+    primary_byte_limit = max(
+        0,
+        primary_max_bytes
+        if primary_max_bytes is not None
+        else DEFAULT_PRIMARY_RETAINED_BYTES,
+    )
+    secondary_byte_limit = max(
+        0,
+        secondary_max_bytes
+        if secondary_max_bytes is not None
+        else DEFAULT_SECONDARY_RETAINED_BYTES,
+    )
+    primary_cap_reached = False
+    primary_byte_cap_reached = False
+    secondary_count_truncated = False
+    secondary_byte_truncated = False
+    cancelled = False
+    deadline_elapsed = False
+    termination = "indefinite_backstop"
+    interruption_cause: Exception | None = None
+    capture_started = False
+    # A finite validation window measures broker traffic, not connection setup.
+    # Start its monotonic deadline only after CONNECT and every SUBACK succeed.
+    deadline: float | None = None
     # Keepalive: ping at keep_alive/2 so a quiet broker does not drop a long /
     # indefinite capture (the loop is otherwise recv-only after SUBSCRIBE).
     ping_interval = max(1.0, settings.keep_alive / 2.0) if settings.keep_alive and settings.keep_alive > 0 else None
     last_ping = time.monotonic()
-    with MqttClient(settings) as client:
-        client.subscribe_many(topics, qos)
-        while primary_retained < max_messages if partitioned_budget else len(messages) < max_messages:
-            if cancel_check is not None and cancel_check():
-                break
-            if ping_interval is not None and time.monotonic() - last_ping >= ping_interval:
-                try:
-                    client.ping()
-                except (OSError, MqttTransportError) as error:
-                    raise MqttCaptureInterrupted(messages, error) from error
-                last_ping = time.monotonic()
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+    try:
+        with MqttClient(settings) as client:
+            client.subscribe_many(topics, qos)
+            capture_started = True
+            deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+            while True:
+                if cancel_check is not None and cancel_check():
+                    cancelled, termination = True, "cancelled"
                     break
-                poll = max(0.1, min(1.0, remaining))
-            else:
-                # Indefinite: poll in 1s slices, re-checking cancel each time.
-                poll = 1.0
-            try:
-                message = client.read_publish_any(
-                    expected_topics=expected_topics,
-                    timeout_seconds=poll,
-                    cancel_check=cancel_check,
-                    capture_deadline=deadline,
-                    # ``poll`` is only the quiet-boundary/cancel slice. Finite
-                    # captures use their real outer deadline for a packet already
-                    # in flight; indefinite captures retain the normal per-packet
-                    # connection timeout.
-                    use_timeout_as_packet_deadline=False,
-                )
-            except (OSError, MqttTransportError) as error:
-                raise MqttCaptureInterrupted(messages, error) from error
-            if message is not None:
+                if ping_interval is not None and time.monotonic() - last_ping >= ping_interval:
+                    client.ping()
+                    last_ping = time.monotonic()
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        deadline_elapsed, termination = True, "deadline_elapsed"
+                        break
+                    poll = max(0.1, min(1.0, remaining))
+                else:
+                    poll = 1.0
+                try:
+                    message = client.read_publish_any(
+                        expected_topics=expected_topics,
+                        timeout_seconds=poll,
+                        cancel_check=cancel_check,
+                        capture_deadline=deadline,
+                        use_timeout_as_packet_deadline=False,
+                    )
+                except (OSError, MqttTransportError) as error:
+                    interruption_cause = error
+                    termination = "broker_interruption"
+                    break
+                if message is None:
+                    continue
                 if on_observed_message is not None:
-                    # A diagnostic consumer may need to recognise a registered
-                    # asset ID in a topic which is not retained because the
-                    # observational secondary budget is full. Keep the legacy
-                    # on_message contract below unchanged.
                     on_observed_message(message)
                 is_primary = not partitioned_budget or (
                     message.topic in primary_exact_topics
-                    or any(
-                        _topic_matches_filter(message.topic, topic_filter)
-                        for topic_filter in primary_wildcard_filters
-                    )
+                    or any(_topic_matches_filter(message.topic, item) for item in primary_wildcard_filters)
                 )
                 if (
-                    partitioned_budget
-                    and not is_primary
-                    and secondary_topic_filters is not None
+                    partitioned_budget and not is_primary and secondary_topic_filters is not None
                     and message.topic not in secondary_exact_topics
-                    and not any(
-                        _topic_matches_filter(message.topic, topic_filter)
-                        for topic_filter in secondary_wildcard_filters
-                    )
+                    and not any(_topic_matches_filter(message.topic, item) for item in secondary_wildcard_filters)
                 ):
-                    # A broad diagnostic subscription saw this delivery, but
-                    # the caller did not designate it ordinary secondary
-                    # evidence. It must not consume the bounded normal lane.
                     continue
                 existing_position = topic_positions.get(message.topic)
-                if (
-                    partitioned_budget
-                    and not is_primary
-                    and existing_position is None
-                    and secondary_retained >= secondary_limit
-                ):
-                    # The observational budget is full. Drop only this new
-                    # secondary topic and keep waiting for protected traffic.
-                    continue
+                message_bytes = len(message.topic.encode("utf-8")) + len(message.payload)
+                if existing_position is not None:
+                    previous = messages[existing_position]
+                    previous_bytes = len(previous.topic.encode("utf-8")) + len(previous.payload)
+                    if is_primary and primary_retained_bytes - previous_bytes + message_bytes > primary_byte_limit:
+                        primary_byte_cap_reached, termination = True, "primary_byte_cap"
+                        break
+                    if (
+                        not is_primary
+                        and secondary_retained_bytes - previous_bytes + message_bytes > secondary_byte_limit
+                    ):
+                        secondary_byte_truncated = True
+                        continue
+                if partitioned_budget and not is_primary and existing_position is None:
+                    if secondary_retained >= secondary_limit:
+                        secondary_count_truncated = True
+                        continue
+                    if secondary_retained_bytes + message_bytes > secondary_byte_limit:
+                        secondary_byte_truncated = True
+                        continue
+                if existing_position is None and is_primary:
+                    if primary_retained >= max_messages:
+                        primary_cap_reached, termination = True, "primary_topic_cap"
+                        break
+                    if primary_retained_bytes + message_bytes > primary_byte_limit:
+                        primary_byte_cap_reached, termination = True, "primary_byte_cap"
+                        break
+                if existing_position is None and not partitioned_budget and len(messages) >= max_messages:
+                    primary_cap_reached, termination = True, "primary_topic_cap"
+                    break
                 if on_message is not None:
-                    # Fires for every accepted message, including one that
-                    # replaces a duplicate below — keeps per-topic counts honest.
                     on_message(message)
                 if stop_when is None and not retain_latest and not partitioned_budget:
                     messages.append(message)
+                    primary_retained += 1
+                    primary_retained_bytes += message_bytes
                 elif existing_position is not None:
                     messages[existing_position] = message
+                    if is_primary:
+                        primary_retained_bytes += message_bytes - previous_bytes
+                    else:
+                        secondary_retained_bytes += message_bytes - previous_bytes
                 else:
                     topic_positions[message.topic] = len(messages)
                     messages.append(message)
-                    if partitioned_budget:
-                        if is_primary:
-                            primary_retained += 1
-                        else:
-                            secondary_retained += 1
+                    if is_primary:
+                        primary_retained += 1
+                        primary_retained_bytes += message_bytes
+                    else:
+                        secondary_retained += 1
+                        secondary_retained_bytes += message_bytes
                 if stop_when is not None and stop_when(messages):
+                    termination = "required_topics_received"
                     break
-            # No message this slice: keep looping (re-check cancel/deadline)
-            # rather than breaking, so a quiet broker does not end the window
-            # early and an indefinite capture keeps waiting.
-    return messages
+                if not partitioned_budget and len(messages) >= max_messages:
+                    primary_cap_reached, termination = True, "primary_topic_cap"
+                    break
+    except (OSError, MqttTransportError) as error:
+        if not capture_started:
+            raise
+        interruption_cause = error
+        termination = "broker_interruption"
+    return MqttCaptureOutcome(
+        messages=messages,
+        termination=termination,
+        deadline_requested=deadline is not None,
+        deadline_elapsed=deadline_elapsed,
+        cancelled=cancelled,
+        primary_cap_reached=primary_cap_reached,
+        primary_byte_cap_reached=primary_byte_cap_reached,
+        secondary_truncated=secondary_count_truncated or secondary_byte_truncated,
+        secondary_count_truncated=secondary_count_truncated,
+        secondary_byte_truncated=secondary_byte_truncated,
+        primary_retained_count=primary_retained,
+        secondary_retained_count=secondary_retained,
+        primary_retained_bytes=primary_retained_bytes,
+        secondary_retained_bytes=secondary_retained_bytes,
+        interruption_cause=interruption_cause,
+    )
+
+
+def subscribe_and_capture(
+    settings: MqttConnectionSettings,
+    **kwargs: object,
+) -> list[MqttMessage]:
+    """Compatibility wrapper returning retained messages only.
+
+    Existing callers keep their list contract. New production validation must
+    use :func:`subscribe_and_capture_with_outcome` so it cannot infer a
+    completed finite window from a list without termination evidence.
+    """
+    outcome = subscribe_and_capture_with_outcome(settings, **kwargs)
+    if outcome.termination == "broker_interruption":
+        raise MqttCaptureInterrupted(
+            outcome.messages,
+            outcome.interruption_cause or MqttTransportError("MQTT capture interrupted."),
+        )
+    return outcome.messages
 
 
 def _encode_utf8(value: str) -> bytes:

@@ -1,0 +1,22 @@
+# v0.1.40 Docker deployment and rollback
+
+Deploy only the immutable API, worker, and frontend digest references in the
+verified `docker-image-evidence.json` bundle. Do not rebuild a branch during deployment.
+
+```text
+API_IMAGE=ghcr.io/rvs006/smart-commissioning-app-api@sha256:{{API_IMAGE_DIGEST}}
+WORKER_IMAGE={{WORKER_IMAGE}}@{{WORKER_IMAGE_DIGEST}}
+FRONTEND_IMAGE={{FRONTEND_IMAGE}}@{{FRONTEND_IMAGE_DIGEST}}
+APP_VERSION=v0.1.40
+SOURCE_COMMIT={{COMMIT}}
+```
+
+End active work, back up persistent volumes, set the exact references, and run
+`docker compose ... up -d --no-build`. For inline execution add
+`-f infra/docker-compose.inline.yml`. Confirm API health, visible frontend
+version, worker heartbeat, one approved run, and one report download.
+
+For rollback, restore the recorded compatible v0.1.39 digest set with
+`up -d --no-build`; retain the database at `a7b8c9d0e1f2`. Do not delete volumes
+containing evidence or encrypted configuration. Store actual image names, broker details,
+and secrets only in the private deployment record.
