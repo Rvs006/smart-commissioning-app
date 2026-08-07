@@ -17,7 +17,6 @@ and is not claimed by this release note.
   report IDs, and shared evidence-set IDs.
 - Carry portable build version, source commit, and final EXE SHA-256 into the
   bundle and launcher environment. Docker images carry the same OCI provenance.
-
 ## Validation boundary
 
 The local application suites and release contracts must pass before controlled

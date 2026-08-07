@@ -132,12 +132,12 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         root = self._make_root()
         for name in _MANAGED_VARS:
             os.environ.pop(name, None)
-        (root / "APP_VERSION.txt").write_text("v0.1.38\n", encoding="utf-8")
+        (root / "APP_VERSION.txt").write_text("v0.1.39\n", encoding="utf-8")
         (root / "BUILD_PROVENANCE.json").write_text(
             json.dumps(
                 {
                     "schema_version": "1.0",
-                    "application_version": "v0.1.38",
+                    "application_version": "v0.1.39",
                     "source_commit": "a" * 40,
                     "portable_exe_sha256": "b" * 64,
                 }
@@ -147,7 +147,7 @@ class ConfigureEnvironmentTests(unittest.TestCase):
 
         self.launcher.configure_environment(root)
 
-        self.assertEqual(os.environ["SMART_COMMISSIONING_APP_VERSION"], "v0.1.38")
+        self.assertEqual(os.environ["SMART_COMMISSIONING_APP_VERSION"], "v0.1.39")
         self.assertEqual(os.environ["SMART_COMMISSIONING_SOURCE_COMMIT"], "a" * 40)
         self.assertEqual(os.environ["SMART_COMMISSIONING_PORTABLE_EXE_SHA256"], "b" * 64)
 

@@ -7,6 +7,7 @@ validating the packaged sample fixture.
 import hashlib
 import io
 import json
+import unicodedata
 import unittest
 from zipfile import ZipFile
 
@@ -61,6 +62,15 @@ _PARTIAL_REGISTER_CSV = (
     "Expected points,Expected units,Expected reporting interval,Source protocol\n"
     'Site A,BMS,EM-1,hv/ems/01/em/EM-1/#,1.5.2,energy_sensor,kwh,60,MQTT\n'
     'Site A,BMS,EM-2,hv/ems/01/em/EM-2,1.5.2,energy_sensor,kwh,60,MQTT\n'
+)
+
+# A newer upload with no usable rows must not make a register-driven run fall
+# back to the previous accepted import. That fallback makes newly added assets
+# appear to be missing when the edited register was rejected in full.
+_FULLY_REJECTED_REGISTER_CSV = (
+    "Project/site,System,Asset ID,Expected topic,Expected schema version,"
+    "Expected points,Expected units,Expected reporting interval,Source protocol\n"
+    'Site A,BMS,EM-NEW,hv/ems/01/em/EM-NEW,1.5.2,energy_sensor,kwh,60,MQTT\n'
 )
 
 
@@ -159,6 +169,126 @@ class UdmiRegisterFlowTests(ApiTestCase):
         # not one invented high-severity issue per expected point.
         descriptions = " ".join(issue["description"] for issue in run["issues"])
         self.assertNotIn("Expected point energy_sensor was not received", descriptions)
+
+    def test_floor_column_is_optional_metadata_and_does_not_change_asset_selection(self) -> None:
+        variants = {
+            "with-floor": _REGISTER_CSV.replace(
+                "Payload applicability\n",
+                "Payload applicability,Floor\n",
+            ).replace(
+                '"state,metadata,pointset"\n',
+                '"state,metadata,pointset",L02\n',
+            ),
+            "without-floor": _REGISTER_CSV,
+        }
+        observed: dict[str, tuple[str, str, str, str]] = {}
+
+        for suffix, register in variants.items():
+            project = f"{_PROJECT}-floor-{suffix}"
+            site = f"{_SITE}-floor-{suffix}"
+            upload = self.client.post(
+                "/api/v1/imports",
+                data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+                files={"file": ("register.csv", io.BytesIO(register.encode()), "text/csv")},
+            )
+            self.assertEqual(upload.status_code, 200, upload.text)
+            self.assertEqual(upload.json()["accepted_rows"], 1)
+
+            response = self._post_run(project, site)
+            self.assertEqual(response.status_code, 200, response.text)
+            run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+            entry = run["parameters"]["assets"][0]
+            schedule = entry["expected_schedule"]
+            observed[suffix] = (
+                schedule["asset_id"],
+                entry["state_topic"],
+                entry["metadata_topic"],
+                entry["pointset_topic"],
+            )
+            if suffix == "with-floor":
+                self.assertEqual(schedule["floor"], "L02")
+                self.assertIn("Floor", run["parameters"]["register_columns"])
+                self.assertEqual(run["parameters"]["register_rows"][0]["Floor"], "L02")
+            else:
+                self.assertNotIn("floor", schedule)
+
+        self.assertEqual(observed["with-floor"], observed["without-floor"])
+
+    def test_register_row_secrets_are_redacted_in_run_api_response(self) -> None:
+        register = _REGISTER_CSV.replace(
+            "Payload applicability\n",
+            "Payload applicability,Broker password\n",
+        ).replace(
+            '"state,metadata,pointset"\n',
+            '"state,metadata,pointset",broker-secret\n',
+        )
+        project = f"{_PROJECT}-redaction"
+        site = f"{_SITE}-redaction"
+        upload = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={"file": ("register.csv", io.BytesIO(register.encode()), "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 200, response.text)
+        run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+        self.assertEqual(run["parameters"]["register_rows"][0]["Broker password"], "********")
+
+    def test_register_rejection_text_escapes_control_characters(self) -> None:
+        project = f"{_PROJECT}-rejection-text"
+        site = f"{_SITE}-rejection-text"
+        rejected = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={
+                "file": (
+                    "edited\r\nregister.csv",
+                    io.BytesIO(_FULLY_REJECTED_REGISTER_CSV.encode()),
+                    "text/csv",
+                )
+            },
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 400, response.text)
+        flattened = response.json()["detail"]
+        self.assertFalse(
+            any(unicodedata.category(character) in {"Cc", "Cf"} for character in flattened)
+        )
+
+    def test_fully_rejected_new_register_does_not_fall_back_to_previous_import(self) -> None:
+        project = f"{_PROJECT}-stale-register"
+        site = f"{_SITE}-stale-register"
+        accepted = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={"file": ("previous-register.csv", io.BytesIO(_REGISTER_CSV.encode()), "text/csv")},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["accepted_rows"], 1)
+
+        rejected = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={
+                "file": (
+                    "edited-register.csv",
+                    io.BytesIO(_FULLY_REJECTED_REGISTER_CSV.encode()),
+                    "text/csv",
+                )
+            },
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["status"], "rejected")
+        self.assertEqual(rejected.json()["accepted_rows"], 0)
+
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 400, response.text)
+        detail = response.json()["detail"]
+        self.assertIn("edited-register.csv", detail)
+        self.assertIn("no accepted rows", detail)
+        self.assertIn("row 2", detail)
 
     def test_source_header_variants_remain_exact_in_annotated_register(self) -> None:
         project, site = f"{_PROJECT}-source-headings", f"{_SITE}-source-headings"

@@ -13,6 +13,8 @@ see :mod:`smart_commissioning_core.mqtt_config_publish` and the ``rollback``
 endpoint below.
 """
 
+import unicodedata
+
 from fastapi import APIRouter, Depends, HTTPException, Response
 from smart_commissioning_core.db.repositories import (
     DiscoveryRepository,
@@ -315,17 +317,35 @@ def _register_rejection_info(record: dict) -> dict:
     few row errors so the validator can report them as a real issue.
     """
     errors = [error for error in record.get("errors") or [] if isinstance(error, dict)]
+    filename = _safe_register_text(record.get("original_filename"))
+    info = {
+        "register_import_filename": filename,
+    } if filename else {}
     if not errors:
-        return {}
+        return info
     details = [
-        f"row {error.get('row_number')}: {error.get('field')} — {error.get('message')}"
+        "row "
+        f"{_safe_register_text(error.get('row_number'))}: "
+        f"{_safe_register_text(error.get('field'))} — "
+        f"{_safe_register_text(error.get('message'))}"
         for error in errors[:5]
     ]
-    return {
+    info.update({
         "register_rejected_rows": len({error.get("row_number") for error in errors}),
         "register_rejected_details": details,
-        "register_import_filename": record.get("original_filename"),
-    }
+    })
+    return info
+
+
+def _safe_register_text(value: object) -> str:
+    """Escape control/format characters before imported text reaches logs or API errors."""
+    text = str(value or "")
+    return "".join(
+        f"\\u{ord(character):04x}"
+        if unicodedata.category(character) in {"Cc", "Cf"}
+        else character
+        for character in text
+    )
 
 
 def _register_row_value(row: dict, *headings: str) -> object:
@@ -351,57 +371,70 @@ def _expected_assets_from_register(project_id: str, site_id: str) -> tuple[list[
     imports = ImportRepository(service.engine).list(
         project_id=project_id, site_id=site_id, import_type="mqtt_register"
     )
-    for record in imports:  # newest-first
-        rows = record.get("accepted_rows", [])
-        if rows:
-            entries, duplicate_records = _merge_asset_rows(rows)
-            register_info = _register_rejection_info(record)
-            # Freeze the exact accepted register evidence on the validation run.
-            # Reports must never look up whichever import happens to be newest at
-            # render time, because that could annotate a different register from
-            # the one the validator actually used. Dict insertion order preserves
-            # the imported column order; the union handles defensive legacy rows
-            # whose optional columns differ.
-            raw_summary = record.get("summary")
-            summary = raw_summary if isinstance(raw_summary, dict) else {}
-            raw_source_columns = summary.get("source_columns")
-            raw_source_rows = summary.get("accepted_source_rows")
-            source_rows = (
-                [dict(row) for row in raw_source_rows if isinstance(row, dict)]
-                if isinstance(raw_source_rows, list)
-                else []
-            )
-            # The source and canonical lists were stored in lockstep. Fall back
-            # to legacy accepted rows if older data is incomplete.
-            if len(source_rows) != len(rows):
-                source_rows = [dict(row) for row in rows if isinstance(row, dict)]
-                raw_source_columns = []
-            register_columns = (
-                [str(column) for column in raw_source_columns]
-                if isinstance(raw_source_columns, list)
-                else []
-            )
-            register_rows = [
-                {str(key): value for key, value in source_row.items()}
-                for source_row in source_rows
-            ]
-            for row in register_rows:
-                for column in row:
-                    if column not in register_columns:
-                        register_columns.append(column)
-            register_info.update(
-                {
-                    "register_import_id": record.get("import_id"),
-                    "register_import_filename": record.get("original_filename"),
-                    "register_sha256": summary.get("file_sha256"),
-                    "register_columns": register_columns,
-                    "register_rows": register_rows,
-                }
-            )
-            if duplicate_records:
-                register_info["register_duplicate_asset_ids"] = duplicate_records
-            return entries, register_info
-    return [], {}
+    if not imports:
+        return [], {}
+
+    # The newest upload is authoritative. Skipping a fully rejected upload and
+    # falling back to an older accepted register makes newly added assets appear
+    # to be missing and hides the operator's actual import error.
+    record = imports[0]
+    rows = record.get("accepted_rows", [])
+    register_info = _register_rejection_info(record)
+    raw_summary = record.get("summary")
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    if not rows:
+        register_info.update(
+            {
+                "register_import_id": record.get("import_id"),
+                "register_sha256": summary.get("file_sha256"),
+            }
+        )
+        return [], register_info
+
+    entries, duplicate_records = _merge_asset_rows(rows)
+    # Freeze the exact accepted register evidence on the validation run.
+    # Reports must never look up whichever import happens to be newest at
+    # render time, because that could annotate a different register from
+    # the one the validator actually used. Dict insertion order preserves
+    # the imported column order; the union handles defensive legacy rows
+    # whose optional columns differ.
+    raw_source_columns = summary.get("source_columns")
+    raw_source_rows = summary.get("accepted_source_rows")
+    source_rows = (
+        [dict(row) for row in raw_source_rows if isinstance(row, dict)]
+        if isinstance(raw_source_rows, list)
+        else []
+    )
+    # The source and canonical lists were stored in lockstep. Fall back
+    # to legacy accepted rows if older data is incomplete.
+    if len(source_rows) != len(rows):
+        source_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        raw_source_columns = []
+    register_columns = (
+        [str(column) for column in raw_source_columns]
+        if isinstance(raw_source_columns, list)
+        else []
+    )
+    register_rows = [
+        {str(key): value for key, value in source_row.items()}
+        for source_row in source_rows
+    ]
+    for row in register_rows:
+        for column in row:
+            if column not in register_columns:
+                register_columns.append(column)
+    register_info.update(
+        {
+            "register_import_id": record.get("import_id"),
+            "register_import_filename": record.get("original_filename"),
+            "register_sha256": summary.get("file_sha256"),
+            "register_columns": register_columns,
+            "register_rows": register_rows,
+        }
+    )
+    if duplicate_records:
+        register_info["register_duplicate_asset_ids"] = duplicate_records
+    return entries, register_info
 
 
 @router.post("/udmi/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
@@ -460,13 +493,22 @@ def create_udmi_validation_run(
             # The operator explicitly asked to validate against the imported
             # register and there is none: refuse rather than silently falling
             # back to the packaged sample fixture and presenting it as a result.
-            raise HTTPException(
-                status_code=400,
-                detail=(
+            filename = str(register_info.get("register_import_filename") or "").strip()
+            details = register_info.get("register_rejected_details") or []
+            if filename:
+                detail = f"The latest MQTT register import '{filename}' has no accepted rows."
+                if details:
+                    detail += " " + " ".join(str(item) for item in details)
+                detail += " Correct the register and upload it again before running validation."
+            else:
+                detail = (
                     "No accepted MQTT register import was found for this project/site. "
                     "Upload an mqtt_register file, or untick the register option to "
                     "validate pasted payloads instead."
-                ),
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=detail,
             )
     # Embed every uploaded nonpub schema set into the run parameters so a
     # declared nonpub version validates identically on the inline path and on

@@ -130,7 +130,7 @@ manual, error-prone checklist into a repeatable five-stage workflow:
 | Stage | What happens | Pages |
 | --- | --- | --- |
 | **1. Configure** | Capture the site's network, BACnet, MQTT broker (with TLS certs), time/NTP and backup settings. Export/import per-project config so the same engineer can jump between projects. | Configuration |
-| **2. Import** | Upload the *expected* register (CSV/XLSX) - the devices and points the design says should exist. Every module ships a downloadable template. Registers are flexible: asset ID *or* name, optional Notes/payload-type, `prefix/#` topic wildcards, multiple points per row, and UDMI metadata columns (make/model/GUID/serial/firmware/site/room). | each module |
+| **2. Import** | Upload the *expected* register (CSV/XLSX) - the devices and points the design says should exist. Every module ships a downloadable template. Registers are flexible: asset ID *or* name, optional Notes/payload-type, `prefix/#` topic wildcards, multiple points per row, and UDMI metadata columns (make/model/GUID/serial/firmware/site/room/Floor). Floor is optional metadata and does not change asset or topic selection. | each module |
 | **3. Discover** | Scan the live network: IP sweep, BACnet device/object discovery, and MQTT topic capture (MQTT-Explorer-style wildcard subscription with latest-payload export). The IP sweep honours operator port ranges and flags **forbidden** and **unexpected-open** ports; the MQTT subscribe inherits the configured QoS, a blank per-run topic filter captures every topic (`#`), and `#` / `prefix/#` filters match the concrete publish topics returned by the broker. | IP Scanner, BACnet Discovery, MQTT Discovery |
 | **4. Validate** | Check observed data against the design: UDMI payload validation (pointset / metadata / state, expected-vs-observed) and BACnet ↔ MQTT comparison within tolerances. UDMI validates **every asset in the register in one run** and matches make/model/GUID/serial/firmware/site/room. Result is a clear **Pass / Fail** with reasons. | UDMI Validation, BACnet to MQTT Validation |
 | **5. Report** | Export a commissioning evidence pack (XLSX / DOCX / ZIP) scoped to the runs you choose, carrying the actual findings and stamped with an integrity signature. | Reports |
@@ -268,7 +268,7 @@ small set below instead of guessing from filenames.
 | Validate a running stack | [Quickstart](docs/quickstart.md) |
 | Operate or recover a deployment | [Operations runbook](docs/runbook.md) |
 | Check protocol support and live-test gaps | [Protocol conformance](docs/protocol-conformance.md) and [Phase 5 validation](docs/phase5-onsite-validation.md) |
-| Prepare the v0.1.38 field gate | [v0.1.38 field acceptance checklist](docs/v0.1.38-field-acceptance-checklist.md) |
+| Prepare the v0.1.39 field gate | [v0.1.39 field acceptance checklist](docs/v0.1.39-field-acceptance-checklist.md) |
 | Contribute code | [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) |
 
 ### Security & safety
@@ -308,16 +308,15 @@ artifact metadata, and exact report bytes through Sync v2. Per-item receipts
 advance only accepted or byte-identical items, while project/site scope failures
 remain generic and unsynchronized.
 
-The v0.1.38 candidate carries exact association semantics, grouped payload
-routing diagnostics, bounded report history, redacted technical raw evidence,
-client and technical report products, deterministic report-set manifests, and
-portable/Docker provenance. Field acceptance remains pending until the
-approved register, applicability matrix, paired collector evidence, and
-complete cadence run pass the [field acceptance checklist](docs/v0.1.38-field-acceptance-checklist.md).
+The v0.1.39 candidate carries the corrected register reconciliation behavior,
+optional Floor metadata, exact association semantics, and portable/Docker
+provenance. Field acceptance remains pending until the approved register,
+applicability matrix, paired collector evidence, and complete cadence run pass
+the [field acceptance checklist](docs/v0.1.39-field-acceptance-checklist.md).
 
-v0.1.38 adds no database migration. Follow
-[the v0.1.38 migration and rollback guide](docs/migration-rollback-v0.1.38.md),
-then complete [the release validation record](docs/release-validation-v0.1.38.md)
+v0.1.39 adds no database migration. Follow
+[the v0.1.39 migration and rollback guide](docs/migration-rollback-v0.1.39.md),
+then complete [the release validation record](docs/release-validation-v0.1.39.md)
 against the exact merged commit. Hosted deployments should pull API, worker,
 and frontend by the immutable references in the public Docker image evidence.
 
