@@ -31,9 +31,6 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   identity.
 - Portable and Docker build provenance carrying the release version, source
   commit, and final EXE or image identity.
-- Optional MQTT register `Floor` metadata, preserved in the validation schedule
-  and report context without changing asset or topic selection.
-
 ### Changed
 
 - Capture completion, cancellation, truncation, applicability, topic routing,
@@ -47,9 +44,6 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   presented as a completed cadence window.
 - Missing values, received falsey values, unresolved applicability, unexpected
   publishers, and wrong-topic observations no longer collapse into one metric.
-- A newer fully rejected MQTT register no longer falls back to an older accepted
-  register; register-driven validation now reports the rejected upload details.
-
 ## [0.1.37] - 2026-08-04
 
 ### Changed

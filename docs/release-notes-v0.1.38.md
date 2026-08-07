@@ -17,14 +17,6 @@ and is not claimed by this release note.
   report IDs, and shared evidence-set IDs.
 - Carry portable build version, source commit, and final EXE SHA-256 into the
   bundle and launcher environment. Docker images carry the same OCI provenance.
-- Accept an optional `Floor` column in the MQTT asset register. Floor is kept as
-  explicit metadata and report context; it does not change asset identity,
-  expected topics, or payload capture scope. `Room` is never used as a Floor
-  value.
-- Treat the newest MQTT register upload as authoritative. A fully rejected
-  upload now stops a register-driven validation run with the row-level import
-  reason instead of silently reusing an older accepted register.
-
 ## Validation boundary
 
 The local application suites and release contracts must pass before controlled
