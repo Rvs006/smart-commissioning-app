@@ -122,6 +122,24 @@ collection order is alphabetical - keep it so.
 
 ## Gotchas
 
+## Humanized, anti-AI-slop messages
+
+- Whenever the user asks for a message, email, handoff, release note, status
+  update, or engineer-facing summary, apply the Humanizer skill and the
+  anti-AI-slop writing rules before showing the draft. Do not wait for the
+  user to repeat this instruction.
+- Put the ready-to-send message first. Keep the user's casual, direct voice,
+  use exact versions, commit IDs, test names, file paths, and observed results,
+  and keep claims tied to evidence. Cut stock openers, generic summaries,
+  rhetorical questions, fake experience, repeated sentence patterns, banned
+  buzzwords, and decorative AI phrasing.
+- Include at least one concrete detail and one honest limitation when they
+  matter. Prefer plain sentences with varied rhythm. Avoid em dashes, emoji
+  bullets, and decorative formatting in professional messages. Technical
+  precision takes priority over forced informality.
+- For edits, preserve the user's facts and meaning. If useful, provide a
+  short violations note after the rewritten message, never before it.
+
 - **Worktree + editable install**: in a `git worktree`, `import
   smart_commissioning_core` resolves to the **main checkout's** installed
   package, not the worktree's `core/`. To exercise worktree `core/` changes,
