@@ -13,6 +13,8 @@ see :mod:`smart_commissioning_core.mqtt_config_publish` and the ``rollback``
 endpoint below.
 """
 
+import unicodedata
+
 from fastapi import APIRouter, Depends, HTTPException, Response
 from smart_commissioning_core.db.repositories import (
     DiscoveryRepository,
@@ -315,14 +317,17 @@ def _register_rejection_info(record: dict) -> dict:
     few row errors so the validator can report them as a real issue.
     """
     errors = [error for error in record.get("errors") or [] if isinstance(error, dict)]
-    filename = record.get("original_filename")
+    filename = _safe_register_text(record.get("original_filename"))
     info = {
         "register_import_filename": filename,
     } if filename else {}
     if not errors:
         return info
     details = [
-        f"row {error.get('row_number')}: {error.get('field')} — {error.get('message')}"
+        "row "
+        f"{_safe_register_text(error.get('row_number'))}: "
+        f"{_safe_register_text(error.get('field'))} — "
+        f"{_safe_register_text(error.get('message'))}"
         for error in errors[:5]
     ]
     info.update({
@@ -330,6 +335,17 @@ def _register_rejection_info(record: dict) -> dict:
         "register_rejected_details": details,
     })
     return info
+
+
+def _safe_register_text(value: object) -> str:
+    """Escape control/format characters before imported text reaches logs or API errors."""
+    text = str(value or "")
+    return "".join(
+        f"\\u{ord(character):04x}"
+        if unicodedata.category(character) in {"Cc", "Cf"}
+        else character
+        for character in text
+    )
 
 
 def _register_row_value(row: dict, *headings: str) -> object:

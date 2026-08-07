@@ -7,6 +7,7 @@ validating the packaged sample fixture.
 import hashlib
 import io
 import json
+import unicodedata
 import unittest
 from zipfile import ZipFile
 
@@ -212,6 +213,49 @@ class UdmiRegisterFlowTests(ApiTestCase):
                 self.assertNotIn("floor", schedule)
 
         self.assertEqual(observed["with-floor"], observed["without-floor"])
+
+    def test_register_row_secrets_are_redacted_in_run_api_response(self) -> None:
+        register = _REGISTER_CSV.replace(
+            "Payload applicability\n",
+            "Payload applicability,Broker password\n",
+        ).replace(
+            '"state,metadata,pointset"\n',
+            '"state,metadata,pointset",broker-secret\n',
+        )
+        project = f"{_PROJECT}-redaction"
+        site = f"{_SITE}-redaction"
+        upload = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={"file": ("register.csv", io.BytesIO(register.encode()), "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 200, response.text)
+        run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+        self.assertEqual(run["parameters"]["register_rows"][0]["Broker password"], "********")
+
+    def test_register_rejection_text_escapes_control_characters(self) -> None:
+        project = f"{_PROJECT}-rejection-text"
+        site = f"{_SITE}-rejection-text"
+        rejected = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project, "site_id": site},
+            files={
+                "file": (
+                    "edited\r\nregister.csv",
+                    io.BytesIO(_FULLY_REJECTED_REGISTER_CSV.encode()),
+                    "text/csv",
+                )
+            },
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        response = self._post_run(project, site)
+        self.assertEqual(response.status_code, 400, response.text)
+        flattened = response.json()["detail"]
+        self.assertFalse(
+            any(unicodedata.category(character) in {"Cc", "Cf"} for character in flattened)
+        )
 
     def test_fully_rejected_new_register_does_not_fall_back_to_previous_import(self) -> None:
         project = f"{_PROJECT}-stale-register"

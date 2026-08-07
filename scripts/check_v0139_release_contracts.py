@@ -36,9 +36,26 @@ def main() -> int:
     ):
         if not (repo / relative).is_file():
             failures.append(f"required v0.1.39 safety file is missing: {relative}")
-    for text, label in ((release_workflow, "release workflow"), (windows_workflow, "Windows workflow")):
-        if "scan_v0139_release_secrets.py" not in text:
+    scanner_commands = (
+        (
+            release_workflow,
+            "release workflow",
+            "python scripts/scan_v0139_release_secrets.py --path build/release-evidence",
+        ),
+        (
+            windows_workflow,
+            "Windows workflow",
+            "python scripts/scan_v0139_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable",
+        ),
+    )
+    for text, label, scanner_command in scanner_commands:
+        if scanner_command not in text:
             failures.append(f"{label} does not execute the v0.1.39 repository secret scan")
+            continue
+        scan_position = text.index(scanner_command)
+        upload_position = text.find("actions/upload-artifact@", scan_position + len(scanner_command))
+        if upload_position < 0:
+            failures.append(f"{label} does not upload an artifact after the v0.1.39 secret scan")
     hosted_evidence = release_workflow[
         release_workflow.index("  evidence:") : release_workflow.index("  promote-images:")
     ]

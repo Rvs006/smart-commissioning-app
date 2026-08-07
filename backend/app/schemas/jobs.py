@@ -40,20 +40,31 @@ def _nonpub_schema_sets_summary(value: object) -> object:
     }
 
 
+def _redact_parameter_value(key: str, value: object) -> object:
+    """Redact sensitive values at every depth of a serialized parameter tree."""
+    lowered = key.casefold()
+    if key == _NONPUB_SCHEMA_SETS_KEY:
+        return _nonpub_schema_sets_summary(value)
+    if any(token in lowered for token in _SENSITIVE_PARAM_SUBSTRINGS) and value not in (None, ""):
+        return _SECRET_SENTINEL
+    if isinstance(value, str) and "-----BEGIN" in value:
+        return _SECRET_SENTINEL
+    if isinstance(value, dict):
+        return {
+            str(child_key): _redact_parameter_value(str(child_key), child_value)
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_parameter_value("", item) for item in value]
+    return value
+
+
 def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, object]:
     """Replace broker/cert secret values with a sentinel for API serialization."""
-    redacted: dict[str, object] = {}
-    for key, value in parameters.items():
-        lowered = key.casefold()
-        if key == _NONPUB_SCHEMA_SETS_KEY:
-            redacted[key] = _nonpub_schema_sets_summary(value)
-        elif any(token in lowered for token in _SENSITIVE_PARAM_SUBSTRINGS) and value not in (None, ""):
-            redacted[key] = _SECRET_SENTINEL
-        elif isinstance(value, str) and "-----BEGIN" in value:
-            redacted[key] = _SECRET_SENTINEL  # inline PEM material
-        else:
-            redacted[key] = value
-    return redacted
+    return {
+        str(key): _redact_parameter_value(str(key), value)
+        for key, value in parameters.items()
+    }
 
 
 JobType = Literal[
