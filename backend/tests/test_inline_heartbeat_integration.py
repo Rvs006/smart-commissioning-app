@@ -27,6 +27,7 @@ from smart_commissioning_core.db.models import (
     RunSeal,
 )
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+from smart_commissioning_core.mqtt_transport import MqttCaptureOutcome
 from smart_commissioning_core.owned_run_store import (
     OwnedRunStore,
     OwnershipLostError,
@@ -46,12 +47,27 @@ class EventControlledCapture:
         self.release = threading.Event()
         self.calls: list[dict[str, object]] = []
 
-    def __call__(self, _settings: object, **kwargs: object) -> list:
+    def __call__(self, _settings: object, **kwargs: object) -> MqttCaptureOutcome:
         self.calls.append(kwargs)
         self.started.set()
         if not self.release.wait(_WAIT):
             raise TimeoutError("test capture was not released")
-        return []
+        return MqttCaptureOutcome(
+            messages=[],
+            termination="deadline_elapsed",
+            deadline_requested=True,
+            deadline_elapsed=True,
+            cancelled=False,
+            primary_cap_reached=False,
+            primary_byte_cap_reached=False,
+            secondary_truncated=False,
+            secondary_count_truncated=False,
+            secondary_byte_truncated=False,
+            primary_retained_count=0,
+            secondary_retained_count=0,
+            primary_retained_bytes=0,
+            secondary_retained_bytes=0,
+        )
 
 
 def _context(parameters: dict[str, object]) -> RunContextV1:
@@ -617,6 +633,105 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
                 )
             self.assertEqual(result_count, 1)
             self.assertEqual(seal_count, 1)
+
+    def test_stopping_one_persisted_run_does_not_cancel_a_second_run(self) -> None:
+        """Cancellation stays attached to the owned run ID through dispatch."""
+
+        first = self._create_run(
+            job_type="mqtt_discovery",
+            parameters={"capture_seconds": 32_400},
+        )
+        second = self._create_run(
+            job_type="mqtt_discovery",
+            parameters={"capture_seconds": 32_400},
+        )
+        started = {first.run_id: threading.Event(), second.run_id: threading.Event()}
+        release = {first.run_id: threading.Event(), second.run_id: threading.Event()}
+        self.addCleanup(release[first.run_id].set)
+        self.addCleanup(release[second.run_id].set)
+
+        def run_inline(
+            owned_store: OwnedRunStore,
+            _frozen_parameters: dict[str, object],
+        ) -> None:
+            run_id = owned_store.lease.run_id
+            started[run_id].set()
+            if not release[run_id].wait(_WAIT):
+                raise TimeoutError(f"run {run_id} was not released")
+            if owned_store.is_cancel_requested(run_id):
+                owned_store.update_run_status(
+                    run_id,
+                    status="cancelled",
+                    stage="mqtt_discovery_cancelled",
+                    progress_percent=100,
+                )
+            else:
+                owned_store.update_run_status(
+                    run_id,
+                    status="succeeded",
+                    stage="mqtt_discovery_complete",
+                    progress_percent=100,
+                )
+
+        settings = SimpleNamespace(
+            inline_run_async=True,
+            job_execution_mode="inline",
+            run_lease_seconds=1,
+            run_heartbeat_seconds=0.02,
+            deployment_id="smart-commissioning-local",
+        )
+        with mock.patch.object(run_dispatch, "get_settings", return_value=settings):
+            for run in (first, second):
+                run_dispatch.dispatch_run(
+                    run,
+                    service=self.service,
+                    enqueue=None,
+                    run_inline=run_inline,
+                    inline_message="MQTT discovery run started.",
+                    queued_message="queued",
+                )
+            self.assertTrue(started[first.run_id].wait(_WAIT))
+            self.assertTrue(started[second.run_id].wait(_WAIT))
+
+            self.service.request_cancel(first.run_id)
+            self.assertTrue(self.service.is_cancel_requested(first.run_id))
+            self.assertFalse(self.service.is_cancel_requested(second.run_id))
+            release[first.run_id].set()
+
+            deadline = time.monotonic() + _WAIT
+            while time.monotonic() < deadline:
+                first_terminal = self.service.get_run(first.run_id)
+                if first_terminal.status == "cancelled":
+                    break
+                threading.Event().wait(0.01)
+            else:
+                self.fail("first run did not finalise as cancelled")
+
+            # The second run is still live with an untouched persisted flag
+            # while the cancelled run seals its terminal result.
+            second_live = self.service.get_run(second.run_id)
+            self.assertEqual(second_live.status, "running")
+            with session_factory(self.engine)() as session:
+                second_row = session.get(Run, second.run_id)
+                assert second_row is not None
+                self.assertFalse(second_row.cancel_requested)
+            release[second.run_id].set()
+
+            deadline = time.monotonic() + _WAIT
+            while time.monotonic() < deadline:
+                second_terminal = self.service.get_run(second.run_id)
+                if second_terminal.status == "succeeded":
+                    break
+                threading.Event().wait(0.01)
+            else:
+                self.fail("second run did not finish independently")
+
+        self.assertEqual(first_terminal.stage, "mqtt_discovery_cancelled")
+        self.assertEqual(second_terminal.stage, "mqtt_discovery_complete")
+        with session_factory(self.engine)() as session:
+            second_row = session.get(Run, second.run_id)
+            assert second_row is not None
+            self.assertFalse(second_row.cancel_requested)
 
     def test_brief_real_sqlite_write_lock_is_retried(self) -> None:
         run = self._create_run(

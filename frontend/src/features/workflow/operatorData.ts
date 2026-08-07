@@ -407,7 +407,7 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     route: "reports",
     title: "Reports",
     headline: "Create evidence packs, issue reports, and commissioning handover outputs.",
-    tableTitle: "Report Queue",
+    tableTitle: "Generated Reports",
     columns: ["Report", "Source", "Status", "File"],
     evidence: ["Evidence pack ZIP", "Issue report XLSX", "Executive summary PDF"],
   },

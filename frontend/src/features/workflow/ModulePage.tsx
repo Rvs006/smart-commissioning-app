@@ -1394,11 +1394,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // branch the list shows — the map below still walks the full module.runActions
   // and each dispatch uses a stable action id rather than an array position.
   const visibleRunActions = module.runActions.filter((action) => !action.hiddenFromRunControls);
-  const reportRunActions = module.runActions.filter(
-    (action): action is Extract<ModuleRunAction, { kind: "report" }> =>
-      action.kind === "report",
-  );
-
   // Index of the UDMI validation run action, used by the Schedule & Payload
   // Evidence "Execute capture" button — the only visible trigger for this run
   // now that the Run Controls card is hidden (mq9n7pbe).
@@ -1870,10 +1865,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           }
           // Facet filters are a claim about the ASSET, so they apply on the
           // udmi-validation route only (other routes have no asset facts).
-          // Unexpected devices are observed by definition but deliberately have
-          // no register-backed System facet.
+          // Unexpected devices have no register-backed System facet. "Observed
+          // this run" remains exclusive to registered expected-topic traffic.
           if (isUdmiValidation && row.__category === "unexpected-devices") {
-            return resultsSystemFilter === "all" && resultsObservationFilter !== "not-observed";
+            return resultsSystemFilter === "all" && resultsObservationFilter === "all";
           }
           return isUdmiValidation
             ? assetMatchesFacetFilter(assetFacts.get(row.Asset), {
@@ -4216,18 +4211,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </h3>
               </div>
               <div className="report-list-actions">
-                {reportRunActions.map((action) => (
-                  <button
-                    className="secondary-button compact"
-                    disabled={runMutation.isPending || !canEngineer}
-                    key={action.id}
-                    onClick={() => runMutation.mutate(action.id)}
-                    title={canEngineer ? action.helper : ENGINEER_REQUIRED_TOOLTIP}
-                    type="button"
-                  >
-                    {runMutation.isPending ? "Generating..." : action.label}
-                  </button>
-                ))}
                 <button
                   className="secondary-button compact"
                   disabled={
@@ -4264,9 +4247,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </div>
             <p className="section-copy">
-              Every report generated here is stored against its source run and listed below. Use
-              the format actions above, or generate a report from a completed discovery or
-              validation run elsewhere. Each entry remains traceable to the run it came from.
+              Every report generated here is stored against its source run and listed below.
+              Generate a scoped report from a completed discovery or validation run. Each entry
+              remains traceable to the run it came from.
             </p>
             {reportToast && (
               <div
@@ -4292,7 +4275,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             )}
             <div className="data-table-wrap results-scroll" aria-label="Generated report list">
               {liveReports.length > 0 ? (
-                <table className="data-table">
+                <table className="data-table report-list-table">
                   <thead>
                     <tr>
                       <th>Select</th>
@@ -4423,7 +4406,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   <span>
                     {reportsQuery.isError
                       ? "The report list request failed. Retry to load the stored report metadata."
-                      : "Generate an Excel or Word report above; it will appear here for selection and export."}
+                      : "Generate a scoped report from a completed discovery or validation run; it will appear here for selection and export."}
                   </span>
                   {reportsQuery.isError && (
                     <button
@@ -4487,12 +4470,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <div className="state-panel warning" role="status">
                 <strong>
                   {hasPersistedValidationEvidence
-                    ? "Partial results from a cancelled run"
-                    : "Run cancelled"}
+                    ? "Partial results from a stopped run"
+                    : "Run stopped"}
                 </strong>
                 <span>
                   {hasPersistedValidationEvidence
-                    ? `Only evidence collected before cancellation is included.${captureOutcome ? ` ${captureOutcome}.` : ""}`
+                    ? `Only evidence collected before stopping is included.${captureOutcome ? ` ${captureOutcome}.` : ""}`
                     : "No validation evidence was stored for this run."}
                 </span>
               </div>
@@ -4513,8 +4496,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
             {displayedValidationSummary ? (
               <UdmiSummaryPanel
-                assetTopicDiscovery={displayedAssetTopicDiscovery}
-                filtered={summaryFiltersActive}
+                filtered={isResultsFilterActive}
                 lastRunAt={validationRunQuery.data?.updated_at}
                 provisional={!activeRunTerminal}
                 summary={displayedValidationSummary}
@@ -4531,7 +4513,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         {/* Keep the results table full-width. The inspector follows below it so a
           long topic or payload value never has to compete with a narrow side
           column, and the selected evidence remains readable at normal zoom. */}
-        <section className="app-grid" data-stepgroup="results">
+        {module.route !== "reports" && (
+          <section className="app-grid" data-stepgroup="results">
           <article className="surface">
             <div className="surface-heading">
               <div>
@@ -5107,7 +5090,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               )}
             </>
           </aside>
-        </section>
+          {isUdmiValidation && displayedValidationSummary ? (
+            <div className="udmi-result-supplementary">
+              {displayedAssetTopicDiscovery ? (
+                <AssetTopicDiscoveryPanel
+                  discovery={displayedAssetTopicDiscovery}
+                  filtered={summaryFiltersActive}
+                />
+              ) : null}
+              {(displayedValidationSummary.wrong_topic_assets ?? []).length > 0 ? (
+                <WrongTopicAssetsPanel assets={displayedValidationSummary.wrong_topic_assets ?? []} />
+              ) : null}
+            </div>
+          ) : null}
+          </section>
+        )}
 
         {/* Second instance of the report controls, at the END of the Results step
           (field engineer's 2026-07-15 walkthrough: a run finishes, the step auto-advances
@@ -5338,7 +5335,7 @@ function ReportFromRunControls({
             }
             value={udmiVariant}
           >
-            <option value="client">Client summary</option>
+            <option value="client">Condensed metrics-only</option>
             <option value="technical">Technical evidence</option>
           </select>
         </label>
@@ -6101,8 +6098,9 @@ function assetTopicDiscoveryScopeSourceLabel(
 
 function assetTopicDiscoveryCaptureStatusLabel(status: string): string {
   if (status === "completed") return "Completed";
-  if (status === "cancelled") return "Cancelled";
+  if (status === "cancelled") return "Stopped";
   if (status === "primary_topic_limit_reached") return "Primary topic limit reached";
+  if (status === "primary_byte_limit_reached") return "Primary byte limit reached";
   return status.replace(/_/g, " ");
 }
 
@@ -6240,14 +6238,48 @@ function AssetTopicDiscoveryPanel({
   );
 }
 
+function WrongTopicAssetsPanel({
+  assets,
+}: {
+  assets: readonly NonNullable<UdmiValidationSummaryV1["wrong_topic_assets"]>[number][];
+}) {
+  return (
+    <section
+      className="surface udmi-system-summary udmi-wrong-topic-summary"
+      aria-labelledby="udmi-wrong-topic-summary-heading"
+    >
+      <div>
+        <h4 id="udmi-wrong-topic-summary-heading">Registered assets on wrong topics</h4>
+        <p>These assets were received and identified, but their observed MQTT topic roots do not match the register.</p>
+      </div>
+      <div className="data-table-wrap udmi-wrong-topic-scroll">
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>Asset</th><th>System</th><th>Expected topic root</th><th>Observed topic root</th><th>Affected payloads</th><th>Last seen</th>
+            </tr>
+          </thead>
+          <tbody>
+            {assets.map((asset) => (
+              <tr key={`${asset.asset_id}:${asset.actual_topic_root}`}>
+                <td>{asset.asset_id}</td><td>{asset.system || "Unspecified"}</td><td>{asset.expected_topic_root}</td><td>{asset.actual_topic_root}</td>
+                <td>{asset.payloads.map((payload) => `${payload.payload_type}: ${payload.expected_topic} → ${payload.actual_topic}`).join(", ")}</td>
+                <td>{asset.last_seen ? formatAbsoluteTime(asset.last_seen) : "Not recorded"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function UdmiSummaryPanel({
-  assetTopicDiscovery,
   filtered,
   lastRunAt,
   provisional,
   summary,
 }: {
-  assetTopicDiscovery: UdmiAssetTopicDiscovery | null;
   filtered: boolean;
   lastRunAt: string | undefined;
   provisional: boolean;
@@ -6318,60 +6350,6 @@ function UdmiSummaryPanel({
         <PayloadMetricGroup summary={summary} />
         <SummaryMetricGroup metrics={faults} title="Fault metrics" tone="faults" />
       </div>
-
-      {(summary.wrong_topic_assets ?? []).length > 0 ? (
-        <section
-          className="udmi-system-summary udmi-wrong-topic-summary"
-          aria-labelledby="udmi-wrong-topic-summary-heading"
-        >
-          <div>
-            <h4 id="udmi-wrong-topic-summary-heading">Registered assets on wrong topics</h4>
-            <p>
-              These assets were received and identified, but their observed MQTT topic roots do not
-              match the register.
-            </p>
-          </div>
-          <div className="data-table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Asset</th>
-                  <th>System</th>
-                  <th>Expected topic root</th>
-                  <th>Observed topic root</th>
-                  <th>Affected payloads</th>
-                  <th>Last seen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(summary.wrong_topic_assets ?? []).map((asset) => (
-                  <tr key={`${asset.asset_id}:${asset.actual_topic_root}`}>
-                    <td>{asset.asset_id}</td>
-                    <td>{asset.system || "Unspecified"}</td>
-                    <td>{asset.expected_topic_root}</td>
-                    <td>{asset.actual_topic_root}</td>
-                    <td>
-                      {asset.payloads
-                        .map(
-                          (payload) =>
-                            `${payload.payload_type}: ${payload.expected_topic} → ${payload.actual_topic}`,
-                        )
-                        .join(", ")}
-                    </td>
-                    <td>
-                      {asset.last_seen ? formatAbsoluteTime(asset.last_seen) : "Not recorded"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
-
-      {assetTopicDiscovery ? (
-        <AssetTopicDiscoveryPanel discovery={assetTopicDiscovery} filtered={filtered} />
-      ) : null}
 
       <p className="udmi-metric-basis">
         The Observed assets metric counts expected register assets with at least one retained
@@ -6504,7 +6482,7 @@ function udmiResultsEmptyState(input: {
   }
   if (input.status === "cancelled") {
     return {
-      title: "Validation was cancelled",
+      title: "Validation was stopped",
       detail: "No payload rows were stored before the run stopped.",
     };
   }

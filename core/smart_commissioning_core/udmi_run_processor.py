@@ -7,7 +7,7 @@ from typing import Any
 from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
 from smart_commissioning_core.engines.base import make_cancel_checker
 from smart_commissioning_core.mqtt_settings import parse_bool, parse_capture_seconds
-from smart_commissioning_core.mqtt_transport import subscribe_and_capture
+from smart_commissioning_core.mqtt_transport import subscribe_and_capture_with_outcome
 from smart_commissioning_core.run_store import RunStore
 from smart_commissioning_core.udmi_validation import (
     DEFAULT_CAPTURE_SECONDS,
@@ -215,7 +215,7 @@ def process_udmi_validation_run(
     run_store: RunStore,
     execution_mode: str,
     fallback_reason: str | None = None,
-    live_capture: LiveCapture | None = subscribe_and_capture,
+    live_capture: LiveCapture | None = subscribe_and_capture_with_outcome,
     run_is_backgrounded: bool = True,
 ) -> Any:
     run_store.update_run_status(
@@ -371,9 +371,27 @@ def process_udmi_validation_run(
         broker_status_detail = str(
             result_summary.get("broker_status_detail") or "capture_failed"
         )
+        termination_reason = str(result_summary.get("termination_reason") or "")
         capture_failed = (
             result_summary.get("broker_capture_attempted")
-            and broker_status_detail not in _CAPTURE_COMPLETED_STATUSES
+            and (
+                broker_status_detail not in _CAPTURE_COMPLETED_STATUSES
+                or termination_reason
+                in {
+                    "broker_interruption",
+                    "message_cap",
+                    "byte_cap",
+                    "backstop_elapsed",
+                    "capture_outcome_unavailable",
+                }
+                or (
+                    result_summary.get("capture_mode") == "bounded"
+                    and not (
+                        result_summary.get("window_completed") is True
+                        and termination_reason == "window_elapsed"
+                    )
+                )
+            )
         )
         terminal_status = (
             "cancelled" if cancel_observed else "failed" if capture_failed else "succeeded"

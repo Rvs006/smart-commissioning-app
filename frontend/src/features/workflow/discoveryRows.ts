@@ -744,8 +744,8 @@ export function discoveryEmptyStateFor(
   }
   if (results.status === "cancelled") {
     return {
-      title: "Run cancelled",
-      detail: "The run was cancelled before any results were recorded.",
+      title: "Run stopped",
+      detail: "The run was stopped before any results were recorded.",
     };
   }
   if (results.status !== "succeeded") {

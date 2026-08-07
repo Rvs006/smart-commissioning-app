@@ -70,15 +70,15 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-07. The v0.1.39 candidate is
-  prepared from the verified v0.1.38 release line. The application gate is
+- **Current handoff**: status as of 2026-08-07. The v0.1.40 release is
+  prepared from the v0.1.39 base commit `f9bbcf4634af3923802def539c5de9f0bb17c5de`. The application gate is
   covered by the full local suites, register reconciliation tests, release
   contracts, and portable/Docker provenance. Field acceptance remains open
   until the approved register, applicability matrix, paired collector evidence,
-  and complete cadence run pass `docs/v0.1.39-field-acceptance-checklist.md`.
+  and complete cadence run pass `docs/v0.1.40-field-acceptance-checklist.md`.
   A one-minute operator Stop is cancellation evidence, not cadence evidence.
-  The latest public release remains v0.1.38 and v0.1.39 is the current
-  candidate. Keep source, raw evidence, report bytes, EXE identity, Docker
+  The latest public release is v0.1.40 and there is no later candidate. Keep
+  source, raw evidence, report bytes, EXE identity, Docker
   labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`

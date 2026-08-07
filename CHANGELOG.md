@@ -5,6 +5,17 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.40] - 2026-08-07
+
+This v0.1.40 recovery release restores the trusted v0.1.37 UDMI capture
+semantics on the current codebase.
+
+### Fixed
+
+- Finite UDMI capture proves its deadline after CONNECT/SUBACK and keeps
+  incomplete diagnostic discovery separate from completed validation evidence.
+- Confirmed-all diagnostics and per-run Stop isolation have direct regression coverage.
+
 ## [0.1.39] - 2026-08-07
 
 ### Changed

@@ -94,9 +94,12 @@ if (-not $BuildVersion -and $Git) {
 }
 if ([string]::IsNullOrWhiteSpace($BuildVersion)) { $BuildVersion = "unversioned" }
 $SourceCommit = "unknown"
+$SourceTreeState = "unknown"
 if ($Git) {
     $SourceCommit = (& $Git.Source -C $RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1).Trim()
     if ([string]::IsNullOrWhiteSpace($SourceCommit)) { $SourceCommit = "unknown" }
+    $SourceTreeState = if ((& $Git.Source -C $RepoRoot status --porcelain 2>$null)) { "dirty_local_non_publishable" } else { "clean" }
+    if ($SourceTreeState -ne "clean") { $SourceCommit = "local-dirty-tree" }
 }
 $VersionParts = if ($BuildVersion -match '^v?(\d+)\.(\d+)\.(\d+)(?:-(\d+)-g[0-9a-f]+)?') {
     @([int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]($Matches[4] ?? 0))
@@ -295,6 +298,8 @@ $BuildProvenance = [ordered]@{
     schema_version = "1.0"
     application_version = $BuildVersion
     source_commit = $SourceCommit
+    source_tree_state = $SourceTreeState
+    publishable = ($SourceTreeState -eq "clean")
     portable_exe_sha256 = $null
 }
 $BuildProvenance | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDir "BUILD_PROVENANCE.json") -Encoding UTF8

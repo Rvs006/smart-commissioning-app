@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import unittest
@@ -643,7 +644,7 @@ class UdmiV1ReportTests(ApiTestCase):
 
         provenance = validation["evidence_provenance"]["sources"][0]
         self.assertEqual(provenance["source_run_id"], source_id)
-        self.assertEqual(provenance["application_version"], "0.1.39")
+        self.assertEqual(provenance["application_version"], "0.1.40")
         self.assertEqual(provenance["source_commit"], "b" * 40)
         self.assertEqual(provenance["portable_exe_sha256"], "c" * 64)
         self.assertEqual(
@@ -708,6 +709,7 @@ class UdmiV1ReportTests(ApiTestCase):
                 elif output_format == "pdf":
                     self.assertIn(b"Client Metrics", content)
                     self.assertNotIn(b"Faults in Detail", content)
+                    self.assertRegex(content, rb"/Count\s+1\b")
                 else:
                     with zipfile.ZipFile(io.BytesIO(content)) as archive:
                         document = archive.read("word/document.xml")
@@ -727,6 +729,7 @@ class UdmiV1ReportTests(ApiTestCase):
                                 "timestamp": "2026-08-05T08:00:00Z",
                                 "credentials": "removed",
                             },
+                            "payload_encoding": "json",
                             "payload_timestamp": "2026-08-05T08:00:00Z",
                             "broker_received_at": "2026-08-05T08:00:01+00:00",
                             "retained": False,
@@ -744,12 +747,14 @@ class UdmiV1ReportTests(ApiTestCase):
 
         with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
             manifest = json.loads(archive.read("raw_evidence/manifest.json"))
+            payload_manifest = json.loads(archive.read("raw_evidence/payload_manifest.json"))
             finding_index = json.loads(archive.read("raw_evidence/finding_index.json"))
             records = [
                 json.loads(line)
                 for line in archive.read("raw_evidence/records.jsonl").splitlines()
                 if line
             ]
+            payload_bytes = archive.read(payload_manifest["entries"][0]["filename"])
 
         self.assertEqual(manifest["record_count"], 1)
         self.assertEqual(len(records), 1)
@@ -760,6 +765,75 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(finding_index["record_id_field"], "evidence_id")
         self.assertEqual(records[0]["payload"]["credentials"], "********")
         self.assertEqual(records[0]["payload"]["timestamp"], "2026-08-05T08:00:00Z")
+        self.assertEqual(manifest["payload_file_manifest"], "raw_evidence/payload_manifest.json")
+        self.assertEqual(len(payload_manifest["entries"]), 1)
+        entry = payload_manifest["entries"][0]
+        self.assertEqual(entry["topic"], "site/devices/asset-1/metadata")
+        self.assertEqual(entry["asset_id"], "asset-1")
+        self.assertEqual(entry["payload_type"], "metadata")
+        self.assertEqual(entry["timestamp"], "2026-08-05T08:00:00Z")
+        self.assertEqual(entry["byte_count"], len(payload_bytes))
+        self.assertEqual(entry["sha256"], hashlib.sha256(payload_bytes).hexdigest())
+        self.assertEqual(json.loads(payload_bytes), records[0]["payload"])
+        self.assertNotIn(b"removed", payload_bytes)
+
+    def test_raw_evidence_payload_manifest_keeps_latest_topic_and_marks_non_json_metadata(self) -> None:
+        source_id = self._seed_run(
+            result_summary_extra={
+                "raw_evidence": {
+                    "records": [
+                        {
+                            "asset_id": "asset-1",
+                            "payload_type": "state",
+                            "topic": "site/asset-1/state",
+                            "payload": {"version": "older"},
+                            "payload_encoding": "json",
+                            "payload_timestamp": "2026-08-05T09:00:00Z",
+                            "broker_received_at": "2026-08-05T08:00:00Z",
+                            "content_sha256": "a" * 64,
+                        },
+                        {
+                            "asset_id": "asset-1",
+                            "payload_type": "state",
+                            "topic": "site/asset-1/state",
+                            "payload": {"version": "latest"},
+                            "payload_encoding": "json",
+                            "payload_timestamp": "2026-08-05T07:00:00Z",
+                            "broker_received_at": "2026-08-05T08:01:00Z",
+                            "content_sha256": "b" * 64,
+                        },
+                        {
+                            "asset_id": "asset-2",
+                            "payload_type": "metadata",
+                            "topic": "site/asset-2/metadata",
+                            "payload": None,
+                            "payload_encoding": "omitted_non_json",
+                            "content_sha256": "c" * 64,
+                            "redaction_status": "metadata_only_non_json",
+                        },
+                    ],
+                    "captured_record_count": 3,
+                    "retained_bytes": 128,
+                    "truncated": False,
+                }
+            }
+        )
+        report = self._create_report("zip", [source_id], udmi_report_variant="technical")
+
+        with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
+            payload_manifest = json.loads(archive.read("raw_evidence/payload_manifest.json"))
+            entries = payload_manifest["entries"]
+            state = next(entry for entry in entries if entry["topic"] == "site/asset-1/state")
+            metadata = next(entry for entry in entries if entry["topic"] == "site/asset-2/metadata")
+            state_payload = json.loads(archive.read(state["filename"]))
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(state["export_status"], "payload_json")
+        self.assertEqual(state_payload, {"version": "latest"})
+        self.assertEqual(state["broker_received_at"], "2026-08-05T08:01:00Z")
+        self.assertEqual(state["payload_timestamp"], "2026-08-05T07:00:00Z")
+        self.assertEqual(metadata["export_status"], "metadata_only_non_json")
+        self.assertIsNone(metadata["filename"])
     def test_evidence_set_id_is_stable_when_source_runs_are_reordered(self) -> None:
         first_source = self._seed_run()
         second_source = self._seed_run()
@@ -1986,6 +2060,37 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(description_cell.alignment.horizontal, "center")
         self.assertEqual(description_cell.alignment.vertical, "center")
         self.assertEqual(description_cell.border.left.style, "thin")
+
+    def test_wrapped_metric_row_moves_whole_to_fresh_pdf_page(self) -> None:
+        """A short row must not tear across pages merely to use spare space."""
+
+        from app.services import report_pdf
+
+        document = report_pdf.PdfDocument(landscape=True)
+        builder = report_pdf._PageBuilder(
+            page_height=document._page_height,
+            margin=report_pdf._MARGIN,
+            bottom_limit=report_pdf._BOTTOM_LIMIT,
+            top_reserve=0.0,
+        )
+        # Enough room for the header and minimum row, but not this wrapped row.
+        builder.y = builder.bottom_limit + 50
+        document._layout_wrapped_table(
+            builder,
+            ("Metric", "Value"),
+            (("Payloads With Issues", "inspection evidence " * 18),),
+            (1.0, 1.0),
+            report_pdf._BODY_SIZE,
+            center_cells=False,
+            draw_grid=True,
+        )
+
+        self.assertEqual(len(builder.pages), 2)
+        first_page = b"\n".join(builder.pages[0])
+        second_page = b"\n".join(builder.pages[1])
+        self.assertNotIn(b"Payloads With Issues", first_page)
+        self.assertIn(b"Payloads With Issues", second_page)
+        self.assertIn(b"inspection evidence", second_page)
 
     def test_xlsx_print_layout_filters_styles_and_asset_verdict(self) -> None:
         source_id = self._seed_run()

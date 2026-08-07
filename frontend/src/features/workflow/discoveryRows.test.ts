@@ -547,7 +547,7 @@ describe("discoveryEmptyStateFor", () => {
       "ip-scanner",
       emptyResults("cancelled", { dry_run: true, hosts_scanned: 0 }),
     );
-    expect(cancelled?.title).toBe("Run cancelled");
+    expect(cancelled?.title).toBe("Run stopped");
     expect(cancelled?.title).not.toMatch(/complete/i);
 
     const failed = discoveryEmptyStateFor(

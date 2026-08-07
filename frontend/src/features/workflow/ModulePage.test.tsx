@@ -1538,7 +1538,7 @@ describe("ModulePage reports wiring", () => {
     clearApiKey();
   });
 
-  it("disables Export until a report has been queued", async () => {
+  it("keeps report exports selection-scoped when no reports are available", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -1564,7 +1564,7 @@ describe("ModulePage reports wiring", () => {
     renderModule("reports");
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Export" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
     });
   });
 
@@ -1909,6 +1909,11 @@ describe("ModulePage reports wiring", () => {
     renderModule("reports");
 
     expect(await screen.findByText("No reports yet")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Generate a scoped report from a completed discovery or validation run; it will appear here for selection and export.",
+      ),
+    ).toBeInTheDocument();
     for (const fabricated of [
       "Excel issue report",
       "Word handover report",
@@ -1949,7 +1954,7 @@ describe("ModulePage labels and templates", () => {
     clearApiKey();
   });
 
-  function stubBasic() {
+  function stubBasic(reports: unknown[] = []) {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -1966,7 +1971,7 @@ describe("ModulePage labels and templates", () => {
           return jsonResponse(profilesPayload);
         }
         if (url.split("?")[0].endsWith("/api/v1/reports")) {
-          return jsonResponse({ reports: [] });
+          return jsonResponse({ reports });
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
@@ -1979,13 +1984,35 @@ describe("ModulePage labels and templates", () => {
     expect(await screen.findByText("Run IP Discovery")).toBeInTheDocument();
   });
 
-  it("uses Generate (not Queue) for report run actions", async () => {
-    stubBasic();
+  it("keeps Reports as a generated-artifact list without generic report controls", async () => {
+    stubBasic([
+      {
+        created_at: "2026-08-07T13:20:00Z",
+        file_name: "handover.pdf",
+        output_format: "pdf",
+        report_id: "report-1",
+        report_type: "udmi_validation",
+        source_run_ids: ["run-1"],
+        status: "succeeded",
+        udmi_report_variant: "client",
+      },
+    ]);
     renderModule("reports");
+    expect(await screen.findByRole("heading", { name: "Generated Reports" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Generate Excel Report/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Generate Word Report/i })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        document.querySelector('[aria-label="Generated report list"] > table.report-list-table'),
+      ).toBeInTheDocument();
+    });
     expect(
-      await screen.findByRole("button", { name: "Generate Excel Report" }),
+      screen.getByText(
+        /Generate a scoped report from a completed discovery or validation run\./i,
+      ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Generate Word Report" })).toBeInTheDocument();
+    expect(screen.queryByText(/format actions above/i)).not.toBeInTheDocument();
+    expect(document.querySelector(".inspector")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Register Import" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Run Controls" })).not.toBeInTheDocument();
   });
@@ -2429,13 +2456,14 @@ describe("ModulePage UDMI workbench live results", () => {
       .getByText("Wrong-topic assets")
       .closest("div") as HTMLElement;
     expect(within(wrongTopicMetric).getByText("1")).toBeInTheDocument();
-    const detail = within(summary)
+    const detail = screen
       .getByRole("heading", { name: "Registered assets on wrong topics" })
       .closest(".udmi-wrong-topic-summary") as HTMLElement;
     expect(within(detail).getByText("site/registered/EM-1")).toBeInTheDocument();
     expect(within(detail).getByText("site/wrong/EM-1")).toBeInTheDocument();
+    expect(detail.querySelector(".udmi-wrong-topic-scroll")).toBeInTheDocument();
 
-    const discovery = within(summary)
+    const discovery = screen
       .getByRole("heading", { name: "Asset topic discovery" })
       .closest(".udmi-asset-topic-discovery") as HTMLElement;
     expect(within(discovery).getByText("Not available")).toBeInTheDocument();
@@ -2444,6 +2472,10 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(within(discovery).getByText(/Payload content is not inspected/i)).toBeInTheDocument();
 
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
+    const inspector = document.querySelector(".inspector") as HTMLElement;
+    expect(resultsTable.compareDocumentPosition(inspector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(inspector.compareDocumentPosition(discovery) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(discovery.compareDocumentPosition(detail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(
       within(resultsTable).getByRole("columnheader", { name: "Topic status" }),
     ).toBeInTheDocument();
@@ -3453,9 +3485,11 @@ describe("ModulePage UDMI workbench live results", () => {
           payload_type: "pointset",
           expected: true,
           received,
-          has_issues: false,
-          blocking_issue_count: 0,
-          successfully_validated: received,
+          // EM-1 arrived on its expected topic but is invalid. Observation is
+          // traffic presence, not JSON/schema validity.
+          has_issues: assetId === "EM-1",
+          blocking_issue_count: assetId === "EM-1" ? 1 : 0,
+          successfully_validated: false,
           topic: `${assetId}/pointset`,
           received_at: received ? "2026-07-23T01:00:00Z" : null,
         },
@@ -3555,6 +3589,12 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(screen.getByRole("option", { name: "BMS" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Lighting" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Legacy" })).not.toBeInTheDocument();
+
+    // Observed selects the invalid-but-retained expected-topic payload. The
+    // missing EM-2 (and separate unexpected publishers) are not promoted.
+    fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "observed" } });
+    expect(await within(table).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "all" } });
     fireEvent.change(screen.getByLabelText("System"), { target: { value: "BMS" } });
@@ -6750,9 +6790,7 @@ describe("ModulePage snap-to-top when results open", () => {
     expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
   });
 
-  // The report branch of runMutation sets the step directly rather than going
-  // through the terminal-run effect — a second, easily-missed route into Results.
-  it("snaps to the hero when generating a report opens Results", async () => {
+  it("does not expose generic report generation on Reports", async () => {
     const scrollSpy = spyOnScroll();
     vi.stubGlobal(
       "fetch",
@@ -6785,21 +6823,9 @@ describe("ModulePage snap-to-top when results open", () => {
 
     renderModule("reports");
 
-    const generate = await screen.findByRole("button", { name: "Generate Excel Report" });
-    await waitFor(() => expect(generate).toBeEnabled());
+    await screen.findByRole("heading", { name: "Generated Reports" });
+    expect(screen.queryByRole("button", { name: /Generate .* Report/i })).not.toBeInTheDocument();
     expect(scrollSpy).not.toHaveBeenCalled();
-
-    fireEvent.click(generate);
-
-    await waitFor(() =>
-      expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
-    );
-    // Same passive-effect race as the run-advance test above: the step update
-    // comes from the mutation's onSuccess, outside act().
-    await waitFor(() =>
-      expect(scrollSpy).toHaveBeenCalledWith({ behavior: "auto", block: "start" }),
-    );
-    expect(scrollTarget(scrollSpy)).toHaveClass("module-hero");
   });
 
   // A run restored on arrival never advances the step, so it must never snap

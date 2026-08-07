@@ -346,7 +346,7 @@ class PdfDocument:
         text: str,
         *,
         level: int = 2,
-        keep_with_next: float = 36.0,
+        keep_with_next: float = 80.0,
     ) -> None:
         size = _HEADING_SIZES.get(level, _HEADING_SIZES[2])
         self._items.append(
@@ -676,6 +676,26 @@ class PdfDocument:
             remaining = wrap_row(row, bold=False)
             first_chunk = True
             while any(cell_lines for cell_lines in remaining):
+                # Keep a normal wrapped row together. Splitting merely because
+                # the current page is nearly full creates a torn first chunk
+                # and a visually blank continuation cell on the next page.
+                # Only rows taller than an entire fresh table body are chunked.
+                full_remaining_height = row_height(remaining)
+                fresh_body_height = (
+                    self._page_height
+                    - _MARGIN
+                    - builder.top_reserve
+                    - header_height
+                    - builder.bottom_limit
+                    - 6
+                )
+                if (
+                    full_remaining_height <= fresh_body_height
+                    and not builder.fits(full_remaining_height + 6)
+                ):
+                    builder.new_page()
+                    emit_header()
+                    continue
                 available_height = builder.y - builder.bottom_limit - 6
                 maximum_lines = int(
                     max(available_height - 2 * vertical_padding, 0) // line_height

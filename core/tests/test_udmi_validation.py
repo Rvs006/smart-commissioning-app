@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from smart_commissioning_core import mqtt_transport, udmi_schema, udmi_validation
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, set_configuration_values_provider
-from smart_commissioning_core.mqtt_transport import MqttMessage
+from smart_commissioning_core.mqtt_transport import MqttCaptureOutcome, MqttMessage
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.udmi_run_processor import (
     _CoalescedProgressWriter,
@@ -2002,15 +2002,32 @@ class RecordingCapture:
         self.messages = messages or []
         self.calls: list[dict] = []
 
-    def __call__(self, _settings: object, **kwargs: object) -> list[MqttMessage]:
+    def __call__(self, _settings: object, **kwargs: object) -> MqttCaptureOutcome:
         self.calls.append(kwargs)
-        return self.messages
+        stop_when = kwargs.get("stop_when")
+        expected_complete = callable(stop_when) and bool(stop_when(self.messages))
+        return MqttCaptureOutcome(
+            messages=self.messages,
+            termination="required_topics_received" if expected_complete else "deadline_elapsed",
+            deadline_requested=True,
+            deadline_elapsed=not expected_complete,
+            cancelled=False,
+            primary_cap_reached=False,
+            primary_byte_cap_reached=False,
+            secondary_truncated=False,
+            secondary_count_truncated=False,
+            secondary_byte_truncated=False,
+            primary_retained_count=len(self.messages),
+            secondary_retained_count=0,
+            primary_retained_bytes=0,
+            secondary_retained_bytes=0,
+        )
 
 
 class ProgressRecordingCapture(RecordingCapture):
-    """Capture fake that mirrors the transport's per-message callbacks."""
+    """Capture fake that mirrors callbacks and returns transport truth."""
 
-    def __call__(self, _settings: object, **kwargs: object) -> list[MqttMessage]:
+    def __call__(self, _settings: object, **kwargs: object) -> MqttCaptureOutcome:
         self.calls.append(kwargs)
         on_observed_message = kwargs.get("on_observed_message")
         on_message = kwargs.get("on_message")
@@ -2019,11 +2036,47 @@ class ProgressRecordingCapture(RecordingCapture):
                 on_observed_message(message)
             if callable(on_message):
                 on_message(message)
-        return self.messages
+        stop_when = kwargs.get("stop_when")
+        expected_complete = callable(stop_when) and bool(stop_when(self.messages))
+        return MqttCaptureOutcome(
+            messages=self.messages,
+            termination="required_topics_received" if expected_complete else "deadline_elapsed",
+            deadline_requested=True,
+            deadline_elapsed=not expected_complete,
+            cancelled=False,
+            primary_cap_reached=False,
+            primary_byte_cap_reached=False,
+            secondary_truncated=False,
+            secondary_count_truncated=False,
+            secondary_byte_truncated=False,
+            primary_retained_count=len(self.messages),
+            secondary_retained_count=0,
+            primary_retained_bytes=0,
+            secondary_retained_bytes=0,
+        )
 
 
 def _msg(topic: str, payload: bytes = b'{"timestamp":"2026-07-09T10:00:00Z"}') -> MqttMessage:
     return MqttMessage(topic=topic, payload=payload)
+
+
+def _deadline_outcome(messages: list[MqttMessage]) -> MqttCaptureOutcome:
+    return MqttCaptureOutcome(
+        messages=messages,
+        termination="deadline_elapsed",
+        deadline_requested=True,
+        deadline_elapsed=True,
+        cancelled=False,
+        primary_cap_reached=False,
+        primary_byte_cap_reached=False,
+        secondary_truncated=False,
+        secondary_count_truncated=False,
+        secondary_byte_truncated=False,
+        primary_retained_count=len(messages),
+        secondary_retained_count=0,
+        primary_retained_bytes=0,
+        secondary_retained_bytes=0,
+    )
 
 
 _BROKER = {"use_live_broker": True, "broker_host": "203.0.113.10"}
@@ -2037,6 +2090,160 @@ _ALL_TOPIC_MESSAGES = [_msg("a/b/state"), _msg("a/b/metadata"), _msg("a/b/events
 
 
 class CaptureRunTimeTests(unittest.TestCase):
+    def test_inconsistent_deadline_outcome_is_incomplete(self) -> None:
+        result = udmi_validation._capture_result_details(
+            MqttCaptureOutcome(
+                messages=[],
+                termination="deadline_elapsed",
+                deadline_requested=False,
+                deadline_elapsed=True,
+                cancelled=False,
+                primary_cap_reached=False,
+                primary_byte_cap_reached=False,
+                secondary_truncated=False,
+                secondary_count_truncated=False,
+                secondary_byte_truncated=False,
+                primary_retained_count=0,
+                secondary_retained_count=0,
+                primary_retained_bytes=0,
+                secondary_retained_bytes=0,
+            ),
+            finite_window=True,
+        )
+        self.assertEqual(result[1], "capture_outcome_unavailable")
+        self.assertFalse(result[2])
+
+    def test_contradictory_deadline_outcome_is_incomplete(self) -> None:
+        contradictory_values = (
+            {"cancelled": True},
+            {"primary_cap_reached": True},
+            {"primary_byte_cap_reached": True},
+            {"interruption_cause": ConnectionResetError("interrupted")},
+        )
+        for overrides in contradictory_values:
+            with self.subTest(overrides=overrides):
+                outcome_kwargs = {
+                    "messages": [],
+                    "termination": "deadline_elapsed",
+                    "deadline_requested": True,
+                    "deadline_elapsed": True,
+                    "cancelled": False,
+                    "primary_cap_reached": False,
+                    "primary_byte_cap_reached": False,
+                    "secondary_truncated": False,
+                    "secondary_count_truncated": False,
+                    "secondary_byte_truncated": False,
+                    "primary_retained_count": 0,
+                    "secondary_retained_count": 0,
+                    "primary_retained_bytes": 0,
+                    "secondary_retained_bytes": 0,
+                }
+                outcome_kwargs.update(overrides)
+                result = udmi_validation._capture_result_details(
+                    MqttCaptureOutcome(**outcome_kwargs),
+                    finite_window=True,
+                )
+                self.assertEqual(result[1], "capture_outcome_unavailable")
+                self.assertFalse(result[2])
+
+    def test_broker_interruption_outcome_is_redacted_and_actionable(self) -> None:
+        def interrupted(_settings: object, **_kwargs: object) -> MqttCaptureOutcome:
+            return MqttCaptureOutcome(
+                messages=[],
+                termination="broker_interruption",
+                deadline_requested=True,
+                deadline_elapsed=False,
+                cancelled=False,
+                primary_cap_reached=False,
+                primary_byte_cap_reached=False,
+                secondary_truncated=False,
+                secondary_count_truncated=False,
+                secondary_byte_truncated=False,
+                primary_retained_count=0,
+                secondary_retained_count=0,
+                primary_retained_bytes=0,
+                secondary_retained_bytes=0,
+                interruption_cause=ConnectionResetError("password=hunter2"),
+            )
+
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 5},
+            live_capture=interrupted,
+            cancel_check=lambda: False,
+        )
+        self.assertEqual(result.result_summary["termination_reason"], "broker_interruption")
+        self.assertNotIn("hunter2", json.dumps(result.result_summary))
+        self.assertTrue(any(issue.severity == "high" for issue in result.issues))
+
+    def test_finite_legacy_list_adapter_cannot_prove_window_completion(self) -> None:
+        legacy_messages = list(_ALL_TOPIC_MESSAGES)
+        result = validate_udmi_full_report(
+            {**_BROKER, **_TOPICS, "capture_seconds": 45},
+            live_capture=lambda _settings, **_kwargs: legacy_messages,
+            cancel_check=lambda: False,
+        )
+        self.assertFalse(result.result_summary["window_completed"])
+        self.assertEqual(result.result_summary["termination_reason"], "capture_outcome_unavailable")
+
+    def test_legacy_discovery_capture_never_reports_completed(self) -> None:
+        """List-only capture evidence cannot certify a discovery window."""
+
+        def legacy_capture(_settings: object, **_kwargs: object) -> list[MqttMessage]:
+            return []
+
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "assets": AssetTopicDiscoveryTests._assets(),
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "bounded",
+            },
+            live_capture=legacy_capture,
+            cancel_check=lambda: False,
+        )
+
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertFalse(discovery["capture_complete"])
+        self.assertEqual(discovery["capture_status"], "capture_outcome_unavailable")
+
+    def test_indefinite_backstop_discovery_never_reports_completed(self) -> None:
+        """The safety backstop is an incomplete diagnostic outcome, not success."""
+
+        def backstop(_settings: object, **_kwargs: object) -> MqttCaptureOutcome:
+            return MqttCaptureOutcome(
+                messages=[],
+                termination="indefinite_backstop",
+                deadline_requested=True,
+                deadline_elapsed=True,
+                cancelled=False,
+                primary_cap_reached=False,
+                primary_byte_cap_reached=False,
+                secondary_truncated=False,
+                secondary_count_truncated=False,
+                secondary_byte_truncated=False,
+                primary_retained_count=0,
+                secondary_retained_count=0,
+                primary_retained_bytes=0,
+                secondary_retained_bytes=0,
+            )
+
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": "",
+                "assets": AssetTopicDiscoveryTests._assets(),
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "bounded",
+            },
+            live_capture=backstop,
+            cancel_check=lambda: False,
+        )
+
+        discovery = result.result_summary["asset_topic_discovery"]
+        self.assertFalse(discovery["capture_complete"])
+        self.assertEqual(discovery["capture_status"], "backstop_elapsed")
+
     def test_blank_capture_seconds_is_indefinite_until_all_topics(self) -> None:
         # Blank run time + a cancel path => indefinite capture (timeout None)
         # that completes once every expected topic has a payload.
@@ -2682,6 +2889,8 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
 
     def test_shared_indefinite_backstop_is_a_non_pass_termination(self) -> None:
         capture = RecordingCapture([_msg("site/a1/state")])
+        def legacy_capture(_settings: object, **_kwargs: object) -> list[MqttMessage]:
+            return capture.messages
         result = validate_udmi_full_report(
             {
                 **_BROKER,
@@ -2691,7 +2900,7 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
                     {"expected_schedule": {"asset_id": "A2"}, "state_topic": "site/a2/state"},
                 ],
             },
-            live_capture=capture,
+            live_capture=legacy_capture,
             cancel_check=lambda: False,
         )
         self.assertEqual(result.result_summary["termination_reason"], "backstop_elapsed")
@@ -2715,7 +2924,9 @@ class SharedMultiAssetCaptureTests(unittest.TestCase):
         self.assertFalse(result.result_summary["unexpected_devices_measured"])
         self.assertIsNone(result.result_summary["unexpected_devices_measurement_scope"])
         self.assertEqual(result.result_summary["unexpected_devices"], [])
-        self.assertTrue(capture.calls[0]["stop_when"](capture.messages))
+        # A finite run measures its full requested window even after every
+        # expected topic has arrived.
+        self.assertFalse(capture.calls[0]["stop_when"](capture.messages))
 
     def test_unexpected_sibling_is_deduplicated_without_becoming_an_issue(self) -> None:
         early = datetime(2026, 7, 23, 10, 0, tzinfo=UTC)
@@ -3160,6 +3371,45 @@ class AssetTopicDiscoveryTests(unittest.TestCase):
         self.assertEqual(discovery["scope_source"], "all")
         self.assertTrue(discovery["capture_complete"])
 
+    def test_confirmed_all_with_disjoint_roots_keeps_primary_and_secondary_budgets_separate(self) -> None:
+        """An expressly confirmed ``#`` remains diagnostic-only across disjoint roots."""
+
+        capture = RecordingCapture()
+        result = validate_udmi_full_report(
+            {
+                **_BROKER,
+                "capture_seconds": 2,
+                "unexpected_max_messages": 7,
+                "topic_discovery_enabled": True,
+                "topic_discovery_scope": "all",
+                "topic_discovery_all_scope_confirmed": True,
+                "assets": [
+                    {
+                        "expected_schedule": {"asset_id": "A1"},
+                        "state_topic": "site/a1/state",
+                    },
+                    {
+                        "expected_schedule": {"asset_id": "A2"},
+                        "state_topic": "other/a2/state",
+                    },
+                ],
+            },
+            live_capture=capture,
+            cancel_check=lambda: False,
+        )
+
+        call = capture.calls[0]
+        self.assertEqual(call["topics"], ["site/a1/state", "other/a2/state", "#"])
+        self.assertEqual(call["primary_topics"], ["site/a1/state", "other/a2/state"])
+        self.assertEqual(call["secondary_topic_filters"], ["#"])
+        self.assertEqual(call["secondary_max_messages"], 7)
+        self.assertEqual(call["primary_max_bytes"], 256 * 1024 * 1024)
+        self.assertEqual(call["secondary_max_bytes"], 2 * 1024 * 1024)
+        self.assertEqual(
+            result.result_summary["asset_topic_discovery"]["scope_source"],
+            "all",
+        )
+
     def test_all_scope_alternate_topic_stays_out_of_validation_evidence(self) -> None:
         """A message received only because of ``#`` remains ledger-only evidence."""
 
@@ -3462,7 +3712,7 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             assert callable(on_message)
             on_message(message)
             self.assertTrue(progress_written.wait(timeout=2.0))
-            return [message]
+            return _deadline_outcome([message])
 
         record = process_udmi_validation_run(
             "run-progress",
@@ -3638,7 +3888,7 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
                 completed_callbacks += 1
             self.assertTrue(progress_write_started.wait(timeout=4.0))
             release_progress_write.set()
-            return messages
+            return _deadline_outcome(messages)
 
         record = process_udmi_validation_run(
             "run-462-pointsets",
@@ -3900,7 +4150,7 @@ class UdmiProcessorCancelAndInlineGuardTests(unittest.TestCase):
             assert callable(on_message)
             on_message(message)
             self.assertTrue(progress_attempted.wait(timeout=2.0))
-            return [message]
+            return _deadline_outcome([message])
 
         with self.assertLogs(
             "smart_commissioning_core.udmi_run_processor", level="WARNING"

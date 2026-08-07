@@ -166,5 +166,5 @@ export const statusTokenLabels: Record<HealthState, string> = {
   queued: "Queued",
   ready: "Ready",
   running: "Running",
-  warning: "Cancelled",
+  warning: "Stopped",
 };

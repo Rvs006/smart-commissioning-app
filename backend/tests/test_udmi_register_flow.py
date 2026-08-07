@@ -117,7 +117,9 @@ class UdmiRegisterFlowTests(ApiTestCase):
         self.assertEqual(entry["expected_schedule"]["units"], {"energy_sensor": "kwh", "power_sensor": "kw"})
         self.assertEqual(entry["expected_schedule"]["udmi_version"], "1.5.2")
         self.assertEqual(entry["expected_schedule"]["reporting_interval_seconds"], "60")
+        self.assertEqual(entry["expected_schedule"]["payload_applicability_source"], "explicit_applicability")
         self.assertEqual(entry["state_topic"], "hv/ems/01/em/EM-1/state")
+
         self.assertEqual(entry["pointset_topic"], "hv/ems/01/em/EM-1/events/pointset")
         self.assertEqual(entry["extra_capture_topics"], ["hv/ems/01/em/EM-1/event/pointset"])
         # Real inline validation, never the packaged sample fixture.
@@ -169,6 +171,42 @@ class UdmiRegisterFlowTests(ApiTestCase):
         # not one invented high-severity issue per expected point.
         descriptions = " ".join(issue["description"] for issue in run["issues"])
         self.assertNotIn("Expected point energy_sensor was not received", descriptions)
+
+    def test_legacy_blank_register_expands_three_payload_families(self) -> None:
+        project_id = "udmi-v0140-legacy-project"
+        site_id = "udmi-v0140-legacy-site"
+        header = (
+            "Project/site,System,Asset ID,Expected topic,Expected schema version,"
+            "Expected reporting interval,Source protocol\n"
+        )
+        rows = "".join(
+            f"Site A,BMS,DDC-{index:03d},site/DDC-{index:03d}/#,1.5.2,60,MQTT\n"
+            for index in range(780)
+        )
+        upload = self.client.post(
+            "/api/v1/imports",
+            data={"import_type": "mqtt_register", "project_id": project_id, "site_id": site_id},
+            files={"file": ("legacy.csv", io.BytesIO((header + rows).encode()), "text/csv")},
+        )
+        self.assertEqual(upload.status_code, 200, upload.text)
+        self.assertEqual(upload.json()["status"], "accepted", upload.text)
+
+        response = self._post_run(project_id, site_id)
+        self.assertEqual(response.status_code, 200, response.text)
+        run = self.client.get(f"/api/v1/validation/runs/{response.json()['run_id']}").json()
+        assets = run["parameters"]["assets"]
+        self.assertEqual(len(assets), 780)
+        self.assertTrue(
+            all(
+                asset["expected_schedule"]["payload_types"] == ["state", "metadata", "pointset"]
+                and asset["expected_schedule"]["payload_applicability_source"] == "legacy_blank_default"
+                for asset in assets
+            )
+        )
+        self.assertEqual(
+            sum(len(asset["expected_schedule"]["payload_types"]) for asset in assets),
+            2340,
+        )
 
     def test_floor_column_is_optional_metadata_and_does_not_change_asset_selection(self) -> None:
         variants = {
