@@ -44,6 +44,11 @@ async function loadUsersPage() {
   return { Component: UsersPage };
 }
 
+async function loadEvoObservatoryPage() {
+  const { EvoObservatoryPage } = await import("../features/evo/EvoObservatoryPage");
+  return { Component: EvoObservatoryPage };
+}
+
 export const router = createHashRouter([
   // Standalone product surfaces (own demo-shell header), mirroring the
   // Electracom reference's Product Brief + Course. "Launch the App" enters the
@@ -73,6 +78,7 @@ export const router = createHashRouter([
       { path: "reports", lazy: loadModulePage("reports") },
       { path: "hub", lazy: loadHubPage },
       { path: "run-history", lazy: loadRunHistoryPage },
+      { path: "evo", lazy: loadEvoObservatoryPage },
       { path: "users", lazy: loadUsersPage },
     ],
   },

@@ -6,6 +6,7 @@ from app.api.routes import (
     discovery,
     events,
     evidence,
+    evo,
     health,
     hub,
     hub_sync_v2,
@@ -62,6 +63,7 @@ protected_router = APIRouter(dependencies=[Depends(require_auth)])
 protected_router.include_router(configuration.router, prefix="/configuration", tags=["configuration"])
 protected_router.include_router(imports.router, prefix="/imports", tags=["imports"])
 protected_router.include_router(runs.router, prefix="/runs", tags=["runs"])
+protected_router.include_router(evo.router, prefix="/evo", tags=["evo"])
 # SSE run-progress streaming (GET /runs/{run_id}/events). Mounted on the same
 # /runs prefix and behind the same auth as the polling endpoints; the frontend
 # consumes it via fetch()+ReadableStream so X-API-Key still rides the request.

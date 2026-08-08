@@ -34,6 +34,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { label: "Hub", to: "/hub" },
       { label: "Run History", to: "/run-history" },
+      { label: "Evo Observatory", to: "/evo" },
     ],
   },
 ];
@@ -43,6 +44,7 @@ const pageTitles: Record<string, string> = {
   "/bacnet-discovery": "BACnet Discovery",
   "/configuration": "Configuration",
   "/data-validation": "BACnet to MQTT Validation",
+  "/evo": "Evo Observatory",
   "/hub": "Multi-Project Hub",
   "/ip-scanner": "IP Discovery",
   "/mqtt-discovery": "MQTT Discovery",
@@ -57,6 +59,7 @@ const pageSubtitles: Record<string, string> = {
   "/bacnet-discovery": "Review discovered devices, objects and live properties.",
   "/configuration": "Keep connection settings focused and safe to edit.",
   "/data-validation": "Compare point quality and protocol alignment.",
+  "/evo": "Inspect isolated UDMI optimization experiments and their evidence.",
   "/hub": "Track runs across every project, site, and edge from one operator view.",
   "/ip-scanner": "Find reachable, missing and unexpected hosts.",
   "/mqtt-discovery": "Inspect broker topics, payloads and extracted points.",

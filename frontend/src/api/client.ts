@@ -6,6 +6,30 @@ export type HealthStatus = {
   timestamp: string;
 };
 
+export type EvoExperiment = {
+  id: string;
+  parent_id: string | null;
+  status: "pending" | "running" | "committed" | "failed" | "discarded";
+  score: number | null;
+  correctness: number | null;
+  duration_seconds: number | null;
+  peak_memory_mb: number | null;
+  change: string;
+  finding: string;
+};
+
+export type EvoOverview = {
+  workspace_status: "not_initialized" | "snapshot_unavailable" | "ready" | "running";
+  protected_release: string;
+  protected_commit: string;
+  target: string;
+  metric: string;
+  baseline: EvoExperiment | null;
+  experiments: EvoExperiment[];
+  selected_experiment_id: string | null;
+  updated_at: string | null;
+};
+
 // RBAC roles, ascending privilege. Mirrors smart_commissioning_core.rbac.Role
 // (StrEnum: serialized as the lowercase string). Declaration order here matches
 // the backend ROLE_ORDER so roleAtLeast() can compare by index.
@@ -819,6 +843,10 @@ export function formatApiDetail(detail: unknown): string {
 
 export function getHealth(context?: ApiRequestContext): Promise<HealthStatus> {
   return request<HealthStatus>("/health", undefined, context);
+}
+
+export function getEvoOverview(context?: ApiRequestContext): Promise<EvoOverview> {
+  return request<EvoOverview>("/evo/overview", undefined, context);
 }
 
 // Best-effort adapter classification from the backend. The server DOES return
