@@ -5,6 +5,20 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- An authenticated, read-only Evo Observatory shows isolated UDMI benchmark
+  results, experiment lineage, safety gates, runtime, and memory evidence.
+- OpenUI renders a plain-language explanation of each experiment from the same
+  local evidence snapshot used by the dashboard.
+
+### Security
+
+- Updated transitive frontend development dependencies to resolve the current
+  `brace-expansion` and `nanoid` advisories.
+
 ## [0.1.40] - 2026-08-07
 
 This v0.1.40 recovery release restores the trusted v0.1.37 UDMI capture

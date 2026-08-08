@@ -25,8 +25,8 @@ export function EvoObservatoryPage() {
   const experiments = useMemo(() => overview ? [overview.baseline, ...overview.experiments].filter((item): item is EvoExperiment => Boolean(item)) : [], [overview]);
   const selected = experiments.find((item) => item.id === (selectedId ?? overview?.selected_experiment_id)) ?? experiments[experiments.length - 1] ?? null;
 
-  if (query.isLoading) return <div className="evo-state" aria-busy="true">Reading the local Evo workspace…</div>;
-  if (query.isError || !overview) return <div className="evo-state error"><strong>Evo data is unavailable</strong><span>{query.error instanceof Error ? query.error.message : "The API did not return an experiment snapshot."}</span><button onClick={() => query.refetch()} type="button">Try again</button></div>;
+  if (query.isLoading) return <div className="evo-state" aria-busy="true" aria-live="polite">Reading the local Evo workspace…</div>;
+  if (query.isError || !overview) return <div className="evo-state error" aria-live="polite"><strong>Evo data is unavailable</strong><span>{query.error instanceof Error ? query.error.message : "The API did not return an experiment snapshot."}</span><button onClick={() => query.refetch()} type="button">Try again</button></div>;
 
   return (
     <section className="evo-observatory">
@@ -39,7 +39,7 @@ export function EvoObservatoryPage() {
 
       <div className="evo-bench">
         <section className="evo-lineage" aria-labelledby="lineage-title">
-          <div className="evo-section-head"><h2 id="lineage-title">Experiment lineage</h2><button onClick={() => query.refetch()} disabled={query.isFetching} type="button">{query.isFetching ? "Refreshing…" : "Refresh data"}</button></div>
+          <div className="evo-section-head"><h2 id="lineage-title">Experiment lineage</h2><button onClick={() => query.refetch()} disabled={query.isFetching} aria-busy={query.isFetching} type="button">{query.isFetching ? "Refreshing…" : "Refresh data"}</button></div>
           {experiments.length ? <div className="evo-runs">{experiments.map((experiment) => <ExperimentRow key={experiment.id} experiment={experiment} active={selected?.id === experiment.id} onSelect={() => setSelectedId(experiment.id)} />)}</div> : <div className="evo-empty"><strong>No experiment has run yet</strong><span>The first row will appear after Evo verifies and scores exp_0000.</span></div>}
         </section>
 

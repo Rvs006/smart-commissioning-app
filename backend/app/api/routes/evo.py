@@ -25,7 +25,8 @@ def _snapshot_path() -> Path:
     configured = os.environ.get("EVO_OBSERVATORY_PATH", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
-    return (Path.cwd() / ".evo" / "observatory.json").resolve()
+    repository_root = Path(__file__).resolve().parents[4]
+    return (repository_root / ".evo" / "observatory.json").resolve()
 
 
 def _pending_snapshot() -> dict[str, Any]:

@@ -2,6 +2,7 @@
 .evo-masthead { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 32px; align-items: end; min-height: 220px; padding: 36px; background: #173f4c; color: #f5f2e9; clip-path: polygon(0 0, 100% 0, 100% calc(100% - 18px), calc(100% - 18px) 100%, 0 100%); }
 .evo-context { margin: 0 0 14px; color: #b8d5d6; font-weight: 650; }
 .evo-masthead h1 { margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: clamp(42px, 7vw, 88px); font-weight: 500; line-height: .92; letter-spacing: -.045em; }
+.evo-masthead h1, .evo-section-head h2, .evo-measurements h2, .evo-explanation h2 { text-wrap: balance; }
 .evo-masthead p:last-child { max-width: 640px; margin: 22px 0 0; color: #d9e7e5; font-size: 16px; line-height: 1.55; }
 .evo-protected { display: grid; gap: 6px; align-self: stretch; align-content: end; padding: 22px 0 10px 24px; border-left: 2px solid #82aeb0; }
 .evo-protected span { color: #b8d5d6; }
@@ -16,6 +17,8 @@
 .evo-section-head h2, .evo-measurements h2, .evo-explanation h2 { margin: 0; font-size: 18px; }
 .evo-section-head button, .evo-state button { min-height: 38px; padding: 0 14px; background: var(--surface-3); color: var(--ink); border-radius: 6px; }
 .evo-section-head button:hover, .evo-state button:hover { background: var(--accent-bg); color: var(--accent); }
+.evo-section-head button, .evo-state button, .evo-run { touch-action: manipulation; }
+.evo-section-head button:focus-visible, .evo-state button:focus-visible, .evo-run:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
 .evo-runs { display: grid; gap: 8px; }
 .evo-run { display: grid; grid-template-columns: minmax(0, 1fr) 100px 84px; gap: 12px; align-items: center; width: 100%; padding: 14px 16px; background: var(--surface-2); color: var(--ink); text-align: left; border-radius: 3px; border-left: 4px solid transparent; }
 .evo-run:hover { background: var(--surface-3); }
