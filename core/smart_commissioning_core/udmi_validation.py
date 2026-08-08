@@ -2503,15 +2503,21 @@ def _capture_live_payloads_per_asset(
                 wildcard_topic_routes.append((entry_index, topic_filter))
             else:
                 exact_topic_routes.setdefault(topic_filter, set()).add(entry_index)
+    validation_entry_cache: dict[str, frozenset[int]] = {}
     progress_message_count = 0
     progress_state_lock = threading.Lock()
 
-    def matching_validation_entries(topic: str) -> set[int]:
+    def matching_validation_entries(topic: str) -> frozenset[int]:
+        cached = validation_entry_cache.get(topic)
+        if cached is not None:
+            return cached
         matching_entries = set(exact_topic_routes.get(topic, ()))
         for entry_index, topic_filter in wildcard_topic_routes:
             if _topic_matches_filter(topic, topic_filter):
                 matching_entries.add(entry_index)
-        return matching_entries
+        result = frozenset(matching_entries)
+        validation_entry_cache[topic] = result
+        return result
 
     def topic_matches_validation_filter(topic: str) -> bool:
         return bool(matching_validation_entries(topic))
@@ -2650,7 +2656,7 @@ def _capture_live_payloads_per_asset(
             return
         with progress_state_lock:
             latest_progress_messages[message.topic] = message
-            matching_entries = matching_validation_entries(message.topic)
+            matching_entries = set(matching_validation_entries(message.topic))
             wrong_topic_entry = None
             if not matching_entries:
                 wrong_topic_entry = _registered_wrong_topic_entry_index(
