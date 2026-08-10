@@ -160,7 +160,7 @@ def create_report(request: ReportRequest) -> ReportSummary:
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="Report artifact materialization failed.") from error
-    return _to_report_summary(run.run_id)
+    return _to_report_summary(render_run)
 
 
 @router.get("", response_model=ReportListResponse, dependencies=[Depends(require_viewer)])

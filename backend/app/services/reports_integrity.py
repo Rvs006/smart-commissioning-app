@@ -48,16 +48,22 @@ def load_signing_key() -> SigningKey:
     """Load (or create on first use) the evidence signing key, owner-only."""
     ensure_runtime_directories()
     destination = signing_key_path()
+    try:
+        return SigningKey.from_pem_bytes(destination.read_bytes())
+    except FileNotFoundError:
+        pass
     legacy = SECRETS_ROOT / _SIGNING_KEY_FILE
-    if not destination.exists() and legacy.is_file():
-        # Preserve verification continuity on upgrade while separating the key
-        # from connection secrets that the worker is allowed to read.
-        destination.write_bytes(legacy.read_bytes())
-        try:
-            destination.chmod(0o600)
-        except OSError:
-            pass
-    return SigningKey.load_or_create(signing_key_path())
+    try:
+        legacy_private_pem = legacy.read_bytes()
+    except FileNotFoundError:
+        legacy_private_pem = None
+    # Preserve verification continuity on upgrade while separating the key
+    # from connection secrets that the worker is allowed to read. The core
+    # publisher validates and atomically claims these bytes under concurrency.
+    return SigningKey.load_or_create(
+        destination,
+        initial_private_pem=legacy_private_pem,
+    )
 
 
 def build_integrity_metadata(artifact: bytes) -> dict[str, Any]:

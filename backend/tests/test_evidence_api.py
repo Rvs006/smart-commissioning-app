@@ -19,8 +19,11 @@ import shutil
 import tempfile
 import unittest
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier
+from unittest import mock
 
 from harness import ApiTestCase
 
@@ -33,14 +36,128 @@ _ENV_OVERRIDES = {
 }
 
 
+class SigningKeyMigrationTests(unittest.TestCase):
+    def test_concurrent_legacy_migration_preserves_one_identity(self) -> None:
+        import smart_commissioning_core.integrity as core_integrity
+        from app.services import reports_integrity
+        from smart_commissioning_core.integrity import SigningKey
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            secrets_root = root / "secrets"
+            report_signing_root = root / "report-signing"
+            secrets_root.mkdir()
+            report_signing_root.mkdir()
+            legacy_key = SigningKey.generate()
+            legacy_path = secrets_root / ".evidence_signing_key"
+            legacy_path.write_bytes(legacy_key.private_pem_bytes())
+            worker_count = 8
+            ready_to_publish = Barrier(worker_count)
+            original_write = core_integrity._write_private_file
+
+            def synchronized_write(path: Path, content: bytes) -> bool:
+                ready_to_publish.wait(timeout=5)
+                return original_write(path, content)
+
+            with (
+                mock.patch.object(reports_integrity, "SECRETS_ROOT", secrets_root),
+                mock.patch.object(
+                    reports_integrity,
+                    "REPORT_SIGNING_ROOT",
+                    report_signing_root,
+                ),
+                mock.patch.object(reports_integrity, "ensure_runtime_directories"),
+                mock.patch.object(
+                    core_integrity,
+                    "_write_private_file",
+                    side_effect=synchronized_write,
+                ),
+                ThreadPoolExecutor(max_workers=worker_count) as executor,
+            ):
+                keys = list(
+                    executor.map(
+                        lambda _index: reports_integrity.load_signing_key(),
+                        range(worker_count),
+                    )
+                )
+
+            public_key = legacy_key.public_key_bytes()
+            self.assertEqual({key.public_key_bytes() for key in keys}, {public_key})
+            destination = report_signing_root / ".evidence_signing_key"
+            self.assertTrue(destination.is_file())
+            legacy_path.unlink()
+            self.assertEqual(
+                SigningKey.load_or_create(destination).public_key_bytes(),
+                public_key,
+            )
+
+    def test_invalid_legacy_key_is_not_published(self) -> None:
+        from app.services import reports_integrity
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            secrets_root = root / "secrets"
+            report_signing_root = root / "report-signing"
+            secrets_root.mkdir()
+            report_signing_root.mkdir()
+            (secrets_root / ".evidence_signing_key").write_bytes(b"invalid-key")
+
+            with (
+                mock.patch.object(reports_integrity, "SECRETS_ROOT", secrets_root),
+                mock.patch.object(
+                    reports_integrity,
+                    "REPORT_SIGNING_ROOT",
+                    report_signing_root,
+                ),
+                mock.patch.object(reports_integrity, "ensure_runtime_directories"),
+                self.assertRaises(ValueError),
+            ):
+                reports_integrity.load_signing_key()
+
+            self.assertFalse(
+                (report_signing_root / ".evidence_signing_key").exists()
+            )
+
+
+class ReportArtifactStorageTests(unittest.TestCase):
+    def test_signing_failure_does_not_publish_unmanifested_artifact(self) -> None:
+        from app.services import report_artifacts
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            artifacts_root = Path(temporary_directory) / "artifacts"
+            signing_key = mock.Mock()
+            signing_key.public_key_fingerprint.return_value = "test-key"
+            signing_key.sign.side_effect = RuntimeError("signing unavailable")
+            with (
+                mock.patch.object(report_artifacts, "ARTIFACTS_ROOT", artifacts_root),
+                mock.patch.object(report_artifacts, "ensure_runtime_directories"),
+                mock.patch.object(
+                    report_artifacts,
+                    "load_signing_key",
+                    return_value=signing_key,
+                ),
+                self.assertRaisesRegex(RuntimeError, "signing unavailable"),
+            ):
+                report_artifacts.store_report_artifact(
+                    report_id="run_test",
+                    snapshot_hash="a" * 64,
+                    file_name="report.pdf",
+                    media_type="application/pdf",
+                    artifact=b"report-bytes",
+                    origin="test",
+                    signed_at="2026-08-10T12:00:00+00:00",
+                )
+
+            self.assertEqual(list(artifacts_root.iterdir()), [])
+            signing_key.sign.assert_called_once()
+
+
 class EvidenceVerifyApiTests(ApiTestCase):
     env = _ENV_OVERRIDES
     client_headers = {"X-API-Key": _API_KEY}
 
     @classmethod
     def before_client(cls) -> None:
-        from unittest import mock
-
         # Point the signing key + backup sources at the temp runtime via patching
         # (SECRETS_ROOT is bound by value at import; patching where it is used is
         # robust and matches test_secret_storage.py). Patches live for the class.

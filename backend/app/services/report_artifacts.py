@@ -116,13 +116,8 @@ def store_report_artifact(
     if target.parent != root:
         raise ValueError("Report artifact path escaped the artifact root.")
 
-    if target.exists():
-        existing = target.read_bytes()
-        if existing != artifact:
-            raise RuntimeError("A report artifact path already contains different bytes.")
-    else:
-        _atomic_write(target, artifact)
-
+    # Build the complete signed manifest before publishing bytes. A signing
+    # failure must not leave an artifact that cannot be reached safely.
     key = load_signing_key()
     manifest: dict[str, Any] = {
         "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
@@ -148,6 +143,12 @@ def store_report_artifact(
             "signed_manifest_sha256": sha256_bytes(signed_body),
         }
     )
+    if target.exists():
+        existing = target.read_bytes()
+        if existing != artifact:
+            raise RuntimeError("A report artifact path already contains different bytes.")
+    else:
+        _atomic_write(target, artifact)
     return manifest
 
 

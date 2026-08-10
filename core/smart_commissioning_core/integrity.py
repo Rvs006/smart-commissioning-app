@@ -21,6 +21,7 @@ key path. Private key material never leaves disk except through the explicit
 from __future__ import annotations
 
 import os
+import tempfile
 from hashlib import sha256
 from pathlib import Path
 
@@ -75,20 +76,39 @@ def sha256_bytes(data: bytes) -> str:
     return sha256(data).hexdigest()
 
 
-def _write_private_file(path: Path, content: bytes) -> None:
-    """Write bytes owner-only (0o600), mirroring the backend secret store.
+def _write_private_file(path: Path, content: bytes) -> bool:
+    """Atomically publish owner-only bytes and report whether this caller won.
 
     On Windows the POSIX mode only maps onto the read-only attribute, so this is
     best-effort there; real isolation comes from the ACL on the key directory.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(content)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary_name)
     try:
-        os.chmod(path, 0o600)
-    except OSError:  # pragma: no cover - non-POSIX best effort
-        pass
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temporary_path, 0o600)
+        except OSError:  # pragma: no cover - non-POSIX best effort
+            pass
+        try:
+            # A hard link publishes the fully flushed inode without replacing
+            # a key another process has already claimed.
+            os.link(temporary_path, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        try:
+            temporary_path.unlink()
+        except OSError:
+            # Publication and the original I/O outcome are authoritative.
+            # A private orphan is safer than reporting failure after the final
+            # key was already linked successfully.
+            pass
 
 
 class SigningKey:
@@ -111,19 +131,37 @@ class SigningKey:
         return cls(Ed25519PrivateKey.generate())
 
     @classmethod
-    def load_or_create(cls, key_path: str | os.PathLike[str]) -> SigningKey:
+    def load_or_create(
+        cls,
+        key_path: str | os.PathLike[str],
+        *,
+        initial_private_pem: bytes | None = None,
+    ) -> SigningKey:
         """Load the signing key from ``key_path``, generating + persisting it once.
 
         Idempotent: subsequent calls return the same key. The PEM is written
         owner-only the first time so the private key is never world-readable.
+        ``initial_private_pem`` preserves an existing identity while moving a
+        legacy key to this path.
         """
         _require_cryptography()
         path = Path(key_path)
-        if path.exists():
+        for _attempt in range(2):
+            try:
+                return cls.from_pem_bytes(path.read_bytes())
+            except FileNotFoundError:
+                pass
+            key = (
+                cls.from_pem_bytes(initial_private_pem)
+                if initial_private_pem is not None
+                else cls.generate()
+            )
+            if _write_private_file(path, key.private_pem_bytes()):
+                return key
+        try:
             return cls.from_pem_bytes(path.read_bytes())
-        key = cls.generate()
-        _write_private_file(path, key.private_pem_bytes())
-        return key
+        except FileNotFoundError as error:
+            raise FileNotFoundError(f"Signing key could not be created at '{path}'.") from error
 
     @classmethod
     def from_pem_bytes(cls, pem: bytes) -> SigningKey:

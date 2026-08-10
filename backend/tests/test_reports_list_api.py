@@ -97,6 +97,20 @@ class ReportListProjectionTests(ApiTestCase):
             datetime,
         )
 
+    def test_create_report_returns_completed_record_without_post_commit_lookup(self) -> None:
+        from app.api.routes import reports as reports_route
+
+        with patch.object(
+            reports_route.service,
+            "get_run",
+            side_effect=AssertionError("completed reports must not be re-read after commit"),
+        ):
+            body = self._create_report([])
+
+        self.assertEqual(body["status"], "succeeded")
+        download = self.client.get(f"/api/v1/reports/{body['report_id']}/download")
+        self.assertEqual(download.status_code, 200, download.text)
+
     def test_list_projection_matches_the_creation_projection(self) -> None:
         created = self._create_report(self._seed_source_runs(2))
 
