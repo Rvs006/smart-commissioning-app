@@ -5,6 +5,15 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Generate All creates PDF, DOCX, XLSX, and evidence-pack reports one at a time,
+  preventing the four jobs from competing for the same database and memory.
+- First-use evidence signing creates one shared key under concurrent requests,
+  and a completed report returns without redundant post-commit database reads.
+
 ## [0.1.40] - 2026-08-07
 
 This v0.1.40 recovery release restores the trusted v0.1.37 UDMI capture

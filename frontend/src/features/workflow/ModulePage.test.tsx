@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
-import { clearApiKey, setApiKey } from "../../api/client";
+import { clearApiKey, setApiKey, type ReportFormat } from "../../api/client";
 import { SessionProvider } from "../../app/session";
 import { ModulePage } from "./ModulePage";
 
@@ -6443,14 +6443,33 @@ describe("ModulePage report controls placement", () => {
   // Run rehydration hands us a terminal run with no clicks at all, which is the
   // only way to put a *viewer* in front of one — viewers cannot start runs.
   function stubTerminalRun(
-    options: { role?: string; lastRun?: boolean; finalEvidenceFails?: boolean } = {},
+    options: {
+      role?: string;
+      lastRun?: boolean;
+      finalEvidenceFails?: boolean;
+      failReportFormats?: readonly ReportFormat[];
+    } = {},
   ) {
-    const { role = "engineer", lastRun = true, finalEvidenceFails = false } = options;
+    const {
+      role = "engineer",
+      lastRun = true,
+      finalEvidenceFails = false,
+      failReportFormats = [],
+    } = options;
+    const failedReportFormats = new Set(failReportFormats);
     const captured: {
       reportBodies: Record<string, unknown>[];
       reportBody: Record<string, unknown> | null;
       exportBodies: Array<{ report_ids: string[] }>;
-    } = { reportBodies: [], reportBody: null, exportBodies: [] };
+      activeReportRequests: number;
+      maxActiveReportRequests: number;
+    } = {
+      reportBodies: [],
+      reportBody: null,
+      exportBodies: [],
+      activeReportRequests: 0,
+      maxActiveReportRequests: 0,
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -6483,15 +6502,33 @@ describe("ModulePage report controls placement", () => {
         if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
           const reportBody = JSON.parse(String(init.body)) as Record<string, unknown>;
           captured.reportBody = reportBody;
-          captured.reportBodies.push(reportBody);
-          const format = String(reportBody.output_format);
-          return jsonResponse({
-            file_name: `ip_discovery_rep-${captured.reportBodies.length}.${format}`,
-            output_format: format,
-            report_id: `rep-${captured.reportBodies.length}`,
-            report_type: "ip_discovery",
-            status: "succeeded",
-          });
+          const reportNumber = captured.reportBodies.push(reportBody);
+          const format = String(reportBody.output_format) as ReportFormat;
+          captured.activeReportRequests += 1;
+          captured.maxActiveReportRequests = Math.max(
+            captured.maxActiveReportRequests,
+            captured.activeReportRequests,
+          );
+          try {
+            await Promise.resolve();
+            if (failedReportFormats.has(format)) {
+              return {
+                ok: false,
+                status: 500,
+                statusText: "Internal Server Error",
+                json: async () => ({ detail: `forced ${format} failure` }),
+              } as unknown as Response;
+            }
+            return jsonResponse({
+              file_name: `ip_discovery_rep-${reportNumber}.${format}`,
+              output_format: format,
+              report_id: `rep-${reportNumber}`,
+              report_type: "ip_discovery",
+              status: "succeeded",
+            });
+          } finally {
+            captured.activeReportRequests -= 1;
+          }
         }
         if (url.endsWith("/api/v1/reports/export") && init?.method === "POST") {
           captured.exportBodies.push(JSON.parse(String(init.body)) as { report_ids: string[] });
@@ -6602,6 +6639,7 @@ describe("ModulePage report controls placement", () => {
       "xlsx",
       "zip",
     ]);
+    expect(captured.maxActiveReportRequests).toBe(1);
     expect(new Set(captured.reportBodies.map((body) => body.report_title))).toEqual(
       new Set(["Building A commissioning"]),
     );
@@ -6613,6 +6651,60 @@ describe("ModulePage report controls placement", () => {
         /4 reports generated from this run: PDF, Word, Excel, and evidence pack/i,
       ),
     ).toHaveLength(2);
+  });
+
+  it("continues serial Generate All after one format fails", async () => {
+    const captured = stubTerminalRun({ failReportFormats: ["docx"] });
+    renderModule("ip-scanner");
+
+    const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
+    fireEvent.change(pickers[1], { target: { value: "all" } });
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    await submitReportDialog(buttons[1]);
+
+    expect(
+      await screen.findAllByText(
+        /3 of 4 reports were generated\. Failed formats: DOCX\. The completed reports are in the Reports tab\./i,
+      ),
+    ).toHaveLength(2);
+    expect(captured.reportBodies.map((body) => body.output_format)).toEqual([
+      "pdf",
+      "docx",
+      "xlsx",
+      "zip",
+    ]);
+    expect(captured.maxActiveReportRequests).toBe(1);
+  });
+
+  it("keeps Generate All retryable after every format fails", async () => {
+    const captured = stubTerminalRun({
+      failReportFormats: ["pdf", "docx", "xlsx", "zip"],
+    });
+    renderModule("ip-scanner");
+
+    const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
+    fireEvent.change(pickers[1], { target: { value: "all" } });
+    const buttons = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    await submitReportDialog(buttons[1]);
+
+    const dialog = await screen.findByRole("dialog", { name: "Name this validation report" });
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("forced pdf failure");
+    expect(captured.reportBodies.map((body) => body.output_format)).toEqual([
+      "pdf",
+      "docx",
+      "xlsx",
+      "zip",
+    ]);
+    expect(captured.maxActiveReportRequests).toBe(1);
+    expect(screen.queryByText("Report generation incomplete")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Download all reports/i }),
+    ).not.toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Generate report" })).toBeEnabled();
   });
 
   it("offers one combined report download after Generate All", async () => {

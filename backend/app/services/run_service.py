@@ -454,12 +454,8 @@ class RunService:
         # Pin the rendered timestamp at creation. New reports therefore build
         # entirely from their own stored record and downloads never need to
         # mutate this provenance field.
-        # Reports are NOT processed by a worker actor: the artifact is built
-        # on-demand from the stored run record at GET /reports/{id}/download. A
-        # report run therefore has nothing to wait for — it is ready the moment
-        # it is created. Without this the run sat at the default "queued" status
-        # forever and the UI (which only offers a download for "succeeded"
-        # reports) could never export it. Mark it terminal-succeeded immediately.
+        # Reports are materialized synchronously by POST /reports from this
+        # immutable snapshot. They are not handed to a worker actor.
         report = ReportSummary(
             report_id=run.run_id,
             report_type=request.report_type,
@@ -933,7 +929,7 @@ class RunService:
         record = self._store.update_result_summary(run_id, result_summary, merge=merge)
         return RunRecord.model_validate(record)
 
-    def complete_report_run(self, run_id: str, manifest: dict[str, object]) -> RunRecord:
+    def complete_report_run(self, run_id: str, manifest: dict[str, object]) -> None:
         """Publish one immutable artifact manifest and terminal status atomically."""
 
         if not verify_signed_manifest(manifest):
@@ -1023,7 +1019,6 @@ class RunService:
                         sealed_at=now,
                     )
                 )
-        return self.get_run(run_id)
 
     def replace_issues(
         self,

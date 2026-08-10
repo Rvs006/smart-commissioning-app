@@ -1213,36 +1213,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       intents: readonly ReportIntent[];
       reportTitle: string;
     }) => {
-      const settled = await Promise.allSettled(
-        intents.map((intent) =>
-          createReport({
-            context: { client: apiClient },
-            format: intent.format,
-            reportTitle: title,
-            reportType: intent.reportType,
-            sourceRunIds: [intent.runId],
-            udmiReportVariant: intent.udmiReportVariant,
-            udmiScope: intent.udmiScope,
-            workspace: workspaceRef,
-          }),
-        ),
-      );
       const reports: ReportSummary[] = [];
       const failedFormats: ReportFormat[] = [];
-      settled.forEach((outcome, index) => {
-        if (outcome.status === "fulfilled") {
-          reports.push(outcome.value);
-        } else {
-          failedFormats.push(intents[index].format);
+      let firstFailure: unknown;
+      for (const intent of intents) {
+        try {
+          reports.push(
+            await createReport({
+              context: { client: apiClient },
+              format: intent.format,
+              reportTitle: title,
+              reportType: intent.reportType,
+              sourceRunIds: [intent.runId],
+              udmiReportVariant: intent.udmiReportVariant,
+              udmiScope: intent.udmiScope,
+              workspace: workspaceRef,
+            }),
+          );
+        } catch (error) {
+          firstFailure ??= error;
+          failedFormats.push(intent.format);
         }
-      });
+      }
       if (reports.length === 0) {
-        const firstFailure = settled.find(
-          (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected",
-        );
-        throw firstFailure?.reason instanceof Error
-          ? firstFailure.reason
-          : new Error("Report generation failed.");
+        throw firstFailure instanceof Error ? firstFailure : new Error("Report generation failed.");
       }
       return { failedFormats, reports, requestedCount: intents.length };
     },

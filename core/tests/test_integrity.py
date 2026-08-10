@@ -8,8 +8,12 @@ key persistence (create-once, 0600), and public-key export/fingerprint.
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event, Lock
+from unittest.mock import patch
 
+import smart_commissioning_core.integrity as integrity_module
 from smart_commissioning_core.integrity import (
     SigningKey,
     cryptography_available,
@@ -94,6 +98,101 @@ class KeyPersistenceTests(unittest.TestCase):
         # The same artifact, signed by either handle, verifies under the key.
         data = b"persisted-key-data"
         self.assertTrue(verify_bytes(data, second.sign(data), first.public_key_bytes()))
+
+    def test_initial_private_pem_preserves_an_existing_identity(self) -> None:
+        existing = SigningKey.generate()
+
+        migrated = SigningKey.load_or_create(
+            self.key_path,
+            initial_private_pem=existing.private_pem_bytes(),
+        )
+
+        self.assertEqual(migrated.public_key_bytes(), existing.public_key_bytes())
+        self.assertEqual(
+            SigningKey.load_or_create(self.key_path).public_key_bytes(),
+            existing.public_key_bytes(),
+        )
+
+    def test_concurrent_first_use_returns_one_persisted_identity(self) -> None:
+        worker_count = 8
+        ready_to_write = Barrier(worker_count)
+        original_write = integrity_module._write_private_file
+
+        def synchronized_write(path: Path, content: bytes) -> bool:
+            ready_to_write.wait(timeout=5)
+            return original_write(path, content)
+
+        with patch.object(integrity_module, "_write_private_file", side_effect=synchronized_write):
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                keys = list(
+                    executor.map(
+                        lambda _index: SigningKey.load_or_create(self.key_path),
+                        range(worker_count),
+                    )
+                )
+
+        public_keys = {key.public_key_bytes() for key in keys}
+        self.assertEqual(len(public_keys), 1)
+        persisted = SigningKey.load_or_create(self.key_path)
+        self.assertEqual(persisted.public_key_bytes(), next(iter(public_keys)))
+        self.assertEqual(
+            {path.name for path in self.key_path.parent.iterdir()},
+            {self.key_path.name},
+        )
+
+    def test_invalid_persisted_key_is_not_replaced(self) -> None:
+        self.key_path.parent.mkdir(parents=True)
+        self.key_path.write_bytes(b"not-a-private-key")
+
+        with self.assertRaises(ValueError):
+            SigningKey.load_or_create(self.key_path)
+
+        self.assertEqual(self.key_path.read_bytes(), b"not-a-private-key")
+
+    def test_key_path_is_published_only_after_complete_write(self) -> None:
+        first_publish_ready = Event()
+        release_first_publish = Event()
+        call_lock = Lock()
+        link_calls = 0
+        original_link = integrity_module.os.link
+
+        def delayed_first_link(source: Path, target: Path) -> None:
+            nonlocal link_calls
+            with call_lock:
+                call_number = link_calls
+                link_calls += 1
+            if call_number == 0:
+                first_publish_ready.set()
+                self.assertTrue(release_first_publish.wait(timeout=5))
+            original_link(source, target)
+
+        with patch.object(integrity_module.os, "link", side_effect=delayed_first_link):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(SigningKey.load_or_create, self.key_path)
+                self.assertTrue(first_publish_ready.wait(timeout=5))
+                self.assertFalse(self.key_path.exists())
+                second = executor.submit(SigningKey.load_or_create, self.key_path)
+                release_first_publish.set()
+                keys = [first.result(timeout=5), second.result(timeout=5)]
+
+        self.assertEqual(len({key.public_key_bytes() for key in keys}), 1)
+
+    def test_link_failure_removes_the_temporary_key(self) -> None:
+        with (
+            patch.object(integrity_module.os, "link", side_effect=OSError("link failed")),
+            self.assertRaisesRegex(OSError, "link failed"),
+        ):
+            SigningKey.load_or_create(self.key_path)
+
+        self.assertFalse(self.key_path.exists())
+        self.assertEqual(list(self.key_path.parent.iterdir()), [])
+
+    def test_cleanup_failure_does_not_overturn_a_published_key(self) -> None:
+        with patch.object(Path, "unlink", side_effect=PermissionError("cleanup denied")):
+            published = SigningKey.load_or_create(self.key_path)
+
+        persisted = SigningKey.load_or_create(self.key_path)
+        self.assertEqual(published.public_key_bytes(), persisted.public_key_bytes())
 
     def test_persisted_key_file_is_owner_only(self) -> None:
         SigningKey.load_or_create(self.key_path)
