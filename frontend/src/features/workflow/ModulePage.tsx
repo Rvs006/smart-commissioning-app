@@ -2548,12 +2548,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (visibleResultRows.length === 0) {
       return;
     }
-    if (
-      !visibleResultRows.some(({ row }) => resultIdentity(module.route, row) === selectedResultId)
-    ) {
-      setSelectedResultId(resultIdentity(module.route, visibleResultRows[0].row));
-    }
-  }, [module.route, selectedResultId, visibleResultRows]);
+    const visibleResultIds = new Set(
+      visibleResultRows.map(({ row }) => resultIdentity(module.route, row)),
+    );
+    const firstVisibleResultId = resultIdentity(module.route, visibleResultRows[0].row);
+    setSelectedResultId((current) =>
+      current !== null && visibleResultIds.has(current) ? current : firstVisibleResultId,
+    );
+  }, [module.route, visibleResultRows]);
 
   // The structured DiscoveredTopic record for the selected MQTT row, matched by
   // topic (topics are distinct per run by aggregation construction). Yields the

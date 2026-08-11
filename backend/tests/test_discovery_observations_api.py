@@ -372,13 +372,65 @@ class DiscoveryObservationApiTests(ApiTestCase):
         self.assertFalse(body["observations_pruned"])
         self.assertFalse(body["observations_quarantined"])
 
-    def test_pruned_terminal_history_crosses_to_sealed_results_without_looping(self) -> None:
+    def test_retention_commit_during_page_read_fails_closed(self) -> None:
+        from unittest.mock import patch
+
+        from app.api.routes import discovery as discovery_routes
+
+        self._append(
+            version=1,
+            event_key="host-25-retention-race",
+            name="AHU-25",
+        )
+        outcome = self.lifecycle.finalize_discovery_run(
+            self.run_id,
+            self.lease.owner_token,
+            self.lease.attempt,
+            {
+                "status": "succeeded",
+                "stage": "engine_complete",
+                "summary": {"targets": 1},
+            },
+        )
+        self.assertTrue(outcome.applied)
+        cutoff_before = self.lifecycle.get_discovery_observation_cutoff(
+            self.run_id,
+            self.lease.attempt,
+            project_id="demo-project",
+            site_id="demo-site",
+        )
+        cutoff_after = cutoff_before.model_copy(
+            update={"observation_count": 0, "terminal_cursor": 0}
+        )
+
+        with patch.object(
+            discovery_routes.lifecycle_repository,
+            "get_discovery_observation_cutoff",
+            side_effect=(cutoff_before, cutoff_after),
+        ):
+            response = self.client.get(
+                f"/api/v1/discovery/runs/{self.run_id}/observations",
+                params={"after": 0},
+            )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "detail": (
+                    "Stored discovery observation evidence failed integrity "
+                    "verification."
+                )
+            },
+        )
+
+    def test_manual_terminal_history_deletion_fails_closed_as_integrity_error(self) -> None:
         from app.core.db import get_engine
         from smart_commissioning_core.db.engine import session_factory
         from smart_commissioning_core.db.models import RunDiscoveryObservation
         from sqlalchemy import delete
 
-        terminal_cursor = self._append(
+        self._append(
             version=1,
             event_key="host-25-retained-until-expiry",
             name="AHU-25",
@@ -396,6 +448,63 @@ class DiscoveryObservationApiTests(ApiTestCase):
         self.assertTrue(outcome.applied)
         with session_factory(get_engine()).begin() as session:
             session.execute(delete(RunDiscoveryObservation).where(RunDiscoveryObservation.run_id == self.run_id))
+
+        response = self.client.get(
+            f"/api/v1/discovery/runs/{self.run_id}/observations",
+            params={"after": 0},
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json(),
+            {
+                "detail": (
+                    "Stored discovery observation evidence failed integrity "
+                    "verification."
+                )
+            },
+        )
+
+    def test_audited_retention_reports_pruned_terminal_history(self) -> None:
+        from app.core.db import get_engine
+        from app.services.retention_service import ObservationRetentionService
+        from smart_commissioning_core.db.engine import session_factory
+        from smart_commissioning_core.db.models import RunSeal
+
+        terminal_cursor = self._append(
+            version=1,
+            event_key="host-25-audited-expiry",
+            name="AHU-25",
+        )
+        outcome = self.lifecycle.finalize_discovery_run(
+            self.run_id,
+            self.lease.owner_token,
+            self.lease.attempt,
+            {
+                "status": "succeeded",
+                "stage": "engine_complete",
+                "summary": {"targets": 1},
+            },
+        )
+        self.assertTrue(outcome.applied)
+        with session_factory(get_engine())() as session:
+            sealed_at = session.get(RunSeal, self.run_id).sealed_at
+        retention = ObservationRetentionService(get_engine())
+        preview = retention.preview(
+            project_id="demo-project",
+            site_id="demo-site",
+            keep_days=30,
+            batch_limit=100,
+            actor="retention-test",
+            now=sealed_at + timedelta(days=31),
+        )
+        applied = retention.apply(
+            job_id=str(preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="retention-test",
+            now=sealed_at + timedelta(days=31),
+        )
+        self.assertEqual(applied["deleted_this_batch"], 1)
 
         response = self.client.get(
             f"/api/v1/discovery/runs/{self.run_id}/observations",

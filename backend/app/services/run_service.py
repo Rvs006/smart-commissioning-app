@@ -1138,6 +1138,7 @@ class RunService:
             "status": run.status,
             "terminal_cursor": validated.terminal_cursor,
             "observation_count": validated.observation_count,
+            "observation_stream_sha256": validated.observation_stream_sha256,
             "attempt": validated.attempt,
             "observations_quarantined": False,
         }

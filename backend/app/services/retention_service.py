@@ -60,9 +60,10 @@ from smart_commissioning_core.sealed_run_integrity import (
     SealedRunIntegrityError,
     verify_sealed_run,
 )
-from sqlalchemy import and_, delete, exists, func, select, text
+from sqlalchemy import and_, delete, exists, func, or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class _CandidateBinding:
     observation_count: int
     observation_stream_sha256: str
     verified_at: datetime | None
+    deleted_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +110,7 @@ class _CandidateVerificationProof:
     result_binding_sha256: str
     seal_binding_sha256: str
     observation_count: int
+    prior_attested_deleted_count: int
     terminal_cursor: int
     observation_stream_sha256: str
 
@@ -375,6 +378,7 @@ def _candidate_binding(candidate: ObservationRetentionCandidate) -> _CandidateBi
         observation_count=int(candidate.observation_count),
         observation_stream_sha256=candidate.observation_stream_sha256,
         verified_at=(_utc(candidate.verified_at) if candidate.verified_at is not None else None),
+        deleted_count=int(candidate.deleted_count),
     )
 
 
@@ -648,29 +652,43 @@ class ObservationRetentionService:
                         raise ObservationRetentionConflictError(
                             "Sealed discovery observation evidence does not match its run."
                         )
-                    candidates.append(
-                        ObservationRetentionCandidate(
-                            job_id=job_id,
+                    candidate = ObservationRetentionCandidate(
+                        job_id=job_id,
+                        run_id=run.id,
+                        project_id=run.project_id,
+                        site_id=run.site_id,
+                        attempt=run.attempt,
+                        terminal_status=run.status,
+                        context_sha256=context.context_sha256,
+                        result_sha256=result.result_sha256,
+                        seal_sha256=_seal_sha256(
                             run_id=run.id,
-                            project_id=run.project_id,
-                            site_id=run.site_id,
-                            attempt=run.attempt,
-                            terminal_status=run.status,
-                            context_sha256=context.context_sha256,
-                            result_sha256=result.result_sha256,
-                            seal_sha256=_seal_sha256(
-                                run_id=run.id,
-                                terminal_status=seal.terminal_status,
-                                context_sha256=seal.context_sha256,
-                                result_sha256=seal.result_sha256,
-                                sealed_at=seal.sealed_at,
-                            ),
+                            terminal_status=seal.terminal_status,
+                            context_sha256=seal.context_sha256,
+                            result_sha256=seal.result_sha256,
                             sealed_at=seal.sealed_at,
-                            terminal_cursor=evidence.terminal_cursor,
-                            observation_count=evidence.observation_count,
-                            observation_stream_sha256=evidence.observation_stream_sha256,
-                        )
+                        ),
+                        sealed_at=seal.sealed_at,
+                        terminal_cursor=evidence.terminal_cursor,
+                        observation_count=evidence.observation_count,
+                        observation_stream_sha256=evidence.observation_stream_sha256,
+                        deleted_count=0,
                     )
+                    prior_attestations = self._attested_candidates_for_binding(
+                        session,
+                        _candidate_binding(candidate),
+                    )
+                    prior_deleted_count = sum(
+                        int(attestation.deleted_count)
+                        for attestation in prior_attestations
+                    )
+                    if prior_deleted_count > int(evidence.observation_count):
+                        raise ObservationRetentionConflictError(
+                            "Observation retention deletion audit failed integrity verification."
+                        )
+                    if prior_deleted_count == int(evidence.observation_count):
+                        continue
+                    candidates.append(candidate)
 
                 job = ObservationRetentionJob(
                     job_id=job_id,
@@ -772,9 +790,135 @@ class ObservationRetentionService:
                 "Frozen retention candidate manifest failed integrity verification."
             )
 
-    @staticmethod
-    def _verify_physical_observation_count(session, job: ObservationRetentionJob) -> None:  # noqa: ANN001
+    def _verify_attested_candidate_jobs(
+        self,
+        session,  # noqa: ANN001
+        candidates: Sequence[ObservationRetentionCandidate],
+    ) -> None:
+        """Verify every retention job supplying the candidate attestations."""
+
+        job_ids = sorted({candidate.job_id for candidate in candidates})
+        if not job_ids:
+            return
+        jobs = list(
+            session.scalars(
+                select(ObservationRetentionJob)
+                .where(ObservationRetentionJob.job_id.in_(job_ids))
+                .order_by(ObservationRetentionJob.job_id)
+            ).all()
+        )
+        if len(jobs) != len(job_ids):
+            raise ObservationRetentionConflictError(
+                "Observation retention deletion audit failed integrity verification."
+            )
+        candidates_by_job_id: dict[str, list[ObservationRetentionCandidate]] = {
+            job_id: [] for job_id in job_ids
+        }
+        for candidate in session.scalars(
+            select(ObservationRetentionCandidate)
+            .where(ObservationRetentionCandidate.job_id.in_(job_ids))
+            .order_by(
+                ObservationRetentionCandidate.job_id,
+                ObservationRetentionCandidate.run_id,
+            )
+        ):
+            candidates_by_job_id[candidate.job_id].append(candidate)
+        for attested_job in jobs:
+            self._verify_candidate_manifest(
+                attested_job,
+                candidates_by_job_id[attested_job.job_id],
+            )
+            self._verify_deletion_audit_conservation(session, attested_job)
+
+    def _attested_candidates_for_binding(
+        self,
+        session,  # noqa: ANN001
+        candidate: _CandidateBinding,
+    ) -> list[ObservationRetentionCandidate]:
+        matching_candidates = list(
+            session.scalars(
+                select(ObservationRetentionCandidate)
+                .where(
+                    ObservationRetentionCandidate.run_id == candidate.run_id,
+                    ObservationRetentionCandidate.project_id == candidate.project_id,
+                    ObservationRetentionCandidate.site_id == candidate.site_id,
+                    ObservationRetentionCandidate.attempt == candidate.attempt,
+                    ObservationRetentionCandidate.terminal_status
+                    == candidate.terminal_status,
+                    ObservationRetentionCandidate.context_sha256
+                    == candidate.context_sha256,
+                    ObservationRetentionCandidate.result_sha256
+                    == candidate.result_sha256,
+                    ObservationRetentionCandidate.seal_sha256
+                    == candidate.seal_sha256,
+                    ObservationRetentionCandidate.sealed_at == candidate.sealed_at,
+                    ObservationRetentionCandidate.terminal_cursor
+                    == candidate.terminal_cursor,
+                    ObservationRetentionCandidate.observation_count
+                    == candidate.observation_count,
+                    ObservationRetentionCandidate.observation_stream_sha256
+                    == candidate.observation_stream_sha256,
+                    ObservationRetentionCandidate.verified_at.is_not(None),
+                )
+                .order_by(ObservationRetentionCandidate.job_id)
+            ).all()
+        )
+        self._verify_attested_candidate_jobs(session, matching_candidates)
+        return matching_candidates
+
+    def _verify_physical_observation_count(
+        self,
+        session,  # noqa: ANN001
+        job: ObservationRetentionJob,
+    ) -> None:
         """Check the whole frozen row count during query-only preflight."""
+
+        current_candidate = aliased(ObservationRetentionCandidate)
+        attested_candidate = aliased(ObservationRetentionCandidate)
+        candidate_pairs = session.execute(
+            select(current_candidate, attested_candidate)
+            .select_from(current_candidate)
+            .outerjoin(
+                attested_candidate,
+                and_(
+                    attested_candidate.run_id == current_candidate.run_id,
+                    attested_candidate.project_id == current_candidate.project_id,
+                    attested_candidate.site_id == current_candidate.site_id,
+                    attested_candidate.attempt == current_candidate.attempt,
+                    attested_candidate.terminal_status
+                    == current_candidate.terminal_status,
+                    attested_candidate.context_sha256
+                    == current_candidate.context_sha256,
+                    attested_candidate.result_sha256
+                    == current_candidate.result_sha256,
+                    attested_candidate.seal_sha256 == current_candidate.seal_sha256,
+                    attested_candidate.sealed_at == current_candidate.sealed_at,
+                    attested_candidate.terminal_cursor
+                    == current_candidate.terminal_cursor,
+                    attested_candidate.observation_count
+                    == current_candidate.observation_count,
+                    attested_candidate.observation_stream_sha256
+                    == current_candidate.observation_stream_sha256,
+                    attested_candidate.verified_at.is_not(None),
+                ),
+            )
+            .where(current_candidate.job_id == job.job_id)
+        ).all()
+        expected_by_run_id: dict[str, int] = {}
+        attested_candidates: list[ObservationRetentionCandidate] = []
+        for candidate, attestation in candidate_pairs:
+            expected_by_run_id.setdefault(
+                candidate.run_id,
+                int(candidate.observation_count),
+            )
+            if attestation is not None:
+                expected_by_run_id[candidate.run_id] -= int(attestation.deleted_count)
+                attested_candidates.append(attestation)
+        self._verify_attested_candidate_jobs(session, attested_candidates)
+        if any(count < 0 for count in expected_by_run_id.values()):
+            raise ObservationRetentionConflictError(
+                "Observation retention deletion audit failed integrity verification."
+            )
 
         physical_observation_count = session.scalar(
             select(func.count())
@@ -788,10 +932,51 @@ class ObservationRetentionService:
                 ),
             )
         )
-        expected_observation_count = int(job.candidate_observation_count) - int(job.deleted_count)
+        expected_observation_count = sum(expected_by_run_id.values())
         if int(physical_observation_count or 0) != expected_observation_count:
             raise ObservationRetentionConflictError(
                 "Frozen retention observations changed outside an audited batch."
+            )
+
+    @staticmethod
+    def _verify_deletion_audit_conservation(session, job: ObservationRetentionJob) -> None:  # noqa: ANN001
+        """Require candidate, batch, and job deletion totals to agree exactly."""
+
+        invalid_candidate_count = int(
+            session.scalar(
+                select(func.count()).where(
+                    ObservationRetentionCandidate.job_id == job.job_id,
+                    or_(
+                        ObservationRetentionCandidate.deleted_count < 0,
+                        ObservationRetentionCandidate.deleted_count
+                        > ObservationRetentionCandidate.observation_count,
+                    ),
+                )
+            )
+            or 0
+        )
+        candidate_deleted_count = int(
+            session.scalar(
+                select(func.coalesce(func.sum(ObservationRetentionCandidate.deleted_count), 0)).where(
+                    ObservationRetentionCandidate.job_id == job.job_id
+                )
+            )
+            or 0
+        )
+        batch_count, batch_deleted_count = session.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(ObservationRetentionBatch.deleted_count), 0),
+            ).where(ObservationRetentionBatch.job_id == job.job_id)
+        ).one()
+        if (
+            invalid_candidate_count != 0
+            or candidate_deleted_count != int(job.deleted_count)
+            or int(batch_deleted_count) != int(job.deleted_count)
+            or int(batch_count) != int(job.batch_count)
+        ):
+            raise ObservationRetentionConflictError(
+                "Observation retention deletion audit failed integrity verification."
             )
 
     @staticmethod
@@ -932,6 +1117,13 @@ class ObservationRetentionService:
                     .order_by(RunDiscoveryObservation.id)
                 ).all()
             ]
+            prior_attestations = self._attested_candidates_for_binding(
+                session,
+                candidate,
+            )
+            prior_attested_deleted_count = sum(
+                int(attestation.deleted_count) for attestation in prior_attestations
+            )
 
         self._verify_frozen_bindings(
             candidate=candidate,
@@ -975,11 +1167,18 @@ class ObservationRetentionService:
             )
             for row in observation_rows
         ]
+        expected_remaining_count = (
+            candidate.observation_count - prior_attested_deleted_count
+        )
+        if expected_remaining_count < 0:
+            raise ObservationRetentionConflictError(
+                "Observation retention deletion audit failed integrity verification."
+            )
         try:
             fold = fold_discovery_observations(
                 observations,
                 terminal_cursor=candidate.terminal_cursor,
-                expected_count=candidate.observation_count,
+                expected_count=expected_remaining_count,
                 run_id=candidate.run_id,
                 attempt=candidate.attempt,
             )
@@ -987,7 +1186,10 @@ class ObservationRetentionService:
             raise ObservationRetentionConflictError(
                 "Frozen retention candidate observation prefix failed integrity verification."
             ) from error
-        if fold.observation_stream_sha256 != candidate.observation_stream_sha256:
+        if (
+            prior_attested_deleted_count == 0
+            and fold.observation_stream_sha256 != candidate.observation_stream_sha256
+        ):
             raise ObservationRetentionConflictError("Frozen retention candidate observation stream digest changed.")
         return _CandidateVerificationProof(
             job_id=candidate.job_id,
@@ -1000,8 +1202,9 @@ class ObservationRetentionService:
             result_binding_sha256=_binding_sha256(result_payload),
             seal_binding_sha256=_binding_sha256(seal_payload),
             observation_count=len(observations),
+            prior_attested_deleted_count=prior_attested_deleted_count,
             terminal_cursor=fold.terminal_cursor,
-            observation_stream_sha256=fold.observation_stream_sha256,
+            observation_stream_sha256=candidate.observation_stream_sha256,
         )
 
     def _prepare_apply_verification(
@@ -1015,6 +1218,7 @@ class ObservationRetentionService:
                 raise ObservationRetentionNotFoundError("Observation retention job not found.")
             self._require_active_job(job)
             self._verify_candidate_summary(session, job)
+            self._verify_deletion_audit_conservation(session, job)
             self._verify_physical_observation_count(session, job)
             window_rows = tuple(
                 (int(row_id), str(run_id))
@@ -1114,6 +1318,7 @@ class ObservationRetentionService:
                 )
 
             self._verify_candidate_summary(session, job)
+            self._verify_deletion_audit_conservation(session, job)
             run_ids = [candidate.run_id for candidate in verification_plan.candidate_bindings]
             candidates = (
                 list(
@@ -1208,7 +1413,9 @@ class ObservationRetentionService:
                     and proof.result_binding_sha256 == _binding_sha256(result_payload)
                     and proof.seal_binding_sha256 == _binding_sha256(seal_payload)
                     and proof.observation_count == current_count
-                    and proof.observation_count == int(candidate.observation_count)
+                    and proof.observation_count
+                    + proof.prior_attested_deleted_count
+                    == int(candidate.observation_count)
                     and proof.terminal_cursor == current_cursor
                     and proof.terminal_cursor == int(candidate.terminal_cursor)
                     and proof.observation_stream_sha256 == candidate.observation_stream_sha256
@@ -1265,6 +1472,10 @@ class ObservationRetentionService:
             attempted_this_batch = len(scanned)
             scanned_ids = [int(row_id) for row_id, _run_id in scanned]
             eligible_ids = [int(row_id) for row_id, run_id in scanned if run_id not in blocked_run_ids]
+            deleted_by_run_id: dict[str, int] = {}
+            for _row_id, run_id in scanned:
+                if run_id not in blocked_run_ids:
+                    deleted_by_run_id[run_id] = deleted_by_run_id.get(run_id, 0) + 1
             if eligible_ids:
                 deletion = session.execute(
                     delete(RunDiscoveryObservation).where(RunDiscoveryObservation.id.in_(eligible_ids))
@@ -1278,6 +1489,9 @@ class ObservationRetentionService:
                     raise ObservationRetentionConflictError(
                         "Observation rows changed while the retention batch was locked."
                     )
+            candidates_by_run_id = {candidate.run_id: candidate for candidate in candidates}
+            for run_id, deleted_count in deleted_by_run_id.items():
+                candidates_by_run_id[run_id].deleted_count += deleted_count
             if scanned_ids:
                 job.next_cursor = max(scanned_ids)
             elif job.next_cursor < job.high_water_observation_id:
@@ -1306,6 +1520,7 @@ class ObservationRetentionService:
                 )
             )
             session.flush()
+            self._verify_deletion_audit_conservation(session, job)
             result = _job_to_dict(job)
         return {
             **result,
@@ -1320,6 +1535,42 @@ class ObservationRetentionService:
             if job is None:
                 raise ObservationRetentionNotFoundError("Observation retention job not found.")
             return _job_to_dict(job)
+
+    def get_attested_observation_deletion_count(
+        self,
+        *,
+        run_id: str,
+        project_id: str,
+        site_id: str,
+        attempt: int,
+        terminal_cursor: int,
+        observation_count: int,
+        observation_stream_sha256: str,
+    ) -> int:
+        """Return deletions bound to the exact sealed run evidence, or zero."""
+
+        with self._query_session_factory() as session:
+            matching_candidates = list(
+                session.scalars(
+                    select(ObservationRetentionCandidate)
+                    .where(
+                        ObservationRetentionCandidate.run_id == run_id,
+                        ObservationRetentionCandidate.project_id == project_id,
+                        ObservationRetentionCandidate.site_id == site_id,
+                        ObservationRetentionCandidate.attempt == attempt,
+                        ObservationRetentionCandidate.terminal_cursor == terminal_cursor,
+                        ObservationRetentionCandidate.observation_count == observation_count,
+                        ObservationRetentionCandidate.observation_stream_sha256
+                        == observation_stream_sha256,
+                        ObservationRetentionCandidate.verified_at.is_not(None),
+                    )
+                    .order_by(ObservationRetentionCandidate.job_id)
+                ).all()
+            )
+            if not matching_candidates:
+                return 0
+            self._verify_attested_candidate_jobs(session, matching_candidates)
+            return sum(int(candidate.deleted_count) for candidate in matching_candidates)
 
     def get_active_job(
         self,

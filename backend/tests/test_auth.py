@@ -26,7 +26,7 @@ _API_KEY = "test-auth-secret-key"
 _NON_LOOPBACK = ("203.0.113.9", 51234)
 _LOOPBACK = ("127.0.0.1", 51234)
 
-# Any authenticated route works as a probe; /me is cheap (no DB writes).
+# Any authenticated route works as a probe; /me has no domain writes.
 _PROTECTED_PATH = "/api/v1/me"
 
 
@@ -111,6 +111,95 @@ class ApiKeyModeTests(_AuthClientTestCase):
         # unauthenticated clients: schema endpoints answer 404.
         for path in ("/openapi.json", "/docs", "/redoc"):
             self.assertEqual(self.client.get(path).status_code, 404, path)
+
+
+class NamedUserLastUsedTests(_AuthClientTestCase):
+    """Named-user activity is recorded without adding writes to hot read paths."""
+
+    auth_env = {"AUTH_MODE": "api_key", "API_KEY": _API_KEY}
+    client_headers = {"X-API-Key": _API_KEY}
+
+    def _create_user(self, role: str = "viewer") -> dict:
+        response = self.client.post(
+            "/api/v1/users",
+            json={"username": f"last-used-{uuid.uuid4().hex[:8]}", "role": role},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()
+
+    def _listed_user(self, user_id: str) -> dict:
+        response = self.client.get("/api/v1/users")
+        self.assertEqual(response.status_code, 200, response.text)
+        return next(user for user in response.json() if user["id"] == user_id)
+
+    def test_first_named_viewer_get_records_last_used_from_a_query_only_lookup(self) -> None:
+        from app.core.db import get_engine
+        from sqlalchemy import event
+
+        created = self._create_user()
+        user_id = created["user"]["id"]
+        self.assertIsNone(created["user"]["last_used_at"])
+        statements: list[str] = []
+
+        def record_statement(_conn, _cursor, statement, _parameters, _context, _many) -> None:
+            statements.append(statement.strip().upper())
+
+        engine = get_engine()
+        event.listen(engine, "before_cursor_execute", record_statement)
+        try:
+            response = self.client.get(
+                "/api/v1/me",
+                headers={"X-API-Key": created["api_key"]},
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", record_statement)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["source"], "user_key")
+        self.assertIsNotNone(self._listed_user(user_id)["last_used_at"])
+        self.assertIn("PRAGMA QUERY_ONLY=ON", statements)
+        self.assertTrue(
+            any(statement.startswith("UPDATE USERS") for statement in statements),
+            statements,
+        )
+
+    def test_high_frequency_named_user_reads_do_not_reserve_the_sqlite_writer(self) -> None:
+        from app.core.db import get_engine
+        from sqlalchemy import event
+
+        created = self._create_user(role="admin")
+        user_id = created["user"]["id"]
+        headers = {"X-API-Key": created["api_key"]}
+        paths = (
+            "/api/v1/runs/run_missing_last_used/events",
+            "/api/v1/discovery/runs/run_missing_last_used/observations",
+        )
+        engine = get_engine()
+        statements: list[str] = []
+
+        def record_statement(
+            _conn, _cursor, statement, _parameters, _context, _many
+        ) -> None:
+            statements.append(statement.strip().upper())
+
+        for path in paths:
+            with self.subTest(path=path):
+                statements.clear()
+                event.listen(engine, "before_cursor_execute", record_statement)
+                try:
+                    response = self.client.get(path, headers=headers)
+                finally:
+                    event.remove(engine, "before_cursor_execute", record_statement)
+
+                self.assertEqual(response.status_code, 404, response.text)
+                self.assertIn("PRAGMA QUERY_ONLY=ON", statements)
+                self.assertFalse(
+                    any(statement.startswith("UPDATE USERS") for statement in statements),
+                    statements,
+                )
+                self.assertNotIn("BEGIN IMMEDIATE", statements)
+
+        self.assertIsNone(self._listed_user(user_id)["last_used_at"])
 
 
 class ApiKeyModeFailClosedTests(_AuthClientTestCase):

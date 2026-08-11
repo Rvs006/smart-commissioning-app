@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from alembic import command
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from smart_commissioning_core.db.base import Base
 from smart_commissioning_core.db.db_run_store import DbRunStore
 from smart_commissioning_core.db.engine import create_engine_from_url, session_factory
@@ -494,6 +496,55 @@ class RetentionSchemaTests(unittest.TestCase):
                 1,
             )
 
+    def test_candidate_deleted_count_defaults_to_zero_and_is_bounded_by_evidence(
+        self,
+    ) -> None:
+        job = ObservationRetentionJob(**self._job_values())
+        candidate_values = {
+            "job_id": job.job_id,
+            "run_id": self.run_id,
+            "project_id": self.project_id,
+            "site_id": self.site_id,
+            "attempt": 1,
+            "terminal_status": "succeeded",
+            "context_sha256": "a" * 64,
+            "result_sha256": "b" * 64,
+            "seal_sha256": "c" * 64,
+            "sealed_at": self.now,
+            "terminal_cursor": 10,
+            "observation_count": 2,
+            "observation_stream_sha256": "d" * 64,
+        }
+        with session_factory(self.engine).begin() as session:
+            session.add(job)
+            session.flush()
+            session.add(ObservationRetentionCandidate(**candidate_values))
+
+        with session_factory(self.engine)() as session:
+            candidate = session.get(
+                ObservationRetentionCandidate,
+                (job.job_id, self.run_id),
+            )
+            self.assertEqual(candidate.deleted_count, 0)
+
+        for run_id, deleted_count in (
+            ("negative-deleted-count", -1),
+            ("excess-deleted-count", 3),
+        ):
+            with self.subTest(deleted_count=deleted_count), self.assertRaises(
+                IntegrityError
+            ):
+                with session_factory(self.engine).begin() as session:
+                    session.add(
+                        ObservationRetentionCandidate(
+                            **{
+                                **candidate_values,
+                                "run_id": run_id,
+                                "deleted_count": deleted_count,
+                            }
+                        )
+                    )
+
     def test_hold_indexes_support_active_scope_and_run_queries(self) -> None:
         indexes = {
             index["name"]: tuple(index["column_names"])
@@ -608,6 +659,230 @@ class RetentionSchemaTests(unittest.TestCase):
 
 
 class RunDiscoveryObservationMigrationTests(unittest.TestCase):
+    def test_fresh_head_adds_candidate_attestations_without_metadata_drift(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            url = f"sqlite:///{(Path(temp_dir) / 'attestations.db').as_posix()}"
+            upgrade_to_head(url)
+            engine = create_engine_from_url(url)
+            try:
+                inspector = inspect(engine)
+                columns = {
+                    column["name"]: column
+                    for column in inspector.get_columns(
+                        "observation_retention_candidates"
+                    )
+                }
+                self.assertIn("deleted_count", columns)
+                self.assertFalse(columns["deleted_count"]["nullable"])
+                checks = {
+                    constraint["name"]
+                    for constraint in inspector.get_check_constraints(
+                        "observation_retention_candidates"
+                    )
+                }
+                self.assertIn(
+                    "ck_observation_retention_candidates_"
+                    "ck_observation_retention_candidates_deleted_count",
+                    checks,
+                )
+                with engine.connect() as connection:
+                    context = MigrationContext.configure(connection)
+                    self.assertEqual(
+                        compare_metadata(context, Base.metadata),
+                        [],
+                    )
+            finally:
+                engine.dispose()
+
+    def test_attestation_upgrade_refuses_historical_unattributed_deletions(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            url = f"sqlite:///{(Path(temp_dir) / 'pre-attestation-audit.db').as_posix()}"
+            command.upgrade(build_alembic_config(url), "f2a3b4c5d6e7")
+            engine = create_engine_from_url(url)
+            try:
+                DbRunStore(engine).create_run(
+                    project_id="project-pre-attestation",
+                    site_id="site-pre-attestation",
+                    job_type="ip_discovery",
+                )
+                now = datetime(2026, 8, 11, 12, 30, tzinfo=UTC)
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO observation_retention_jobs (
+                                job_id, project_id, site_id, keep_days,
+                                cutoff_sealed_at, high_water_observation_id,
+                                candidate_run_count, candidate_observation_count,
+                                candidate_manifest_sha256, next_cursor, batch_limit,
+                                status, requested_by, requested_at, confirmed_by,
+                                confirmed_at, deleted_count, batch_count, active_marker
+                            ) VALUES (
+                                :job_id, :project_id, :site_id, 30,
+                                :now, 1, 1, 1, :manifest_sha256, 1, 100,
+                                'running', 'migration-test', :now, 'migration-test',
+                                :now, 1, 1, 1
+                            )
+                            """
+                        ),
+                        {
+                            "job_id": "pre-attestation-job",
+                            "project_id": "project-pre-attestation",
+                            "site_id": "site-pre-attestation",
+                            "now": now,
+                            "manifest_sha256": "f" * 64,
+                        },
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO observation_retention_candidates (
+                                job_id, run_id, project_id, site_id, attempt,
+                                terminal_status, context_sha256, result_sha256,
+                                seal_sha256, sealed_at, terminal_cursor,
+                                observation_count, observation_stream_sha256,
+                                verified_at
+                            ) VALUES (
+                                :job_id, :run_id, :project_id, :site_id, 1,
+                                'succeeded', :context_sha256, :result_sha256,
+                                :seal_sha256, :now, 1, 1, :stream_sha256, :now
+                            )
+                            """
+                        ),
+                        {
+                            "job_id": "pre-attestation-job",
+                            "run_id": "run-pre-attestation",
+                            "project_id": "project-pre-attestation",
+                            "site_id": "site-pre-attestation",
+                            "context_sha256": "a" * 64,
+                            "result_sha256": "b" * 64,
+                            "seal_sha256": "c" * 64,
+                            "stream_sha256": "d" * 64,
+                            "now": now,
+                        },
+                    )
+                    connection.execute(
+                        text(
+                            """
+                            INSERT INTO observation_retention_batches (
+                                job_id, batch_number, actor, cursor_before,
+                                cursor_after, attempted_count, deleted_count,
+                                applied_at
+                            ) VALUES (
+                                :job_id, 1, 'migration-test', 0, 1, 1, 1, :now
+                            )
+                            """
+                        ),
+                        {"job_id": "pre-attestation-job", "now": now},
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(RuntimeError, "cannot be reconstructed"):
+                command.upgrade(build_alembic_config(url), "head")
+
+            engine = create_engine_from_url(url)
+            try:
+                inspector = inspect(engine)
+                columns = {
+                    column["name"]
+                    for column in inspector.get_columns(
+                        "observation_retention_candidates"
+                    )
+                }
+                self.assertNotIn("deleted_count", columns)
+                with engine.connect() as connection:
+                    revision = connection.scalar(
+                        text("SELECT version_num FROM alembic_version")
+                    )
+                self.assertEqual(revision, "f2a3b4c5d6e7")
+            finally:
+                engine.dispose()
+
+    def test_attestation_downgrade_refuses_positive_candidate_deletion_count(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            url = f"sqlite:///{(Path(temp_dir) / 'attestation-audit.db').as_posix()}"
+            upgrade_to_head(url)
+            engine = create_engine_from_url(url)
+            try:
+                run_id = DbRunStore(engine).create_run(
+                    project_id="project-attestation-downgrade",
+                    site_id="site-attestation-downgrade",
+                    job_type="ip_discovery",
+                )["run_id"]
+                now = datetime(2026, 8, 11, 13, 0, tzinfo=UTC)
+                with engine.begin() as connection:
+                    connection.execute(
+                        ObservationRetentionJob.__table__.insert().values(
+                            job_id="attestation-downgrade-job",
+                            project_id="project-attestation-downgrade",
+                            site_id="site-attestation-downgrade",
+                            keep_days=30,
+                            cutoff_sealed_at=now,
+                            high_water_observation_id=1,
+                            candidate_run_count=1,
+                            candidate_observation_count=1,
+                            candidate_manifest_sha256="f" * 64,
+                            next_cursor=1,
+                            batch_limit=10,
+                            status="complete",
+                            requested_by="migration-test",
+                            requested_at=now,
+                            deleted_count=1,
+                            batch_count=1,
+                            completed_at=now,
+                            active_marker=None,
+                        )
+                    )
+                    connection.execute(
+                        ObservationRetentionCandidate.__table__.insert().values(
+                            job_id="attestation-downgrade-job",
+                            run_id=run_id,
+                            project_id="project-attestation-downgrade",
+                            site_id="site-attestation-downgrade",
+                            attempt=1,
+                            terminal_status="succeeded",
+                            context_sha256="a" * 64,
+                            result_sha256="b" * 64,
+                            seal_sha256="c" * 64,
+                            sealed_at=now,
+                            terminal_cursor=1,
+                            observation_count=1,
+                            observation_stream_sha256="d" * 64,
+                            verified_at=now,
+                            deleted_count=1,
+                        )
+                    )
+                    connection.execute(
+                        ObservationRetentionBatch.__table__.insert().values(
+                            job_id="attestation-downgrade-job",
+                            batch_number=1,
+                            actor="migration-test",
+                            cursor_before=0,
+                            cursor_after=1,
+                            attempted_count=1,
+                            deleted_count=1,
+                            applied_at=now,
+                        )
+                    )
+            finally:
+                engine.dispose()
+
+            with self.assertRaisesRegex(RuntimeError, "attestation to be zero"):
+                command.downgrade(build_alembic_config(url), "f2a3b4c5d6e7")
+
+            engine = create_engine_from_url(url)
+            try:
+                with engine.connect() as connection:
+                    revision = connection.scalar(
+                        text("SELECT version_num FROM alembic_version")
+                    )
+                self.assertEqual(revision, "f3b4c5d6e7f8")
+            finally:
+                engine.dispose()
+
     def test_downgrade_refuses_nonempty_observation_table(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             url = f"sqlite:///{(Path(temp_dir) / 'observations.db').as_posix()}"

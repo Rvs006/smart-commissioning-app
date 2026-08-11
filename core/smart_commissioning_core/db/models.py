@@ -638,6 +638,9 @@ class ObservationRetentionCandidate(Base):
     observation_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
     observation_stream_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    deleted_count: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -685,6 +688,10 @@ class ObservationRetentionCandidate(Base):
         CheckConstraint(
             _lowercase_sha256_check("observation_stream_sha256"),
             name="ck_observation_retention_candidates_stream_sha256",
+        ),
+        CheckConstraint(
+            "deleted_count BETWEEN 0 AND observation_count",
+            name="ck_observation_retention_candidates_deleted_count",
         ),
         Index(
             "ix_observation_retention_candidates_job_cursor",

@@ -8,7 +8,7 @@ Import records mirror the imp_... summary/errors/accepted_rows JSON files
 written today by backend ImportService.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.engine import Engine
@@ -395,20 +395,47 @@ class ImportRepository:
         project_id: str | None = None,
         site_id: str | None = None,
         created_at: datetime | None = None,
+        monotonic_scope_created_at: bool = False,
     ) -> dict[str, object]:
-        record = ImportRecord(
-            import_id=import_id,
-            import_type=import_type,
-            project_id=project_id,
-            site_id=site_id,
-            original_filename=original_filename,
-            stored_file_path=stored_file_path,
-            summary=dict(summary),
-            accepted_rows=list(accepted_rows or []),
-            errors=list(errors or []),
-            created_at=created_at or datetime.now(UTC),
-        )
+        candidate_created_at = created_at or datetime.now(UTC)
         with self._session_factory.begin() as session:
+            effective_created_at = candidate_created_at
+            stored_summary = dict(summary)
+            if monotonic_scope_created_at:
+                bind = session.get_bind()
+                if bind.dialect.name == "postgresql":
+                    # SHARE ROW EXCLUSIVE conflicts with itself. Combined with
+                    # SQLite's BEGIN IMMEDIATE, this serializes the scoped max
+                    # read and insert without changing the historical create path.
+                    session.execute(
+                        text("LOCK TABLE import_records IN SHARE ROW EXCLUSIVE MODE")
+                    )
+                latest_created_at = session.scalar(
+                    select(func.max(ImportRecord.created_at)).where(
+                        ImportRecord.import_type == import_type,
+                        ImportRecord.project_id == project_id,
+                        ImportRecord.site_id == site_id,
+                    )
+                )
+                if (
+                    latest_created_at is not None
+                    and effective_created_at <= latest_created_at
+                ):
+                    effective_created_at = latest_created_at + timedelta(microseconds=1)
+                stored_summary["created_at"] = effective_created_at.isoformat()
+
+            record = ImportRecord(
+                import_id=import_id,
+                import_type=import_type,
+                project_id=project_id,
+                site_id=site_id,
+                original_filename=original_filename,
+                stored_file_path=stored_file_path,
+                summary=stored_summary,
+                accepted_rows=list(accepted_rows or []),
+                errors=list(errors or []),
+                created_at=effective_created_at,
+            )
             session.add(record)
             session.flush()
             return _import_to_dict(record)

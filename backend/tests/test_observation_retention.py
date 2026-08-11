@@ -390,6 +390,44 @@ class ObservationRetentionServiceTests(unittest.TestCase):
             self.assertIsNotNone(job.completed_at)
             self.assertIsNone(job.active_marker)
 
+    def test_fully_attested_run_is_excluded_from_a_later_retention_job(self) -> None:
+        self._seed_run("fully-retained", observation_count=1)
+        first_preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=10,
+            actor="first-preview",
+            now=_NOW,
+        )
+        first_apply = self.service.apply(
+            job_id=str(first_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="first-applier",
+            now=_NOW,
+        )
+        self.assertEqual(first_apply["deleted_count"], 1)
+        self.assertEqual(first_apply["status"], "complete")
+
+        second_preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=10,
+            actor="second-preview",
+            now=_NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(second_preview["candidate_run_count"], 0)
+        self.assertEqual(second_preview["candidate_count"], 0)
+        second_apply = self.service.apply(
+            job_id=str(second_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="second-applier",
+            now=_NOW + timedelta(minutes=1),
+        )
+        self.assertEqual(second_apply["deleted_count"], 0)
+        self.assertEqual(second_apply["status"], "complete")
+
     def test_apply_fails_closed_when_the_previewed_seal_changes(self) -> None:
         self._seed_run("tampered-seal", observation_count=2)
         preview = self.service.preview(
@@ -546,6 +584,39 @@ class ObservationRetentionServiceTests(unittest.TestCase):
         self.assertEqual([batch.attempted_count for batch in batches], [2, 1])
         self.assertEqual([batch.deleted_count for batch in batches], [2, 1])
         self.assertIsNotNone(candidate.verified_at)
+        self.assertEqual(candidate.deleted_count, 3)
+        self.assertEqual(
+            job.deleted_count,
+            candidate.deleted_count,
+        )
+        self.assertEqual(
+            job.deleted_count,
+            sum(batch.deleted_count for batch in batches),
+        )
+        self.assertEqual(
+            self.service.get_attested_observation_deletion_count(
+                run_id=candidate.run_id,
+                project_id=candidate.project_id,
+                site_id=candidate.site_id,
+                attempt=candidate.attempt,
+                terminal_cursor=candidate.terminal_cursor,
+                observation_count=candidate.observation_count,
+                observation_stream_sha256=candidate.observation_stream_sha256,
+            ),
+            3,
+        )
+        self.assertEqual(
+            self.service.get_attested_observation_deletion_count(
+                run_id=candidate.run_id,
+                project_id=candidate.project_id,
+                site_id=candidate.site_id,
+                attempt=candidate.attempt,
+                terminal_cursor=candidate.terminal_cursor,
+                observation_count=candidate.observation_count,
+                observation_stream_sha256="0" * 64,
+            ),
+            0,
+        )
 
     def test_apply_locks_the_job_before_sorted_candidate_runs(self) -> None:
         self._seed_run("lock-order-b", observation_count=1)
@@ -591,6 +662,44 @@ class ObservationRetentionServiceTests(unittest.TestCase):
         self.assertEqual(run_lock_index, 1)
         self.assertIn("ORDER BY runs.id", locked_sql[run_lock_index])
         self.assertIn("FOR UPDATE", locked_sql[run_lock_index])
+
+    def test_run_attestation_rejects_candidate_job_batch_total_drift(self) -> None:
+        self._seed_run("attestation-total-drift", observation_count=2)
+        preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=10,
+            actor="previewer",
+            now=_NOW,
+        )
+        self.service.apply(
+            job_id=str(preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="applier",
+            now=_NOW,
+        )
+        with self.factory.begin() as session:
+            candidate = session.get(
+                ObservationRetentionCandidate,
+                (str(preview["job_id"]), "attestation-total-drift"),
+            )
+            attestation = {
+                "run_id": candidate.run_id,
+                "project_id": candidate.project_id,
+                "site_id": candidate.site_id,
+                "attempt": candidate.attempt,
+                "terminal_cursor": candidate.terminal_cursor,
+                "observation_count": candidate.observation_count,
+                "observation_stream_sha256": candidate.observation_stream_sha256,
+            }
+            candidate.deleted_count = 1
+
+        with self.assertRaisesRegex(
+            ObservationRetentionConflictError,
+            "deletion audit failed integrity verification",
+        ):
+            self.service.get_attested_observation_deletion_count(**attestation)
 
     def test_apply_bounds_verification_and_run_locks_to_the_next_deletion_window(self) -> None:
         for run_id in ("window-a", "window-b", "window-c", "window-d"):
@@ -1309,6 +1418,153 @@ class ObservationRetentionHoldServiceTests(unittest.TestCase):
             include_released=True,
         )
         self.assertEqual(len(history), 1)
+
+    def test_held_candidate_attests_zero_and_a_later_job_attests_its_deletion(
+        self,
+    ) -> None:
+        self._seed_run("held-attestation", observation_count=2)
+        first_preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=10,
+            actor="previewer",
+            now=_NOW,
+        )
+        hold = self.service.place_hold(
+            run_id="held-attestation",
+            hold_type="legal",
+            reason="Preserve the first retention window.",
+            actor="legal-admin",
+            now=_NOW,
+        )
+        first_apply = self.service.apply(
+            job_id=str(first_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="retention-admin",
+            now=_NOW,
+        )
+        with self.factory() as session:
+            first_candidate = session.get(
+                ObservationRetentionCandidate,
+                (str(first_preview["job_id"]), "held-attestation"),
+            )
+            attestation = {
+                "run_id": first_candidate.run_id,
+                "project_id": first_candidate.project_id,
+                "site_id": first_candidate.site_id,
+                "attempt": first_candidate.attempt,
+                "terminal_cursor": first_candidate.terminal_cursor,
+                "observation_count": first_candidate.observation_count,
+                "observation_stream_sha256": first_candidate.observation_stream_sha256,
+            }
+
+        self.assertEqual(first_apply["deleted_count"], 0)
+        self.assertEqual(
+            self.service.get_attested_observation_deletion_count(**attestation),
+            0,
+        )
+
+        self.service.release_hold(
+            hold_id=str(hold["hold_id"]),
+            reason="Evidence preservation completed.",
+            actor="legal-admin",
+            now=_NOW + timedelta(minutes=1),
+        )
+        second_preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=10,
+            actor="previewer",
+            now=_NOW + timedelta(minutes=2),
+        )
+        second_apply = self.service.apply(
+            job_id=str(second_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="retention-admin",
+            now=_NOW + timedelta(minutes=2),
+        )
+
+        self.assertEqual(second_apply["deleted_count"], 2)
+        self.assertEqual(self._observation_count("held-attestation"), 0)
+        self.assertEqual(
+            self.service.get_attested_observation_deletion_count(**attestation),
+            2,
+        )
+        with self.factory() as session:
+            candidate_counts = list(
+                session.scalars(
+                    select(ObservationRetentionCandidate.deleted_count)
+                    .where(
+                        ObservationRetentionCandidate.run_id
+                        == "held-attestation"
+                    )
+                    .order_by(ObservationRetentionCandidate.job_id)
+                )
+            )
+        self.assertEqual(sorted(candidate_counts), [0, 2])
+
+    def test_later_job_accounts_for_an_audited_prefix_deleted_before_a_hold(
+        self,
+    ) -> None:
+        self._seed_run("partially-held-attestation", observation_count=2)
+        first_preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=1,
+            actor="previewer",
+            now=_NOW,
+        )
+        first_batch = self.service.apply(
+            job_id=str(first_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="retention-admin",
+            now=_NOW,
+        )
+        self.assertEqual(first_batch["deleted_this_batch"], 1)
+        hold = self.service.place_hold(
+            run_id="partially-held-attestation",
+            hold_type="legal",
+            reason="Preserve the remaining observation.",
+            actor="legal-admin",
+            now=_NOW + timedelta(seconds=1),
+        )
+        completed_under_hold = self.service.apply(
+            job_id=str(first_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="retention-admin",
+            now=_NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(completed_under_hold["status"], "complete")
+        self.assertEqual(completed_under_hold["deleted_count"], 1)
+        self.assertEqual(self._observation_count("partially-held-attestation"), 1)
+
+        self.service.release_hold(
+            hold_id=str(hold["hold_id"]),
+            reason="Preservation complete.",
+            actor="legal-admin",
+            now=_NOW + timedelta(minutes=1),
+        )
+        second_preview = self.service.preview(
+            project_id="project-a",
+            site_id="site-a",
+            keep_days=30,
+            batch_limit=10,
+            actor="previewer",
+            now=_NOW + timedelta(minutes=2),
+        )
+        second_apply = self.service.apply(
+            job_id=str(second_preview["job_id"]),
+            acknowledge="DELETE PROVISIONAL OBSERVATIONS",
+            actor="retention-admin",
+            now=_NOW + timedelta(minutes=2),
+        )
+
+        self.assertEqual(second_apply["deleted_count"], 1)
+        self.assertEqual(second_apply["status"], "complete")
+        self.assertEqual(self._observation_count("partially-held-attestation"), 0)
 
     def test_releasing_a_hold_after_preview_does_not_expand_frozen_membership(self) -> None:
         self._seed_run("held-at-preview", observation_count=2)

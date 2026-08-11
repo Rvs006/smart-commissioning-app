@@ -80,6 +80,10 @@ from app.services.engine_dispatch import (
 )
 from app.services.job_queue import JobQueueService
 from app.services.register_topics import expected_topic_filters
+from app.services.retention_service import (
+    ObservationRetentionConflictError,
+    ObservationRetentionService,
+)
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
 from app.services.scan_authorization_service import ScanAuthorizationService
@@ -89,6 +93,7 @@ service = RunService()
 queue_service = JobQueueService()
 config_service = ConfigurationService()
 lifecycle_repository = RunLifecycleRepository(service.engine)
+observation_retention_service = ObservationRetentionService(service.engine)
 
 # RBAC: reading discovery data is viewer+; creating/running a discovery job
 # (which can drive a real network scan) is engineer+. The separate scan
@@ -718,10 +723,40 @@ def get_discovery_observations(
     observations_quarantined = bool(
         terminal_marker is not None and terminal_marker.get("observations_quarantined") is True
     )
-    observations_pruned = bool(
-        terminal_marker is not None
-        and int(terminal_marker["observation_count"]) > cutoff.observation_count
-    )
+    observations_pruned = False
+    if terminal_marker is not None and not observations_quarantined:
+        missing_observation_count = int(terminal_marker["observation_count"]) - cutoff.observation_count
+        if missing_observation_count < 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored discovery observation evidence failed integrity verification.",
+            )
+        if missing_observation_count > 0:
+            try:
+                attested_deletion_count = (
+                    observation_retention_service.get_attested_observation_deletion_count(
+                        run_id=run_id,
+                        project_id=scoped.project_id,
+                        site_id=scoped.site_id,
+                        attempt=int(terminal_marker["attempt"]),
+                        terminal_cursor=int(terminal_marker["terminal_cursor"]),
+                        observation_count=int(terminal_marker["observation_count"]),
+                        observation_stream_sha256=str(
+                            terminal_marker["observation_stream_sha256"]
+                        ),
+                    )
+                )
+            except ObservationRetentionConflictError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored discovery observation evidence failed integrity verification.",
+                ) from error
+            if attested_deletion_count != missing_observation_count:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored discovery observation evidence failed integrity verification.",
+                )
+            observations_pruned = True
     latest_cursor = int(terminal_marker["terminal_cursor"]) if terminal_marker is not None else cutoff.terminal_cursor
     if after > latest_cursor:
         raise HTTPException(status_code=409, detail="Observation cursor is no longer valid.")
@@ -745,6 +780,18 @@ def get_discovery_observations(
             detail="Stored discovery observation evidence failed integrity verification.",
         ) from error
     observations = [DiscoveryObservationRecord.model_validate(item.model_dump(mode="json")) for item in requested_rows]
+    if terminal_marker is not None:
+        cutoff_after_page = lifecycle_repository.get_discovery_observation_cutoff(
+            run_id,
+            attempt,
+            project_id=scoped.project_id,
+            site_id=scoped.site_id,
+        )
+        if cutoff_after_page != cutoff:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored discovery observation evidence failed integrity verification.",
+            )
     next_cursor = observations[-1].cursor if observations else after
     response.headers["Cache-Control"] = "no-store"
     terminal = (

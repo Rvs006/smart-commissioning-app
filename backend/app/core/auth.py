@@ -5,7 +5,8 @@ stashes it on ``request.state.principal`` so routes and role checks can read who
 the caller is. Resolution order (require_auth):
 
   1. A presented X-API-Key / Bearer key whose SHA-256 hash matches an ACTIVE
-     user -> that user's principal (source="user_key"); last_used_at is touched.
+     user -> that user's principal (source="user_key"); last_used_at is touched
+     except on the two high-frequency query-only discovery read paths.
      An inactive user's key is rejected (401) — it never falls through to the
      shared key.
   2. Else the legacy shared ``settings.api_key`` (constant-time compare) -> a
@@ -52,6 +53,16 @@ logger = logging.getLogger(__name__)
 # arriving over a real network interface — so treating it as loopback only
 # affects in-process test traffic.
 _TEST_CLIENT_HOST = "testclient"
+
+# These two matched route templates are the application's long-lived or
+# high-frequency read paths. Repeated synchronous last-used writes here would
+# contend for SQLite's single writer while adding little audit value.
+_LAST_USED_TOUCH_EXEMPT_READ_ROUTES = frozenset(
+    {
+        "/api/v1/runs/{run_id}/events",
+        "/api/v1/discovery/runs/{run_id}/observations",
+    }
+)
 
 PrincipalSource = Literal["user_key", "shared_key", "local"]
 
@@ -128,6 +139,21 @@ def _is_loopback_client(request: Request) -> bool:
     return is_loopback_host(request.client.host)
 
 
+def _should_touch_last_used(request: Request) -> bool:
+    """Whether this successful named-user authentication should be stamped.
+
+    Mutations always record activity. Ordinary reads do too, except for the
+    two matched high-frequency route templates above. Missing route metadata
+    deliberately falls back to a touch so an unusual mount cannot silently
+    suppress the audit timestamp.
+    """
+    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    route = request.scope.get("route")
+    route_path = getattr(route, "path", None)
+    return route_path not in _LAST_USED_TOUCH_EXEMPT_READ_ROUTES
+
+
 def _resolve_user_principal(
     presented: str | None,
     rejection_detail: str,
@@ -146,7 +172,8 @@ def _resolve_user_principal(
     caller passes the exact message a key matching NO row would produce for
     the same mode and client location, so the response never discloses that
     the key matched a row (no key-validity oracle). Touches last_used_at on
-    success (best-effort; a touch failure never blocks the request).
+    success when requested by the route policy (best-effort; a touch failure
+    never blocks the request).
     """
     if not presented:
         return None
@@ -199,7 +226,7 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
     user_principal = _resolve_user_principal(
         presented,
         rejection_detail,
-        touch_last_used=request.method.upper() not in {"GET", "HEAD", "OPTIONS"},
+        touch_last_used=_should_touch_last_used(request),
     )
     if user_principal is not None:
         return user_principal

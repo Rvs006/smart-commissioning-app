@@ -976,7 +976,7 @@ class ImportService:
         stored_summary["accepted_rows_sha256"] = canonical_sha256(accepted_rows)
         stored_summary["authority_schema_version"] = "1.0"
 
-        self._repository.create(
+        created_record = self._repository.create(
             import_id=import_id,
             import_type=import_type,
             project_id=project_id,
@@ -987,6 +987,11 @@ class ImportService:
             accepted_rows=accepted_rows,
             errors=[error.model_dump(mode="json") for error in errors],
             created_at=summary.created_at,
+            monotonic_scope_created_at=True,
+        )
+
+        summary = summary.model_copy(
+            update={"created_at": datetime.fromisoformat(str(created_record["created_at"]))}
         )
 
         return summary, error_report
