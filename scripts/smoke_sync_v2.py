@@ -16,7 +16,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import httpx
 from app.schemas.jobs import ReportRequest
-from app.services.report_artifacts import REPORT_RENDERER_VERSION
+from app.services.report_artifacts import (
+    ARTIFACT_MANIFEST_SCHEMA_VERSION,
+    REPORT_RENDERER_VERSION,
+)
 from app.services.report_artifacts import canonical_json_bytes as artifact_json_bytes
 from app.services.run_service import RunService
 from smart_commissioning_core import __version__ as APPLICATION_VERSION
@@ -129,13 +132,14 @@ class EdgeFixture:
             )
         artifact = f"%PDF-1.4\npublic hosted sync smoke {marker}\n%%EOF\n".encode()
         unsigned = {
-            "schema_version": "1.0",
+            "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
             "report_id": run.run_id,
             "snapshot_sha256": run.parameters["report_snapshot_sha256"],
             "file_name": f"sync-smoke-{marker}.pdf",
             "media_type": "application/pdf",
             "byte_size": len(artifact),
             "renderer_version": REPORT_RENDERER_VERSION,
+            "evidence_set_id": run.parameters["evidence_set_id"],
             "artifact_sha256": sha256_bytes(artifact),
             "artifact_relpath": f"edge-{marker}.pdf",
             "origin": self.identity.edge_id,
