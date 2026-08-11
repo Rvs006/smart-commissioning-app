@@ -98,6 +98,55 @@ class JobAcceptedResponse(BaseModel):
     message: str
 
 
+class DiscoveryObservationRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cursor: int = Field(ge=1)
+    run_id: str
+    attempt: int = Field(ge=1)
+    protocol: Literal["ip", "bacnet"]
+    entity_kind: Literal[
+        "lane",
+        "host",
+        "port",
+        "device",
+        "object",
+        "property",
+        "diagnostic",
+    ]
+    entity_key: str
+    entity_version: int = Field(ge=1)
+    event_key: str
+    phase: Literal["planned", "reachability", "enrichment", "comparison", "finalize"]
+    outcome: str
+    payload_schema_version: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_at: datetime | None = None
+    created_at: datetime
+
+
+class DiscoveryObservationTerminal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["succeeded", "failed", "cancelled"]
+    terminal_cursor: int = Field(ge=0)
+
+
+class DiscoveryObservationPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    attempt: int = Field(ge=1)
+    observations: list[DiscoveryObservationRecord] = Field(default_factory=list)
+    next_cursor: int = Field(ge=0)
+    latest_cursor: int = Field(ge=0)
+    has_more: bool
+    observations_pruned: bool = False
+    observations_quarantined: bool = False
+    terminal: DiscoveryObservationTerminal | None = None
+
+
 class JobSummary(BaseModel):
     run_id: str
     job_type: JobType

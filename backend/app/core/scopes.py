@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import Depends, HTTPException
-from smart_commissioning_core.db.engine import session_factory
+from smart_commissioning_core.db.engine import query_session_factory, session_factory
 from smart_commissioning_core.db.models import (
     ImportRecord,
     Run,
@@ -115,8 +115,13 @@ def _grant_to_dict(grant: UserScopeGrant) -> dict[str, object]:
 class ScopeGrantRepository:
     """Transactional current-grant management with retained revoke history."""
 
-    def __init__(self, engine: Engine | None = None) -> None:
-        self._session_factory = session_factory(engine or get_engine())
+    def __init__(self, engine: Engine | None = None, *, query_only: bool = False) -> None:
+        resolved_engine = engine or get_engine()
+        self._session_factory = (
+            query_session_factory(resolved_engine)
+            if query_only
+            else session_factory(resolved_engine)
+        )
 
     def create(
         self,
@@ -330,9 +335,10 @@ def require_project_site_access(
     site_id: str,
     *,
     engine: Engine | None = None,
+    query_only: bool = False,
 ) -> ScopedResource:
     """Authorize one scope or raise the same 404 used for a missing scope."""
-    repository = ScopeGrantRepository(engine)
+    repository = ScopeGrantRepository(engine, query_only=query_only)
     if principal.user_id is None:
         if has_global_scope(principal):
             return ScopedResource("project_site", project_id, site_id)
@@ -361,6 +367,7 @@ def _authorize_resource(
     kind: str,
     principal: AuthPrincipal,
     engine: Engine,
+    query_only: bool = False,
 ) -> ScopedResource:
     if not project_id or not site_id:
         raise HTTPException(status_code=404, detail=f"{kind} not found.")
@@ -370,6 +377,7 @@ def _authorize_resource(
             project_id,
             site_id,
             engine=engine,
+            query_only=query_only,
         )
     except HTTPException as error:
         if error.status_code == 404:
@@ -383,10 +391,16 @@ def load_scoped_run(
     principal: AuthPrincipal,
     *,
     engine: Engine | None = None,
+    query_only: bool = False,
 ) -> ScopedResource:
     """Load a run's owner and authorize it without exposing foreign IDs."""
     resolved_engine = engine or get_engine()
-    with session_factory(resolved_engine)() as session:
+    factory = (
+        query_session_factory(resolved_engine)
+        if query_only
+        else session_factory(resolved_engine)
+    )
+    with factory() as session:
         row = session.execute(
             select(Run.project_id, Run.site_id).where(Run.id == run_id)
         ).one_or_none()
@@ -399,6 +413,7 @@ def load_scoped_run(
         kind="Run",
         principal=principal,
         engine=resolved_engine,
+        query_only=query_only,
     )
 
 

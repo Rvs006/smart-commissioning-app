@@ -770,6 +770,112 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
         )
         return run.run_id
 
+    def _running_mqtt_run_with_topics(self, topics: list[dict]) -> str:
+        """Seed live capture rows while the MQTT run remains nonterminal."""
+
+        from app.api.routes import discovery as discovery_routes
+        from app.schemas.jobs import JobCreateRequest
+
+        run = discovery_routes.service.create_job_run(
+            JobCreateRequest(
+                project_id="demo-project",
+                site_id="demo-site",
+                job_type="mqtt_discovery",
+                parameters={
+                    "authorized": True,
+                    "broker_host": "mqtt.example.local",
+                },
+            ),
+            expected_job_type="mqtt_discovery",
+            requesting_principal="test-suite",
+        )
+        owned = discovery_routes.service.claim_owned_run(run.run_id)
+        self.assertIsNotNone(owned)
+        self.addCleanup(
+            owned.update_run_status,
+            run.run_id,
+            status="cancelled",
+            stage="test_fixture_cleanup",
+        )
+        discovery_routes._discovery_repository().replace_topics(run.run_id, topics)
+        return run.run_id
+
+    def test_topics_view_reads_live_rows_while_mqtt_capture_is_running(self) -> None:
+        run_id = self._running_mqtt_run_with_topics(
+            [
+                {
+                    "topic": "demo-site/b1/ahu-1/state",
+                    "last_payload": {"present_value": 22},
+                    "message_count": 3,
+                    "attributes": {"device_ref": "AHU-1"},
+                }
+            ]
+        )
+
+        response = self.client.get(f"/api/v1/discovery/runs/{run_id}/topics")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "running")
+        self.assertEqual(response.json()["topics"][0]["topic"], "demo-site/b1/ahu-1/state")
+
+    def test_topics_xlsx_reads_live_rows_while_mqtt_capture_is_running(self) -> None:
+        from io import BytesIO
+
+        from openpyxl import load_workbook
+
+        run_id = self._running_mqtt_run_with_topics(
+            [
+                {
+                    "topic": "demo-site/b1/ahu-1/state",
+                    "last_payload": {"present_value": 22},
+                    "message_count": 3,
+                    "attributes": {"device_ref": "AHU-1"},
+                }
+            ]
+        )
+
+        response = self.client.get(f"/api/v1/discovery/runs/{run_id}/topics.xlsx")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        rows = list(load_workbook(BytesIO(response.content)).active.iter_rows(values_only=True))
+        self.assertEqual(rows[1][0], "demo-site/b1/ahu-1/state")
+
+    def test_terminal_topic_reads_still_require_valid_sealed_evidence(self) -> None:
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.engine import session_factory
+        from smart_commissioning_core.db.models import RunSeal
+
+        run_id = self._mqtt_run_with_topics(
+            [
+                {
+                    "topic": "demo-site/b1/ahu-1/state",
+                    "last_payload": {"present_value": 22},
+                    "message_count": 3,
+                    "attributes": {"device_ref": "AHU-1"},
+                }
+            ]
+        )
+        with session_factory(get_engine()).begin() as session:
+            seal = session.get(RunSeal, run_id)
+            self.assertIsNotNone(seal)
+            original_result_sha256 = seal.result_sha256
+            seal.result_sha256 = "0" * 64
+
+        try:
+            for suffix in ("topics", "topics.xlsx"):
+                with self.subTest(suffix=suffix):
+                    response = self.client.get(f"/api/v1/discovery/runs/{run_id}/{suffix}")
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(
+                        response.json(),
+                        {"detail": "Stored discovery evidence failed integrity verification."},
+                    )
+        finally:
+            with session_factory(get_engine()).begin() as session:
+                seal = session.get(RunSeal, run_id)
+                self.assertIsNotNone(seal)
+                seal.result_sha256 = original_result_sha256
+
     def test_topics_xlsx_export_empty_for_dry_run(self) -> None:
         # mq9nhbzu Excel export: a dry run has no topics, so the workbook must be
         # header-only (no fabricated rows) and carry the xlsx download headers.

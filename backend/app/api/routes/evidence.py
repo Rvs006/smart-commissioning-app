@@ -19,6 +19,7 @@ router comment / decisions).
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -46,7 +47,14 @@ from app.services.reports_integrity import (
     load_signing_key,
     verify_artifact,
 )
-from app.services.retention_service import RetentionService, cutoff_from_keep_days
+from app.services.retention_service import (
+    ObservationRetentionConflictError,
+    ObservationRetentionNotFoundError,
+    ObservationRetentionService,
+    ObservationRetentionValidationError,
+    RetentionService,
+    cutoff_from_keep_days,
+)
 from app.services.run_service import RunService
 
 router = APIRouter()
@@ -172,12 +180,8 @@ def create_backup(
     (online backup API), the secrets dir, and import files. Auth is enforced by
     the parent protected router.
     """
-    recipient_public_key_pem = (
-        str(request.recipient_public_key_pem or "").strip() if request is not None else ""
-    )
-    encryption_required = (
-        principal.source == "user_key" or get_settings().deployment_role != "standalone"
-    )
+    recipient_public_key_pem = str(request.recipient_public_key_pem or "").strip() if request is not None else ""
+    encryption_required = principal.source == "user_key" or get_settings().deployment_role != "standalone"
     if encryption_required and not recipient_public_key_pem:
         raise HTTPException(
             status_code=400,
@@ -208,16 +212,10 @@ def create_backup(
 
     encrypted = bool(recipient_public_key_pem)
     suffix = "scbackup" if encrypted else "zip"
-    file_name = (
-        f"smart_commissioning_backup_{created_at.strftime('%Y%m%dT%H%M%SZ')}.{suffix}"
-    )
+    file_name = f"smart_commissioning_backup_{created_at.strftime('%Y%m%dT%H%M%SZ')}.{suffix}"
     return Response(
         content=bundle,
-        media_type=(
-            "application/vnd.smart-commissioning.backup+json"
-            if encrypted
-            else "application/zip"
-        ),
+        media_type=("application/vnd.smart-commissioning.backup+json" if encrypted else "application/zip"),
         headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
 
@@ -264,3 +262,180 @@ def retention_apply(
     cutoff = cutoff_from_keep_days(request.keep_days)
     result = RetentionService(service.engine).apply(before=cutoff, confirm=True)
     return result.as_dict()
+
+
+class ObservationRetentionPreviewRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=255)
+    site_id: str = Field(min_length=1, max_length=255)
+    keep_days: int = Field(
+        default=30,
+        description="Retain provisional observations for at least this many days after seal.",
+    )
+    batch_limit: int = Field(
+        default=500,
+        description="Maximum scoped observation rows inspected in each apply call.",
+    )
+
+
+class ObservationRetentionApplyRequest(BaseModel):
+    acknowledge: str = Field(
+        description='Must equal "DELETE PROVISIONAL OBSERVATIONS".',
+    )
+
+
+class RetentionHoldPlaceRequest(BaseModel):
+    run_id: str = Field(min_length=1, max_length=64)
+    hold_type: Literal["legal", "evidence"]
+    reason: str = Field(min_length=1, max_length=4_096)
+    evidence_set_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class RetentionHoldReleaseRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=4_096)
+
+
+def _retention_actor(principal: AuthPrincipal) -> str:
+    return principal.user_id or principal.source
+
+
+def _raise_observation_retention_http(error: Exception) -> None:
+    if isinstance(error, ObservationRetentionValidationError):
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if isinstance(error, ObservationRetentionNotFoundError):
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    if isinstance(error, ObservationRetentionConflictError):
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    raise error
+
+
+@router.post("/retention/observations/preview")
+def observation_retention_preview(
+    request: ObservationRetentionPreviewRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """Persist an exact-scope preview and its immutable observation high-water."""
+    try:
+        return ObservationRetentionService(service.engine).preview(
+            project_id=request.project_id,
+            site_id=request.site_id,
+            keep_days=request.keep_days,
+            batch_limit=request.batch_limit,
+            actor=_retention_actor(principal),
+        )
+    except (
+        ObservationRetentionValidationError,
+        ObservationRetentionNotFoundError,
+        ObservationRetentionConflictError,
+    ) as error:
+        _raise_observation_retention_http(error)
+
+
+@router.post("/retention/observations/jobs/{job_id}/apply")
+def observation_retention_apply(
+    job_id: str,
+    request: ObservationRetentionApplyRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """Delete one bounded batch, rechecking active slots and holds at apply time."""
+    try:
+        return ObservationRetentionService(service.engine).apply(
+            job_id=job_id,
+            acknowledge=request.acknowledge,
+            actor=_retention_actor(principal),
+        )
+    except (
+        ObservationRetentionValidationError,
+        ObservationRetentionNotFoundError,
+        ObservationRetentionConflictError,
+    ) as error:
+        _raise_observation_retention_http(error)
+
+
+@router.get("/retention/observations/jobs/active")
+def observation_retention_active_job(
+    project_id: str,
+    site_id: str,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """Recover the active preview for one exact project/site scope."""
+    try:
+        return ObservationRetentionService(service.engine).get_active_job(
+            project_id=project_id,
+            site_id=site_id,
+        )
+    except ObservationRetentionNotFoundError as error:
+        _raise_observation_retention_http(error)
+
+
+@router.get("/retention/observations/jobs/{job_id}")
+def observation_retention_job_status(
+    job_id: str,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """Return the durable cursor, status, actors, timestamps, and counts for a job."""
+    try:
+        return ObservationRetentionService(service.engine).get_job(job_id)
+    except ObservationRetentionNotFoundError as error:
+        _raise_observation_retention_http(error)
+
+
+@router.post("/retention/holds")
+def place_retention_hold(
+    request: RetentionHoldPlaceRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """Place an audited legal or evidence hold on one run."""
+    try:
+        return ObservationRetentionService(service.engine).place_hold(
+            run_id=request.run_id,
+            hold_type=request.hold_type,
+            reason=request.reason,
+            evidence_set_id=request.evidence_set_id,
+            actor=_retention_actor(principal),
+        )
+    except (
+        ObservationRetentionValidationError,
+        ObservationRetentionNotFoundError,
+        ObservationRetentionConflictError,
+    ) as error:
+        _raise_observation_retention_http(error)
+
+
+@router.get("/retention/holds")
+def list_retention_holds(
+    project_id: str,
+    site_id: str,
+    include_released: bool = False,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """List active or historical holds for one exact project/site."""
+    try:
+        holds = ObservationRetentionService(service.engine).list_holds(
+            project_id=project_id,
+            site_id=site_id,
+            include_released=include_released,
+        )
+    except ObservationRetentionNotFoundError as error:
+        _raise_observation_retention_http(error)
+    return {"holds": holds, "count": len(holds)}
+
+
+@router.post("/retention/holds/{hold_id}/release")
+def release_retention_hold(
+    hold_id: str,
+    request: RetentionHoldReleaseRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
+    """Release one active hold while retaining its audit row."""
+    try:
+        return ObservationRetentionService(service.engine).release_hold(
+            hold_id=hold_id,
+            reason=request.reason,
+            actor=_retention_actor(principal),
+        )
+    except (
+        ObservationRetentionValidationError,
+        ObservationRetentionNotFoundError,
+        ObservationRetentionConflictError,
+    ) as error:
+        _raise_observation_retention_http(error)

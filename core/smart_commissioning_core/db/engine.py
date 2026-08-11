@@ -13,6 +13,11 @@ _POSTGRES_IDLE_TRANSACTION_TIMEOUT_MS = 30_000
 # two server-side cancellation bounds above, while still having a firm ceiling.
 _POSTGRES_LOCK_TIMEOUT_MS = 35_000
 _POSTGRES_TCP_USER_TIMEOUT_MS = 30_000
+_SQLITE_QUERY_SESSION_OPTION = "smart_commissioning_query_session"
+_SQLITE_QUERY_ONLY_CONNECTION_INFO = "smart_commissioning_query_only_enabled"
+_SQLITE_QUERY_ONLY_INVALIDATE_ON_CHECKIN = (
+    "smart_commissioning_query_only_invalidate_on_checkin"
+)
 
 
 def default_sqlite_url(runtime_root: Path) -> str:
@@ -53,12 +58,66 @@ def create_engine_from_url(url: str) -> Engine:
             cursor.close()
 
         @event.listens_for(engine, "begin")
-        def _begin_immediate(conn) -> None:  # noqa: ANN001
+        def _begin_transaction(conn) -> None:  # noqa: ANN001
+            if conn.get_execution_options().get(_SQLITE_QUERY_SESSION_OPTION):
+                # PRAGMA query_only is connection-local, so mark the pooled
+                # handle before changing it. The pool reset hook below owns the
+                # corresponding OFF transition on every return path.
+                conn.info[_SQLITE_QUERY_ONLY_CONNECTION_INFO] = True
+                conn.exec_driver_sql("PRAGMA query_only=ON")
+                conn.exec_driver_sql("BEGIN")
+                return
             # BEGIN IMMEDIATE takes the write lock at transaction start, so
             # concurrent read-modify-write transactions (e.g. result_summary
             # merges from backend and worker processes) serialize instead of
             # losing updates.
             conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+        @event.listens_for(engine.pool, "reset")
+        def _reset_query_only(
+            dbapi_connection: object,
+            connection_record: object,
+            _reset_state: object,
+        ) -> None:
+            if not connection_record.info.pop(  # type: ignore[attr-defined]
+                _SQLITE_QUERY_ONLY_CONNECTION_INFO, False
+            ):
+                return
+            cursor = None
+            try:
+                cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+                cursor.execute("PRAGMA query_only=OFF")
+                cursor.close()
+                cursor = None
+            except Exception as exc:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception:
+                        # The connection is invalidated below, so a second
+                        # cursor cleanup error must not rescue the handle.
+                        pass
+                    cursor = None
+                # Let SQLAlchemy perform its normal rollback on the still-open
+                # handle, then discard it in the check-in event below. Closing
+                # it here makes the pool's reset rollback operate on a closed
+                # database; soft invalidation alone can expose the same
+                # read-only handle on the next checkout.
+                connection_record.info[  # type: ignore[attr-defined]
+                    _SQLITE_QUERY_ONLY_INVALIDATE_ON_CHECKIN
+                ] = exc
+
+        @event.listens_for(engine.pool, "checkin")
+        def _discard_failed_query_only_reset(
+            _dbapi_connection: object,
+            connection_record: object,
+        ) -> None:
+            exc = connection_record.info.pop(  # type: ignore[attr-defined]
+                _SQLITE_QUERY_ONLY_INVALIDATE_ON_CHECKIN,
+                None,
+            )
+            if exc is not None:
+                connection_record.invalidate(exc)  # type: ignore[attr-defined]
 
         return engine
 
@@ -106,3 +165,24 @@ def session_factory(engine: Engine) -> sessionmaker[Session]:
     remain usable after the transaction closes.
     """
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def query_session_factory(engine: Engine) -> sessionmaker[Session]:
+    """Return an opt-in sessionmaker for short read-only queries.
+
+    SQLite query sessions share the caller's pool but select deferred ``BEGIN``
+    plus ``PRAGMA query_only=ON`` through an execution option. Pool reset clears
+    that connection-local flag before the handle can serve a later writer.
+    Other databases receive an ordinary read-oriented session with autoflush
+    disabled; mutation sessions and their locking behavior remain unchanged.
+    """
+    bind = (
+        engine.execution_options(**{_SQLITE_QUERY_SESSION_OPTION: True})
+        if engine.dialect.name == "sqlite"
+        else engine
+    )
+    return sessionmaker(
+        bind=bind,
+        expire_on_commit=False,
+        autoflush=False,
+    )

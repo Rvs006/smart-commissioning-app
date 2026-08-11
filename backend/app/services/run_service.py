@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Mapping
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
 from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
@@ -7,7 +8,7 @@ from smart_commissioning_core.db.db_run_store import (
     WORKER_STALE_OBSERVED_AT_KEY,
     DbRunStore,
 )
-from smart_commissioning_core.db.engine import session_factory
+from smart_commissioning_core.db.engine import query_session_factory, session_factory
 from smart_commissioning_core.db.models import (
     ActiveProtocolSlot,
     DiscoveredDevice,
@@ -29,6 +30,7 @@ from smart_commissioning_core.db.models import (
 )
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+from smart_commissioning_core.discovery_observations import ObservationEvidenceV1
 from smart_commissioning_core.execution_context import (
     ExecutionContextIntegrityError,
     scan_authority_bindings,
@@ -239,19 +241,14 @@ def _report_record_from_row(run: Run, issues: list[RunIssue]) -> RunRecord:
             "updated_at": run.updated_at,
             "edge_id": run.edge_id,
             "parameters": dict(run.parameters) if isinstance(run.parameters, Mapping) else {},
-            "result_summary": (
-                dict(run.result_summary) if isinstance(run.result_summary, Mapping) else {}
-            ),
+            "result_summary": (dict(run.result_summary) if isinstance(run.result_summary, Mapping) else {}),
             "issues": [
-                {
-                    field: getattr(issue, field)
-                    for field in ValidationIssueRecord.model_fields
-                }
-                for issue in issues
+                {field: getattr(issue, field) for field in ValidationIssueRecord.model_fields} for issue in issues
             ],
             "error_message": run.error_message,
         }
     )
+
 
 # Operator-facing message stamped on a run the startup sweep found fossilized at
 # "running" (see RunService.sweep_interrupted_runs). Credential-free and generic
@@ -412,7 +409,7 @@ class RunService:
     ) -> VerifiedSealedRun | VerifiedReportEvidence | VerifiedLegacyReportEvidence | None:
         """Verify one source before any report evidence is frozen."""
 
-        with session_factory(self._engine)() as session:
+        with query_session_factory(self._engine)() as session:
             run = session.get(Run, run_id)
             if run is None:
                 raise FileNotFoundError(run_id)
@@ -424,7 +421,7 @@ class RunService:
             has_dispatch = (
                 session.scalar(select(RunDispatch.dispatch_id).where(RunDispatch.run_id == run_id).limit(1)) is not None
             )
-            projection_rows = {
+            projection_models = {
                 "issues": session.scalars(
                     select(RunIssue).where(RunIssue.run_id == run_id).order_by(RunIssue.position, RunIssue.id)
                 ).all(),
@@ -444,14 +441,24 @@ class RunService:
                     .order_by(DiscoveredTopic.position, DiscoveredTopic.id)
                 ).all(),
             }
+            projection_rows = {
+                label: [
+                    {
+                        column.name: deepcopy(getattr(row, column.name))
+                        for column in row.__table__.columns
+                    }
+                    for row in rows
+                ]
+                for label, rows in projection_models.items()
+            }
             run_projection = {
                 "job_type": run.job_type,
                 "project_id": run.project_id,
                 "site_id": run.site_id,
-                "parameters": run.parameters,
+                "parameters": deepcopy(run.parameters),
                 "status": run.status,
                 "stage": run.stage,
-                "result_summary": run.result_summary,
+                "result_summary": deepcopy(run.result_summary),
                 "error_message": run.error_message,
                 "result_sha256": run.result_sha256,
                 "terminal_at": run.terminal_at,
@@ -467,76 +474,87 @@ class RunService:
                 "modern_lifecycle_component_present": has_dispatch,
                 "sync_artifact_present": sync_artifact is not None,
                 "sync_artifact_manifest": (
-                    dict(sync_artifact.manifest_json)
+                    deepcopy(dict(sync_artifact.manifest_json))
                     if sync_artifact is not None
                     else None
                 ),
             }
-            if run.job_type == "report_generation":
+            context_projection = (
+                {
+                    "context_json": deepcopy(context.context_json),
+                    "context_sha256": context.context_sha256,
+                }
+                if context is not None
+                else None
+            )
+            result_projection = (
+                {
+                    "schema_version": result.schema_version,
+                    "terminal_status": result.terminal_status,
+                    "terminal_stage": result.terminal_stage,
+                    "summary": deepcopy(result.summary),
+                    "result_payload": deepcopy(result.result_payload),
+                    "result_sha256": result.result_sha256,
+                }
+                if result is not None
+                else None
+            )
+            seal_projection = (
+                {
+                    "terminal_status": seal.terminal_status,
+                    "context_sha256": seal.context_sha256,
+                    "result_sha256": seal.result_sha256,
+                    "sealed_at": seal.sealed_at,
+                }
+                if seal is not None
+                else None
+            )
+            source_job_type = run.job_type
+            if source_job_type == "report_generation":
                 contract_version = contract.contract_version if contract is not None else None
                 if contract_version == "sealed_v1":
                     verifier = verify_report_evidence_run
                 elif contract_version == "legacy_pre_lifecycle":
                     verifier = verify_legacy_report_evidence_run
                 else:
-                    raise ValueError(
-                        f"Source report '{run_id}' has no recognized evidence contract."
-                    )
+                    raise ValueError(f"Source report '{run_id}' has no recognized evidence contract.")
             else:
                 verifier = verify_sealed_run
-            try:
-                return verifier(
-                    run_id=run_id,
-                    run=run_projection,
-                    context=(
-                        {
-                            "context_json": context.context_json,
-                            "context_sha256": context.context_sha256,
-                        }
-                        if context is not None
-                        else None
-                    ),
-                    result=(
-                        {
-                            "schema_version": result.schema_version,
-                            "terminal_status": result.terminal_status,
-                            "terminal_stage": result.terminal_stage,
-                            "summary": result.summary,
-                            "result_payload": result.result_payload,
-                            "result_sha256": result.result_sha256,
-                        }
-                        if result is not None
-                        else None
-                    ),
-                    seal=(
-                        {
-                            "terminal_status": seal.terminal_status,
-                            "context_sha256": seal.context_sha256,
-                            "result_sha256": seal.result_sha256,
-                            "sealed_at": seal.sealed_at,
-                        }
-                        if seal is not None
-                        else None
-                    ),
-                    **{label: [dict(row.__dict__) for row in rows] for label, rows in projection_rows.items()},
-                )
-            except SealedRunIntegrityError as error:
-                if run.job_type == "report_generation":
-                    raise ValueError(
-                        f"Source report '{run_id}' failed sealed evidence integrity verification: {error}"
-                    ) from error
-                if error.component == "context":
-                    raise ValueError(
-                        f"Source run '{run_id}' execution context failed integrity verification: {error}"
-                    ) from error
-                if error.component == "lifecycle":
-                    raise ValueError(
-                        f"Source run '{run_id}' is terminal but unsealed. "
-                        "Recover or rerun it before generating evidence."
-                    ) from error
+
+        try:
+            return verifier(
+                run_id=run_id,
+                run=run_projection,
+                context=context_projection,
+                result=result_projection,
+                seal=seal_projection,
+                **projection_rows,
+            )
+        except SealedRunIntegrityError as error:
+            if source_job_type == "report_generation":
                 raise ValueError(
-                    f"Source run '{run_id}' sealed result failed integrity verification: {error}"
+                    f"Source report '{run_id}' failed sealed evidence integrity verification: {error}"
                 ) from error
+            if error.component == "context":
+                raise ValueError(
+                    f"Source run '{run_id}' execution context failed integrity verification: {error}"
+                ) from error
+            if error.component == "lifecycle":
+                raise ValueError(
+                    f"Source run '{run_id}' is terminal but unsealed. "
+                    "Recover or rerun it before generating evidence."
+                ) from error
+            raise ValueError(
+                f"Source run '{run_id}' sealed result failed integrity verification: {error}"
+            ) from error
+
+    def get_verified_terminal_result(self, run_id: str) -> TerminalResultV1 | None:
+        """Return the canonical terminal payload after projection/seal parity checks."""
+
+        verified = self._verify_report_source_seal(run_id)
+        if verified is None:
+            return None
+        return verified.terminal_result
 
     def get_report_for_serving(self, run_id: str) -> RunRecord:
         """Return a report whose summary is sourced from verified sealed evidence.
@@ -805,14 +823,9 @@ class RunService:
             has_attached_rows = any(
                 (
                     session.get(RunExecutionContext, run_id) is not None,
+                    session.scalar(select(RunDispatch.dispatch_id).where(RunDispatch.run_id == run_id)) is not None,
                     session.scalar(
-                        select(RunDispatch.dispatch_id).where(RunDispatch.run_id == run_id)
-                    )
-                    is not None,
-                    session.scalar(
-                        select(ActiveProtocolSlot.protocol_key)
-                        .where(ActiveProtocolSlot.run_id == run_id)
-                        .limit(1)
+                        select(ActiveProtocolSlot.protocol_key).where(ActiveProtocolSlot.run_id == run_id).limit(1)
                     )
                     is not None,
                     session.scalar(
@@ -840,29 +853,18 @@ class RunService:
                     session.get(RunResult, run_id) is not None,
                     session.get(RunSeal, run_id) is not None,
                     session.scalar(
-                        select(RunLifecycleConflict.id)
-                        .where(RunLifecycleConflict.run_id == run_id)
-                        .limit(1)
+                        select(RunLifecycleConflict.id).where(RunLifecycleConflict.run_id == run_id).limit(1)
                     )
                     is not None,
                     session.get(SyncArtifact, run_id) is not None,
                     session.get(SyncDeliveryState, run_id) is not None,
-                    session.scalar(
-                        select(SyncReceipt.id).where(SyncReceipt.run_id == run_id).limit(1)
-                    )
-                    is not None,
+                    session.scalar(select(SyncReceipt.id).where(SyncReceipt.run_id == run_id).limit(1)) is not None,
                     session.scalar(select(RunIssue.id).where(RunIssue.run_id == run_id).limit(1)) is not None,
-                    session.scalar(
-                        select(DiscoveredDevice.id).where(DiscoveredDevice.run_id == run_id).limit(1)
-                    )
+                    session.scalar(select(DiscoveredDevice.id).where(DiscoveredDevice.run_id == run_id).limit(1))
                     is not None,
-                    session.scalar(
-                        select(DiscoveredPoint.id).where(DiscoveredPoint.run_id == run_id).limit(1)
-                    )
+                    session.scalar(select(DiscoveredPoint.id).where(DiscoveredPoint.run_id == run_id).limit(1))
                     is not None,
-                    session.scalar(
-                        select(DiscoveredTopic.id).where(DiscoveredTopic.run_id == run_id).limit(1)
-                    )
+                    session.scalar(select(DiscoveredTopic.id).where(DiscoveredTopic.run_id == run_id).limit(1))
                     is not None,
                 )
             )
@@ -978,6 +980,167 @@ class RunService:
         # Read paths are observational only. Lease expiry and stale-worker
         # recovery belong to the periodic recovery task, never to GET or SSE.
         return RunRecord.model_validate(self._store.get_run(run_id))
+
+    def get_run_read_only(self, run_id: str) -> RunRecord:
+        """Return one run through the deferred/query-only database path."""
+
+        return RunRecord.model_validate(self._store.get_run_read_only(run_id))
+
+    def get_run_attempt_read_only(self, run_id: str) -> int:
+        """Return the executor attempt without reserving SQLite's writer slot."""
+
+        with query_session_factory(self._engine)() as session:
+            attempt = session.scalar(select(Run.attempt).where(Run.id == run_id))
+        if attempt is None:
+            raise FileNotFoundError(run_id)
+        return int(attempt)
+
+    def get_terminal_observation_marker_read_only(
+        self,
+        run_id: str,
+    ) -> dict[str, object] | None:
+        """Read a terminal cursor only from a hash-bound RunResult and RunSeal."""
+
+        with query_session_factory(self._engine)() as session:
+            row = session.execute(
+                select(Run, RunResult, RunSeal)
+                .outerjoin(RunResult, RunResult.run_id == Run.id)
+                .outerjoin(RunSeal, RunSeal.run_id == Run.id)
+                .where(Run.id == run_id)
+            ).one_or_none()
+            if row is None:
+                raise FileNotFoundError(run_id)
+            run, result, seal = row
+            if run.status not in _TERMINAL_RUN_STATUSES:
+                return None
+            if result is None or seal is None:
+                raise RuntimeError("Terminal discovery evidence is incomplete.")
+            context = session.get(RunExecutionContext, run_id)
+        try:
+            terminal = TerminalResultV1.model_validate(result.result_payload)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Terminal discovery evidence failed integrity verification.") from error
+        if (
+            run.job_type not in {"ip_discovery", "bacnet_discovery"}
+            or result.terminal_status != run.status
+            or seal.terminal_status != run.status
+            or terminal.status != run.status
+            or result.schema_version != terminal.schema_version
+            or result.terminal_stage != terminal.stage
+            or result.summary != dict(terminal.summary)
+            or run.result_sha256 != result.result_sha256
+            or seal.result_sha256 != result.result_sha256
+            or (context is not None and seal.context_sha256 != context.context_sha256)
+            or sha256_bytes(canonical_json_bytes(result.result_payload)) != result.result_sha256
+        ):
+            raise RuntimeError("Terminal discovery evidence failed integrity verification.")
+        summary = dict(terminal.summary)
+        evidence = summary.get("observation_evidence_v1")
+        if evidence is None:
+            quarantine = summary.get("observation_quarantine_v1")
+            if quarantine is not None:
+                if (
+                    summary.get("observation_prefix_quarantined") is not True
+                    or summary.get("validation_incomplete") is not True
+                    or summary.get("acceptance_eligible") is not False
+                    or not isinstance(quarantine, dict)
+                    or set(quarantine)
+                    != {
+                        "schema_version",
+                        "attempt",
+                        "observation_count",
+                        "terminal_cursor",
+                        "reason",
+                    }
+                    or quarantine.get("schema_version") != "1.0"
+                    or type(quarantine.get("attempt")) is not int
+                    or quarantine.get("attempt") != run.attempt
+                    or type(quarantine.get("observation_count")) is not int
+                    or type(quarantine.get("terminal_cursor")) is not int
+                    or quarantine.get("observation_count") < 0
+                    or quarantine.get("terminal_cursor") < 0
+                    or quarantine.get("observation_count") > quarantine.get("terminal_cursor")
+                    or (quarantine.get("observation_count") == 0) != (quarantine.get("terminal_cursor") == 0)
+                    or quarantine.get("reason") not in {"fold_row_limit", "fold_payload_byte_limit", "invalid_prefix"}
+                ):
+                    raise RuntimeError("Terminal discovery observation evidence is malformed.")
+                return {
+                    "status": run.status,
+                    "terminal_cursor": quarantine["terminal_cursor"],
+                    "observation_count": quarantine["observation_count"],
+                    "attempt": quarantine["attempt"],
+                    "observations_quarantined": True,
+                }
+            cancel_before_start = (
+                run.status == "cancelled"
+                and run.attempt == 0
+                and run.owner_token is None
+                and run.claimed_at is None
+                and run.lease_expires_at is None
+                and run.cancel_requested is True
+                and terminal.stage == "cancelled_before_start"
+                and summary == {"cancelled_before_start": True}
+                and not terminal.issues
+                and not terminal.devices
+                and not terminal.points
+                and not terminal.topics
+                and terminal.error_message is None
+            )
+            if cancel_before_start:
+                return {
+                    "status": run.status,
+                    "terminal_cursor": 0,
+                    "observation_count": 0,
+                    "attempt": 1,
+                    "observations_quarantined": False,
+                }
+            legacy_candidate = (
+                context is None
+                and run.attempt == 0
+                and run.owner_token is None
+                and run.claimed_at is None
+                and run.heartbeat_at is None
+                and run.lease_expires_at is None
+            )
+            if not legacy_candidate:
+                raise RuntimeError("Terminal discovery observation evidence is missing.")
+            with query_session_factory(self._engine)() as session:
+                has_dispatch = (
+                    session.scalar(select(RunDispatch.dispatch_id).where(RunDispatch.run_id == run_id).limit(1))
+                    is not None
+                )
+            if has_dispatch:
+                raise RuntimeError("Terminal discovery observation evidence is missing.")
+            return {
+                "status": run.status,
+                "terminal_cursor": 0,
+                "observation_count": 0,
+                "attempt": 1,
+                "observations_quarantined": False,
+            }
+        try:
+            validated = ObservationEvidenceV1.model_validate(evidence)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Terminal discovery observation evidence is malformed.") from error
+        if (
+            run.attempt < 1
+            or validated.attempt != run.attempt
+            or validated.observation_count > validated.terminal_cursor
+            or (validated.observation_count == 0) != (validated.terminal_cursor == 0)
+            or (
+                validated.observation_count == 0
+                and validated.observation_stream_sha256
+                != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            )
+        ):
+            raise RuntimeError("Terminal discovery observation evidence is malformed.")
+        return {
+            "status": run.status,
+            "terminal_cursor": validated.terminal_cursor,
+            "observation_count": validated.observation_count,
+            "attempt": validated.attempt,
+            "observations_quarantined": False,
+        }
 
     def delete_report_runs(
         self,
@@ -1197,10 +1360,7 @@ class RunService:
             scope_pairs,
         )
         has_dispatch = (
-            select(RunDispatch.dispatch_id)
-            .where(RunDispatch.run_id == Run.id)
-            .exists()
-            .label("has_dispatch")
+            select(RunDispatch.dispatch_id).where(RunDispatch.run_id == Run.id).exists().label("has_dispatch")
         )
         statement = (
             select(
@@ -1256,8 +1416,7 @@ class RunService:
         for run, context, result, seal, contract, sync_artifact, has_dispatch_row in candidates:
             try:
                 projection_rows = {
-                    label: [dict(row.__dict__) for row in rows.get(run.id, [])]
-                    for label, rows in projections.items()
+                    label: [dict(row.__dict__) for row in rows.get(run.id, [])] for label, rows in projections.items()
                 }
                 run_projection = {
                     "job_type": run.job_type,
@@ -1282,9 +1441,7 @@ class RunService:
                     "modern_lifecycle_component_present": bool(has_dispatch_row),
                     "sync_artifact_present": sync_artifact is not None,
                     "sync_artifact_manifest": (
-                        dict(sync_artifact.manifest_json)
-                        if sync_artifact is not None
-                        else None
+                        dict(sync_artifact.manifest_json) if sync_artifact is not None else None
                     ),
                 }
                 verifier = (
@@ -1325,16 +1482,16 @@ class RunService:
                     verified,
                 )
             except (FileNotFoundError, RuntimeError, ValueError) as error:
-                raise ReportListIntegrityError(
-                    "Stored report evidence failed integrity verification."
-                ) from error
-            if scope_pairs is not None and (
-                report.project_id,
-                report.site_id,
-            ) not in scope_pairs:
-                raise ReportListIntegrityError(
-                    "Stored report evidence failed integrity verification."
+                raise ReportListIntegrityError("Stored report evidence failed integrity verification.") from error
+            if (
+                scope_pairs is not None
+                and (
+                    report.project_id,
+                    report.site_id,
                 )
+                not in scope_pairs
+            ):
+                raise ReportListIntegrityError("Stored report evidence failed integrity verification.")
             visible.append(report)
         return visible, total
 

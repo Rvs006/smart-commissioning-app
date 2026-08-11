@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from smart_commissioning_core.discovery_observations import ObservationEvidenceV1
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.run_context import (
     RunContextV1,
@@ -518,6 +519,30 @@ def _verify_terminal_evidence(
             "result",
             "persisted summary projections do not match the sealed result payload",
         )
+
+    raw_observation_evidence = terminal.summary.get("observation_evidence_v1")
+    if raw_observation_evidence is not None:
+        try:
+            observation_evidence = ObservationEvidenceV1.model_validate(
+                raw_observation_evidence
+            )
+        except (TypeError, ValidationError) as error:
+            raise SealedRunIntegrityError(
+                "result",
+                "terminal discovery observation evidence is malformed",
+            ) from error
+        if run.get("attempt") != observation_evidence.attempt:
+            raise SealedRunIntegrityError(
+                "result",
+                "terminal discovery observation attempt does not match the run",
+            )
+        if (observation_evidence.observation_count == 0) != (
+            observation_evidence.terminal_cursor == 0
+        ):
+            raise SealedRunIntegrityError(
+                "result",
+                "terminal discovery observation count and cursor are inconsistent",
+            )
 
     projection_pairs = (
         ("issues", _normalize_issues(terminal.issues), _normalize_issues(issues)),

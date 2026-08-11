@@ -39,6 +39,7 @@ import time
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
+from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.rbac import Role
 from starlette.responses import StreamingResponse
 
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 service = RunService()
+lifecycle_repository = RunLifecycleRepository(service.engine)
 require_viewer = require_role(Role.VIEWER)
 
 # Terminal statuses close the stream. Kept in lockstep with the frontend
@@ -76,9 +78,14 @@ def _format_sse(payload: dict[str, object], *, event: str | None = None) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def _progress_payload(run: RunRecord) -> dict[str, object]:
+def _progress_payload(
+    run: RunRecord,
+    *,
+    scoped_project_id: str | None = None,
+    scoped_site_id: str | None = None,
+) -> dict[str, object]:
     """The status/stage/progress slice the frontend live-updates from."""
-    return {
+    payload: dict[str, object] = {
         "run_id": run.run_id,
         "job_type": run.job_type,
         "status": run.status,
@@ -87,6 +94,38 @@ def _progress_payload(run: RunRecord) -> dict[str, object]:
         "updated_at": run.updated_at.isoformat() if run.updated_at else None,
         "error_message": run.error_message,
     }
+    if run.job_type in {"ip_discovery", "bacnet_discovery"}:
+        attempt = service.get_run_attempt_read_only(run.run_id)
+        if attempt < 1:
+            payload.update(
+                {
+                    "observation_attempt": None,
+                    "latest_observation_cursor": 0,
+                    "progressive_counts": {"observations": 0},
+                }
+            )
+            return payload
+        cutoff = lifecycle_repository.get_discovery_observation_cutoff(
+            run.run_id,
+            attempt,
+            project_id=scoped_project_id,
+            site_id=scoped_site_id,
+        )
+        terminal = service.get_terminal_observation_marker_read_only(run.run_id)
+        payload.update(
+            {
+                "observation_attempt": cutoff.attempt,
+                "latest_observation_cursor": (
+                    int(terminal["terminal_cursor"]) if terminal is not None else cutoff.terminal_cursor
+                ),
+                "progressive_counts": {
+                    "observations": (
+                        int(terminal["observation_count"]) if terminal is not None else cutoff.observation_count
+                    )
+                },
+            }
+        )
+    return payload
 
 
 async def _run_event_stream(
@@ -108,17 +147,16 @@ async def _run_event_stream(
                 # Scope is mutable control state. Recheck it on EVERY database
                 # poll so user deactivation, role demotion, or grant revocation
                 # closes an already-open stream before another progress read.
-                await asyncio.to_thread(
+                scoped = await asyncio.to_thread(
                     load_scoped_run,
                     run_id,
                     principal,
                     engine=service.engine,
+                    query_only=True,
                 )
-                # Off the event loop: get_run is a SYNC DB read, and on SQLite even
-                # a read takes the write lock (BEGIN IMMEDIATE), so calling it inline
-                # would stall the whole loop — including the operator's Stop request —
-                # for up to the busy-timeout while an inline run writes results.
-                run = await asyncio.to_thread(service.get_run, run_id)
+                # Keep the synchronous query-only read off the event loop so a
+                # busy database cannot delay Stop or other async request handling.
+                run = await asyncio.to_thread(service.get_run_read_only, run_id)
             except HTTPException:
                 # Missing, purged, foreign, and newly revoked all close through
                 # one indistinguishable marker. Never keep polling after access
@@ -136,7 +174,24 @@ async def _run_event_stream(
                 )
                 return
 
-            payload = _progress_payload(run)
+            try:
+                payload = await asyncio.to_thread(
+                    _progress_payload,
+                    run,
+                    scoped_project_id=scoped.project_id,
+                    scoped_site_id=scoped.site_id,
+                )
+            except Exception:  # noqa: BLE001 - cursor/control reads also fail closed
+                logger.warning(
+                    "SSE observation/control poll failed for %s; closing",
+                    run_id,
+                    exc_info=True,
+                )
+                yield _format_sse(
+                    {"run_id": run_id, "status": "unavailable"},
+                    event="unavailable",
+                )
+                return
             serialized = json.dumps(payload, sort_keys=True, default=str)
             if serialized != last_serialized:
                 last_serialized = serialized
@@ -179,6 +234,7 @@ async def stream_run_events(
             run_id,
             principal,
             engine=service.engine,
+            query_only=True,
         )
     except HTTPException:
         raise
@@ -190,7 +246,7 @@ async def stream_run_events(
         ) from error
 
     headers = {
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-store",
         # Disable proxy buffering (nginx) so frames flush immediately.
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",

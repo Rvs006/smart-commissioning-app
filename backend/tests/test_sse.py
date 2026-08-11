@@ -44,9 +44,9 @@ def _parse_sse(body: str) -> list[dict]:
         data_lines: list[str] = []
         for line in block.splitlines():
             if line.startswith("event:"):
-                event = line[len("event:"):].strip()
+                event = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data_lines.append(line[len("data:"):].strip())
+                data_lines.append(line[len("data:") :].strip())
         parsed: dict = {"event": event}
         if data_lines:
             parsed["data"] = json.loads("".join(data_lines))
@@ -98,6 +98,7 @@ class SseEventsApiTests(ApiTestCase):
                     response.headers["content-type"].startswith("text/event-stream"),
                     response.headers.get("content-type"),
                 )
+                self.assertEqual(response.headers["cache-control"], "no-store")
                 # Reading to completion must terminate (the stream closes itself on
                 # the terminal status); a non-closing stream would hang here.
                 body = "".join(response.iter_text())
@@ -171,6 +172,239 @@ class SseEventsApiTests(ApiTestCase):
         run_id = record["run_id"]
         self.assertNotIn(record["status"], {"succeeded", "failed", "cancelled"})
         return run_id
+
+    def _seed_running_discovery(self):  # noqa: ANN202
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+        from smart_commissioning_core.run_context import RunContextV1
+
+        repository = RunLifecycleRepository(get_engine())
+        context = RunContextV1.model_validate(
+            {
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "configuration_snapshot": {},
+                "configuration_version": 1,
+                "registers": [],
+                "imports": [],
+                "schema_versions": {},
+                "engine_parameters": {"authorized": True, "dry_run": False},
+                "network_interface": "192.0.2.10/24",
+                "connection_settings": {},
+                "secret_references": {},
+                "requesting_principal": "test-sse",
+                "application_version": "0.1.41",
+            }
+        )
+        envelope = repository.create_run_with_context(
+            job_type="ip_discovery",
+            context=context,
+            execution_mode="dramatiq_worker",
+        )
+        lease = repository.claim_run(
+            envelope.run_id,
+            envelope.dispatch_id,
+            owner_token="sse-observation-owner",
+            lease_seconds=60,
+        )
+        self.assertIsNotNone(lease)
+        return repository, lease
+
+    def test_discovery_stream_emits_only_cursor_and_count_hints(self) -> None:
+        from unittest import mock
+
+        import app.api.routes.events as events_module
+        from smart_commissioning_core.discovery_observations import (
+            DiscoveryObservationInputV1,
+        )
+
+        repository, lease = self._seed_running_discovery()
+        appended = repository.append_discovery_observation(
+            lease.run_id,
+            lease.owner_token,
+            lease.attempt,
+            DiscoveryObservationInputV1(
+                protocol="ip",
+                entity_kind="host",
+                entity_key="host:viewer-safe",
+                entity_version=1,
+                event_key="host-viewer-safe-v1",
+                phase="reachability",
+                outcome="observed",
+                payload_schema_version="1.0",
+                payload={"projection_v1": {"collection": "devices", "record": {}}},
+            ),
+        )
+
+        with mock.patch.object(events_module, "MAX_STREAM_SECONDS", 0.0):
+            with self.client.stream("GET", f"/api/v1/runs/{lease.run_id}/events") as response:
+                body = "".join(response.iter_text())
+
+        frames = _parse_sse(body)
+        progress = frames[0]["data"]
+        self.assertEqual(progress["observation_attempt"], lease.attempt)
+        self.assertEqual(progress["latest_observation_cursor"], appended.cursor)
+        self.assertEqual(progress["progressive_counts"], {"observations": 1})
+        self.assertNotIn("observations", progress)
+        self.assertNotIn("viewer-safe", body)
+
+    def test_discovery_cursor_store_failure_closes_as_unavailable(self) -> None:
+        from unittest import mock
+
+        import app.api.routes.events as events_module
+
+        _repository, lease = self._seed_running_discovery()
+        with mock.patch.object(
+            events_module.lifecycle_repository,
+            "get_discovery_observation_cutoff",
+            side_effect=RuntimeError("control store unavailable"),
+        ):
+            with self.client.stream("GET", f"/api/v1/runs/{lease.run_id}/events") as response:
+                body = "".join(response.iter_text())
+
+        frames = _parse_sse(body)
+        self.assertEqual(
+            frames,
+            [
+                {
+                    "event": "unavailable",
+                    "data": {
+                        "run_id": lease.run_id,
+                        "status": "unavailable",
+                    },
+                }
+            ],
+        )
+
+    def test_discovery_progress_payload_runs_off_the_event_loop(self) -> None:
+        from unittest import mock
+
+        import app.api.routes.events as events_module
+        from app.core.auth import AuthPrincipal
+        from smart_commissioning_core.rbac import Role
+
+        _repository, lease = self._seed_running_discovery()
+        principal = AuthPrincipal(None, "shared-key", Role.ADMIN, "shared_key")
+        real_to_thread = asyncio.to_thread
+        threaded_functions: list[object] = []
+
+        async def recording_to_thread(function, /, *args, **kwargs):  # noqa: ANN001, ANN202
+            threaded_functions.append(function)
+            return await real_to_thread(function, *args, **kwargs)
+
+        async def read_first_frame() -> None:
+            stream = events_module._run_event_stream(lease.run_id, principal)
+            try:
+                await stream.__anext__()
+            finally:
+                await stream.aclose()
+
+        with (
+            mock.patch.object(
+                events_module.asyncio,
+                "to_thread",
+                side_effect=recording_to_thread,
+            ),
+            mock.patch.object(events_module, "POLL_INTERVAL_SECONDS", 0.0),
+        ):
+            asyncio.run(read_first_frame())
+
+        self.assertIn(events_module._progress_payload, threaded_functions)
+
+    def test_terminal_discovery_frame_keeps_the_sealed_count_after_pruning(self) -> None:
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import app.api.routes.events as events_module
+
+        run = SimpleNamespace(
+            run_id="run-terminal-observations",
+            job_type="ip_discovery",
+            status="succeeded",
+            stage="completed",
+            progress_percent=100,
+            updated_at=datetime.now(UTC),
+            error_message=None,
+        )
+        pruned_cutoff = SimpleNamespace(
+            attempt=2,
+            terminal_cursor=0,
+            observation_count=0,
+        )
+        sealed_marker = {
+            "attempt": 2,
+            "terminal_cursor": 987,
+            "observation_count": 42,
+        }
+
+        with (
+            mock.patch.object(events_module.service, "get_run_attempt_read_only", return_value=2),
+            mock.patch.object(
+                events_module.lifecycle_repository,
+                "get_discovery_observation_cutoff",
+                return_value=pruned_cutoff,
+            ),
+            mock.patch.object(
+                events_module.service,
+                "get_terminal_observation_marker_read_only",
+                return_value=sealed_marker,
+            ),
+        ):
+            payload = events_module._progress_payload(run)
+
+        self.assertEqual(payload["latest_observation_cursor"], 987)
+        self.assertEqual(payload["progressive_counts"], {"observations": 42})
+
+    def test_cursor_only_change_emits_a_new_progress_frame(self) -> None:
+        from unittest import mock
+
+        import app.api.routes.events as events_module
+        from app.core.auth import AuthPrincipal
+        from smart_commissioning_core.discovery_observations import (
+            DiscoveryObservationInputV1,
+        )
+        from smart_commissioning_core.rbac import Role
+
+        repository, lease = self._seed_running_discovery()
+        principal = AuthPrincipal(None, "shared-key", Role.ADMIN, "shared_key")
+
+        async def observe_cursor_change() -> tuple[dict, dict]:
+            stream = events_module._run_event_stream(lease.run_id, principal)
+            initial = _parse_sse(await stream.__anext__())[0]
+            appended = repository.append_discovery_observation(
+                lease.run_id,
+                lease.owner_token,
+                lease.attempt,
+                DiscoveryObservationInputV1(
+                    protocol="ip",
+                    entity_kind="host",
+                    entity_key="host:cursor-only",
+                    entity_version=1,
+                    event_key="host-cursor-only-v1",
+                    phase="reachability",
+                    outcome="observed",
+                    payload_schema_version="1.0",
+                    payload={},
+                ),
+            )
+            changed = _parse_sse(await stream.__anext__())[0]
+            self.assertEqual(
+                changed["data"]["latest_observation_cursor"],
+                appended.cursor,
+            )
+            await stream.aclose()
+            return initial, changed
+
+        with mock.patch.object(events_module, "POLL_INTERVAL_SECONDS", 0.0):
+            initial, changed = asyncio.run(observe_cursor_change())
+
+        self.assertEqual(initial["data"]["latest_observation_cursor"], 0)
+        self.assertEqual(initial["data"]["stage"], changed["data"]["stage"])
+        self.assertEqual(
+            initial["data"]["progress_percent"],
+            changed["data"]["progress_percent"],
+        )
 
     def test_nonterminal_stream_emits_timeout_then_closes(self) -> None:
         from unittest import mock

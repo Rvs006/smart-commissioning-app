@@ -225,7 +225,14 @@ class OwnedRunHeartbeat:
                     outcome = self._owned_store.terminal_outcome
                     if outcome is not None and not outcome.conflict:
                         break
-                    self._owned_store.mark_ownership_lost()
+                    marked = self._owned_store.mark_ownership_lost()
+                    if marked is False:
+                        # Discovery finalization closes its sink before folding
+                        # outside the lifecycle lock. A false beat after the
+                        # terminal commit but before the local outcome is set is
+                        # transient; the finalizer alone decides that race.
+                        delay = min(self._interval_seconds, 0.05)
+                        continue
                     self._ownership_lost.set()
                     logger.warning(
                         "owned-run heartbeat confirmed ownership loss for run_id=%s "

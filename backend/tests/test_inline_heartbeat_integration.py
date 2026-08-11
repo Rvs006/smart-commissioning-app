@@ -34,7 +34,7 @@ from smart_commissioning_core.owned_run_store import (
 )
 from smart_commissioning_core.run_context import RunContextV1
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 
 _WAIT = 5.0
 
@@ -747,6 +747,25 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
         heartbeat_failed = threading.Event()
         heartbeat_succeeded = threading.Event()
         original_heartbeat = OwnedRunStore.heartbeat
+
+        def configure_test_busy_timeout(
+            dbapi_connection: object,
+            _connection_record: object,
+            _connection_proxy: object,
+        ) -> None:
+            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+            try:
+                cursor.execute("PRAGMA busy_timeout=250")
+            finally:
+                cursor.close()
+
+        event.listen(self.engine.pool, "checkout", configure_test_busy_timeout)
+        self.addCleanup(
+            event.remove,
+            self.engine.pool,
+            "checkout",
+            configure_test_busy_timeout,
+        )
 
         def observed_heartbeat(
             store: OwnedRunStore, *, lease_seconds: int = 60

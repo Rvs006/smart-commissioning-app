@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from smart_commissioning_core.db.db_run_store import (
     get_or_create_project_and_site,
 )
-from smart_commissioning_core.db.engine import session_factory
+from smart_commissioning_core.db.engine import query_session_factory, session_factory
 from smart_commissioning_core.db.models import (
     ConfigurationSnapshot,
     DiscoveredDevice,
@@ -28,6 +28,7 @@ from smart_commissioning_core.db.models import (
     Run,
     RunExecutionContext,
     RunIssue,
+    RunLifecycleConflict,
     RunResult,
     RunSeal,
     UdmiSchemaSet,
@@ -87,8 +88,10 @@ class UserRepository:
     never leak through the API.
     """
 
-    def __init__(self, engine: Engine) -> None:
-        self._session_factory = session_factory(engine)
+    def __init__(self, engine: Engine, *, query_only: bool = False) -> None:
+        self._session_factory = (
+            query_session_factory(engine) if query_only else session_factory(engine)
+        )
 
     def create_user(
         self,
@@ -616,6 +619,10 @@ def _topic_to_dict(row: DiscoveredTopic) -> dict[str, object]:
     }
 
 
+class SealedDiscoveryProjectionError(RuntimeError):
+    """A compatibility writer tried to replace terminal sealed evidence."""
+
+
 class DiscoveryRepository:
     """Persist + read discovery results (devices, points, MQTT topics) per run.
 
@@ -663,14 +670,19 @@ class DiscoveryRepository:
     def replace_devices(
         self, run_id: str, devices: list[dict[str, object]]
     ) -> int:
-        with self._session_factory.begin() as session:
-            session.execute(
-                delete(DiscoveredDevice).where(DiscoveredDevice.run_id == run_id)
-            )
-            session.flush()
-            for position, payload in enumerate(devices):
-                session.add(self._device_row(run_id, position, payload))
-            session.flush()
+        try:
+            with self._session_factory.begin() as session:
+                self._require_unsealed_projection(session, run_id)
+                session.execute(
+                    delete(DiscoveredDevice).where(DiscoveredDevice.run_id == run_id)
+                )
+                session.flush()
+                for position, payload in enumerate(devices):
+                    session.add(self._device_row(run_id, position, payload))
+                session.flush()
+        except SealedDiscoveryProjectionError:
+            self._audit_sealed_projection_write(run_id, "replace_devices")
+            raise
         return len(devices)
 
     def list_devices(self, run_id: str) -> list[dict[str, object]]:
@@ -685,14 +697,19 @@ class DiscoveryRepository:
     # -- points ---------------------------------------------------------------
 
     def replace_points(self, run_id: str, points: list[dict[str, object]]) -> int:
-        with self._session_factory.begin() as session:
-            session.execute(
-                delete(DiscoveredPoint).where(DiscoveredPoint.run_id == run_id)
-            )
-            session.flush()
-            for position, payload in enumerate(points):
-                session.add(self._point_row(run_id, position, payload))
-            session.flush()
+        try:
+            with self._session_factory.begin() as session:
+                self._require_unsealed_projection(session, run_id)
+                session.execute(
+                    delete(DiscoveredPoint).where(DiscoveredPoint.run_id == run_id)
+                )
+                session.flush()
+                for position, payload in enumerate(points):
+                    session.add(self._point_row(run_id, position, payload))
+                session.flush()
+        except SealedDiscoveryProjectionError:
+            self._audit_sealed_projection_write(run_id, "replace_points")
+            raise
         return len(points)
 
     def list_points(self, run_id: str) -> list[dict[str, object]]:
@@ -707,14 +724,19 @@ class DiscoveryRepository:
     # -- topics ---------------------------------------------------------------
 
     def replace_topics(self, run_id: str, topics: list[dict[str, object]]) -> int:
-        with self._session_factory.begin() as session:
-            session.execute(
-                delete(DiscoveredTopic).where(DiscoveredTopic.run_id == run_id)
-            )
-            session.flush()
-            for position, payload in enumerate(topics):
-                session.add(self._topic_row(run_id, position, payload))
-            session.flush()
+        try:
+            with self._session_factory.begin() as session:
+                self._require_unsealed_projection(session, run_id)
+                session.execute(
+                    delete(DiscoveredTopic).where(DiscoveredTopic.run_id == run_id)
+                )
+                session.flush()
+                for position, payload in enumerate(topics):
+                    session.add(self._topic_row(run_id, position, payload))
+                session.flush()
+        except SealedDiscoveryProjectionError:
+            self._audit_sealed_projection_write(run_id, "replace_topics")
+            raise
         return len(topics)
 
     def list_topics(self, run_id: str) -> list[dict[str, object]]:
@@ -727,6 +749,28 @@ class DiscoveryRepository:
             return [_topic_to_dict(row) for row in session.scalars(statement).all()]
 
     # -- internals ------------------------------------------------------------
+
+    @staticmethod
+    def _require_unsealed_projection(session: Session, run_id: str) -> None:
+        run = session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+        if run is None:
+            raise FileNotFoundError(run_id)
+        if session.get(RunResult, run_id) is not None or session.get(RunSeal, run_id) is not None:
+            raise SealedDiscoveryProjectionError(
+                f"run {run_id} has immutable terminal discovery evidence"
+            )
+
+    def _audit_sealed_projection_write(self, run_id: str, operation: str) -> None:
+        with self._session_factory.begin() as session:
+            if session.get(Run, run_id) is None:
+                return
+            session.add(
+                RunLifecycleConflict(
+                    run_id=run_id,
+                    operation=operation,
+                    reason="sealed_projection_immutable",
+                )
+            )
 
     def _device_row(
         self, run_id: str, position: int, payload: dict[str, object]

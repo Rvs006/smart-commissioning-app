@@ -17,11 +17,13 @@ the safety module's stated convention.
 import json
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.db.run_lifecycle import (
+    DiscoveryObservationIntegrityError,
     ProtocolConflictError,
+    RunLifecycleRepository,
     ScanAuthorizationError,
 )
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
@@ -35,7 +37,7 @@ from smart_commissioning_core.engines.safety import is_authorized
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.run_context import canonical_sha256
-from smart_commissioning_core.run_lifecycle import ScanAuthorizationV1
+from smart_commissioning_core.run_lifecycle import ScanAuthorizationV1, TerminalResultV1
 
 from app.core.auth import AuthPrincipal, get_principal, require_role
 from app.core.config import get_settings
@@ -46,6 +48,9 @@ from app.core.scopes import (
     require_project_site_access,
 )
 from app.schemas.jobs import (
+    DiscoveryObservationPageResponse,
+    DiscoveryObservationRecord,
+    DiscoveryObservationTerminal,
     DiscoveryPointsResponse,
     DiscoveryResultsResponse,
     DiscoveryTopicsResponse,
@@ -83,6 +88,7 @@ router = APIRouter()
 service = RunService()
 queue_service = JobQueueService()
 config_service = ConfigurationService()
+lifecycle_repository = RunLifecycleRepository(service.engine)
 
 # RBAC: reading discovery data is viewer+; creating/running a discovery job
 # (which can drive a real network scan) is engineer+. The separate scan
@@ -165,18 +171,14 @@ def _prepare_scan_parameters(
     return resolved, False
 
 
-def _bind_control_identity(
-    parameters: dict[str, object], principal: AuthPrincipal
-) -> None:
+def _bind_control_identity(parameters: dict[str, object], principal: AuthPrincipal) -> None:
     contract = parameters.get("scan_contract_v1")
     if not isinstance(contract, dict):
         raise HTTPException(status_code=400, detail="scan_contract_v1 is missing")
     contract["initiating_user_id"] = principal.user_id
     contract["principal_source"] = principal.source
     contract["deployment_role"] = get_settings().deployment_role
-    packet_plan = {
-        key: value for key, value in contract.items() if key != "packet_plan_sha256"
-    }
+    packet_plan = {key: value for key, value in contract.items() if key != "packet_plan_sha256"}
     contract["packet_plan_sha256"] = canonical_sha256(packet_plan)
 
 
@@ -202,9 +204,7 @@ def _bind_retry_relation(
     }
 
 
-def _verify_frozen_control_identity(
-    parameters: dict[str, object], principal: AuthPrincipal
-) -> None:
+def _verify_frozen_control_identity(parameters: dict[str, object], principal: AuthPrincipal) -> None:
     contract = parameters.get("scan_contract_v1")
     if not isinstance(contract, dict):
         raise HTTPException(status_code=409, detail="sealed preview is missing control identity")
@@ -233,9 +233,7 @@ def _require_legacy_scan_authorization(parameters: dict[str, object]) -> None:
         raise HTTPException(status_code=403, detail=_SCAN_AUTH_DETAIL)
 
 
-def _stamp_legacy_authorizer(
-    parameters: dict[str, object], principal: AuthPrincipal
-) -> None:
+def _stamp_legacy_authorizer(parameters: dict[str, object], principal: AuthPrincipal) -> None:
     if is_dry_run(parameters) or not is_authorized(parameters):
         return
     existing = parameters.get("scan_authorization")
@@ -444,14 +442,10 @@ def create_ip_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    require_project_site_access(
-        principal, request.project_id, request.site_id, engine=service.engine
-    )
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
     if request.preview_run_id:
         load_scoped_run(request.preview_run_id, principal, engine=service.engine)
-    parameters, preview = _prepare_scan_parameters(
-        request, expected_job_type="ip_discovery", principal=principal
-    )
+    parameters, preview = _prepare_scan_parameters(request, expected_job_type="ip_discovery", principal=principal)
     if preview:
         resolve_ip_enrichment(parameters)
         _resolve_source_interface(request.project_id, request.site_id, parameters)
@@ -478,9 +472,7 @@ def create_ip_discovery_run(
         _bind_control_identity(parameters, principal)
     else:
         _guard_frozen_source_interface(parameters)
-    run = _create_run(
-        request.model_copy(update={"parameters": parameters}), "ip_discovery", principal
-    )
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_ip_discovery_run(
@@ -506,14 +498,10 @@ def create_bacnet_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    require_project_site_access(
-        principal, request.project_id, request.site_id, engine=service.engine
-    )
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
     if request.preview_run_id:
         load_scoped_run(request.preview_run_id, principal, engine=service.engine)
-    parameters, preview = _prepare_scan_parameters(
-        request, expected_job_type="bacnet_discovery", principal=principal
-    )
+    parameters, preview = _prepare_scan_parameters(request, expected_job_type="bacnet_discovery", principal=principal)
     if preview:
         _resolve_source_interface(request.project_id, request.site_id, parameters)
         _resolve_bacnet_transport(request.project_id, request.site_id, parameters)
@@ -549,9 +537,7 @@ def create_bacnet_discovery_run(
         resolve_bacnet_backend(parameters)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    run = _create_run(
-        request.model_copy(update={"parameters": parameters}), "bacnet_discovery", principal
-    )
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_discovery", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_bacnet_discovery_run(
@@ -578,9 +564,7 @@ def create_mqtt_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    require_project_site_access(
-        principal, request.project_id, request.site_id, engine=service.engine
-    )
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
     parameters = dict(request.parameters)
     _require_legacy_scan_authorization(parameters)
     _stamp_legacy_authorizer(parameters, principal)
@@ -588,9 +572,7 @@ def create_mqtt_discovery_run(
     # routes/validation.py) so a rejected request never leaves an orphaned run.
     # None (0/blank = indefinite) passes: it runs until Stop run, the distinct-
     # topic cap, or the 48-hour backstop the engine applies to the transport.
-    capture_seconds = parse_capture_seconds(
-        parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS
-    )
+    capture_seconds = parse_capture_seconds(parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS)
     if capture_seconds is not None and capture_seconds > MQTT_MAX_CAPTURE_SECONDS:
         raise HTTPException(
             status_code=400,
@@ -606,9 +588,7 @@ def create_mqtt_discovery_run(
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     _bind_mqtt_register(request.project_id, request.site_id, parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
-    run = _create_run(
-        request.model_copy(update={"parameters": parameters}), "mqtt_discovery", principal
-    )
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_discovery", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
         # live_capture defaults to the real raw-socket subscribe_and_capture; in
@@ -670,6 +650,125 @@ def get_discovery_run(
 
 
 @router.get(
+    "/runs/{run_id}/observations",
+    response_model=DiscoveryObservationPageResponse,
+    dependencies=[Depends(require_viewer)],
+)
+def get_discovery_observations(
+    run_id: str,
+    response: Response,
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000),
+    principal: AuthPrincipal = Depends(get_principal),
+) -> DiscoveryObservationPageResponse:
+    """Return one scoped, viewer-safe progressive observation cursor page."""
+
+    scoped = load_scoped_run(
+        run_id,
+        principal,
+        engine=service.engine,
+        query_only=True,
+    )
+    try:
+        run = service.get_run_read_only(run_id)
+        attempt = service.get_run_attempt_read_only(run_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Discovery run not found.") from error
+    if run.job_type not in {"ip_discovery", "bacnet_discovery"}:
+        raise HTTPException(status_code=404, detail="Discovery run not found.")
+
+    try:
+        terminal_marker = service.get_terminal_observation_marker_read_only(run_id)
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored discovery observation evidence failed integrity verification.",
+        ) from error
+    if attempt == 0:
+        if after > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Observation cursor is no longer valid.",
+            )
+        response.headers["Cache-Control"] = "no-store"
+        return DiscoveryObservationPageResponse(
+            run_id=run_id,
+            attempt=1,
+            observations=[],
+            next_cursor=0,
+            latest_cursor=0,
+            has_more=False,
+            observations_pruned=False,
+            terminal=(
+                DiscoveryObservationTerminal(
+                    status=terminal_marker["status"],
+                    terminal_cursor=0,
+                )
+                if terminal_marker is not None
+                else None
+            ),
+        )
+
+    cutoff = lifecycle_repository.get_discovery_observation_cutoff(
+        run_id,
+        attempt,
+        project_id=scoped.project_id,
+        site_id=scoped.site_id,
+    )
+    observations_quarantined = bool(
+        terminal_marker is not None and terminal_marker.get("observations_quarantined") is True
+    )
+    observations_pruned = bool(
+        terminal_marker is not None
+        and int(terminal_marker["observation_count"]) > cutoff.observation_count
+    )
+    latest_cursor = int(terminal_marker["terminal_cursor"]) if terminal_marker is not None else cutoff.terminal_cursor
+    if after > latest_cursor:
+        raise HTTPException(status_code=409, detail="Observation cursor is no longer valid.")
+
+    try:
+        requested_rows = (
+            []
+            if observations_quarantined
+            else lifecycle_repository.list_discovery_observations(
+                run_id,
+                cutoff.attempt,
+                after_cursor=after,
+                limit=limit,
+                project_id=scoped.project_id,
+                site_id=scoped.site_id,
+            )
+        )
+    except DiscoveryObservationIntegrityError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored discovery observation evidence failed integrity verification.",
+        ) from error
+    observations = [DiscoveryObservationRecord.model_validate(item.model_dump(mode="json")) for item in requested_rows]
+    next_cursor = observations[-1].cursor if observations else after
+    response.headers["Cache-Control"] = "no-store"
+    terminal = (
+        DiscoveryObservationTerminal(
+            status=terminal_marker["status"],
+            terminal_cursor=int(terminal_marker["terminal_cursor"]),
+        )
+        if terminal_marker is not None
+        else None
+    )
+    return DiscoveryObservationPageResponse(
+        run_id=run_id,
+        attempt=cutoff.attempt,
+        observations=observations,
+        next_cursor=next_cursor,
+        latest_cursor=latest_cursor,
+        has_more=not observations_quarantined and not observations_pruned and next_cursor < latest_cursor,
+        observations_pruned=observations_pruned,
+        observations_quarantined=observations_quarantined,
+        terminal=terminal,
+    )
+
+
+@router.get(
     "/runs/{run_id}/results",
     response_model=DiscoveryResultsResponse,
     dependencies=[Depends(require_viewer)],
@@ -679,24 +778,27 @@ def get_discovery_results(
     principal: AuthPrincipal = Depends(get_principal),
 ) -> DiscoveryResultsResponse:
     run = _load_discovery_run(run_id, principal)
+    terminal = _verified_discovery_terminal(run)
 
-    # Back-compat: discovered_assets still come from result_summary (the engines
-    # write them there). Structured rows additionally come from the repository
-    # so consumers see persisted devices/points/topics, not just the summary.
-    discovered_assets = run.result_summary.get("discovered_assets", [])
+    result_summary = dict(terminal.summary) if terminal is not None else run.result_summary
+    discovered_assets = result_summary.get("discovered_assets", [])
     if not isinstance(discovered_assets, list):
         discovered_assets = []
 
     repository = _discovery_repository()
-    topics, register_comparison = _annotate_register_matches(run, repository.list_topics(run_id))
+    devices = list(terminal.devices) if terminal is not None else repository.list_devices(run_id)
+    points = list(terminal.points) if terminal is not None else repository.list_points(run_id)
+    topic_rows = list(terminal.topics) if terminal is not None else repository.list_topics(run_id)
+    authoritative_run = run.model_copy(update={"result_summary": result_summary})
+    topics, register_comparison = _annotate_register_matches(authoritative_run, topic_rows)
     return DiscoveryResultsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
         status=run.status,
-        result_summary=run.result_summary,
+        result_summary=result_summary,
         discovered_assets=discovered_assets,
-        devices=repository.list_devices(run_id),
-        points=repository.list_points(run_id),
+        devices=devices,
+        points=points,
         topics=topics,
         register_comparison=register_comparison,
     )
@@ -712,11 +814,12 @@ def get_discovery_points(
     principal: AuthPrincipal = Depends(get_principal),
 ) -> DiscoveryPointsResponse:
     run = _load_discovery_run(run_id, principal)
+    terminal = _verified_discovery_terminal(run)
     return DiscoveryPointsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
         status=run.status,
-        points=_discovery_repository().list_points(run_id),
+        points=(list(terminal.points) if terminal is not None else _discovery_repository().list_points(run_id)),
     )
 
 
@@ -730,8 +833,16 @@ def get_discovery_topics(
     principal: AuthPrincipal = Depends(get_principal),
 ) -> DiscoveryTopicsResponse:
     run = _load_discovery_run(run_id, principal)
+    terminal = (
+        None
+        if run.job_type == "mqtt_discovery" and run.status not in {"succeeded", "failed", "cancelled"}
+        else _verified_discovery_terminal(run)
+    )
+    result_summary = dict(terminal.summary) if terminal is not None else run.result_summary
+    authoritative_run = run.model_copy(update={"result_summary": result_summary})
     topics, register_comparison = _annotate_register_matches(
-        run, _discovery_repository().list_topics(run_id)
+        authoritative_run,
+        (list(terminal.topics) if terminal is not None else _discovery_repository().list_topics(run_id)),
     )
     return DiscoveryTopicsResponse(
         run_id=run.run_id,
@@ -757,7 +868,12 @@ def export_discovery_topics_xlsx(
     the export matches what the operator sees.
     """
     run = _load_discovery_run(run_id, principal)
-    rows = _discovery_repository().list_topics(run_id)
+    terminal = (
+        None
+        if run.job_type == "mqtt_discovery" and run.status not in {"succeeded", "failed", "cancelled"}
+        else _verified_discovery_terminal(run)
+    )
+    rows = list(terminal.topics) if terminal is not None else _discovery_repository().list_topics(run_id)
     if topic_filter:
         rows = [row for row in rows if _matches_topic_filter(str(row.get("topic") or ""), topic_filter)]
     # Annotate the (already filter-narrowed) rows with the same register-match
@@ -783,9 +899,7 @@ def _build_topics_xlsx(rows: list[dict[str, object]]) -> bytes:
         attributes = row.get("attributes")
         attributes = attributes if isinstance(attributes, dict) else {}
         last_payload = row.get("last_payload")
-        payload_text = (
-            json.dumps(last_payload) if isinstance(last_payload, dict) and last_payload else ""
-        )
+        payload_text = json.dumps(last_payload) if isinstance(last_payload, dict) and last_payload else ""
         sheet.append(
             [
                 _xlsx_cell(row.get("topic")),
@@ -854,17 +968,30 @@ def _load_discovery_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
     return run
 
 
-def _bind_mqtt_register(
-    project_id: str, site_id: str, parameters: dict[str, object]
-) -> None:
+def _verified_discovery_terminal(run: RunRecord) -> TerminalResultV1 | None:
+    """Use the sealed RunResult as terminal authority, with narrow legacy fallback."""
+
+    if run.status not in {"succeeded", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Terminal discovery results are not ready.",
+        )
+    try:
+        return service.get_verified_terminal_result(run.run_id)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored discovery evidence failed integrity verification.",
+        ) from error
+
+
+def _bind_mqtt_register(project_id: str, site_id: str, parameters: dict[str, object]) -> None:
     """Freeze the newest usable MQTT register into the run parameters."""
 
     # The route owns this binding. A caller cannot smuggle an import from
     # another workspace by supplying its id in the request body.
     parameters.pop("mqtt_register_import_id", None)
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="mqtt_register"
-    )
+    imports = ImportRepository(service.engine).list(project_id=project_id, site_id=site_id, import_type="mqtt_register")
     for record in imports:
         if record.get("accepted_rows"):
             parameters["mqtt_register_import_id"] = str(record["import_id"])
@@ -896,9 +1023,7 @@ def _mqtt_register_filters(
     return [], None
 
 
-def _annotate_register_matches(
-    run: RunRecord, topics: list[dict]
-) -> tuple[list[dict], dict | None]:
+def _annotate_register_matches(run: RunRecord, topics: list[dict]) -> tuple[list[dict], dict | None]:
     """Stamp observed topics using the register frozen into the run at creation.
 
     Verdicts are derived on GET from the exact import bound at run creation.
@@ -914,9 +1039,7 @@ def _annotate_register_matches(
         device: a silent topic is not proof the device is gone.
     """
     if not (
-        run.job_type == "mqtt_discovery"
-        and run.status == "succeeded"
-        and run.result_summary.get("dry_run") is not True
+        run.job_type == "mqtt_discovery" and run.status == "succeeded" and run.result_summary.get("dry_run") is not True
     ):
         return topics, None
     filters, filename = _mqtt_register_filters(run)

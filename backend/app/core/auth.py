@@ -128,7 +128,12 @@ def _is_loopback_client(request: Request) -> bool:
     return is_loopback_host(request.client.host)
 
 
-def _resolve_user_principal(presented: str | None, rejection_detail: str) -> AuthPrincipal | None:
+def _resolve_user_principal(
+    presented: str | None,
+    rejection_detail: str,
+    *,
+    touch_last_used: bool,
+) -> AuthPrincipal | None:
     """Resolve a presented key to an active user's principal, or None.
 
     Returns None only when no key is presented or the key matches NO user row,
@@ -145,7 +150,7 @@ def _resolve_user_principal(presented: str | None, rejection_detail: str) -> Aut
     """
     if not presented:
         return None
-    repository = UserRepository(get_engine())
+    repository = UserRepository(get_engine(), query_only=True)
     user = repository.get_by_api_key_hash(hash_api_key(presented))
     if user is None:
         return None
@@ -158,10 +163,11 @@ def _resolve_user_principal(presented: str | None, rejection_detail: str) -> Aut
         # privilege — and, like an inactive user, must not fall through either.
         logger.warning("User %s has an unknown role value; rejecting.", user["id"])
         raise HTTPException(status_code=401, detail=rejection_detail) from error
-    try:
-        repository.touch_last_used(str(user["id"]))
-    except Exception:  # noqa: BLE001 (a last_used touch must never fail a request)
-        logger.debug("Failed to touch last_used_at for user %s.", user["id"], exc_info=True)
+    if touch_last_used:
+        try:
+            UserRepository(get_engine()).touch_last_used(str(user["id"]))
+        except Exception:  # noqa: BLE001 (a last_used touch must never fail a request)
+            logger.debug("Failed to touch last_used_at for user %s.", user["id"], exc_info=True)
     return AuthPrincipal(
         user_id=str(user["id"]),
         username=str(user["username"]),
@@ -190,7 +196,11 @@ def _resolve_principal(request: Request) -> AuthPrincipal:
         rejection_detail = "Requests from non-local clients require an API key."
 
     # (1) Per-user key wins.
-    user_principal = _resolve_user_principal(presented, rejection_detail)
+    user_principal = _resolve_user_principal(
+        presented,
+        rejection_detail,
+        touch_last_used=request.method.upper() not in {"GET", "HEAD", "OPTIONS"},
+    )
     if user_principal is not None:
         return user_principal
 

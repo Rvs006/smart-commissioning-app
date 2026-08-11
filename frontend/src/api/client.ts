@@ -1,4 +1,5 @@
 import type { SessionScopeId, WorkspaceRef } from "../app/sessionScope";
+import { isPlainObject } from "../utils/isPlainObject";
 
 export type HealthStatus = {
   status: string;
@@ -581,6 +582,65 @@ export type DiscoveryTopicsResponse = {
   register_comparison?: RegisterComparison | null;
 };
 
+export type DiscoveryObservationProtocol = "ip" | "bacnet";
+export type DiscoveryObservationEntityKind =
+  | "lane"
+  | "host"
+  | "port"
+  | "device"
+  | "object"
+  | "property"
+  | "diagnostic";
+export type DiscoveryObservationPhase =
+  | "planned"
+  | "reachability"
+  | "enrichment"
+  | "comparison"
+  | "finalize";
+
+export type DiscoveryObservationRecord = {
+  cursor: number;
+  run_id: string;
+  attempt: number;
+  protocol: DiscoveryObservationProtocol;
+  entity_kind: DiscoveryObservationEntityKind;
+  entity_key: string;
+  entity_version: number;
+  event_key: string;
+  phase: DiscoveryObservationPhase;
+  outcome: string;
+  payload_schema_version: string;
+  payload: Record<string, unknown>;
+  payload_sha256: string;
+  observed_at: string | null;
+  created_at: string;
+};
+
+export type DiscoveryObservationTerminal = {
+  status: Extract<JobStatus, "succeeded" | "failed" | "cancelled">;
+  terminal_cursor: number;
+};
+
+export type DiscoveryObservationPage = {
+  run_id: string;
+  attempt: number;
+  observations: DiscoveryObservationRecord[];
+  next_cursor: number;
+  // Informational high-water mark. A reducer must acknowledge next_cursor only
+  // after the complete page has folded successfully.
+  latest_cursor: number;
+  has_more: boolean;
+  terminal: DiscoveryObservationTerminal | null;
+  // A sealed run can outlive the 30-day provisional-event retention window.
+  // When true, the terminal result is authoritative and the missing cursor
+  // prefix must not be reconstructed or represented as observed in-browser.
+  observations_pruned?: boolean;
+  // Integrity quarantine is distinct from ordinary retention expiry. The
+  // provisional stream must be discarded, while sealed evidence still crosses
+  // the same terminal synchronization barrier before it is rendered.
+  observations_quarantined?: boolean;
+};
+
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
 const apiBaseUrl = rawApiBaseUrl.replace(/\/$/, "");
 
@@ -605,6 +665,16 @@ export class ApiError extends Error {
 // (e.g. by prompting the operator to clear a key that is shown only once).
 export function isAuthRejection(error: unknown): error is ApiError {
   return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+// Scoped run endpoints deliberately conceal revocation and cross-scope access
+// behind the same 404 used for a missing run. Consumers of those endpoints
+// must close the evidence surface for all three statuses instead of retrying.
+export function isRunAccessClosedError(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403 || error.status === 404)
+  );
 }
 
 function readStoredApiKey(): string | null {
@@ -658,7 +728,9 @@ export type ApiRequestContext = Readonly<{
   signal?: AbortSignal;
 }>;
 
-function combineSignals(...signals: Array<AbortSignal | null | undefined>): AbortSignal | undefined {
+function combineSignals(
+  ...signals: Array<AbortSignal | null | undefined>
+): AbortSignal | undefined {
   const present = signals.filter((signal): signal is AbortSignal => Boolean(signal));
   if (present.length === 0) {
     return undefined;
@@ -680,12 +752,14 @@ function combineSignals(...signals: Array<AbortSignal | null | undefined>): Abor
   return controller.signal;
 }
 
-function withSignal(init: RequestInit | undefined, signal: AbortSignal | undefined): RequestInit | undefined {
+function withSignal(
+  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
+): RequestInit | undefined {
   return signal ? { ...init, signal } : init;
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
-
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
   }
@@ -734,7 +808,10 @@ async function request<T>(
   context?: ApiRequestContext,
 ): Promise<T> {
   if (context?.client) {
-    return context.client.request<T>(path, { ...init, signal: combineSignals(init?.signal, context.signal) });
+    return context.client.request<T>(path, {
+      ...init,
+      signal: combineSignals(init?.signal, context.signal),
+    });
   }
   const response = await fetch(
     `${apiBaseUrl}${path}`,
@@ -774,7 +851,6 @@ export async function downloadFile(
 }
 
 async function parseDownloadResponse(response: Response): Promise<DownloadedFile> {
-
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
   }
@@ -904,17 +980,25 @@ export function createUser(input: {
   role: Role;
   context?: ApiRequestContext;
 }): Promise<CreateUserResponse> {
-  return request<CreateUserResponse>("/users", {
+  return request<CreateUserResponse>(
+    "/users",
+    {
     body: JSON.stringify({ role: input.role, username: input.username }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export function deactivateUser(userId: string, context?: ApiRequestContext): Promise<UserRecord> {
-  return request<UserRecord>(`/users/${encodeURIComponent(userId)}/deactivate`, {
+  return request<UserRecord>(
+    `/users/${encodeURIComponent(userId)}/deactivate`,
+    {
     method: "POST",
-  }, context);
+    },
+    context,
+  );
 }
 
 // Admin-only lost-key recovery: invalidates the user's current key immediately
@@ -924,9 +1008,13 @@ export function reissueUserKey(
   userId: string,
   context?: ApiRequestContext,
 ): Promise<CreateUserResponse> {
-  return request<CreateUserResponse>(`/users/${encodeURIComponent(userId)}/key`, {
+  return request<CreateUserResponse>(
+    `/users/${encodeURIComponent(userId)}/key`,
+    {
     method: "POST",
-  }, context);
+    },
+    context,
+  );
 }
 
 export function updateUserRole(
@@ -934,11 +1022,15 @@ export function updateUserRole(
   role: Role,
   context?: ApiRequestContext,
 ): Promise<UserRecord> {
-  return request<UserRecord>(`/users/${encodeURIComponent(userId)}/role`, {
+  return request<UserRecord>(
+    `/users/${encodeURIComponent(userId)}/role`,
+    {
     body: JSON.stringify({ role }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, context);
+    },
+    context,
+  );
 }
 
 export function getScopeActivationPreflight(
@@ -1006,22 +1098,30 @@ export function validateConfiguration(
   configuration: ConfigurationSnapshot,
   context?: ApiRequestContext,
 ): Promise<ConfigurationValidationResult> {
-  return request<ConfigurationValidationResult>("/configuration/validate", {
+  return request<ConfigurationValidationResult>(
+    "/configuration/validate",
+    {
     body: JSON.stringify(configuration),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, context);
+    },
+    context,
+  );
 }
 
 export function updateConfiguration(
   configuration: ConfigurationSnapshot,
   context?: ApiRequestContext,
 ): Promise<ConfigurationSnapshot> {
-  return request<ConfigurationSnapshot>("/configuration", {
+  return request<ConfigurationSnapshot>(
+    "/configuration",
+    {
     body: JSON.stringify(configuration),
     headers: { "Content-Type": "application/json" },
     method: "PUT",
-  }, context);
+    },
+    context,
+  );
 }
 
 // Query string for the optional project/site scoping the configuration
@@ -1185,7 +1285,9 @@ export function storeSecretMaterial(input: {
   fileName?: string | null;
   context?: ApiRequestContext;
 }): Promise<SecretMaterialResponse> {
-  return request<SecretMaterialResponse>("/configuration/secrets", {
+  return request<SecretMaterialResponse>(
+    "/configuration/secrets",
+    {
     body: JSON.stringify({
       content: input.content,
       field: input.field,
@@ -1194,7 +1296,9 @@ export function storeSecretMaterial(input: {
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export function listImportProfiles(context?: ApiRequestContext): Promise<ImportProfileSummary[]> {
@@ -1214,10 +1318,14 @@ export function createImport(input: {
   body.append("site_id", input.siteId ?? "demo-site");
   body.append("file", input.file);
 
-  return request<ImportBatchSummary>("/imports", {
+  return request<ImportBatchSummary>(
+    "/imports",
+    {
     body,
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 // Per-row rejection reasons for one import. The POST above returns only the
@@ -1227,7 +1335,11 @@ export function getImportErrors(
   importId: string,
   context?: ApiRequestContext,
 ): Promise<ImportErrorReport> {
-  return request<ImportErrorReport>(`/imports/${encodeURIComponent(importId)}/errors`, undefined, context);
+  return request<ImportErrorReport>(
+    `/imports/${encodeURIComponent(importId)}/errors`,
+    undefined,
+    context,
+  );
 }
 
 // Newest usable (non-empty) import of a given type for the current project/site.
@@ -1249,14 +1361,16 @@ export function getLatestImport(
     project_id: projectId,
     site_id: siteId,
   });
-  return request<ImportBatchSummary>(`/imports/latest?${query.toString()}`, undefined, context).catch(
-    (error: unknown) => {
+  return request<ImportBatchSummary>(
+    `/imports/latest?${query.toString()}`,
+    undefined,
+    context,
+  ).catch((error: unknown) => {
       if (error instanceof ApiError && error.status === 404) {
         return null;
       }
       throw error;
-    },
-  );
+  });
 }
 
 // One uploaded non-published UDMI schema set: payloads that declare this
@@ -1285,22 +1399,33 @@ export function uploadUdmiSchemaSet(input: {
   for (const file of input.files) {
     body.append("files", file);
   }
-  return request<UdmiSchemaSet>("/udmi/schemas", {
+  return request<UdmiSchemaSet>(
+    "/udmi/schemas",
+    {
     body,
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export function deleteUdmiSchemaSet(
   versionLabel: string,
   context?: ApiRequestContext,
 ): Promise<void> {
-  return request<void>(`/udmi/schemas/${encodeURIComponent(versionLabel)}`, {
+  return request<void>(
+    `/udmi/schemas/${encodeURIComponent(versionLabel)}`,
+    {
     method: "DELETE",
-  }, context);
+    },
+    context,
+  );
 }
 
-export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
+export function getImportTemplatePath(
+  importType: ImportType,
+  format: ImportTemplateFormat,
+): string {
   return `/imports/templates/${encodeURIComponent(importType)}.${format}`;
 }
 
@@ -1332,7 +1457,9 @@ export function startDiscoveryRun(input: {
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
-  return request<JobAcceptedResponse>(`/discovery/${input.runKind}/runs`, {
+  return request<JobAcceptedResponse>(
+    `/discovery/${input.runKind}/runs`,
+    {
     body: JSON.stringify({
       job_type: input.jobType,
       parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
@@ -1341,7 +1468,9 @@ export function startDiscoveryRun(input: {
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export function startValidationRun(input: {
@@ -1351,7 +1480,9 @@ export function startValidationRun(input: {
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
-  return request<JobAcceptedResponse>(`/validation/${input.runKind}/runs`, {
+  return request<JobAcceptedResponse>(
+    `/validation/${input.runKind}/runs`,
+    {
     body: JSON.stringify({
       job_type: input.jobType,
       parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
@@ -1360,7 +1491,9 @@ export function startValidationRun(input: {
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export type ConfigPublishPoint = { point: string; value: string | number | boolean };
@@ -1396,7 +1529,9 @@ export function startMqttConfigPublishRun(input: {
   for (const pair of allExpected) {
     points[pair.point.trim()] = { present_value: pair.value };
   }
-  return request<JobAcceptedResponse>("/validation/mqtt-config/runs", {
+  return request<JobAcceptedResponse>(
+    "/validation/mqtt-config/runs",
+    {
     body: JSON.stringify({
       job_type: "mqtt_config_publish",
       parameters: {
@@ -1410,7 +1545,10 @@ export function startMqttConfigPublishRun(input: {
         confirmed: input.confirmed,
         expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
         expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",
-        expected_points: allExpected.map((pair) => ({ point: pair.point.trim(), value: pair.value })),
+          expected_points: allExpected.map((pair) => ({
+            point: pair.point.trim(),
+            value: pair.value,
+          })),
         pointset_topic: input.pointsetTopic ?? "",
         next_pointset_payload: {
           pointset: {
@@ -1428,7 +1566,9 @@ export function startMqttConfigPublishRun(input: {
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export function getValidationRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
@@ -1452,7 +1592,9 @@ export function createReport(input: {
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<ReportSummary> {
-  return request<ReportSummary>("/reports", {
+  return request<ReportSummary>(
+    "/reports",
+    {
     body: JSON.stringify({
       output_format: input.format ?? "zip",
       project_id: input.workspace?.projectId ?? "demo-project",
@@ -1465,7 +1607,9 @@ export function createReport(input: {
     }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export function listReports(
@@ -1487,11 +1631,15 @@ export function deleteReports(input: {
   reportIds: string[];
   context?: ApiRequestContext;
 }): Promise<DeleteReportsResponse> {
-  return request<DeleteReportsResponse>("/reports/delete", {
+  return request<DeleteReportsResponse>(
+    "/reports/delete",
+    {
     body: JSON.stringify({ report_ids: input.reportIds }),
     headers: { "Content-Type": "application/json" },
     method: "POST",
-  }, input.context);
+    },
+    input.context,
+  );
 }
 
 export type ListRunsParams = {
@@ -1533,14 +1681,21 @@ function buildRunsQuery(params?: ListRunsParams): string {
   return query ? `?${query}` : "";
 }
 
-export function listRuns(params?: ListRunsParams, context?: ApiRequestContext): Promise<RunListResponse> {
+export function listRuns(
+  params?: ListRunsParams,
+  context?: ApiRequestContext,
+): Promise<RunListResponse> {
   return request<RunListResponse>(`/runs${buildRunsQuery(params)}`, undefined, context);
 }
 
 export function cancelRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
-  return request<RunRecord>(`/runs/${encodeURIComponent(runId)}/cancel`, {
+  return request<RunRecord>(
+    `/runs/${encodeURIComponent(runId)}/cancel`,
+    {
     method: "POST",
-  }, context);
+    },
+    context,
+  );
 }
 
 export function getDiscoveryRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
@@ -1551,14 +1706,39 @@ export function getDiscoveryResults(
   runId: string,
   context?: ApiRequestContext,
 ): Promise<DiscoveryResultsResponse> {
-  return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`, undefined, context);
+  return request<DiscoveryResultsResponse>(
+    `/discovery/runs/${encodeURIComponent(runId)}/results`,
+    undefined,
+    context,
+  );
+}
+
+export function getDiscoveryObservations(
+  runId: string,
+  after: number,
+  limit = 100,
+  context?: ApiRequestContext,
+): Promise<DiscoveryObservationPage> {
+  const query = new URLSearchParams({
+    after: String(after),
+    limit: String(limit),
+  });
+  return request<DiscoveryObservationPage>(
+    `/discovery/runs/${encodeURIComponent(runId)}/observations?${query.toString()}`,
+    undefined,
+    context,
+  );
 }
 
 export function getDiscoveryTopics(
   runId: string,
   context?: ApiRequestContext,
 ): Promise<DiscoveryTopicsResponse> {
-  return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`, undefined, context);
+  return request<DiscoveryTopicsResponse>(
+    `/discovery/runs/${encodeURIComponent(runId)}/topics`,
+    undefined,
+    context,
+  );
 }
 
 // Path (display-only; download via downloadFile so the X-API-Key header rides)
@@ -1599,6 +1779,8 @@ export function rollbackMqttConfigPublish(
 
 // The status/stage/progress slice emitted per progress frame. Mirrors the
 // backend events._progress_payload shape.
+export type ProgressiveCounts = Record<string, number>;
+
 export type RunEvent = {
   run_id: string;
   job_type?: JobType;
@@ -1607,14 +1789,28 @@ export type RunEvent = {
   progress_percent?: number;
   updated_at?: string | null;
   error_message?: string | null;
+  observation_attempt?: number | null;
+  latest_observation_cursor?: number | null;
+  progressive_counts?: ProgressiveCounts;
 };
 
-export type RunEventName = "message" | "terminal" | "timeout" | "gone";
+export type RunControlEvent =
+  | { run_id: string; status: "closed" }
+  | { run_id: string; status: "unavailable" };
+
+export type RunEventPayload = RunEvent | RunControlEvent;
+
+export type RunEventName = "message" | "terminal" | "timeout" | "closed" | "unavailable";
+
+export type RunEventFrame =
+  | { name: "message" | "terminal" | "timeout"; data: RunEvent | null }
+  | { name: "closed"; data: Extract<RunControlEvent, { status: "closed" }> | null }
+  | { name: "unavailable"; data: Extract<RunControlEvent, { status: "unavailable" }> | null };
 
 export type RunEventCallbacks = {
   // Fired for every progress frame (the default "message" event) and for the
   // explicit "terminal" frame, so consumers always see the final state.
-  onEvent: (event: RunEvent, name: RunEventName) => void;
+  onEvent: (event: RunEventPayload, name: RunEventName) => void;
   // Fired once when the stream ends (terminal/timeout/closed) or errors. The
   // boolean reports whether the run reached a terminal status over the stream.
   onClose?: (reachedTerminal: boolean) => void;
@@ -1631,8 +1827,8 @@ const TERMINAL_EVENT_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>([
  * Parses accumulated SSE text into complete frames, returning the parsed
  * events and the unconsumed trailing buffer (a partial frame).
  */
-export function parseSseBuffer(buffer: string): { events: { name: RunEventName; data: RunEvent | null }[]; rest: string } {
-  const events: { name: RunEventName; data: RunEvent | null }[] = [];
+export function parseSseBuffer(buffer: string): { events: RunEventFrame[]; rest: string } {
+  const events: RunEventFrame[] = [];
   // SSE frames are separated by a blank line. Normalise CRLF first.
   const normalized = buffer.replace(/\r\n/g, "\n");
   const parts = normalized.split("\n\n");
@@ -1643,27 +1839,78 @@ export function parseSseBuffer(buffer: string): { events: { name: RunEventName; 
     if (!trimmed) {
       continue;
     }
-    let name: RunEventName = "message";
+    let rawName = "message";
     const dataLines: string[] = [];
     for (const line of trimmed.split("\n")) {
       if (line.startsWith("event:")) {
-        name = line.slice("event:".length).trim() as RunEventName;
+        rawName = line.slice("event:".length).trim();
       } else if (line.startsWith("data:")) {
         dataLines.push(line.slice("data:".length).trim());
       }
     }
-    let data: RunEvent | null = null;
+    const name = parseRunEventName(rawName);
+    if (name === null) {
+      continue;
+    }
+    let decoded: unknown = null;
     if (dataLines.length > 0) {
       try {
-        data = JSON.parse(dataLines.join("")) as RunEvent;
+        decoded = JSON.parse(dataLines.join(""));
       } catch {
         // A malformed data frame is skipped rather than aborting the stream.
-        data = null;
+        decoded = null;
       }
     }
-    events.push({ data, name });
+    if (name === "closed") {
+      events.push({ data: parseControlEvent(decoded, "closed"), name });
+    } else if (name === "unavailable") {
+      events.push({ data: parseControlEvent(decoded, "unavailable"), name });
+    } else {
+      events.push({ data: parseProgressEvent(decoded), name });
+    }
   }
   return { events, rest };
+}
+
+function parseRunEventName(value: string): RunEventName | null {
+  return value === "message" ||
+    value === "terminal" ||
+    value === "timeout" ||
+    value === "closed" ||
+    value === "unavailable"
+    ? value
+    : null;
+}
+
+function isJobStatus(value: unknown): value is JobStatus {
+  return (
+    value === "queued" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+export function isRunProgressEvent(value: RunEventPayload): value is RunEvent {
+  return isJobStatus(value.status);
+}
+
+function parseProgressEvent(value: unknown): RunEvent | null {
+  if (!isPlainObject(value) || typeof value.run_id !== "string" || !isJobStatus(value.status)) {
+    return null;
+  }
+  return value as RunEvent;
+}
+
+function parseControlEvent<TStatus extends RunControlEvent["status"]>(
+  value: unknown,
+  status: TStatus,
+): Extract<RunControlEvent, { status: TStatus }> | null {
+  if (!isPlainObject(value) || typeof value.run_id !== "string" || value.status !== status) {
+    return null;
+  }
+  return { run_id: value.run_id, status } as Extract<RunControlEvent, { status: TStatus }>;
 }
 
 /**
@@ -1732,7 +1979,10 @@ export function streamRunEvents(
         buffer = rest;
         for (const { name, data } of events) {
           if (data && data.run_id === runId) {
-            if (name === "terminal" || TERMINAL_EVENT_STATUSES.has(data.status)) {
+            if (
+              name === "terminal" ||
+              (isRunProgressEvent(data) && TERMINAL_EVENT_STATUSES.has(data.status))
+            ) {
               reachedTerminal = true;
             }
             callbacks.onEvent(data, name);
