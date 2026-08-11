@@ -22,6 +22,30 @@ MAX_SYNC_ITEMS=500
 Confirm the live values through the authenticated capabilities endpoint before
 sending a large batch.
 
+### Create the hub's first named administrator
+
+The shared `API_KEY` remains a bootstrap identity on a hub, but its
+`global_scope` is `false`. Create the first named administrator from inside the
+hub API container before using user-facing report routes:
+
+```sh
+docker compose -f infra/docker-compose.yml \
+  -f infra/docker-compose.sync-acceptance.yml \
+  exec -T hub-api \
+  python -m app.scripts.bootstrap_admin --username sync-operator
+```
+
+The final stdout line is the one-time API key. Store it in the approved secret
+manager immediately. The command stores only its SHA-256 hash, assigns the
+fixed `admin` role, and refuses to run while any active named administrator
+exists. It can be used for recovery when the active named-admin count is zero.
+Duplicate usernames and concurrent bootstrap attempts fail closed.
+
+Use the shared key to confirm `GET /api/v1/me` reports
+`"global_scope": false`. Use the named administrator key for report reads. A
+shared-key request for a synchronized report returns the same `404` used to
+conceal an unavailable or unauthorized report.
+
 ## Online delivery
 
 From the edge backend environment:

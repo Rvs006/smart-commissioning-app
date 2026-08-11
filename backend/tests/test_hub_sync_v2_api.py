@@ -671,8 +671,28 @@ class HubSyncV2ApiTests(ApiTestCase):
         self.assertEqual(retry_contract.site_id, "site-alpha")
         self.assertEqual(retry_contract.classified_at, contract.classified_at)
 
-        first_download = self.client.get(f"/api/v1/reports/{run_id}/download")
-        second_download = self.client.get(f"/api/v1/reports/{run_id}/download")
+        shared_headers = {"X-API-Key": _API_KEY}
+        shared_me = self.client.get("/api/v1/me", headers=shared_headers)
+        self.assertEqual(shared_me.status_code, 200, shared_me.text)
+        self.assertFalse(shared_me.json()["global_scope"])
+        shared_download = self.client.get(
+            f"/api/v1/reports/{run_id}/download",
+            headers=shared_headers,
+        )
+        self.assertEqual(shared_download.status_code, 404, shared_download.text)
+
+        named_headers = {"X-API-Key": self.hub_admin_key}
+        named_me = self.client.get("/api/v1/me", headers=named_headers)
+        self.assertEqual(named_me.status_code, 200, named_me.text)
+        self.assertTrue(named_me.json()["global_scope"])
+        first_download = self.client.get(
+            f"/api/v1/reports/{run_id}/download",
+            headers=named_headers,
+        )
+        second_download = self.client.get(
+            f"/api/v1/reports/{run_id}/download",
+            headers=named_headers,
+        )
         self.assertEqual(first_download.status_code, 200, first_download.text)
         self.assertEqual(first_download.content, self.edge_artifacts[run_id])
         self.assertEqual(first_download.content, second_download.content)

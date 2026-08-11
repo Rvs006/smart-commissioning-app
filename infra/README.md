@@ -69,6 +69,25 @@ Open the app at `http://127.0.0.1:8080` (or your `FRONTEND_PORT`). Everything
 binds to loopback only. To expose the app beyond the host, put a
 TLS-terminating reverse proxy in front of the frontend port.
 
+## First named administrator on an edge or hub
+
+When the API service is configured with `DEPLOYMENT_ROLE=edge` or
+`DEPLOYMENT_ROLE=hub`, the shared `API_KEY` reports `global_scope: false` and
+cannot administer user-facing project data. Create the first named
+administrator offline:
+
+```sh
+docker compose -f infra/docker-compose.yml exec -T api \
+  python -m app.scripts.bootstrap_admin --username site-admin
+```
+
+For a Compose override that renames the API service, replace `api` with that
+service name. The last stdout line is the raw key and appears once. Store it at
+once; only its SHA-256 hash is written to Postgres. The command assigns the
+fixed `admin` role, refuses while an active named administrator exists, permits
+recovery when the active count is zero, and fails closed on duplicate or
+concurrent attempts.
+
 ## Verifying health
 
 ```sh

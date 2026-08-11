@@ -112,14 +112,26 @@ broker is unreachable from the server - that is expected off-site).
 
 ## 4. Provision per-user accounts (do NOT share the bootstrap key)
 
-The `API_KEY` authenticates as a synthetic **admin** with no per-user
-accountability, and the frontend stores whatever key a user enters in browser
-`localStorage`. For a real team, create named users so actions are attributable
-and the shared key is bootstrap-only:
+The frontend stores whatever key a user enters in browser `localStorage`. For
+a real team, create named users so actions are attributable. A standalone
+deployment can use its shared `API_KEY` for the existing HTTP creation route.
+An edge or hub gives that shared identity `global_scope: false`, so its first
+named administrator is created offline inside the API container:
 
 ```sh
-# As the bootstrap admin (X-API-Key: $API_KEY):
-curl -sX POST https://<host>/api/v1/users -H "X-API-Key: $API_KEY" \
+# Run only when DEPLOYMENT_ROLE is edge or hub and no active named admin exists.
+docker compose -f infra/docker-compose.yml exec -T api \
+  python -m app.scripts.bootstrap_admin --username team-admin
+```
+
+The raw administrator key is the final stdout line and is displayed once. The
+database keeps only its SHA-256 hash. The role is fixed to `admin`; the command
+refuses an active named admin and fails closed on a duplicate or concurrent
+attempt. Once the first administrator is signed in, create the rest of the team
+through the API or Users page:
+
+```sh
+curl -sX POST https://<host>/api/v1/users -H "X-API-Key: <named-admin-key>" \
   -H 'Content-Type: application/json' \
   -d '{"username":"alice","role":"engineer"}'
 # -> returns the plaintext key; hand it to that user. It is DISPLAYED only this
@@ -134,8 +146,8 @@ runs require **engineer+**.
   key" button). The old key stops working immediately and the new plaintext is
   shown once, exactly like at creation.
 - **Last-admin guard**: you cannot deactivate/demote the last active admin user
-  (returns 409). Recovery if you ever lock out all admin rows: drop to
-  `AUTH_MODE=local` (loopback) or the shared bootstrap key.
+  (returns 409). If the active admin count reaches zero on an edge or hub, run
+  the offline bootstrap command with a new, unused username.
 - **Secrets at rest**: uploaded cert/key material is Fernet-encrypted (`0600`),
   the secrets directory is owner-only (`0700`), and broker passwords / inline
   keys passed as run parameters are **redacted** from API responses. Back up the
