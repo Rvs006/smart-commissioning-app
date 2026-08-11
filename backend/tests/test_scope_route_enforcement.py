@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import uuid
+from datetime import UTC, datetime
 from unittest import mock
 
 from app.core.auth import AuthPrincipal
@@ -12,6 +13,7 @@ from app.core.db import get_engine
 from app.core.scopes import ScopeGrantRepository
 from harness import ApiTestCase
 from smart_commissioning_core.db.db_run_store import DbRunStore
+from smart_commissioning_core.db.repositories import ImportRepository
 from smart_commissioning_core.rbac import Role
 
 _ROOT_KEY = "scope-route-root-key"
@@ -174,7 +176,11 @@ class ScopeRouteEnforcementTests(ApiTestCase):
         denied_create = self._upload(self.engineer, self.scope_b)
         self.assertEqual(denied_create.status_code, 404, denied_create.text)
         denied_unscoped = self._upload(self.engineer, None)
-        self.assertEqual(denied_unscoped.status_code, 404, denied_unscoped.text)
+        self.assertEqual(denied_unscoped.status_code, 400, denied_unscoped.text)
+        self.assertEqual(
+            denied_unscoped.json()["detail"],
+            "project_id and site_id are required.",
+        )
 
         viewer_headers = self._headers(self.viewer)
         read = self.client.get(f"/api/v1/imports/{import_id}", headers=viewer_headers)
@@ -220,6 +226,105 @@ class ScopeRouteEnforcementTests(ApiTestCase):
             },
         )
         self.assertEqual(foreign_latest.status_code, 404, foreign_latest.text)
+
+    def test_new_imports_require_nonblank_project_and_site_for_every_admin(self) -> None:
+        admin = self._create_user(f"scope-admin-{uuid.uuid4().hex[:10]}", "admin")
+
+        for actor in (admin, {"api_key": _ROOT_KEY}):
+            unscoped = self._upload(actor, None)
+            self.assertEqual(unscoped.status_code, 400, unscoped.text)
+            self.assertEqual(
+                unscoped.json()["detail"],
+                "project_id and site_id are required.",
+            )
+
+        for ownership in (
+            {"project_id": self.scope_a[0]},
+            {"site_id": self.scope_a[1]},
+            {"project_id": " ", "site_id": "\t"},
+        ):
+            response = self.client.post(
+                "/api/v1/imports",
+                headers=self._headers(admin),
+                data={"import_type": "mqtt_register", **ownership},
+                files={
+                    "file": (
+                        "register.csv",
+                        io.BytesIO(f"{_REGISTER_HEADER}\n{_REGISTER_ROW}\n".encode()),
+                        "text/csv",
+                    )
+                },
+            )
+            self.assertEqual(response.status_code, 400, response.text)
+            self.assertEqual(
+                response.json()["detail"],
+                "project_id and site_id are required.",
+            )
+
+        scoped = self._upload(admin, self.scope_a)
+        self.assertEqual(scoped.status_code, 200, scoped.text)
+        import_id = scoped.json()["import_id"]
+        for path in ("", "/errors"):
+            response = self.client.get(
+                f"/api/v1/imports/{import_id}{path}",
+                headers=self._headers(admin),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+
+    def test_global_admin_can_read_legacy_unscoped_import_without_revealing_it(
+        self,
+    ) -> None:
+        admin = self._create_user(f"legacy-admin-{uuid.uuid4().hex[:10]}", "admin")
+        import_id = f"imp_legacy_{uuid.uuid4().hex[:10]}"
+        created_at = datetime.now(UTC)
+        ImportRepository(get_engine()).create(
+            import_id=import_id,
+            import_type="mqtt_register",
+            original_filename="legacy-register.csv",
+            stored_file_path="protected/legacy-register.csv",
+            summary={
+                "import_id": import_id,
+                "import_type": "mqtt_register",
+                "file_name": "legacy-register.csv",
+                "file_type": "csv",
+                "project_id": None,
+                "site_id": None,
+                "total_rows": 0,
+                "accepted_rows": 0,
+                "rejected_rows": 0,
+                "status": "rejected",
+                "missing_columns": [],
+                "warnings": [],
+                "stored_file_name": "legacy-register.csv",
+                "created_at": created_at.isoformat(),
+            },
+            errors=[],
+            created_at=created_at,
+        )
+
+        for headers in (self._headers(admin), self.client_headers):
+            summary = self.client.get(
+                f"/api/v1/imports/{import_id}",
+                headers=headers,
+            )
+            self.assertEqual(summary.status_code, 200, summary.text)
+            errors = self.client.get(
+                f"/api/v1/imports/{import_id}/errors",
+                headers=headers,
+            )
+            self.assertEqual(errors.status_code, 200, errors.text)
+
+        viewer_headers = self._headers(self.viewer)
+        for path in ("", "/errors"):
+            details: list[str] = []
+            for candidate in (import_id, "imp_missing"):
+                response = self.client.get(
+                    f"/api/v1/imports/{candidate}{path}",
+                    headers=viewer_headers,
+                )
+                self.assertEqual(response.status_code, 404, response.text)
+                details.append(response.json()["detail"])
+            self.assertEqual(details[0], details[1])
 
     def test_sse_rechecks_grant_each_poll_and_closes_on_control_store_error(self) -> None:
         import app.api.routes.events as events_module

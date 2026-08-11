@@ -52,6 +52,15 @@ class ScopedResource:
     site_id: str
 
 
+@dataclass(frozen=True)
+class AuthorizedImportResource:
+    """An import whose scoped or global-only ownership has been authorized."""
+
+    resource_id: str
+    project_id: str | None
+    site_id: str | None
+
+
 def _actor(principal: AuthPrincipal) -> str:
     """Return a server-derived stable audit actor, never a client claim."""
     return principal.user_id or principal.source
@@ -398,7 +407,7 @@ def load_scoped_import(
     principal: AuthPrincipal,
     *,
     engine: Engine | None = None,
-) -> ScopedResource:
+) -> AuthorizedImportResource:
     """Load an import's owner and authorize it without exposing foreign IDs."""
     resolved_engine = engine or get_engine()
     with session_factory(resolved_engine)() as session:
@@ -409,13 +418,22 @@ def load_scoped_import(
         ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Import not found.")
-    return _authorize_resource(
+    if row.project_id is None and row.site_id is None:
+        if allowed_scope_pairs(principal, engine=resolved_engine) is None:
+            return AuthorizedImportResource(import_id, None, None)
+        raise HTTPException(status_code=404, detail="Import not found.")
+    scoped = _authorize_resource(
         resource_id=import_id,
         project_id=row.project_id,
         site_id=row.site_id,
         kind="Import",
         principal=principal,
         engine=resolved_engine,
+    )
+    return AuthorizedImportResource(
+        scoped.resource_id,
+        scoped.project_id,
+        scoped.site_id,
     )
 
 

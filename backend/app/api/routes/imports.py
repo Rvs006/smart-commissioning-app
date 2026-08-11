@@ -110,16 +110,12 @@ def _require_create_scope(
     project_id: str | None,
     site_id: str | None,
 ) -> None:
-    """Reject half-scoped or unowned named-user imports before reading a file."""
-    if (project_id is None) != (site_id is None):
+    """Require owned imports from every principal before reading a file."""
+    if not project_id or not project_id.strip() or not site_id or not site_id.strip():
         raise HTTPException(
             status_code=400,
-            detail="project_id and site_id must be supplied together.",
+            detail="project_id and site_id are required.",
         )
-    if project_id is None or site_id is None:
-        if allowed_scope_pairs(principal, engine=get_engine()) is not None:
-            raise HTTPException(status_code=404, detail="Project/site not found.")
-        return
     require_project_site_access(
         principal,
         project_id,
