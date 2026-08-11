@@ -99,9 +99,35 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
             default_sqlite_url(Path(temp_dir.name))
         )
         self.addCleanup(self.engine.dispose)
+        self._run_ids: set[str] = set()
+        self.addCleanup(self._wait_for_inline_threads)
         Base.metadata.create_all(self.engine)
         self.lifecycle = RunLifecycleRepository(self.engine)
         self.service = RunService(self.engine)
+
+    def _wait_for_inline_threads(self) -> None:
+        """Drain this test's daemon executors before SQLite engine disposal."""
+
+        thread_names = {
+            name
+            for run_id in self._run_ids
+            for name in (f"inline-run-{run_id}", f"inline-heartbeat-{run_id}")
+        }
+        deadline = time.monotonic() + _WAIT
+        while time.monotonic() < deadline:
+            survivors = [
+                thread
+                for thread in threading.enumerate()
+                if thread.name in thread_names
+            ]
+            if not survivors:
+                return
+            for thread in survivors:
+                thread.join(timeout=0.02)
+        self.fail(
+            "inline test threads did not stop before SQLite cleanup: "
+            + ", ".join(sorted(thread.name for thread in survivors))
+        )
 
     def _create_run(
         self,
@@ -115,6 +141,7 @@ class RealInlineHeartbeatIntegrationTests(unittest.TestCase):
             execution_mode="inline",
             edge_id="edge-heartbeat-test",
         )
+        self._run_ids.add(envelope.run_id)
         return self.service.get_run(envelope.run_id)
 
     def test_tampered_context_is_rejected_before_inline_processor(self) -> None:
