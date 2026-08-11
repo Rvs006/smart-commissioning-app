@@ -96,3 +96,27 @@ class RunSealViewV1(BaseModel):
     context_sha256: str
     result_sha256: str
     sealed_at: datetime
+
+
+class ScanAuthorizationV1(BaseModel):
+    """Viewer-safe immutable approval state for one sealed preview."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    authorization_id: str
+    preview_run_id: str
+    project_id: str
+    site_id: str
+    packet_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_by: str
+    ticket: str
+    purpose: str
+    not_before: datetime
+    not_after: datetime
+    max_uses: int = Field(ge=1, le=1)
+    use_count: int = Field(ge=0)
+    consumed_run_id: str | None = None
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
+    revoke_reason: str | None = None
+    created_at: datetime

@@ -17,6 +17,8 @@ inline parameters / fakes. No assertion in this file depends on real hardware.
 import importlib.util
 import socket
 import unittest
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 from harness import ApiTestCase
 from smart_commissioning_core.engines.bacnet_params import (
@@ -30,6 +32,7 @@ from smart_commissioning_core.engines.bacnet_params import (
     TARGET_ASSET_ID,
     TARGET_ASSET_NAME,
     TARGET_DEVICE_INSTANCE,
+    TARGET_INTERNETWORK_ID,
     TARGET_NETWORK,
 )
 
@@ -60,6 +63,57 @@ class _EngineApiTestCase(ApiTestCase):
         )
         return response
 
+    def _sealed_live(
+        self,
+        path: str,
+        parameters: dict,
+        job_type: str,
+        *,
+        project_id: str = "demo-project",
+        site_id: str = "demo-site",
+    ):
+        preview_parameters = {
+            key: value
+            for key, value in parameters.items()
+            if key not in {"authorized", "scan_authorization"}
+        }
+        preview_parameters["dry_run"] = True
+        preview = self.client.post(
+            path,
+            json={
+                "project_id": project_id,
+                "site_id": site_id,
+                "job_type": job_type,
+                "parameters": preview_parameters,
+            },
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        preview_run_id = preview.json()["run_id"]
+        now = datetime.now(UTC)
+        authorization = self.client.post(
+            "/api/v1/discovery/scan-authorizations",
+            json={
+                "preview_run_id": preview_run_id,
+                "ticket": "CHG-ENGINE-TEST",
+                "purpose": "Controlled API integration test",
+                "not_before": (now - timedelta(minutes=1)).isoformat(),
+                "not_after": (now + timedelta(hours=1)).isoformat(),
+            },
+        )
+        self.assertEqual(authorization.status_code, 201, authorization.text)
+        live = self.client.post(
+            path,
+            json={
+                "project_id": project_id,
+                "site_id": site_id,
+                "job_type": job_type,
+                "preview_run_id": preview_run_id,
+                "scan_authorization_id": authorization.json()["authorization_id"],
+                "parameters": {},
+            },
+        )
+        return live
+
 
 class IpDiscoveryApiTests(_EngineApiTestCase):
     def test_inline_loopback_scan_discovers_persists_and_lists(self) -> None:
@@ -71,10 +125,9 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         listener.listen(8)
         open_port = listener.getsockname()[1]
         try:
-            response = self._post(
+            response = self._sealed_live(
                 "/api/v1/discovery/ip/runs",
                 {
-                    **_AUTH,
                     "cidr": "127.0.0.1/32",
                     "ports": [open_port],
                     "scan_max_concurrency": 4,
@@ -121,29 +174,76 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(summary["hosts_responsive"], 0)
         self.assertEqual(results["devices"], [], "dry run persists no devices")
 
-    def test_unauthorized_real_scan_rejected_with_403(self) -> None:
-        # No authorization and not a dry run => boundary 403 before any scan.
+    def test_dry_run_persists_the_normalized_multi_target_contract(self) -> None:
+        response = self._post(
+            "/api/v1/discovery/ip/runs",
+            {
+                "dry_run": True,
+                "target_expressions": [
+                    {"kind": "cidr", "cidr": "10.99.0.0/30"},
+                    {"kind": "range", "start": "10.99.0.2", "end": "10.99.0.4"},
+                    {"kind": "address", "address": "10.99.0.10"},
+                ],
+                "exclusions": [
+                    {"kind": "address", "address": "10.99.0.2"},
+                    {"kind": "address", "address": "10.99.0.4"},
+                ],
+                "ports": [80, 443],
+            },
+            "ip_discovery",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        run_id = response.json()["run_id"]
+
+        record = self.client.get(f"/api/v1/discovery/runs/{run_id}").json()
+        contract = record["parameters"]["scan_contract_v1"]
+        self.assertEqual(contract["scan_contract_version"], "1.0")
+        self.assertEqual(contract["ip"]["targets"]["target_count"], 3)
+        self.assertEqual(contract["ip"]["targets"]["excluded_count"], 2)
+        self.assertEqual(
+            record["parameters"]["addresses"],
+            ["10.99.0.1", "10.99.0.3", "10.99.0.10"],
+        )
+        self.assertEqual(len(contract["packet_plan_sha256"]), 64)
+
+        results = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
+        self.assertEqual(results["result_summary"]["dry_run_plan"]["target_count"], 6)
+
+    def test_builtin_provider_rejects_udp_without_creating_a_run(self) -> None:
+        before = self.client.get("/api/v1/discovery/runs").json()["runs"]
+        response = self._post(
+            "/api/v1/discovery/ip/runs",
+            {
+                "dry_run": True,
+                "target_expressions": [
+                    {"kind": "address", "address": "10.99.0.1"},
+                ],
+                "ports": [{"port": 47808, "protocol": "udp"}],
+            },
+            "ip_discovery",
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("does not support UDP", response.json()["detail"])
+        after = self.client.get("/api/v1/discovery/runs").json()["runs"]
+        self.assertEqual(after, before)
+
+    def test_live_scan_without_a_sealed_preview_is_rejected(self) -> None:
         response = self._post(
             "/api/v1/discovery/ip/runs",
             {"cidr": "10.0.0.0/30", "ports": [80]},
             "ip_discovery",
         )
-        self.assertEqual(response.status_code, 403, response.text)
-        self.assertIn("authoriz", response.json()["detail"].lower())
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("sealed preview", response.json()["detail"].lower())
 
-    def test_authorized_run_stamps_real_authorizer(self) -> None:
-        # scan_authorization.authorized_by must name the REAL authenticated
-        # principal (the shared-key admin in these tests), never a client-supplied
-        # label; an operator-supplied note is preserved.
-        response = self._post(
+    def test_sealed_authorization_stamps_real_approver(self) -> None:
+        response = self._sealed_live(
             "/api/v1/discovery/ip/runs",
             {
-                **_AUTH,
                 "cidr": "127.0.0.1/32",
                 "ports": [9],  # discard port, closed -> connect refused fast
                 "scan_connect_timeout_s": 1,
                 "scan_rate_limit_per_sec": 0,
-                "scan_authorization": {"authorized_by": "frontend-operator", "note": "floor 3 sign-off"},
             },
             "ip_discovery",
         )
@@ -153,7 +253,7 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         authz = record["parameters"]["scan_authorization"]
         self.assertTrue(authz["authorized"])
         self.assertEqual(authz["authorized_by"], "shared-key")
-        self.assertEqual(authz["note"], "floor 3 sign-off")  # operator note preserved
+        self.assertEqual(authz["ticket"], "CHG-ENGINE-TEST")
 
     def test_dry_run_adds_no_scan_authorization(self) -> None:
         # A dry run needs no authorization, so the route must NOT stamp one.
@@ -182,40 +282,51 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         )
         self.assertEqual((up.status_code, up.json()["accepted_rows"], up.json()["rejected_rows"]), (200, 3, 0), up.text)
 
-        run = self._post(
+        run = self._sealed_live(
             "/api/v1/discovery/ip/runs",
-            {"authorized": True, "ports": [9], "scan_connect_timeout_s": 1, "scan_rate_limit_per_sec": 0},
+            {"ports": [9], "scan_connect_timeout_s": 1, "scan_rate_limit_per_sec": 0},
             "ip_discovery",
         )
         self.assertEqual(run.status_code, 200, run.text)
         self.assertEqual(run.json()["status"], "succeeded")
         record = self.client.get(f"/api/v1/discovery/runs/{run.json()['run_id']}").json()
         self.assertEqual(sorted(record["parameters"]["addresses"]), ["198.51.100.230", "198.51.100.74"])
+        authority = record["parameters"]["scan_contract_v1"]["ip"]["authority"]
+        self.assertEqual(authority["import_id"], up.json()["import_id"])
+        from app.api.routes import discovery as discovery_routes
+
+        context = discovery_routes.service.get_execution_context(run.json()["run_id"]).context
+        self.assertEqual(len(context.imports), 1)
+        self.assertEqual(context.imports[0].resource_id, authority["import_id"])
+        self.assertEqual(context.imports[0].sha256, authority["accepted_rows_sha256"])
 
     def test_no_targets_and_no_register_rejected_with_400(self) -> None:
         response = self.client.post(
             "/api/v1/discovery/ip/runs",
             json={"project_id": "empty-p", "site_id": "empty-s", "job_type": "ip_discovery",
-                  "parameters": {"authorized": True}},
+                  "parameters": {"dry_run": True}},
         )
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("scan target", response.json()["detail"].lower())
 
 
 class BacnetDiscoveryApiTests(_EngineApiTestCase):
-    def test_non_dry_run_rejects_simulated_backend(self) -> None:
-        response = self._post(
+    def test_simulated_preview_cannot_make_the_live_child_simulated(self) -> None:
+        response = self._sealed_live(
             "/api/v1/discovery/bacnet/runs",
-            {**_AUTH, "bacnet_backend": "simulated"},
+            {"bacnet_backend": "simulated"},
             "bacnet_discovery",
         )
-        self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("only available for dry runs", response.json()["detail"])
+        self.assertEqual(response.status_code, 200, response.text)
+        record = self.client.get(
+            f"/api/v1/discovery/runs/{response.json()['run_id']}"
+        ).json()
+        self.assertEqual(record["parameters"]["bacnet_backend"], "bacpypes3")
 
     def test_unknown_bacnet_backend_returns_400(self) -> None:
         response = self._post(
             "/api/v1/discovery/bacnet/runs",
-            {**_AUTH, "bacnet_backend": "not-a-backend"},
+            {"dry_run": True, "bacnet_backend": "not-a-backend"},
             "bacnet_discovery",
         )
         self.assertEqual(response.status_code, 400, response.text)
@@ -246,9 +357,9 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
         # bacpypes3 is installed (the parameter is stamped before the run executes;
         # with an Auto source interface the run has no local_address so no socket
         # I/O occurs even when the dependency is present).
-        response = self._post(
+        response = self._sealed_live(
             "/api/v1/discovery/bacnet/runs",
-            {**_AUTH},
+            {},
             "bacnet_discovery",
         )
         self.assertEqual(response.status_code, 200, response.text)
@@ -266,11 +377,14 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
         # simulated devices/points — never the "Acme Controls"/"Globex BMS" fakes.
         # local_address is explicit so this reaches the missing-dependency failure
         # instead of stopping first at the Source Interface guard.
-        response = self._post(
-            "/api/v1/discovery/bacnet/runs",
-            {**_AUTH, "local_address": "192.0.2.10/24"},
-            "bacnet_discovery",
-        )
+        with patch(
+            "app.api.routes.discovery.interface_service.ensure_source_ip_available"
+        ):
+            response = self._sealed_live(
+                "/api/v1/discovery/bacnet/runs",
+                {"local_address": "192.0.2.10/24"},
+                "bacnet_discovery",
+            )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "failed")
         run_id = response.json()["run_id"]
@@ -524,7 +638,15 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         parameters = self._persisted_parameters(
             self._dry_run("reg-override", parameters={PARAM_BACNET_TARGETS: chosen})
         )
-        self.assertEqual(parameters[PARAM_BACNET_TARGETS], chosen)
+        self.assertEqual(
+            parameters[PARAM_BACNET_TARGETS],
+            [
+                {
+                    **chosen[0],
+                    TARGET_INTERNETWORK_ID: "primary",
+                }
+            ],
+        )
 
     def test_legacy_register_rows_are_skipped_not_fatal(self) -> None:
         # A register imported before the numeric/IP row validators existed can
@@ -567,6 +689,7 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
                 {
                     TARGET_ADDRESS: "198.51.100.10",
                     TARGET_DEVICE_INSTANCE: 101,
+                    TARGET_INTERNETWORK_ID: "primary",
                     TARGET_ASSET_ID: "A1",
                     TARGET_ASSET_NAME: "AHU-1",
                     TARGET_NETWORK: 1,
@@ -618,6 +741,35 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
             "mqtt_discovery",
         ).json()["run_id"]
 
+    def _mqtt_run_with_topics(self, topics: list[dict]) -> str:
+        """Seed captured topics before the lifecycle result is sealed."""
+
+        from app.api.routes import discovery as discovery_routes
+        from app.schemas.jobs import JobCreateRequest
+        from lifecycle_helpers import finish_run
+
+        run = discovery_routes.service.create_job_run(
+            JobCreateRequest(
+                project_id="demo-project",
+                site_id="demo-site",
+                job_type="mqtt_discovery",
+                parameters={
+                    "authorized": True,
+                    "broker_host": "mqtt.example.local",
+                },
+            ),
+            expected_job_type="mqtt_discovery",
+            requesting_principal="test-suite",
+        )
+        finish_run(
+            discovery_routes.service,
+            run.run_id,
+            stage="capture_complete",
+            summary={"topics_discovered": len(topics)},
+            topics=topics,
+        )
+        return run.run_id
+
     def test_topics_xlsx_export_empty_for_dry_run(self) -> None:
         # mq9nhbzu Excel export: a dry run has no topics, so the workbook must be
         # header-only (no fabricated rows) and carry the xlsx download headers.
@@ -645,12 +797,9 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
     def test_topics_xlsx_export_includes_persisted_rows(self) -> None:
         from io import BytesIO
 
-        from app.api.routes import discovery as discovery_routes
         from openpyxl import load_workbook
 
-        run_id = self._mqtt_dry_run_id()
-        discovery_routes._discovery_repository().replace_topics(
-            run_id,
+        run_id = self._mqtt_run_with_topics(
             [
                 {
                     "topic": "demo-site/b1/ahu-1/state",
@@ -658,7 +807,7 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
                     "message_count": 3,
                     "attributes": {"device_ref": "AHU-1"},
                 }
-            ],
+            ]
         )
         resp = self.client.get(f"/api/v1/discovery/runs/{run_id}/topics.xlsx")
         self.assertEqual(resp.status_code, 200, resp.text)
@@ -673,12 +822,9 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
     def test_topics_xlsx_topic_filter_narrows_rows(self) -> None:
         from io import BytesIO
 
-        from app.api.routes import discovery as discovery_routes
         from openpyxl import load_workbook
 
-        run_id = self._mqtt_dry_run_id()
-        discovery_routes._discovery_repository().replace_topics(
-            run_id,
+        run_id = self._mqtt_run_with_topics(
             [
                 {"topic": "demo-site/b1/ahu-1/state", "last_payload": {"a": 1}, "message_count": 1, "attributes": {}},
                 {
@@ -687,7 +833,7 @@ class MqttDiscoveryApiTests(_EngineApiTestCase):
                     "message_count": 1,
                     "attributes": {},
                 },
-            ],
+            ]
         )
         resp = self.client.get(
             f"/api/v1/discovery/runs/{run_id}/topics.xlsx",

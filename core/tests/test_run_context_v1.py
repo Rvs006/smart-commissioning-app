@@ -1,11 +1,13 @@
 import json
 import unittest
+from pathlib import Path
 
 from pydantic import ValidationError
 from smart_commissioning_core.execution_context import (
     ExecutionContextIntegrityError,
     SecretMaterialUnavailableError,
     resolve_context_parameters,
+    verify_bound_import_rows,
     verify_stored_context,
 )
 from smart_commissioning_core.run_context import (
@@ -20,9 +22,12 @@ from smart_commissioning_core.run_context import (
 )
 from smart_commissioning_core.run_lifecycle import (
     RunLeaseV1,
+    RunSealViewV1,
     StoredRunContextV1,
     TerminalResultV1,
 )
+
+_FIXTURES = Path(__file__).with_name("fixtures")
 
 
 def _context(**overrides: object) -> RunContextV1:
@@ -59,6 +64,20 @@ def _context(**overrides: object) -> RunContextV1:
 
 
 class CanonicalContextTests(unittest.TestCase):
+    def test_historical_v1_context_and_seal_hashes_remain_verifiable(self) -> None:
+        fixture = json.loads(
+            (_FIXTURES / "run_context_v1_historical.json").read_text(encoding="utf-8")
+        )
+        context = RunContextV1.model_validate(fixture["context"])
+        result = TerminalResultV1.model_validate(fixture["terminal_result"])
+        seal = RunSealViewV1.model_validate(fixture["seal"])
+
+        self.assertEqual(context.sha256(), fixture["context_sha256"])
+        self.assertEqual(result.sha256(), fixture["result_sha256"])
+        self.assertEqual(seal.context_sha256, fixture["context_sha256"])
+        self.assertEqual(seal.result_sha256, fixture["result_sha256"])
+        self.assertNotIn("scan_contract_v1", context.engine_parameters)
+
     def test_hash_is_stable_across_mapping_order(self) -> None:
         first = _context(
             engine_parameters={"authorized": True, "duration_seconds": 10}
@@ -259,6 +278,36 @@ class SharedContextResolutionTests(unittest.TestCase):
 
         with self.assertRaises(ExecutionContextIntegrityError):
             verify_stored_context(stored, lease)
+
+    def test_selected_scan_authority_rows_are_rehashed_at_execution(self) -> None:
+        rows = [{"IP Address": "192.168.10.20"}]
+        from smart_commissioning_core.run_context import canonical_sha256
+
+        digest = canonical_sha256(rows)
+        context = _context(
+            imports=[{"resource_id": "imp-authority", "sha256": digest}],
+            engine_parameters={
+                "scan_contract_v1": {
+                    "ip": {
+                        "authority": {
+                            "import_id": "imp-authority",
+                            "accepted_rows_sha256": digest,
+                            "accepted_count": 1,
+                        }
+                    }
+                }
+            },
+        )
+
+        verify_bound_import_rows(context, "imp-authority", rows)
+        with self.assertRaisesRegex(ExecutionContextIntegrityError, "digest"):
+            verify_bound_import_rows(
+                context,
+                "imp-authority",
+                [{"IP Address": "192.168.10.99"}],
+            )
+        with self.assertRaisesRegex(ExecutionContextIntegrityError, "not bound"):
+            verify_bound_import_rows(context, "imp-other", rows)
 
     def test_offline_config_publish_does_not_inherit_broker_defaults(self) -> None:
         context = _context(

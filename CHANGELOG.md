@@ -7,8 +7,25 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- Live IP and BACnet scans now require a one-use authorization bound to an
+  immutable dry-run packet plan, selected interface, import revision, and
+  effective throttle policy.
+- Named users can receive audited project and site grants, with grant creation,
+  revocation, activation preflight, and effective-scope visibility in the UI.
+
+### Changed
+
+- Discovery execution rechecks owner, lease, authorization window, current user
+  role, scope grant, and sealed runtime deadlines before outbound work.
+- Edge-to-hub sync and encrypted backups carry and verify the exact import
+  authority rows needed to reconstruct scan evidence.
+
 ### Fixed
 
+- Reports and backups fail closed when sealed terminal results, discovery
+  projections, report snapshots, or archive membership no longer agree.
 - Generate All creates PDF, DOCX, XLSX, and evidence-pack reports one at a time,
   preventing the four jobs from competing for the same database and memory.
 - First-use evidence signing creates one shared key under concurrent requests,

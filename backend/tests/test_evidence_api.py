@@ -36,6 +36,24 @@ _ENV_OVERRIDES = {
 }
 
 
+def _recipient_rsa_keypair() -> tuple[bytes, bytes]:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    private_key = rsa.generate_private_key(public_exponent=65_537, key_size=2048)
+    return (
+        private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        ),
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ),
+    )
+
+
 class SigningKeyMigrationTests(unittest.TestCase):
     def test_concurrent_legacy_migration_preserves_one_identity(self) -> None:
         import smart_commissioning_core.integrity as core_integrity
@@ -114,9 +132,7 @@ class SigningKeyMigrationTests(unittest.TestCase):
             ):
                 reports_integrity.load_signing_key()
 
-            self.assertFalse(
-                (report_signing_root / ".evidence_signing_key").exists()
-            )
+            self.assertFalse((report_signing_root / ".evidence_signing_key").exists())
 
 
 class ReportArtifactStorageTests(unittest.TestCase):
@@ -301,6 +317,7 @@ class EvidenceVerifyApiTests(ApiTestCase):
 
         run_service = RunService()
         run = run_service.get_run(report_id)
+        original_summary = dict(run.result_summary)
         summary = dict(run.result_summary)
         manifest = dict(summary["artifact_manifest"])
         manifest["artifact_sha256"] = "0" * 64
@@ -308,21 +325,29 @@ class EvidenceVerifyApiTests(ApiTestCase):
         with run_service.engine.begin() as connection:
             connection.execute(update(Run).where(Run.id == report_id).values(result_summary=summary))
 
-        verify = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
-        self.assertEqual(verify.status_code, 409, verify.text)
+        try:
+            verify = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
+            # Integrity is checked before trusted report scope is available, so a
+            # corrupt record is concealed exactly like an absent or foreign ID.
+            self.assertEqual(verify.status_code, 404, verify.text)
+        finally:
+            with run_service.engine.begin() as connection:
+                connection.execute(update(Run).where(Run.id == report_id).values(result_summary=original_summary))
 
-    def test_tampered_signature_makes_signature_invalid(self) -> None:
+    def test_coherently_sealed_tampered_signature_reports_invalid(self) -> None:
         import base64
 
         report_id = self._create_report("zip")
         self.client.get(f"/api/v1/reports/{report_id}/download")
 
         from app.services.run_service import RunService
-        from smart_commissioning_core.db.models import Run
-        from sqlalchemy import update
+        from smart_commissioning_core.db.models import Run, RunResult, RunSeal
+        from smart_commissioning_core.run_lifecycle import TerminalResultV1
+        from sqlalchemy import select, update
 
         run_service = RunService()
         run = run_service.get_run(report_id)
+        original_run_summary = dict(run.result_summary)
         summary = dict(run.result_summary)
         manifest = dict(summary["artifact_manifest"])
         bad = bytearray(base64.b64decode(manifest["signature"]))
@@ -330,14 +355,62 @@ class EvidenceVerifyApiTests(ApiTestCase):
         manifest["signature"] = base64.b64encode(bytes(bad)).decode("ascii")
         summary["artifact_manifest"] = manifest
         with run_service.engine.begin() as connection:
-            connection.execute(update(Run).where(Run.id == report_id).values(result_summary=summary))
+            original_run_sha256 = connection.scalar(select(Run.result_sha256).where(Run.id == report_id))
+            original_result = connection.execute(
+                select(
+                    RunResult.summary,
+                    RunResult.result_payload,
+                    RunResult.result_sha256,
+                ).where(RunResult.run_id == report_id)
+            ).one()
+            original_seal_sha256 = connection.scalar(select(RunSeal.result_sha256).where(RunSeal.run_id == report_id))
+            payload = dict(connection.scalar(select(RunResult.result_payload).where(RunResult.run_id == report_id)))
+            payload["summary"] = summary
+            terminal = TerminalResultV1.model_validate(payload)
+            result_sha256 = terminal.sha256()
+            connection.execute(
+                update(Run).where(Run.id == report_id).values(result_summary=summary, result_sha256=result_sha256)
+            )
+            connection.execute(
+                update(RunResult)
+                .where(RunResult.run_id == report_id)
+                .values(
+                    summary=summary,
+                    result_payload=terminal.model_dump(mode="json"),
+                    result_sha256=result_sha256,
+                )
+            )
+            connection.execute(update(RunSeal).where(RunSeal.run_id == report_id).values(result_sha256=result_sha256))
 
-        body = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify").json()
-        self.assertTrue(body["hash_matches"], body)
-        self.assertFalse(body["signature_valid"], body)
+        try:
+            response = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()["hash_matches"], response.text)
+            self.assertFalse(response.json()["signature_valid"], response.text)
+        finally:
+            with run_service.engine.begin() as connection:
+                connection.execute(
+                    update(Run)
+                    .where(Run.id == report_id)
+                    .values(
+                        result_summary=original_run_summary,
+                        result_sha256=original_run_sha256,
+                    )
+                )
+                connection.execute(
+                    update(RunResult)
+                    .where(RunResult.run_id == report_id)
+                    .values(
+                        summary=original_result.summary,
+                        result_payload=original_result.result_payload,
+                        result_sha256=original_result.result_sha256,
+                    )
+                )
+                connection.execute(
+                    update(RunSeal).where(RunSeal.run_id == report_id).values(result_sha256=original_seal_sha256)
+                )
 
-    def test_swapped_key_stored_record_flags_key_mismatch(self) -> None:
-        """A swapped-key record is internally consistent yet key_matches_current=False."""
+    def test_swapped_key_stored_record_fails_sealed_verification(self) -> None:
         import base64
 
         from smart_commissioning_core.integrity import SigningKey
@@ -364,6 +437,7 @@ class EvidenceVerifyApiTests(ApiTestCase):
         rogue = SigningKey.generate()
         run_service = RunService()
         run = run_service.get_run(report_id)
+        original_summary = dict(run.result_summary)
         summary = dict(run.result_summary)
         manifest = dict(summary["artifact_manifest"])
         manifest["signing_key_id"] = rogue.public_key_fingerprint()
@@ -380,11 +454,12 @@ class EvidenceVerifyApiTests(ApiTestCase):
         with run_service.engine.begin() as connection:
             connection.execute(update(Run).where(Run.id == report_id).values(result_summary=summary))
 
-        body = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify").json()
-        # Self-signature is internally consistent (it verifies against the
-        # embedded rogue key) but the key is NOT the current one.
-        self.assertTrue(body["signature_valid"], body)
-        self.assertFalse(body["key_matches_current"], body)
+        try:
+            response = self.client.get(f"/api/v1/evidence/reports/{report_id}/verify")
+            self.assertEqual(response.status_code, 404, response.text)
+        finally:
+            with run_service.engine.begin() as connection:
+                connection.execute(update(Run).where(Run.id == report_id).values(result_summary=original_summary))
 
     def test_retention_preview_requires_auth(self) -> None:
         from app.main import app
@@ -411,6 +486,306 @@ class EvidenceVerifyApiTests(ApiTestCase):
         manifest = verify_bundle(response.content)
         self.assertIn("db/smart_commissioning.db", manifest["members"])
         self.assertIsNotNone(manifest["signature"])
+
+    def test_renderer_failure_leaves_no_partial_report_and_backup_stays_usable(self) -> None:
+        from app.api.routes import reports as reports_routes
+        from app.services.backup_service import verify_bundle
+
+        existing_report_id = self._create_report("zip")
+        before = self.client.get("/api/v1/reports?limit=100&offset=0")
+        self.assertEqual(before.status_code, 200, before.text)
+        before_ids = {report["report_id"] for report in before.json()["reports"]}
+        before_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(before_runs.status_code, 200, before_runs.text)
+        before_run_ids = {run["run_id"] for run in before_runs.json()["runs"]}
+
+        with mock.patch.object(
+            reports_routes,
+            "_build_report_artifact",
+            side_effect=RuntimeError("renderer unavailable"),
+        ):
+            failed = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+        self.assertEqual(failed.status_code, 500, failed.text)
+
+        after = self.client.get("/api/v1/reports?limit=100&offset=0")
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(
+            {report["report_id"] for report in after.json()["reports"]},
+            before_ids,
+        )
+        after_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(after_runs.status_code, 200, after_runs.text)
+        self.assertEqual(
+            {run["run_id"] for run in after_runs.json()["runs"]},
+            before_run_ids,
+        )
+        existing = self.client.get(f"/api/v1/reports/{existing_report_id}/download")
+        self.assertEqual(existing.status_code, 200, existing.text)
+
+        backup = self.client.post("/api/v1/evidence/backup")
+        self.assertEqual(backup.status_code, 200, backup.text)
+        verify_bundle(backup.content)
+
+    def test_storage_failure_leaves_no_partial_report_and_backup_stays_usable(self) -> None:
+        from app.services import report_artifacts
+        from app.services.backup_service import verify_bundle
+
+        before = self.client.get("/api/v1/reports?limit=100&offset=0")
+        self.assertEqual(before.status_code, 200, before.text)
+        before_ids = {report["report_id"] for report in before.json()["reports"]}
+        before_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(before_runs.status_code, 200, before_runs.text)
+        before_run_ids = {run["run_id"] for run in before_runs.json()["runs"]}
+
+        with mock.patch.object(
+            report_artifacts,
+            "_atomic_write",
+            side_effect=OSError("storage unavailable"),
+        ):
+            failed = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+        self.assertEqual(failed.status_code, 500, failed.text)
+
+        after = self.client.get("/api/v1/reports?limit=100&offset=0")
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(
+            {report["report_id"] for report in after.json()["reports"]},
+            before_ids,
+        )
+        after_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(after_runs.status_code, 200, after_runs.text)
+        self.assertEqual(
+            {run["run_id"] for run in after_runs.json()["runs"]},
+            before_run_ids,
+        )
+        backup = self.client.post("/api/v1/evidence/backup")
+        self.assertEqual(backup.status_code, 200, backup.text)
+        verify_bundle(backup.content)
+
+    def test_signing_failure_leaves_no_partial_report_and_backup_stays_usable(self) -> None:
+        from app.services import report_artifacts
+        from app.services.backup_service import verify_bundle
+
+        before = self.client.get("/api/v1/reports?limit=100&offset=0")
+        self.assertEqual(before.status_code, 200, before.text)
+        before_ids = {report["report_id"] for report in before.json()["reports"]}
+        before_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(before_runs.status_code, 200, before_runs.text)
+        before_run_ids = {run["run_id"] for run in before_runs.json()["runs"]}
+
+        with mock.patch.object(
+            report_artifacts,
+            "load_signing_key",
+            side_effect=RuntimeError("signing unavailable"),
+        ):
+            failed = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+        self.assertEqual(failed.status_code, 500, failed.text)
+
+        after = self.client.get("/api/v1/reports?limit=100&offset=0")
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(
+            {report["report_id"] for report in after.json()["reports"]},
+            before_ids,
+        )
+        after_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(after_runs.status_code, 200, after_runs.text)
+        self.assertEqual(
+            {run["run_id"] for run in after_runs.json()["runs"]},
+            before_run_ids,
+        )
+        backup = self.client.post("/api/v1/evidence/backup")
+        self.assertEqual(backup.status_code, 200, backup.text)
+        verify_bundle(backup.content)
+
+    def test_finalization_failure_removes_report_row_and_owned_artifact(self) -> None:
+        from app.api.routes import reports as reports_routes
+        from app.services import report_artifacts
+        from app.services.backup_service import verify_bundle
+
+        before_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(before_runs.status_code, 200, before_runs.text)
+        before_run_ids = {run["run_id"] for run in before_runs.json()["runs"]}
+        before_artifacts = {path.name for path in report_artifacts.ARTIFACTS_ROOT.iterdir()}
+
+        with mock.patch.object(
+            reports_routes.service,
+            "complete_report_run",
+            side_effect=RuntimeError("finalization unavailable"),
+        ):
+            failed = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+        self.assertEqual(failed.status_code, 500, failed.text)
+
+        after_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(after_runs.status_code, 200, after_runs.text)
+        self.assertEqual(
+            {run["run_id"] for run in after_runs.json()["runs"]},
+            before_run_ids,
+        )
+        self.assertEqual(
+            {path.name for path in report_artifacts.ARTIFACTS_ROOT.iterdir()},
+            before_artifacts,
+        )
+        backup = self.client.post("/api/v1/evidence/backup")
+        self.assertEqual(backup.status_code, 200, backup.text)
+        verify_bundle(backup.content)
+
+    def test_cleanup_refuses_an_existing_sealed_report(self) -> None:
+        from app.services.run_service import RunService
+
+        report_id = self._create_report("zip")
+        run_service = RunService()
+        existing = run_service.get_run(report_id)
+
+        discarded = run_service.discard_unmaterialized_report_run(
+            report_id,
+            expected_snapshot_sha256=str(existing.parameters["report_snapshot_sha256"]),
+        )
+
+        self.assertFalse(discarded)
+        download = self.client.get(f"/api/v1/reports/{report_id}/download")
+        self.assertEqual(download.status_code, 200, download.text)
+
+    def test_cancel_during_report_render_is_rejected_and_failure_cleans_up(self) -> None:
+        from app.api.routes import reports as reports_routes
+        from app.services import report_artifacts
+        from app.services.backup_service import verify_bundle
+
+        before_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(before_runs.status_code, 200, before_runs.text)
+        before_run_ids = {run["run_id"] for run in before_runs.json()["runs"]}
+        before_artifacts = {path.name for path in report_artifacts.ARTIFACTS_ROOT.iterdir()}
+        cancel_responses = []
+        original_renderer = reports_routes._build_report_artifact
+
+        def cancel_then_render(render_run, output_format):
+            cancel_responses.append(self.client.post(f"/api/v1/runs/{render_run.run_id}/cancel"))
+            return original_renderer(render_run, output_format)
+
+        with (
+            mock.patch.object(
+                reports_routes,
+                "_build_report_artifact",
+                side_effect=cancel_then_render,
+            ),
+            mock.patch.object(
+                reports_routes.service,
+                "complete_report_run",
+                side_effect=RuntimeError("finalization unavailable"),
+            ),
+        ):
+            failed = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+
+        self.assertEqual(failed.status_code, 500, failed.text)
+        self.assertEqual(len(cancel_responses), 1)
+        self.assertEqual(cancel_responses[0].status_code, 409, cancel_responses[0].text)
+        self.assertEqual(
+            cancel_responses[0].json()["detail"],
+            "Report generation runs are synchronous and cannot be cancelled.",
+        )
+        after_runs = self.client.get(
+            "/api/v1/runs?project_id=demo-project&site_id=demo-site&job_type=report_generation&limit=200"
+        )
+        self.assertEqual(after_runs.status_code, 200, after_runs.text)
+        self.assertEqual(
+            {run["run_id"] for run in after_runs.json()["runs"]},
+            before_run_ids,
+        )
+        self.assertEqual(
+            {path.name for path in report_artifacts.ARTIFACTS_ROOT.iterdir()},
+            before_artifacts,
+        )
+        backup = self.client.post("/api/v1/evidence/backup")
+        self.assertEqual(backup.status_code, 200, backup.text)
+        verify_bundle(backup.content)
+
+    def test_hub_backup_requires_and_uses_recipient_encryption(self) -> None:
+        from app.api.routes import evidence as evidence_routes
+        from app.services.backup_service import decrypt_backup_bundle, verify_bundle
+
+        with mock.patch.object(
+            evidence_routes,
+            "get_settings",
+            return_value=mock.Mock(deployment_role="hub"),
+        ):
+            denied = self.client.post("/api/v1/evidence/backup")
+            self.assertEqual(denied.status_code, 400, denied.text)
+            self.assertIn("recipient RSA public key", denied.json()["detail"])
+
+            public_pem, private_pem = _recipient_rsa_keypair()
+            encrypted = self.client.post(
+                "/api/v1/evidence/backup",
+                json={"recipient_public_key_pem": public_pem.decode("ascii")},
+            )
+        self.assertEqual(encrypted.status_code, 200, encrypted.text)
+        self.assertEqual(
+            encrypted.headers["content-type"],
+            "application/vnd.smart-commissioning.backup+json",
+        )
+        self.assertNotIn(b".secret_store_key", encrypted.content)
+        manifest = verify_bundle(decrypt_backup_bundle(encrypted.content, private_pem))
+        self.assertIn("db/smart_commissioning.db", manifest["members"])
 
 
 # ---------------------------------------------------------------------------
@@ -447,9 +822,7 @@ class BackupServiceTests(unittest.TestCase):
         (self.secrets_root / "ca-certificate.pem").write_bytes(b"ENCRYPTED-PEM-BYTES")
         (self.imports_files / "devices.csv").write_text("asset_id,name\nA1,AHU")
         (self.report_artifacts / "sha256" / "ab").mkdir(parents=True)
-        (self.report_artifacts / "sha256" / "ab" / "artifact.pdf").write_bytes(
-            b"IMMUTABLE-REPORT"
-        )
+        (self.report_artifacts / "sha256" / "ab" / "artifact.pdf").write_bytes(b"IMMUTABLE-REPORT")
         (self.report_signing / ".evidence_signing_key").write_bytes(b"SIGNING-KEY")
 
     def _seed_run(self) -> str:
@@ -489,9 +862,7 @@ class BackupServiceTests(unittest.TestCase):
         from smart_commissioning_core.db.db_run_store import DbRunStore
 
         run_id = self._seed_run()
-        bundle = create_backup_bundle(
-            self._sources(), created_at=datetime.now(UTC), signing_key=self._signing_key()
-        )
+        bundle = create_backup_bundle(self._sources(), created_at=datetime.now(UTC), signing_key=self._signing_key())
 
         # Restore into a fresh, empty runtime root.
         target_root = Path(self._temp.name) / "restored"
@@ -510,13 +881,54 @@ class BackupServiceTests(unittest.TestCase):
         restored_run = DbRunStore(restored_engine).get_run(run_id)
         self.assertEqual(restored_run["run_id"], run_id)
 
+    def test_recipient_encrypted_roundtrip_and_wrong_key_fail_closed(self) -> None:
+        from app.services.backup_service import (
+            BackupError,
+            RestoreTarget,
+            create_backup_bundle,
+            encrypt_backup_bundle,
+            restore_backup_bundle,
+        )
+
+        self._seed_run()
+        signed = create_backup_bundle(
+            self._sources(),
+            created_at=datetime(2026, 8, 10, tzinfo=UTC),
+            signing_key=self._signing_key(),
+        )
+        public_pem, private_pem = _recipient_rsa_keypair()
+        encrypted = encrypt_backup_bundle(signed, public_pem)
+        self.assertNotIn(b"IMMUTABLE-REPORT", encrypted)
+        target_root = self.runtime.parent / "encrypted-restore"
+        target = RestoreTarget(
+            database_path=target_root / "smart_commissioning.db",
+            secrets_root=target_root / "secrets",
+            imports_files_root=target_root / "imports" / "files",
+        )
+        manifest = restore_backup_bundle(
+            encrypted,
+            target,
+            recipient_private_key_pem=private_pem,
+        )
+        self.assertIn("db/smart_commissioning.db", manifest["members"])
+
+        _other_public, wrong_private = _recipient_rsa_keypair()
+        wrong_target = RestoreTarget(
+            database_path=target_root / "wrong.db",
+            secrets_root=target_root / "wrong-secrets",
+            imports_files_root=target_root / "wrong-imports",
+        )
+        with self.assertRaisesRegex(BackupError, "different recipient"):
+            restore_backup_bundle(
+                encrypted,
+                wrong_target,
+                recipient_private_key_pem=wrong_private,
+            )
+        self.assertFalse(wrong_target.database_path.exists())
+
         # Secret file + import file survive byte-for-byte.
-        self.assertEqual(
-            (target.secrets_root / "ca-certificate.pem").read_bytes(), b"ENCRYPTED-PEM-BYTES"
-        )
-        self.assertEqual(
-            (target.imports_files_root / "devices.csv").read_text(), "asset_id,name\nA1,AHU"
-        )
+        self.assertEqual((target.secrets_root / "ca-certificate.pem").read_bytes(), b"ENCRYPTED-PEM-BYTES")
+        self.assertEqual((target.imports_files_root / "devices.csv").read_text(), "asset_id,name\nA1,AHU")
         self.assertEqual(
             (target_root / "artifacts" / "sha256" / "ab" / "artifact.pdf").read_bytes(),
             b"IMMUTABLE-REPORT",
@@ -535,9 +947,7 @@ class BackupServiceTests(unittest.TestCase):
         )
 
         self._seed_run()
-        bundle = create_backup_bundle(
-            self._sources(), created_at=datetime.now(UTC), signing_key=self._signing_key()
-        )
+        bundle = create_backup_bundle(self._sources(), created_at=datetime.now(UTC), signing_key=self._signing_key())
 
         target_root = Path(self._temp.name) / "occupied"
         target_root.mkdir()
@@ -568,9 +978,7 @@ class BackupServiceTests(unittest.TestCase):
         )
 
         self._seed_run()
-        bundle = create_backup_bundle(
-            self._sources(), created_at=datetime.now(UTC), signing_key=self._signing_key()
-        )
+        bundle = create_backup_bundle(self._sources(), created_at=datetime.now(UTC), signing_key=self._signing_key())
         # Verifies clean as produced.
         verify_bundle(bundle)
 
@@ -710,12 +1118,7 @@ class RetentionServiceTests(unittest.TestCase):
         from sqlalchemy import func, select
 
         with session_factory(self.engine)() as session:
-            return int(
-                session.scalar(
-                    select(func.count()).select_from(RunIssue).where(RunIssue.run_id == run_id)
-                )
-                or 0
-            )
+            return int(session.scalar(select(func.count()).select_from(RunIssue).where(RunIssue.run_id == run_id)) or 0)
 
     def test_preview_lists_candidates_and_deletes_nothing(self) -> None:
         from app.services.retention_service import RetentionService, cutoff_from_keep_days
@@ -737,9 +1140,7 @@ class RetentionServiceTests(unittest.TestCase):
         new_run = self._create_run(age_days=1, with_issue=True)
         self.assertEqual(self._issue_count(old_run), 1)
 
-        result = RetentionService(self.engine).apply(
-            before=cutoff_from_keep_days(30), confirm=True
-        )
+        result = RetentionService(self.engine).apply(before=cutoff_from_keep_days(30), confirm=True)
         self.assertIn(old_run, result.deleted_run_ids)
         self.assertNotIn(new_run, result.deleted_run_ids)
         self.assertFalse(self._run_exists(old_run))
@@ -751,9 +1152,7 @@ class RetentionServiceTests(unittest.TestCase):
         from app.services.retention_service import RetentionService, cutoff_from_keep_days
 
         old_run = self._create_run(age_days=100)
-        result = RetentionService(self.engine).apply(
-            before=cutoff_from_keep_days(30), confirm=False
-        )
+        result = RetentionService(self.engine).apply(before=cutoff_from_keep_days(30), confirm=False)
         self.assertEqual(result.deleted_run_ids, [])
         self.assertTrue(result.dry_run)
         self.assertTrue(self._run_exists(old_run))
@@ -769,9 +1168,7 @@ class RetentionServiceTests(unittest.TestCase):
             parameters={"source_run_ids": [source_run]},
         )
 
-        result = RetentionService(self.engine).apply(
-            before=cutoff_from_keep_days(30), confirm=True
-        )
+        result = RetentionService(self.engine).apply(before=cutoff_from_keep_days(30), confirm=True)
         self.assertNotIn(source_run, result.deleted_run_ids)
         self.assertNotIn(report_run, result.deleted_run_ids)
         self.assertIn(source_run, result.skipped_evidence_run_ids)

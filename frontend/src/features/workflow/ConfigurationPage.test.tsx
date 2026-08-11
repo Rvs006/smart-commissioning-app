@@ -46,7 +46,13 @@ function configurationPayload() {
       status: "Healthy",
     },
     bacnet: {
-      values: { "BACnet Network Number": "2001", "UDP Port": "47808", BBMD: "Enabled", "Foreign Device": "Disabled" },
+      values: {
+        "Internetwork ID": "primary",
+        "BACnet Network Number": "2001",
+        "UDP Port": "47808",
+        BBMD: "Enabled",
+        "Foreign Device": "Disabled",
+      },
       status: "Listening",
     },
     mqtt: {
@@ -411,6 +417,33 @@ describe("ConfigurationPage", () => {
     // The operator can switch to a non-secure connection.
     fireEvent.change(select, { target: { value: "Disabled" } });
     expect(select.value).toBe("Disabled");
+  });
+
+  it("explains the BACnet Internetwork ID and caps it at the backend limit", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/configuration")) {
+        return jsonResponse(configurationPayload());
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    renderPage();
+
+    const input = (await screen.findByLabelText("Internetwork ID")) as HTMLInputElement;
+    const field = input.closest("label");
+    expect(input.value).toBe("primary");
+    expect(input).toHaveAttribute("maxlength", "255");
+    expect(field).toHaveAttribute(
+      "title",
+      expect.stringMatching(/same value in BACnet device and point imports/i),
+    );
+    const hint = within(field as HTMLElement).getByText(
+      /distinguish devices that reuse an instance number/i,
+    );
+    expect(input).toHaveAttribute("aria-describedby", hint.id);
+
+    fireEvent.change(input, { target: { value: "plant-a" } });
+    expect(input.value).toBe("plant-a");
   });
 
   // v0.1.12 — the Foreign Device unlock.

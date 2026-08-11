@@ -7,8 +7,14 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Resp
 from smart_commissioning_core.rbac import Role
 
 from app.api.uploads import check_content_length, read_upload_capped
-from app.core.auth import require_role
+from app.core.auth import AuthPrincipal, require_role
 from app.core.config import get_settings
+from app.core.db import get_engine
+from app.core.scopes import (
+    allowed_scope_pairs,
+    load_scoped_import,
+    require_project_site_access,
+)
 from app.schemas.imports import (
     ImportBatchSummary,
     ImportErrorReport,
@@ -99,14 +105,39 @@ def download_import_template(import_type: str, file_type: str) -> Response:
     )
 
 
-@router.post("", response_model=ImportBatchSummary, dependencies=[Depends(require_engineer)])
+def _require_create_scope(
+    principal: AuthPrincipal,
+    project_id: str | None,
+    site_id: str | None,
+) -> None:
+    """Reject half-scoped or unowned named-user imports before reading a file."""
+    if (project_id is None) != (site_id is None):
+        raise HTTPException(
+            status_code=400,
+            detail="project_id and site_id must be supplied together.",
+        )
+    if project_id is None or site_id is None:
+        if allowed_scope_pairs(principal, engine=get_engine()) is not None:
+            raise HTTPException(status_code=404, detail="Project/site not found.")
+        return
+    require_project_site_access(
+        principal,
+        project_id,
+        site_id,
+        engine=get_engine(),
+    )
+
+
+@router.post("", response_model=ImportBatchSummary)
 async def create_import(
     request: Request,
     import_type: ImportType = Form(...),
     project_id: str | None = Form(default=None),
     site_id: str | None = Form(default=None),
     file: UploadFile = File(...),
+    principal: AuthPrincipal = Depends(require_engineer),
 ) -> ImportBatchSummary:
+    _require_create_scope(principal, project_id, site_id)
     if not file.filename:
         raise HTTPException(status_code=400, detail="Uploaded file must have a filename.")
 
@@ -137,12 +168,25 @@ async def create_import(
 # ahead of the parameterised one, or "latest" is swallowed as an import_id and
 # always 404s. Query params mirror createImport's project/site defaults so the
 # lookup targets the same rows the upload wrote.
-@router.get("/latest", response_model=ImportBatchSummary, dependencies=[Depends(require_viewer)])
+@router.get("/latest", response_model=ImportBatchSummary)
 def get_latest_import(
     import_type: ImportType,
     project_id: str | None = None,
     site_id: str | None = None,
+    principal: AuthPrincipal = Depends(require_viewer),
 ) -> ImportBatchSummary:
+    if (project_id is None) != (site_id is None):
+        raise HTTPException(
+            status_code=400,
+            detail="project_id and site_id must be supplied together.",
+        )
+    scope_pairs = allowed_scope_pairs(principal, engine=get_engine())
+    if scope_pairs is not None and (
+        project_id is None
+        or site_id is None
+        or (project_id, site_id) not in scope_pairs
+    ):
+        raise HTTPException(status_code=404, detail="No import is on file for the given filters.")
     summary = service.get_latest_import(
         import_type=import_type, project_id=project_id, site_id=site_id
     )
@@ -151,17 +195,25 @@ def get_latest_import(
     return summary
 
 
-@router.get("/{import_id}", response_model=ImportBatchSummary, dependencies=[Depends(require_viewer)])
-def get_import(import_id: str) -> ImportBatchSummary:
+@router.get("/{import_id}", response_model=ImportBatchSummary)
+def get_import(
+    import_id: str,
+    principal: AuthPrincipal = Depends(require_viewer),
+) -> ImportBatchSummary:
+    load_scoped_import(import_id, principal, engine=get_engine())
     try:
         return service.get_import(import_id)
     except FileNotFoundError as error:
-        raise HTTPException(status_code=404, detail=f"Import '{import_id}' was not found.") from error
+        raise HTTPException(status_code=404, detail="Import not found.") from error
 
 
-@router.get("/{import_id}/errors", response_model=ImportErrorReport, dependencies=[Depends(require_viewer)])
-def get_import_errors(import_id: str) -> ImportErrorReport:
+@router.get("/{import_id}/errors", response_model=ImportErrorReport)
+def get_import_errors(
+    import_id: str,
+    principal: AuthPrincipal = Depends(require_viewer),
+) -> ImportErrorReport:
+    load_scoped_import(import_id, principal, engine=get_engine())
     try:
         return service.get_import_errors(import_id)
     except FileNotFoundError as error:
-        raise HTTPException(status_code=404, detail=f"Import errors for '{import_id}' were not found.") from error
+        raise HTTPException(status_code=404, detail="Import not found.") from error

@@ -39,6 +39,12 @@ from smart_commissioning_core.udmi_validation import DEFAULT_CAPTURE_SECONDS
 
 from app.core.auth import AuthPrincipal, get_principal, require_role
 from app.core.config import get_settings
+from app.core.scopes import (
+    allowed_scope_pairs,
+    load_scoped_import,
+    load_scoped_run,
+    require_project_site_access,
+)
 from app.schemas.jobs import (
     JobAcceptedResponse,
     JobCreateRequest,
@@ -134,6 +140,47 @@ def _create_run(
         ) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _authorize_validation_resources(
+    request: JobCreateRequest,
+    principal: AuthPrincipal,
+) -> None:
+    """Keep imported authority and observations inside the selected scope."""
+    require_project_site_access(
+        principal, request.project_id, request.site_id, engine=service.engine
+    )
+    import_keys = {
+        "import_id",
+        "expected_points_import_id",
+        "tolerances_import_id",
+        "mapping_import_id",
+    }
+    run_keys = {
+        "discovery_run_id",
+        "bacnet_discovery_run_id",
+        "bacnet_run_id",
+        "mqtt_discovery_run_id",
+        "mqtt_run_id",
+    }
+    for key in import_keys:
+        resource_id = str(request.parameters.get(key) or "").strip()
+        if resource_id:
+            scoped = load_scoped_import(resource_id, principal, engine=service.engine)
+            if (scoped.project_id, scoped.site_id) != (
+                request.project_id,
+                request.site_id,
+            ):
+                raise HTTPException(status_code=404, detail="Import not found.")
+    for key in run_keys:
+        resource_id = str(request.parameters.get(key) or "").strip()
+        if resource_id:
+            scoped = load_scoped_run(resource_id, principal, engine=service.engine)
+            if (scoped.project_id, scoped.site_id) != (
+                request.project_id,
+                request.site_id,
+            ):
+                raise HTTPException(status_code=404, detail="Run not found.")
 
 
 def _import_loader():
@@ -439,6 +486,7 @@ def create_udmi_validation_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
+    _authorize_validation_resources(request, principal)
     # When the operator hasn't pasted expected values, fill them from the imported
     # MQTT register so the workbench validates against Make/Model/GUID/points/units
     # without re-typing. Register rows always become an `assets` list (even a
@@ -551,6 +599,7 @@ def create_mqtt_config_publish_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
+    _authorize_validation_resources(request, principal)
     # A live publish actively writes to a broker, so gate it on the same scan
     # authorization contract used by the discovery engines. The local validate-only
     # path (use_live_broker not set) is side-effect free and needs no authorization.
@@ -599,6 +648,7 @@ def rollback_mqtt_config_publish(
     recorded (often the request-supplied ``previous_config`` or none). The
     live-broker capture/replay path is on-site-validation surface.
     """
+    load_scoped_run(run_id, principal, engine=service.engine)
     try:
         run = service.get_run(run_id)
     except FileNotFoundError as error:
@@ -658,6 +708,7 @@ def create_bacnet_validation_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
+    _authorize_validation_resources(request, principal)
     run = _create_run(request, "bacnet_validation", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
@@ -684,6 +735,7 @@ def create_mapping_validation_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
+    _authorize_validation_resources(request, principal)
     run = _create_run(request, "mapping_validation", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
@@ -706,19 +758,32 @@ def create_mapping_validation_run(
 
 
 @router.get("/runs", response_model=RunListResponse, dependencies=[Depends(require_viewer)])
-def list_validation_runs() -> RunListResponse:
-    return RunListResponse(runs=service.list_runs(job_types=VALIDATION_JOB_TYPES))
+def list_validation_runs(
+    principal: AuthPrincipal = Depends(get_principal),
+) -> RunListResponse:
+    return RunListResponse(
+        runs=service.list_runs(
+            job_types=VALIDATION_JOB_TYPES,
+            scope_pairs=allowed_scope_pairs(principal, engine=service.engine),
+        )
+    )
 
 
 @router.get("/runs/{run_id}", response_model=RunRecord, dependencies=[Depends(require_viewer)])
-def get_validation_run(run_id: str) -> RunRecord:
-    return _load_validation_run(run_id)
+def get_validation_run(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> RunRecord:
+    return _load_validation_run(run_id, principal)
 
 
 @router.get("/runs/{run_id}/export.json", dependencies=[Depends(require_viewer)])
-def export_udmi_validation_run(run_id: str) -> Response:
+def export_udmi_validation_run(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
     """Download one stored UDMI validation snapshot as versioned JSON evidence."""
-    run = _load_validation_run(run_id)
+    run = _load_validation_run(run_id, principal)
     if run.job_type != "udmi_validation":
         raise HTTPException(status_code=404, detail=f"UDMI validation run '{run_id}' was not found.")
     if run.status not in {"succeeded", "failed", "cancelled"}:
@@ -740,8 +805,11 @@ def export_udmi_validation_run(run_id: str) -> Response:
     response_model=ValidationIssuesResponse,
     dependencies=[Depends(require_viewer)],
 )
-def get_validation_issues(run_id: str) -> ValidationIssuesResponse:
-    run = _load_validation_run(run_id)
+def get_validation_issues(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ValidationIssuesResponse:
+    run = _load_validation_run(run_id, principal)
 
     issues = run.issues
     if not issues:
@@ -755,7 +823,8 @@ def get_validation_issues(run_id: str) -> ValidationIssuesResponse:
     )
 
 
-def _load_validation_run(run_id: str) -> RunRecord:
+def _load_validation_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
+    load_scoped_run(run_id, principal, engine=service.engine)
     try:
         run = service.get_run(run_id)
     except FileNotFoundError as error:

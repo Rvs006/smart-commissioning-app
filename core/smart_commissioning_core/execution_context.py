@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from smart_commissioning_core.run_context import (
     RunContextV1,
     canonical_context_sha256,
+    canonical_sha256,
     mqtt_client_id,
 )
 from smart_commissioning_core.run_lifecycle import (
@@ -42,6 +43,88 @@ class SecretMaterialUnavailableError(RuntimeError):
 
 class ExecutionContextIntegrityError(RuntimeError):
     """The insert-once stored context no longer matches its claimed digest."""
+
+
+def scan_authority_bindings(
+    context: RunContextV1,
+) -> dict[str, tuple[str, int]]:
+    """Return exact accepted-row digest/count bindings from a scan contract."""
+    contract = context.engine_parameters.get("scan_contract_v1")
+    if not isinstance(contract, Mapping):
+        return {}
+    candidates: list[object] = []
+    ip_contract = contract.get("ip")
+    if isinstance(ip_contract, Mapping):
+        candidates.append(ip_contract.get("authority"))
+    bacnet_contract = contract.get("bacnet")
+    if isinstance(bacnet_contract, Mapping):
+        authorities = bacnet_contract.get("authorities")
+        if isinstance(authorities, Mapping):
+            candidates.extend(authorities.values())
+
+    context_digests = {
+        binding.resource_id: binding.sha256
+        for binding in (*context.registers, *context.imports)
+    }
+    bindings: dict[str, tuple[str, int]] = {}
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if not isinstance(candidate, Mapping):
+            raise ExecutionContextIntegrityError(
+                "scan authority metadata is malformed"
+            )
+        import_id = str(candidate.get("import_id") or "").strip()
+        digest = str(candidate.get("accepted_rows_sha256") or "").strip().lower()
+        try:
+            accepted_count = int(candidate.get("accepted_count"))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ExecutionContextIntegrityError(
+                "scan authority row count is malformed"
+            ) from error
+        if (
+            not import_id
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or accepted_count < 0
+        ):
+            raise ExecutionContextIntegrityError(
+                "scan authority binding is malformed"
+            )
+        if context_digests.get(import_id) != digest:
+            raise ExecutionContextIntegrityError(
+                "scan authority is not bound to the execution context digest"
+            )
+        previous = bindings.get(import_id)
+        current = (digest, accepted_count)
+        if previous is not None and previous != current:
+            raise ExecutionContextIntegrityError(
+                "scan authority has conflicting frozen bindings"
+            )
+        bindings[import_id] = current
+    return bindings
+
+
+def verify_bound_import_rows(
+    context: RunContextV1,
+    import_id: str,
+    rows: Sequence[object],
+) -> None:
+    """Rehash one immutable authority snapshot immediately before it is used."""
+    binding = scan_authority_bindings(context).get(import_id)
+    if binding is None:
+        raise ExecutionContextIntegrityError(
+            "requested scan authority is not bound to this execution context"
+        )
+    expected_digest, expected_count = binding
+    if len(rows) != expected_count:
+        raise ExecutionContextIntegrityError(
+            "scan authority accepted-row count changed after preview"
+        )
+    if canonical_sha256(list(rows)) != expected_digest:
+        raise ExecutionContextIntegrityError(
+            "scan authority accepted-row digest changed after preview"
+        )
 
 
 def verify_stored_context(

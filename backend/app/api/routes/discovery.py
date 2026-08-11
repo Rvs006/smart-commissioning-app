@@ -20,17 +20,12 @@ from io import BytesIO
 from fastapi import APIRouter, Depends, HTTPException, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
-from smart_commissioning_core.db.run_lifecycle import ProtocolConflictError
-from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
-from smart_commissioning_core.engines.bacnet_params import (
-    PARAM_BACNET_TARGETS,
-    TARGET_ADDRESS,
-    TARGET_ASSET_ID,
-    TARGET_ASSET_NAME,
-    TARGET_DEVICE_INSTANCE,
-    TARGET_NETWORK,
-    parse_targets,
+from smart_commissioning_core.db.run_lifecycle import (
+    ProtocolConflictError,
+    ScanAuthorizationError,
 )
+from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
+from smart_commissioning_core.engines.base import ThrottleConfig
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import (
     DEFAULT_CAPTURE_SECONDS,
@@ -39,9 +34,17 @@ from smart_commissioning_core.engines.mqtt_discovery import (
 from smart_commissioning_core.engines.safety import is_authorized
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
 from smart_commissioning_core.rbac import Role
+from smart_commissioning_core.run_context import canonical_sha256
+from smart_commissioning_core.run_lifecycle import ScanAuthorizationV1
 
 from app.core.auth import AuthPrincipal, get_principal, require_role
 from app.core.config import get_settings
+from app.core.scopes import (
+    allowed_scope_pairs,
+    load_scoped_run,
+    require_global_admin,
+    require_project_site_access,
+)
 from app.schemas.jobs import (
     DiscoveryPointsResponse,
     DiscoveryResultsResponse,
@@ -52,8 +55,16 @@ from app.schemas.jobs import (
     RunListResponse,
     RunRecord,
 )
+from app.schemas.scan_authorizations import (
+    CreateScanAuthorizationRequest,
+    RevokeScanAuthorizationRequest,
+)
 from app.services import interface_service
 from app.services.configuration_service import ConfigurationService
+from app.services.discovery_contract_service import (
+    resolve_bacnet_discovery_parameters,
+    resolve_ip_discovery_parameters,
+)
 from app.services.engine_dispatch import (
     build_throttle,
     is_dry_run,
@@ -66,6 +77,7 @@ from app.services.job_queue import JobQueueService
 from app.services.register_topics import expected_topic_filters
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
+from app.services.scan_authorization_service import ScanAuthorizationService
 
 router = APIRouter()
 service = RunService()
@@ -92,14 +104,13 @@ MQTT_MAX_CAPTURE_SECONDS = int(INDEFINITE_BACKSTOP_SECONDS)
 # Actionable message returned when a real scan lacks authorization. Mirrors the
 # safety module's contract so the operator knows exactly how to authorize.
 _SCAN_AUTH_DETAIL = (
-    "Active network scan requires authorization. Provide parameters.authorized = true, "
-    "or the audit-friendly parameters.scan_authorization = "
-    "{\"authorized\": true, \"authorized_by\": \"<who>\"}. "
-    "A dry_run = true request previews the plan without scanning and needs no authorization."
+    "Active network scan requires a sealed preview and one-use scan authorization. "
+    "Create a dry_run preview first, approve that exact packet plan, then provide "
+    "preview_run_id and scan_authorization_id with an empty parameters object."
 )
 
 
-def _settings_throttle(parameters: dict) -> object:
+def _settings_throttle(parameters: dict) -> ThrottleConfig:
     settings = get_settings()
     return build_throttle(
         parameters,
@@ -109,23 +120,122 @@ def _settings_throttle(parameters: dict) -> object:
     )
 
 
-def _require_scan_authorization(parameters: dict) -> None:
-    """Reject a real (non-dry-run) scan that lacks the authorization contract."""
+def _prepare_scan_parameters(
+    request: JobCreateRequest,
+    *,
+    expected_job_type: JobType,
+    principal: AuthPrincipal,
+) -> tuple[dict[str, object], bool]:
+    """Separate a side-effect-free preview from a preview-bound live start."""
+
+    parameters = dict(request.parameters)
+    dry_run = is_dry_run(parameters)
+    has_preview = bool(request.preview_run_id)
+    has_authorization = bool(request.scan_authorization_id)
+    if dry_run:
+        if has_preview or has_authorization:
+            raise HTTPException(
+                status_code=400,
+                detail="A dry preview cannot consume a scan authorization.",
+            )
+        return parameters, True
+    if not has_preview or not has_authorization:
+        raise HTTPException(status_code=400, detail=_SCAN_AUTH_DETAIL)
+    if parameters:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A live scan must use the exact sealed preview. Send an empty "
+                "parameters object with preview_run_id and scan_authorization_id."
+            ),
+        )
+    try:
+        resolved = ScanAuthorizationService(service).prepare_live_parameters(
+            preview_run_id=str(request.preview_run_id),
+            authorization_id=str(request.scan_authorization_id),
+            project_id=request.project_id,
+            site_id=request.site_id,
+            job_type=expected_job_type,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Sealed preview or authorization was not found.") from error
+    except ScanAuthorizationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    _verify_frozen_control_identity(resolved, principal)
+    return resolved, False
+
+
+def _bind_control_identity(
+    parameters: dict[str, object], principal: AuthPrincipal
+) -> None:
+    contract = parameters.get("scan_contract_v1")
+    if not isinstance(contract, dict):
+        raise HTTPException(status_code=400, detail="scan_contract_v1 is missing")
+    contract["initiating_user_id"] = principal.user_id
+    contract["principal_source"] = principal.source
+    contract["deployment_role"] = get_settings().deployment_role
+    packet_plan = {
+        key: value for key, value in contract.items() if key != "packet_plan_sha256"
+    }
+    contract["packet_plan_sha256"] = canonical_sha256(packet_plan)
+
+
+def _bind_retry_relation(
+    parameters: dict[str, object],
+    *,
+    request: JobCreateRequest,
+    principal: AuthPrincipal,
+) -> None:
+    """Freeze an optional retry parent into the packet plan and relational context."""
+    parent_run_id = str(parameters.pop("retry_parent_run_id", "") or "").strip()
+    if not parent_run_id:
+        return
+    scoped = load_scoped_run(parent_run_id, principal, engine=service.engine)
+    if (scoped.project_id, scoped.site_id) != (request.project_id, request.site_id):
+        raise HTTPException(status_code=404, detail="Run not found.")
+    contract = parameters.get("scan_contract_v1")
+    if not isinstance(contract, dict):
+        raise HTTPException(status_code=400, detail="scan_contract_v1 is missing")
+    contract["relation_snapshot"] = {
+        "relation": "retry",
+        "parent_run_id": parent_run_id,
+    }
+
+
+def _verify_frozen_control_identity(
+    parameters: dict[str, object], principal: AuthPrincipal
+) -> None:
+    contract = parameters.get("scan_contract_v1")
+    if not isinstance(contract, dict):
+        raise HTTPException(status_code=409, detail="sealed preview is missing control identity")
+    expected = (
+        contract.get("initiating_user_id"),
+        contract.get("principal_source"),
+        contract.get("deployment_role"),
+    )
+    current = (principal.user_id, principal.source, get_settings().deployment_role)
+    if expected != current:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Live scan must be started by the same scoped principal and "
+                "deployment role that created the sealed preview."
+            ),
+        )
+
+
+def _require_legacy_scan_authorization(parameters: dict[str, object]) -> None:
+    """Temporary compatibility gate for MQTT while its contract is migrated."""
+
     if is_dry_run(parameters):
         return
     if not is_authorized(parameters):
         raise HTTPException(status_code=403, detail=_SCAN_AUTH_DETAIL)
 
 
-def _stamp_authorizer(parameters: dict, principal: AuthPrincipal) -> None:
-    """Record the REAL authenticated principal as ``scan_authorization.authorized_by``
-    on an authorized real scan, so the audit trail names who actually authorized
-    the run instead of a hard-coded client label. Any operator-supplied note /
-    authorized_at (and other keys) are preserved; only authorized/authorized_by
-    are asserted from the server side. Dry runs and unauthorized requests are left
-    untouched — a dry run needs no authorization, so stamping one would imply a
-    consent that was never required.
-    """
+def _stamp_legacy_authorizer(
+    parameters: dict[str, object], principal: AuthPrincipal
+) -> None:
     if is_dry_run(parameters) or not is_authorized(parameters):
         return
     existing = parameters.get("scan_authorization")
@@ -156,6 +266,8 @@ def _create_run(
                 "active_run_id": error.active_run_id,
             },
         ) from error
+    except ScanAuthorizationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -197,45 +309,6 @@ def _resolve_source_interface(project_id: str, site_id: str, parameters: dict) -
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
-# Explicit target keys an operator may set to scope an IP sweep. When none are
-# present, the scan falls back to the imported IP register's expected addresses.
-_EXPLICIT_IP_TARGET_KEYS = ("cidr", "start", "start_ip", "end", "end_ip", "addresses")
-
-
-def _ensure_ip_targets(project_id: str, site_id: str, parameters: dict) -> None:
-    """Resolve scan targets for an IP discovery run.
-
-    An explicit target (``cidr`` / ``start``-``end`` / ``addresses``) is used
-    untouched. Otherwise ``addresses`` is filled from the newest accepted IP
-    register import for this project/site (deduped, first-seen order), so the
-    "import register -> run discovery" flow sweeps exactly the registered hosts
-    — the engine only knew how to expand a cidr/range, which the frontend never
-    supplied (the old opaque "engine failed"). Raises 400 when there is nothing
-    to scan, with an actionable message instead of the sanitized engine failure.
-    """
-    if any(parameters.get(key) for key in _EXPLICIT_IP_TARGET_KEYS):
-        return
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="ip_register"
-    )
-    for record in imports:  # newest-first
-        addresses = list(dict.fromkeys(
-            a for row in record.get("accepted_rows", [])
-            if (a := str(row.get("Expected IP address", "") or "").strip())
-        ))
-        if addresses:
-            parameters["addresses"] = addresses
-            return
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "No scan targets found. Import an IP register (with an "
-            "'Expected IP address' column) for this project/site, or provide a "
-            "'cidr' or 'start'/'end' range, before running IP discovery."
-        ),
-    )
-
-
 def _resolve_bacnet_transport(project_id: str, site_id: str, parameters: dict) -> None:
     """Inject the saved BACnet transport config (foreign-device registration) into
     the run parameters BEFORE the run is persisted, mirroring the MQTT route's
@@ -258,145 +331,112 @@ def _resolve_bacnet_transport(project_id: str, site_id: str, parameters: dict) -
     single packet is sent.
     """
     try:
-        defaults = config_service.bacnet_transport_defaults(project_id, site_id)
+        defaults = {
+            **config_service.bacnet_transport_defaults(project_id, site_id),
+            **config_service.bacnet_internetwork_defaults(project_id, site_id),
+        }
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     for key, value in defaults.items():
         parameters.setdefault(key, value)
 
 
-def _bacnet_register_targets(record: dict) -> list[dict]:
-    """Contract-shaped target rows from one bacnet_register import's accepted rows.
+def _guard_frozen_source_interface(parameters: dict[str, object]) -> None:
+    """Validate the preview's selected NIC without consulting changed config."""
 
-    Maps the register's column names onto the shared row keys, then delegates ALL
-    normalisation (types, bounds, dedupe on (address, device_instance), first-seen
-    order) to the contract's ``parse_targets`` — the same function the engine reads
-    back with, which is what stops the write and the read from drifting apart.
+    source_ip = str(parameters.get("source_ip") or "").strip()
+    if not source_ip:
+        return
+    try:
+        interface_service.ensure_source_ip_available(source_ip)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
-    Malformed rows are SKIPPED, never fatal: a legacy import predating the
-    numeric/IP validators must not turn a scan into a 500. ``parse_targets`` never
-    raises on JSON-shaped input, and the ``isinstance`` guard here keeps a
-    non-dict row from breaking the ``.get`` before it gets there.
-    """
-    return [
-        target.as_dict()
-        for target in parse_targets(
-            {
-                TARGET_ADDRESS: row.get("IP address"),
-                TARGET_DEVICE_INSTANCE: row.get("BACnet device instance"),
-                TARGET_ASSET_ID: row.get("Asset ID"),
-                TARGET_ASSET_NAME: row.get("Asset name"),
-                TARGET_NETWORK: row.get("BACnet network"),
-            }
-            for row in record.get("accepted_rows", [])
-            if isinstance(row, dict)
+
+@router.post(
+    "/scan-authorizations",
+    response_model=ScanAuthorizationV1,
+    status_code=201,
+)
+def create_scan_authorization(
+    request: CreateScanAuthorizationRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> ScanAuthorizationV1:
+    load_scoped_run(request.preview_run_id, principal, engine=service.engine)
+    try:
+        return ScanAuthorizationService(service).create(
+            preview_run_id=request.preview_run_id,
+            approved_by=principal.username,
+            ticket=request.ticket,
+            purpose=request.purpose,
+            not_before=request.not_before,
+            not_after=request.not_after,
         )
-    ]
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Sealed preview was not found.") from error
+    except ScanAuthorizationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
-def _ensure_bacnet_targets(project_id: str, site_id: str, parameters: dict) -> None:
-    """Resolve the expected-device list for a BACnet discovery run from the newest
-    accepted ``bacnet_register`` import, so the engine can probe registered devices
-    directly and report which expected devices stayed silent.
-
-    An operator-supplied ``bacnet_targets`` wins untouched, like every other
-    resolver on these routes.
-
-    NO REGISTER IS NOT AN ERROR — unlike :func:`_ensure_ip_targets`, which 400s
-    because an IP sweep with no targets has nothing to do at all. BACnet
-    broadcast-only discovery is a legitimate scan: with no register the targets
-    are simply absent and the run proceeds on the broadcast (and, if configured,
-    foreign-device) lanes. Do not copy the IP route's 400 here.
-    """
-    if parameters.get(PARAM_BACNET_TARGETS):
-        return
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="bacnet_register"
+@router.get(
+    "/scan-authorizations",
+    response_model=list[ScanAuthorizationV1],
+)
+def list_scan_authorizations(
+    project_id: str | None = None,
+    site_id: str | None = None,
+    preview_run_id: str | None = None,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> list[ScanAuthorizationV1]:
+    return ScanAuthorizationService(service).list(
+        project_id=project_id,
+        site_id=site_id,
+        preview_run_id=preview_run_id,
     )
-    for record in imports:  # newest-first
-        if targets := _bacnet_register_targets(record):
-            parameters[PARAM_BACNET_TARGETS] = targets
-            return
 
 
-def _ip_register_by_address(project_id: str, site_id: str, column: str) -> dict[str, str]:
-    """``{Expected IP address: <column>}`` from the newest ip_register import that
-    has any non-empty value in ``column`` (every accepted row has an IP address)."""
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="ip_register"
-    )
-    for record in imports:  # newest-first
-        by_address = {
-            address: value
-            for row in record.get("accepted_rows", [])
-            if (value := str(row.get(column, "") or "").strip())
-            and (address := str(row.get("Expected IP address", "") or "").strip())
-        }
-        if by_address:
-            return by_address
-    return {}
+def _effective_throttle(parameters: dict[str, object]) -> dict[str, object]:
+    throttle = _settings_throttle(parameters)
+    return {
+        "max_concurrency": throttle.max_concurrency,
+        "rate_limit_per_sec": throttle.rate_limit_per_sec,
+        "connect_timeout_s": throttle.connect_timeout_s,
+    }
 
 
-def _resolve_forbidden_ports(project_id: str, site_id: str, parameters: dict) -> None:
-    """Forbidden ports from the register's "Ports that should not be enabled": a
-    per-asset ``forbidden_ports_by_address`` map (engine flags each host against its
-    own set) plus a global ``forbidden_ports`` union for hosts not in the map.
-    Operator-supplied values win.
-    """
-    by_address = _ip_register_by_address(project_id, site_id, "Ports that should not be enabled")
-    if not by_address:
-        return
-    if not parameters.get("forbidden_ports"):
-        parameters["forbidden_ports"] = ",".join(by_address.values())
-    parameters.setdefault("forbidden_ports_by_address", by_address)
+@router.get(
+    "/scan-authorizations/{authorization_id}",
+    response_model=ScanAuthorizationV1,
+)
+def get_scan_authorization(
+    authorization_id: str,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> ScanAuthorizationV1:
+    try:
+        return ScanAuthorizationService(service).get(authorization_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Scan authorization was not found.") from error
 
 
-def _resolve_expected_ports(project_id: str, site_id: str, parameters: dict) -> None:
-    """Fill ``expected_ports_by_address`` from the register's "Expected services/ports"
-    so the engine flags any OPEN port NOT expected for that host (needs a port range
-    to be meaningful). Operator-supplied value wins.
-    """
-    if not parameters.get("expected_ports_by_address"):
-        if by_address := _ip_register_by_address(project_id, site_id, "Expected services/ports"):
-            parameters["expected_ports_by_address"] = by_address
-
-
-def _resolve_expected_hostnames(project_id: str, site_id: str, parameters: dict) -> None:
-    """Fill ``expected_hostname_by_address`` from the register's "Expected hostname"
-    so the engine can flag a reverse-DNS result that contradicts the register
-    (rows with a blank hostname are skipped by the map builder, so they can never
-    mismatch). Operator-supplied value wins.
-    """
-    if not parameters.get("expected_hostname_by_address"):
-        if by_address := _ip_register_by_address(project_id, site_id, "Expected hostname"):
-            parameters["expected_hostname_by_address"] = by_address
-
-
-def _resolve_asset_ids(project_id: str, site_id: str, parameters: dict) -> None:
-    """Fill ``asset_id_by_address`` from the register so the live "Asset" column
-    resolves each scanned host to its registered identity — the Asset ID, else
-    the Asset name (asset identity is one-of). First-seen address wins
-    (``setdefault``), from the newest register import that carries any identity.
-    Operator-supplied value wins; a host absent from the register stays None.
-    """
-    if parameters.get("asset_id_by_address"):
-        return
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="ip_register"
-    )
-    for record in imports:  # newest-first
-        by_address: dict[str, str] = {}
-        for row in record.get("accepted_rows", []):
-            address = str(row.get("Expected IP address", "") or "").strip()
-            identity = (
-                str(row.get("Asset ID", "") or "").strip()
-                or str(row.get("Asset name", "") or "").strip()
-            )
-            if address and identity:
-                by_address.setdefault(address, identity)
-        if by_address:
-            parameters["asset_id_by_address"] = by_address
-            return
+@router.post(
+    "/scan-authorizations/{authorization_id}/revoke",
+    response_model=ScanAuthorizationV1,
+)
+def revoke_scan_authorization(
+    authorization_id: str,
+    request: RevokeScanAuthorizationRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> ScanAuthorizationV1:
+    try:
+        return ScanAuthorizationService(service).revoke(
+            authorization_id,
+            revoked_by=principal.username,
+            reason=request.reason,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Scan authorization was not found.") from error
+    except ScanAuthorizationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.post("/ip/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
@@ -404,20 +444,40 @@ def create_ip_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    # Validate authorization + resolve scan targets BEFORE creating the run, so a
-    # rejected request never leaves an orphaned queued run, and the resolved
-    # register addresses are persisted into the run record (the worker path reads
-    # run.parameters, not just the inline dict).
-    parameters = dict(request.parameters)
-    _require_scan_authorization(parameters)
-    _stamp_authorizer(parameters, principal)
-    resolve_ip_enrichment(parameters)
-    _ensure_ip_targets(request.project_id, request.site_id, parameters)
-    _resolve_forbidden_ports(request.project_id, request.site_id, parameters)
-    _resolve_expected_ports(request.project_id, request.site_id, parameters)
-    _resolve_expected_hostnames(request.project_id, request.site_id, parameters)
-    _resolve_asset_ids(request.project_id, request.site_id, parameters)
-    _resolve_source_interface(request.project_id, request.site_id, parameters)
+    require_project_site_access(
+        principal, request.project_id, request.site_id, engine=service.engine
+    )
+    if request.preview_run_id:
+        load_scoped_run(request.preview_run_id, principal, engine=service.engine)
+    parameters, preview = _prepare_scan_parameters(
+        request, expected_job_type="ip_discovery", principal=principal
+    )
+    if preview:
+        resolve_ip_enrichment(parameters)
+        _resolve_source_interface(request.project_id, request.site_id, parameters)
+        try:
+            parameters = resolve_ip_discovery_parameters(
+                parameters,
+                project_id=request.project_id,
+                site_id=request.site_id,
+                import_repository=ImportRepository(service.engine),
+                effective_throttle=_effective_throttle(parameters),
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=404,
+                detail="Selected IP register was not found.",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        _bind_retry_relation(
+            parameters,
+            request=request,
+            principal=principal,
+        )
+        _bind_control_identity(parameters, principal)
+    else:
+        _guard_frozen_source_interface(parameters)
     run = _create_run(
         request.model_copy(update={"parameters": parameters}), "ip_discovery", principal
     )
@@ -446,24 +506,40 @@ def create_bacnet_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    # Resolve parameters (auth check + source-NIC injection) BEFORE creating the
-    # run, so the injected source_ip / local_address are persisted into
-    # run.parameters for the worker path — matching the IP / MQTT routes. (BACnet
-    # binds via parameters["local_address"], already consumed by the engine.)
-    parameters = dict(request.parameters)
-    _require_scan_authorization(parameters)
-    _stamp_authorizer(parameters, principal)
-    _resolve_source_interface(request.project_id, request.site_id, parameters)
-    # Transport (foreign-device registration via a BBMD) and targeting (the
-    # expected devices from the bacnet_register) are resolved HERE, before
-    # _create_run, for the same reason source_ip is: the worker path reads the
-    # PERSISTED run.parameters, not this dict. create_job_run only shallow-copies
-    # what it is given, so injecting before it is what makes the inline (portable
-    # exe) path and the hosted worker path run against identical parameters —
-    # inject after it and the portable build would foreign-device register while
-    # the worker silently broadcast.
-    _resolve_bacnet_transport(request.project_id, request.site_id, parameters)
-    _ensure_bacnet_targets(request.project_id, request.site_id, parameters)
+    require_project_site_access(
+        principal, request.project_id, request.site_id, engine=service.engine
+    )
+    if request.preview_run_id:
+        load_scoped_run(request.preview_run_id, principal, engine=service.engine)
+    parameters, preview = _prepare_scan_parameters(
+        request, expected_job_type="bacnet_discovery", principal=principal
+    )
+    if preview:
+        _resolve_source_interface(request.project_id, request.site_id, parameters)
+        _resolve_bacnet_transport(request.project_id, request.site_id, parameters)
+        try:
+            parameters = resolve_bacnet_discovery_parameters(
+                parameters,
+                project_id=request.project_id,
+                site_id=request.site_id,
+                import_repository=ImportRepository(service.engine),
+                effective_throttle=_effective_throttle(parameters),
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=404,
+                detail="Selected BACnet authority was not found.",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        _bind_retry_relation(
+            parameters,
+            request=request,
+            principal=principal,
+        )
+        _bind_control_identity(parameters, principal)
+    else:
+        _guard_frozen_source_interface(parameters)
     # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
     # backend so it ATTEMPTS real discovery (never silently returns simulated
     # data). Persisted into run.parameters BEFORE _create_run so both the inline
@@ -502,9 +578,12 @@ def create_mqtt_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
+    require_project_site_access(
+        principal, request.project_id, request.site_id, engine=service.engine
+    )
     parameters = dict(request.parameters)
-    _require_scan_authorization(parameters)
-    _stamp_authorizer(parameters, principal)
+    _require_legacy_scan_authorization(parameters)
+    _stamp_legacy_authorizer(parameters, principal)
     # Reject an over-cap capture window BEFORE creating the run (UDMI precedent
     # routes/validation.py) so a rejected request never leaves an orphaned run.
     # None (0/blank = indefinite) passes: it runs until Stop run, the distinct-
@@ -570,13 +649,23 @@ def _dispatch(run: RunRecord, *, enqueue, run_inline, label: str) -> JobAccepted
 
 
 @router.get("/runs", response_model=RunListResponse, dependencies=[Depends(require_viewer)])
-def list_discovery_runs() -> RunListResponse:
-    return RunListResponse(runs=service.list_runs(job_types=DISCOVERY_JOB_TYPES))
+def list_discovery_runs(
+    principal: AuthPrincipal = Depends(get_principal),
+) -> RunListResponse:
+    return RunListResponse(
+        runs=service.list_runs(
+            job_types=DISCOVERY_JOB_TYPES,
+            scope_pairs=allowed_scope_pairs(principal, engine=service.engine),
+        )
+    )
 
 
 @router.get("/runs/{run_id}", response_model=RunRecord, dependencies=[Depends(require_viewer)])
-def get_discovery_run(run_id: str) -> RunRecord:
-    run = _load_discovery_run(run_id)
+def get_discovery_run(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> RunRecord:
+    run = _load_discovery_run(run_id, principal)
     return run
 
 
@@ -585,8 +674,11 @@ def get_discovery_run(run_id: str) -> RunRecord:
     response_model=DiscoveryResultsResponse,
     dependencies=[Depends(require_viewer)],
 )
-def get_discovery_results(run_id: str) -> DiscoveryResultsResponse:
-    run = _load_discovery_run(run_id)
+def get_discovery_results(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> DiscoveryResultsResponse:
+    run = _load_discovery_run(run_id, principal)
 
     # Back-compat: discovered_assets still come from result_summary (the engines
     # write them there). Structured rows additionally come from the repository
@@ -615,8 +707,11 @@ def get_discovery_results(run_id: str) -> DiscoveryResultsResponse:
     response_model=DiscoveryPointsResponse,
     dependencies=[Depends(require_viewer)],
 )
-def get_discovery_points(run_id: str) -> DiscoveryPointsResponse:
-    run = _load_discovery_run(run_id)
+def get_discovery_points(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> DiscoveryPointsResponse:
+    run = _load_discovery_run(run_id, principal)
     return DiscoveryPointsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
@@ -630,8 +725,11 @@ def get_discovery_points(run_id: str) -> DiscoveryPointsResponse:
     response_model=DiscoveryTopicsResponse,
     dependencies=[Depends(require_viewer)],
 )
-def get_discovery_topics(run_id: str) -> DiscoveryTopicsResponse:
-    run = _load_discovery_run(run_id)
+def get_discovery_topics(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> DiscoveryTopicsResponse:
+    run = _load_discovery_run(run_id, principal)
     topics, register_comparison = _annotate_register_matches(
         run, _discovery_repository().list_topics(run_id)
     )
@@ -645,7 +743,11 @@ def get_discovery_topics(run_id: str) -> DiscoveryTopicsResponse:
 
 
 @router.get("/runs/{run_id}/topics.xlsx", dependencies=[Depends(require_viewer)])
-def export_discovery_topics_xlsx(run_id: str, topic_filter: str | None = None) -> Response:
+def export_discovery_topics_xlsx(
+    run_id: str,
+    topic_filter: str | None = None,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
     """Export the captured latest-payload-per-topic rows as an XLSX (mq9nhbzu).
 
     Reuses the same persisted topic rows the capture panel/CSV use (no live
@@ -654,7 +756,7 @@ def export_discovery_topics_xlsx(run_id: str, topic_filter: str | None = None) -
     applies the same ``+``/``#`` wildcard semantics as the on-screen filter so
     the export matches what the operator sees.
     """
-    run = _load_discovery_run(run_id)
+    run = _load_discovery_run(run_id, principal)
     rows = _discovery_repository().list_topics(run_id)
     if topic_filter:
         rows = [row for row in rows if _matches_topic_filter(str(row.get("topic") or ""), topic_filter)]
@@ -741,7 +843,8 @@ def _matches_topic_filter(topic: str, pattern: str) -> bool:
     return len(filter_parts) == len(topic_parts)
 
 
-def _load_discovery_run(run_id: str) -> RunRecord:
+def _load_discovery_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
+    load_scoped_run(run_id, principal, engine=service.engine)
     try:
         run = service.get_run(run_id)
     except FileNotFoundError as error:

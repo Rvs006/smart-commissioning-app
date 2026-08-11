@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -65,6 +66,10 @@ _KEY_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
 _MEDIA_TYPE_RE = re.compile(
     r"^[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+$"
 )
+
+
+class ReportArtifactIntegrityError(RuntimeError):
+    """A report artifact is absent or no longer bound to its requested run."""
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -170,6 +175,89 @@ def load_report_artifact(manifest: dict[str, Any]) -> bytes:
     if not isinstance(expected_hash, str) or sha256_bytes(artifact) != expected_hash:
         raise RuntimeError("Stored report artifact hash does not match its manifest.")
     return artifact
+
+
+def load_owned_report_artifact(
+    *,
+    report_id: str,
+    manifest: Mapping[str, Any],
+    synchronized: Mapping[str, Any] | None = None,
+    require_valid_signature: bool = True,
+) -> tuple[bytes, str]:
+    """Verify ownership, signature, and bytes for one sealed report manifest."""
+
+    owned_manifest = dict(manifest)
+    if owned_manifest.get("report_id") != report_id:
+        raise ReportArtifactIntegrityError(
+            "Stored report artifact ownership does not match the requested report."
+        )
+    if require_valid_signature and not verify_signed_manifest(owned_manifest):
+        raise ReportArtifactIntegrityError(
+            "Stored report artifact manifest has an invalid signature."
+        )
+    media_type = owned_manifest.get("media_type")
+    if not isinstance(media_type, str) or not media_type:
+        raise ReportArtifactIntegrityError("Stored report manifest has no media type.")
+
+    try:
+        if synchronized is None:
+            relative = owned_manifest.get("artifact_relpath")
+            if not isinstance(relative, str) or not relative.startswith(
+                f"{report_id}-"
+            ):
+                raise ReportArtifactIntegrityError(
+                    "Stored report artifact path is not owned by the report."
+                )
+            artifact = load_report_artifact(owned_manifest)
+        else:
+            synchronized_manifest = synchronized.get("manifest")
+            if not isinstance(synchronized_manifest, Mapping):
+                raise ReportArtifactIntegrityError(
+                    "Synchronized artifact has no signed manifest."
+                )
+            synchronized_manifest = dict(synchronized_manifest)
+            if synchronized_manifest.get("report_id") != report_id:
+                raise ReportArtifactIntegrityError(
+                    "Synchronized artifact ownership does not match the requested report."
+                )
+            if require_valid_signature and not verify_signed_manifest(
+                synchronized_manifest
+            ):
+                raise ReportArtifactIntegrityError(
+                    "Synchronized artifact manifest has an invalid signature."
+                )
+            if synchronized_manifest != owned_manifest:
+                raise ReportArtifactIntegrityError(
+                    "Synchronized artifact manifest conflicts with sealed evidence."
+                )
+            expected_hash = owned_manifest.get("artifact_sha256")
+            expected_size = owned_manifest.get("byte_size")
+            if (
+                synchronized.get("artifact_sha256") != expected_hash
+                or synchronized.get("byte_size") != expected_size
+            ):
+                raise ReportArtifactIntegrityError(
+                    "Synchronized artifact record conflicts with its signed manifest."
+                )
+            storage_relpath = synchronized.get("storage_relpath")
+            if not isinstance(storage_relpath, str):
+                raise ReportArtifactIntegrityError(
+                    "Synchronized artifact storage path is invalid."
+                )
+            if not isinstance(expected_hash, str) or type(expected_size) is not int:
+                raise ReportArtifactIntegrityError(
+                    "Stored report artifact manifest has invalid byte metadata."
+                )
+            artifact = load_content_addressed_artifact(
+                storage_relpath,
+                expected_hash=expected_hash,
+                expected_size=expected_size,
+            )
+    except ReportArtifactIntegrityError:
+        raise
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        raise ReportArtifactIntegrityError(str(error)) from error
+    return artifact, media_type
 
 
 def delete_report_artifact(manifest: dict[str, Any], *, report_id: str) -> bool:

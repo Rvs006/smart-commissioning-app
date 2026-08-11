@@ -44,6 +44,10 @@ from app.core.sync_auth import SyncPrincipal, sync_key_sha256
 from app.services.sync_v2_service import ingest_sync_v2_bundle
 
 _MAX_DETECTION_MANIFEST_BYTES = 2 * 1024 * 1024
+# One item document, one optional report artifact, and at most two scan
+# authority snapshots. The authenticated Sync v2 parser applies the same
+# per-item authority bound after protocol detection.
+_MAX_SYNC_V2_MEMBERS_PER_ITEM = 4
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -87,9 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: could not read bundle file: {error}", file=sys.stderr)
         return 2
     max_items = int(getattr(settings, "max_sync_items", 500))
-    max_uncompressed_bytes = int(
-        getattr(settings, "max_sync_uncompressed_bytes", 200 * 1024 * 1024)
-    )
+    max_uncompressed_bytes = int(getattr(settings, "max_sync_uncompressed_bytes", 200 * 1024 * 1024))
     try:
         protocol = _detect_sync_protocol(
             bundle_bytes,
@@ -172,13 +174,11 @@ def _detect_sync_protocol(
             names = [info.filename for info in infos]
             if len(names) != len(set(names)) or names.count("manifest.json") != 1:
                 raise SyncV2Error("Bundle has duplicate or ambiguous members.")
-            if len(infos) > 1 + (2 * max_items):
+            if len(infos) > 1 + (_MAX_SYNC_V2_MEMBERS_PER_ITEM * max_items):
                 raise SyncV2Error("Bundle member count exceeds the configured limit.")
             if sum(info.file_size for info in infos) > max_uncompressed_bytes:
                 raise SyncV2Error("Bundle expands beyond the configured limit.")
-            manifest_info = next(
-                info for info in infos if info.filename == "manifest.json"
-            )
+            manifest_info = next(info for info in infos if info.filename == "manifest.json")
             if manifest_info.file_size > min(
                 _MAX_DETECTION_MANIFEST_BYTES,
                 max_uncompressed_bytes,
@@ -199,16 +199,10 @@ def _detect_sync_protocol(
     if not isinstance(manifest, dict):
         raise SyncV2Error("Bundle manifest must be a JSON object.")
     if "protocol_version" in manifest or "protocol" in manifest:
-        if (
-            manifest.get("protocol") == "smart-commissioning-sync"
-            and manifest.get("protocol_version") == "2.0"
-        ):
+        if manifest.get("protocol") == "smart-commissioning-sync" and manifest.get("protocol_version") == "2.0":
             return "v2"
         raise SyncV2Error("Bundle declares an unsupported Sync protocol.")
-    if (
-        manifest.get("bundle_format_version") == 1
-        and manifest.get("schema_version") in {1, 2}
-    ):
+    if manifest.get("bundle_format_version") == 1 and manifest.get("schema_version") in {1, 2}:
         return "v1"
     raise SyncV2Error("Bundle does not declare a supported Sync protocol.")
 

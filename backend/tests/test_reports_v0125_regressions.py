@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from datetime import UTC, datetime
 from unittest import mock
 from urllib.parse import quote
+from uuid import uuid4
 
 from harness import ApiTestCase
 
@@ -61,9 +63,7 @@ def _summary(
         "system_metrics": [
             {
                 "system": "BMS",
-                "asset_metrics": {
-                    key: value for key, value in asset_metrics.items() if key != "unexpected"
-                },
+                "asset_metrics": {key: value for key, value in asset_metrics.items() if key != "unexpected"},
                 "payload_metrics": dict(payload_metrics),
                 "fault_metrics": _empty_fault_metrics(),
                 "issue_metrics": {"blocking": 0, "warning": 0},
@@ -218,9 +218,7 @@ class ReportsV0125RegressionTests(ApiTestCase):
         )
         self.assertEqual(exported.status_code, 200, exported.text)
         with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
-            self.assertEqual(
-                archive.namelist(), [expected_name, "report_set_manifest.json"]
-            )
+            self.assertEqual(archive.namelist(), [expected_name, "report_set_manifest.json"])
             self.assertEqual(archive.read(expected_name), download.content)
 
     def test_default_blank_and_pre_marker_runs_keep_compatible_names(self) -> None:
@@ -243,31 +241,125 @@ class ReportsV0125RegressionTests(ApiTestCase):
         )
         self.assertEqual(blank.status_code, 422, blank.text)
 
-        from app.schemas.jobs import JobCreateRequest
         from app.services.run_service import RunService
+        from smart_commissioning_core.db.db_run_store import get_or_create_project_and_site
+        from smart_commissioning_core.db.engine import session_factory
+        from smart_commissioning_core.db.models import (
+            ReportEvidenceContract,
+            Run,
+            RunResult,
+            RunSeal,
+        )
+        from smart_commissioning_core.run_context import canonical_sha256
+        from smart_commissioning_core.run_lifecycle import TerminalResultV1
 
         service = RunService()
-        legacy = service.create_job_run(
-            JobCreateRequest(
-                project_id="demo-project",
-                site_id="demo-site",
-                job_type="report_generation",
-                parameters={
-                    "report_type": "udmi_validation",
-                    "output_format": "pdf",
-                    "source_run_ids": [],
-                    "report_title": "Legacy Custom Title",
-                },
-            ),
-            expected_job_type="report_generation",
+        run_id = f"run_legacy_name_{uuid4().hex[:16]}"
+        created_at = datetime(2026, 7, 24, 10, 0, tzinfo=UTC)
+        parameters = {
+            "report_type": "udmi_validation",
+            "output_format": "pdf",
+            "source_run_ids": [],
+            "report_title": "Legacy Custom Title",
+        }
+        result_summary = {
+            "legacy_report_integrity": {
+                "classification": "missing",
+                "migration": "v0.1.26",
+                "silently_resigned": False,
+            }
+        }
+        terminal = TerminalResultV1(
+            status="succeeded",
+            stage="report_ready",
+            summary=result_summary,
         )
-        response = self.client.get(f"/api/v1/reports/{legacy.run_id}")
+        result_sha256 = terminal.sha256()
+        context_sha256 = canonical_sha256(
+            {
+                "schema_version": "legacy-0",
+                "run_id": run_id,
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "job_type": "report_generation",
+                "parameters": parameters,
+                "execution_mode": "inline",
+            }
+        )
+        with session_factory(service.engine).begin() as session:
+            get_or_create_project_and_site(session, "demo-project", "demo-site")
+            session.add(
+                Run(
+                    id=run_id,
+                    project_id="demo-project",
+                    site_id="demo-site",
+                    job_type="report_generation",
+                    status=terminal.status,
+                    stage=terminal.stage,
+                    progress_percent=100,
+                    parameters=parameters,
+                    result_summary=result_summary,
+                    execution_mode="inline",
+                    result_sha256=result_sha256,
+                    terminal_at=created_at,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            session.flush()
+            session.add_all(
+                [
+                    ReportEvidenceContract(
+                        run_id=run_id,
+                        contract_version="legacy_pre_lifecycle",
+                        project_id="demo-project",
+                        site_id="demo-site",
+                        classified_at=created_at,
+                    ),
+                    RunResult(
+                        run_id=run_id,
+                        schema_version=terminal.schema_version,
+                        terminal_status=terminal.status,
+                        terminal_stage=terminal.stage,
+                        summary=result_summary,
+                        result_payload=terminal.model_dump(mode="json"),
+                        result_sha256=result_sha256,
+                        created_at=created_at,
+                    ),
+                    RunSeal(
+                        run_id=run_id,
+                        terminal_status=terminal.status,
+                        context_sha256=context_sha256,
+                        result_sha256=result_sha256,
+                        sealed_at=created_at,
+                    ),
+                ]
+            )
+
+        response = self.client.get(f"/api/v1/reports/{run_id}")
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["report_title"], "Legacy Custom Title")
         self.assertEqual(
             response.json()["file_name"],
-            f"udmi_validation_{legacy.run_id}.pdf",
+            f"udmi_validation_{run_id}.pdf",
         )
+        listed_report_ids: set[str] = set()
+        offset = 0
+        total = 1
+        while offset < total and run_id not in listed_report_ids:
+            listing = self.client.get(
+                "/api/v1/reports",
+                params={"limit": 100, "offset": offset},
+            )
+            self.assertEqual(listing.status_code, 200, listing.text)
+            body = listing.json()
+            rows = body["reports"]
+            total = body["total"]
+            listed_report_ids.update(row["report_id"] for row in rows)
+            if not rows:
+                break
+            offset += len(rows)
+        self.assertIn(run_id, listed_report_ids)
 
     def test_three_asset_scope_is_frozen_exactly_and_never_falls_back_to_all(self) -> None:
         source_id = self._seed_source(_summary(["A-1", "B-1", "C-1", "D-1", "E-1"]))

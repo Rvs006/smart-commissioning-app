@@ -87,6 +87,8 @@ class JobCreateRequest(BaseModel):
     site_id: str
     job_type: JobType
     parameters: dict[str, object] = Field(default_factory=dict)
+    preview_run_id: str | None = Field(default=None, max_length=64)
+    scan_authorization_id: str | None = Field(default=None, max_length=64)
 
 
 class JobAcceptedResponse(BaseModel):

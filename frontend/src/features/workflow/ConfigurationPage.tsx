@@ -64,7 +64,8 @@ const sectionLabels: Record<ConfigurationSectionKey, string> = {
 
 const sectionDescriptions: Record<ConfigurationSectionKey, string> = {
   backups: "Backup schedule, retention, encryption, storage location, and restore readiness.",
-  bacnet: "BACnet/IP discovery settings including BBMD, foreign device mode, UDP ports, and TTL.",
+  bacnet:
+    "BACnet/IP identity and discovery settings including the site internetwork, BBMD, foreign device mode, UDP ports, and TTL.",
   certificates: "TLS trust and client authentication material. Paste content or select local files; only masked server references are saved.",
   device:
     "Planned network identity of the gateway device being commissioned — reference values used by validation, not this laptop's settings. The adapter this laptop scans from is chosen under Source Interface.",
@@ -961,6 +962,9 @@ function fieldHint(
   field: string,
   draft: ConfigurationSnapshot,
 ): string | undefined {
+  if (section === "bacnet" && field === "Internetwork ID") {
+    return "Stable site-local identity used to distinguish devices that reuse an instance number. Keep it aligned with the optional Internetwork ID column in BACnet imports.";
+  }
   if (section === "mqtt" && field === "MQTT Broker FQDN or IP Address") {
     const host = draft.mqtt.values[field] ?? "";
     if (draft.mqtt.values["Use TLS"] === "Enabled" && isIpLiteral(host)) {
@@ -1008,6 +1012,8 @@ const FIELD_TOOLTIPS: Record<string, string> = {
   "DNS Servers": "Planned DNS resolvers for the gateway device, comma-separated (reference values).",
   "VLAN ID": "802.1Q VLAN tag for the gateway's network, if used.",
   // BACnet Discovery
+  "Internetwork ID":
+    "Stable identity for this site's BACnet internetwork. Use the same value in BACnet device and point imports; primary is the default for one internetwork. Limited to 255 printable characters.",
   "BACnet Network Number": "Logical BACnet network this gateway lives on.",
   "UDP Port": "BACnet/IP UDP port (default 47808).",
   "Device Instance Range": "Range of BACnet device instance IDs to discover.",
@@ -1244,9 +1250,11 @@ function FieldControl({
   const effectiveRevealed = revealed && !showsServerSecret;
   const inputElement = (
     <input
+      aria-label={field === "Internetwork ID" ? field : undefined}
       aria-describedby={hintId}
       className={expired ? "field-expired" : undefined}
       id={controlId}
+      maxLength={field === "Internetwork ID" ? 255 : undefined}
       onBlur={() => {
         if (isPassword && maskedSentinel && !value) {
           onValueChange(maskedSentinel);

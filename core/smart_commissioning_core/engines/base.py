@@ -33,7 +33,9 @@ when cancellation is requested.
 import asyncio
 import inspect
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+import math
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -43,6 +45,15 @@ from smart_commissioning_core.run_store import RunStore
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+_MAX_THROTTLE_CONCURRENCY = 2_147_483_647
+_EFFECTIVE_THROTTLE_FIELDS = frozenset({"max_concurrency", "rate_limit_per_sec", "connect_timeout_s"})
+_MISSING = object()
+
+
+class _SealedRuntimeDeadlineExceeded(RuntimeError):
+    """Raised internally when a frozen discovery runtime ceiling expires."""
+
 
 # A callable returning whether cooperative cancellation has been requested.
 CancelChecker = Callable[[], bool]
@@ -105,12 +116,294 @@ class ThrottleConfig:
     connect_timeout_s: float = 5.0
 
     def __post_init__(self) -> None:
-        if self.max_concurrency < 1:
-            raise ValueError("max_concurrency must be >= 1")
-        if self.rate_limit_per_sec is not None and self.rate_limit_per_sec <= 0:
-            raise ValueError("rate_limit_per_sec must be > 0 or None")
-        if self.connect_timeout_s <= 0:
-            raise ValueError("connect_timeout_s must be > 0")
+        if (
+            isinstance(self.max_concurrency, bool)
+            or not isinstance(self.max_concurrency, int)
+            or not 1 <= self.max_concurrency <= _MAX_THROTTLE_CONCURRENCY
+        ):
+            raise ValueError("max_concurrency must be a supported positive integer")
+        if self.rate_limit_per_sec is not None and not _is_finite_positive_number(self.rate_limit_per_sec):
+            raise ValueError("rate_limit_per_sec must be a finite positive number or None")
+        if not _is_finite_positive_number(self.connect_timeout_s):
+            raise ValueError("connect_timeout_s must be a finite positive number")
+
+
+def resolve_throttle_config(
+    parameters: Mapping[str, Any],
+    *,
+    max_concurrency: Any,
+    rate_limit_per_sec: Any,
+    connect_timeout_s: Any,
+) -> ThrottleConfig:
+    """Resolve one policy-bounded throttle for API and worker execution.
+
+    Historical request fields may narrow the current policy. Wider values are
+    clamped to its ceilings, malformed values fail closed, and only the legacy
+    zero rate keeps its established meaning of "use the policy default".
+
+    A frozen ``scan_contract_v1.effective_throttle`` has already been resolved
+    before the execution context was sealed. When present, it is authoritative:
+    all three fields must be positive finite values within the current policy,
+    and the exact frozen values are returned without consulting the raw request
+    fields. A frozen value above current policy is rejected instead of clamped,
+    because silently changing sealed execution input would break replay parity.
+    """
+    policy_concurrency = _policy_positive_int(
+        max_concurrency,
+        label="max_concurrency",
+    )
+    policy_rate = _policy_positive_float(
+        rate_limit_per_sec,
+        label="rate_limit_per_sec",
+    )
+    policy_timeout = _policy_positive_float(
+        connect_timeout_s,
+        label="connect_timeout_s",
+    )
+
+    frozen = _frozen_effective_throttle(parameters)
+    if frozen is not None:
+        return _validate_frozen_throttle(
+            frozen,
+            max_concurrency=policy_concurrency,
+            rate_limit_per_sec=policy_rate,
+            connect_timeout_s=policy_timeout,
+        )
+
+    requested_concurrency = _request_positive_int(
+        parameters.get("scan_max_concurrency"),
+        default=policy_concurrency,
+        label="scan_max_concurrency",
+    )
+    requested_rate = _request_rate(
+        parameters.get("scan_rate_limit_per_sec"),
+        default=policy_rate,
+        label="scan_rate_limit_per_sec",
+    )
+    requested_timeout = _request_positive_float(
+        parameters.get("scan_connect_timeout_s"),
+        default=policy_timeout,
+        label="scan_connect_timeout_s",
+    )
+    return ThrottleConfig(
+        max_concurrency=min(requested_concurrency, policy_concurrency),
+        rate_limit_per_sec=min(requested_rate, policy_rate),
+        connect_timeout_s=min(requested_timeout, policy_timeout),
+    )
+
+
+def _frozen_effective_throttle(
+    parameters: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    contract = parameters.get("scan_contract_v1", _MISSING)
+    if contract is _MISSING:
+        return None
+    if not isinstance(contract, Mapping):
+        raise ValueError("scan_contract_v1 must be a mapping")
+
+    effective = contract.get("effective_throttle", _MISSING)
+    if effective is _MISSING:
+        return None
+    if not isinstance(effective, Mapping):
+        raise ValueError("scan_contract_v1.effective_throttle must be a mapping")
+
+    fields = set(effective)
+    missing = _EFFECTIVE_THROTTLE_FIELDS - fields
+    unexpected = fields - _EFFECTIVE_THROTTLE_FIELDS
+    if missing or unexpected:
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(sorted(missing)))
+        if unexpected:
+            details.append("unexpected " + ", ".join(sorted(map(str, unexpected))))
+        raise ValueError("scan_contract_v1.effective_throttle has invalid fields: " + "; ".join(details))
+    return effective
+
+
+def _validate_frozen_throttle(
+    frozen: Mapping[str, Any],
+    *,
+    max_concurrency: int,
+    rate_limit_per_sec: float,
+    connect_timeout_s: float,
+) -> ThrottleConfig:
+    concurrency = _strict_positive_int(
+        frozen["max_concurrency"],
+        label="scan_contract_v1.effective_throttle.max_concurrency",
+    )
+    rate = _strict_positive_float(
+        frozen["rate_limit_per_sec"],
+        label="scan_contract_v1.effective_throttle.rate_limit_per_sec",
+    )
+    timeout = _strict_positive_float(
+        frozen["connect_timeout_s"],
+        label="scan_contract_v1.effective_throttle.connect_timeout_s",
+    )
+
+    ceilings = (
+        ("max_concurrency", concurrency, max_concurrency),
+        ("rate_limit_per_sec", rate, rate_limit_per_sec),
+        ("connect_timeout_s", timeout, connect_timeout_s),
+    )
+    for field_name, value, ceiling in ceilings:
+        if value > ceiling:
+            raise ValueError(f"scan_contract_v1.effective_throttle.{field_name} exceeds the policy ceiling {ceiling}")
+
+    return ThrottleConfig(
+        max_concurrency=concurrency,
+        rate_limit_per_sec=rate,
+        connect_timeout_s=timeout,
+    )
+
+
+def _policy_positive_int(value: Any, *, label: str) -> int:
+    parsed = _parse_bounded_int(value, label=label)
+    if parsed < 1:
+        raise ValueError(f"{label} must be greater than zero")
+    return parsed
+
+
+def _request_positive_int(value: Any, *, default: int, label: str) -> int:
+    if value is None or value == "":
+        return default
+    parsed = _parse_bounded_int(value, label=label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than zero")
+    return parsed
+
+
+def _strict_positive_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label} must be a positive integer")
+    if not 1 <= value <= _MAX_THROTTLE_CONCURRENCY:
+        raise ValueError(f"{label} must be a supported positive integer")
+    return value
+
+
+def _parse_bounded_int(value: Any, *, label: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be an integer")
+    if isinstance(value, float) and (not math.isfinite(value) or not value.is_integer()):
+        raise ValueError(f"{label} must be a finite integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{label} must be an integer") from error
+    if abs(parsed) > _MAX_THROTTLE_CONCURRENCY:
+        raise ValueError(f"{label} is outside the supported integer range")
+    return parsed
+
+
+def _policy_positive_float(value: Any, *, label: str) -> float:
+    parsed = _parse_finite_float(value, label=label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than zero")
+    return parsed
+
+
+def _request_positive_float(value: Any, *, default: float, label: str) -> float:
+    if value is None or value == "":
+        return default
+    parsed = _parse_finite_float(value, label=label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than zero")
+    return parsed
+
+
+def _request_rate(value: Any, *, default: float, label: str) -> float:
+    if value is None or value == "":
+        return default
+    parsed = _parse_finite_float(value, label=label)
+    if parsed < 0:
+        raise ValueError(f"{label} must not be negative")
+    return default if parsed == 0 else parsed
+
+
+def _strict_positive_float(value: Any, *, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a finite positive number")
+    try:
+        parsed = float(value)
+    except OverflowError as error:
+        raise ValueError(f"{label} must be a finite positive number") from error
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"{label} must be a finite positive number")
+    return parsed
+
+
+def _parse_finite_float(value: Any, *, label: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a finite number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{label} must be a finite number") from error
+    if not math.isfinite(parsed):
+        raise ValueError(f"{label} must be a finite number")
+    return parsed
+
+
+def _is_finite_positive_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class _ScanRuntimeLimits:
+    dispatch_seconds: float
+    run_seconds: float
+
+
+def _scan_runtime_limits(parameters: Mapping[str, Any]) -> _ScanRuntimeLimits | None:
+    """Read the authoritative runtime ceilings from a frozen scan contract.
+
+    Contexts created before ``scan_contract_v1`` and non-scan jobs have no
+    runtime contract, so they retain the historical unbounded wrapper behavior.
+    Once the versioned contract is present, its nested protocol policy is
+    authoritative and malformed deadline data fails closed.
+    """
+
+    contract = parameters.get("scan_contract_v1", _MISSING)
+    if contract is _MISSING:
+        return None
+    if not isinstance(contract, Mapping):
+        raise ValueError("scan_contract_v1 must be a mapping")
+    if contract.get("scan_contract_version") != "1.0":
+        raise ValueError("scan_contract_v1 has an unsupported version")
+
+    job_type = contract.get("job_type")
+    protocol_key = {
+        "ip_discovery": "ip",
+        "bacnet_discovery": "bacnet",
+    }.get(job_type)
+    if protocol_key is None:
+        raise ValueError("scan_contract_v1 has an unsupported scan job type")
+
+    protocol = contract.get(protocol_key)
+    if not isinstance(protocol, Mapping):
+        raise ValueError(f"scan_contract_v1.{protocol_key} must be a mapping")
+    policy = protocol.get("policy")
+    if not isinstance(policy, Mapping):
+        raise ValueError(f"scan_contract_v1.{protocol_key}.policy must be a mapping")
+
+    dispatch_seconds = _strict_positive_float(
+        policy.get("dispatch_phase_seconds"),
+        label=f"scan_contract_v1.{protocol_key}.policy.dispatch_phase_seconds",
+    )
+    run_seconds = _strict_positive_float(
+        policy.get("run_deadline_seconds"),
+        label=f"scan_contract_v1.{protocol_key}.policy.run_deadline_seconds",
+    )
+    if dispatch_seconds > run_seconds:
+        raise ValueError("scan dispatch deadline cannot exceed its run deadline")
+    return _ScanRuntimeLimits(
+        dispatch_seconds=dispatch_seconds,
+        run_seconds=run_seconds,
+    )
 
 
 @dataclass(slots=True)
@@ -136,6 +429,16 @@ class EngineContext:
     throttle: ThrottleConfig = field(default_factory=ThrottleConfig)
     dry_run: bool = False
     _is_cancelled: CancelChecker = field(default=_never_cancelled, repr=False)
+    _dispatch_deadline_monotonic: float | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _run_deadline_monotonic: float | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def is_cancelled(self) -> bool:
         """Return True if cooperative cancellation has been requested.
@@ -149,6 +452,38 @@ class EngineContext:
         except Exception:
             return False
 
+    def require_active_control(self) -> None:
+        """Fail closed when an owned live run can no longer send traffic.
+
+        Legacy/in-memory stores have no active-control method and remain usable
+        for network-free tests. Production claimed runs use ``OwnedRunStore``,
+        whose check validates the database owner, attempt, lease, cancellation,
+        authorization window/revocation, and initiating user's current scope.
+        Errors intentionally propagate; a control-store failure must never read
+        as permission to send another packet.
+        """
+
+        if self.dry_run:
+            return
+        checker = getattr(self.run_store, "require_active_control", None)
+        if callable(checker):
+            checker()
+
+    def require_dispatch_allowed(self) -> None:
+        """Apply the final live-control and monotonic deadline dispatch gate."""
+
+        self.require_active_control()
+        deadline = self._dispatch_deadline_monotonic
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise _SealedRuntimeDeadlineExceeded("sealed scan dispatch deadline elapsed")
+
+    def require_run_completion_allowed(self) -> None:
+        """Reject an engine result produced after its frozen total deadline."""
+
+        deadline = self._run_deadline_monotonic
+        if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+            raise _SealedRuntimeDeadlineExceeded("sealed scan run deadline elapsed")
+
     @property
     def has_cancel_path(self) -> bool:
         """True when a real cooperative-cancel checker is wired for this run.
@@ -161,6 +496,9 @@ class EngineContext:
         one it must bound itself so a never-publishing broker cannot hang forever.
         """
         return self._is_cancelled is not _never_cancelled
+
+
+_ACTIVE_ENGINE_CONTEXT: ContextVar[EngineContext | None] = ContextVar("active_engine_context", default=None)
 
 
 @dataclass(slots=True)
@@ -238,9 +576,7 @@ class Throttle:
         self._config = config
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
         self._rate_limiter = (
-            _AsyncRateLimiter(config.rate_limit_per_sec)
-            if config.rate_limit_per_sec is not None
-            else None
+            _AsyncRateLimiter(config.rate_limit_per_sec) if config.rate_limit_per_sec is not None else None
         )
 
     @property
@@ -251,7 +587,9 @@ class Throttle:
         """Return an async context manager that holds one concurrency slot.
 
         Rate limiting is applied on ENTRY (before the body runs) so dispatches
-        are spaced regardless of how long each body takes.
+        are spaced regardless of how long each body takes. When called inside
+        :func:`run_engine_async`, owned-run active control and the sealed
+        dispatch deadline form the final gate before the body starts.
         """
         return _ThrottleSlot(self._semaphore, self._rate_limiter)
 
@@ -269,6 +607,10 @@ class Throttle:
         Behaviour:
             * Checks ``ctx.is_cancelled()`` BEFORE dispatching each unit; stops
               dispatching as soon as cancellation is requested.
+            * Checks ``ctx.require_dispatch_allowed()`` after any rate-limit
+              wait and immediately before scheduling each unit. Active-control
+              denial, a store read error, or deadline expiry cancels safely
+              dispatched siblings and raises.
             * Acquires the concurrency slot IN the dispatch loop, so the loop
               yields to the event loop whenever the bound is reached. That lets
               already-running units progress (and observe/raise cancellation)
@@ -283,24 +625,49 @@ class Throttle:
 
         async def _guarded(factory: Callable[[], Awaitable[T]]) -> T:
             try:
-                if self._rate_limiter is not None:
-                    await self._rate_limiter.acquire()
                 return await factory()
             finally:
                 self._semaphore.release()
 
-        for factory in coro_factories:
-            if ctx.is_cancelled():
-                break
-            # Acquire here (not inside the task) so this loop blocks — and yields
-            # to the event loop — once max_concurrency units are in flight. The
-            # task is responsible for releasing the slot (see _guarded).
-            await self._semaphore.acquire()
-            if ctx.is_cancelled():
-                # Cancellation observed while waiting for a slot: release and stop.
-                self._semaphore.release()
-                break
-            tasks.append(asyncio.ensure_future(_guarded(factory)))
+        async def _cancel_dispatched() -> None:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        try:
+            for factory in coro_factories:
+                if ctx.is_cancelled():
+                    break
+                # Acquire here (not inside the task) so this loop blocks — and yields
+                # to the event loop — once max_concurrency units are in flight. The
+                # task is responsible for releasing the slot (see _guarded).
+                await self._semaphore.acquire()
+                if ctx.is_cancelled():
+                    # Cancellation observed while waiting for a slot: release and stop.
+                    self._semaphore.release()
+                    break
+                try:
+                    if self._rate_limiter is not None:
+                        await self._rate_limiter.acquire()
+                    if ctx.is_cancelled():
+                        self._semaphore.release()
+                        break
+                    # This is the final synchronous gate before the unit factory is
+                    # scheduled. It is deliberately after the rate-limit wait so an
+                    # approval revoked during that wait cannot dispatch afterward.
+                    ctx.require_dispatch_allowed()
+                except BaseException:
+                    self._semaphore.release()
+                    raise
+                tasks.append(asyncio.ensure_future(_guarded(factory)))
+        except BaseException:
+            # The total runtime timeout can cancel this coroutine while it waits
+            # for a concurrency slot. Reap every unit already scheduled so no
+            # detached task survives the terminal deadline failure.
+            await _cancel_dispatched()
+            raise
 
         if not tasks:
             return []
@@ -325,6 +692,9 @@ class _ThrottleSlot:
         try:
             if self._rate_limiter is not None:
                 await self._rate_limiter.acquire()
+            context = _ACTIVE_ENGINE_CONTEXT.get()
+            if context is not None:
+                context.require_dispatch_allowed()
         except BaseException:
             self._semaphore.release()
             raise
@@ -341,9 +711,10 @@ class _ThrottleSlot:
 # back credentials, hostnames, or tokens. The engine should attach any safe,
 # user-facing detail to result_summary_extra itself.
 _SANITIZED_FAILURE_MESSAGE = (
-    "Engine execution failed. See server logs for details "
-    "(error detail withheld to avoid leaking credentials)."
+    "Engine execution failed. See server logs for details (error detail withheld to avoid leaking credentials)."
 )
+
+_RUNTIME_DEADLINE_FAILURE_MESSAGE = "Discovery stopped because its sealed runtime deadline elapsed."
 
 # DISTINCT from the engine-failure text above: the engine ran to completion and
 # its results are real, but writing them to the store failed (a value that will
@@ -351,10 +722,7 @@ _SANITIZED_FAILURE_MESSAGE = (
 # re-run a scan that already worked, so the message points at saving — not the
 # scan — as the thing to look at. Credential-free by construction (no raw
 # exception text): the traceback goes to the server logs via logger.exception.
-_PERSIST_FAILURE_MESSAGE = (
-    "Discovery finished but its results could not be saved. "
-    "See server logs for details."
-)
+_PERSIST_FAILURE_MESSAGE = "Discovery finished but its results could not be saved. See server logs for details."
 
 # Stage labels mirror the existing processors' "<thing>_complete/_failed" style.
 _STAGE_RUNNING = "engine_running"
@@ -439,8 +807,7 @@ def _safe_update_run_status(
         )
     except Exception:
         logger.exception(
-            "terminal '%s' status write raised for run %s; swallowing so the run "
-            "is not left 'running'",
+            "terminal '%s' status write raised for run %s; swallowing so the run is not left 'running'",
             status,
             ctx.run_id,
         )
@@ -457,9 +824,7 @@ def _apply_failure(ctx: EngineContext, *, error_message: str = _SANITIZED_FAILUR
     :func:`_safe_update_run_status`, so even a failing terminal write is logged
     rather than raised.
     """
-    return _safe_update_run_status(
-        ctx, status="failed", stage=_STAGE_FAILED, error_message=error_message
-    )
+    return _safe_update_run_status(ctx, status="failed", stage=_STAGE_FAILED, error_message=error_message)
 
 
 def _apply_cancelled(ctx: EngineContext) -> Any:
@@ -470,12 +835,8 @@ def _apply_cancelled(ctx: EngineContext) -> Any:
     the honest terminal state. Never leaves the run ``running``, never raises.
     """
     if ctx.is_cancelled():
-        return _safe_update_run_status(
-            ctx, status="cancelled", stage=_STAGE_CANCELLED, error_message=None
-        )
-    return _safe_update_run_status(
-        ctx, status="failed", stage=_STAGE_FAILED, error_message=_SANITIZED_FAILURE_MESSAGE
-    )
+        return _safe_update_run_status(ctx, status="cancelled", stage=_STAGE_CANCELLED, error_message=None)
+    return _safe_update_run_status(ctx, status="failed", stage=_STAGE_FAILED, error_message=_SANITIZED_FAILURE_MESSAGE)
 
 
 async def run_engine_async(
@@ -513,17 +874,39 @@ async def run_engine_async(
         stage=_STAGE_RUNNING,
         progress_percent=15,
     )
+    active_context_token = _ACTIVE_ENGINE_CONTEXT.set(ctx)
     try:
-        outcome = engine(ctx)
-        if inspect.isawaitable(outcome):
-            result = await outcome
-        else:
-            result = outcome
-        if not isinstance(result, EngineResult):
-            raise TypeError(
-                "engine callable must return an EngineResult, "
-                f"got {type(result).__name__}"
-            )
+        runtime_limits = _scan_runtime_limits(ctx.parameters)
+        if runtime_limits is not None:
+            started_at = asyncio.get_running_loop().time()
+            ctx._dispatch_deadline_monotonic = started_at + runtime_limits.dispatch_seconds
+            ctx._run_deadline_monotonic = started_at + runtime_limits.run_seconds
+
+        timeout = asyncio.timeout_at(ctx._run_deadline_monotonic)
+        try:
+            async with timeout:
+                outcome = engine(ctx)
+                if inspect.isawaitable(outcome):
+                    result = await outcome
+                else:
+                    result = outcome
+                if not isinstance(result, EngineResult):
+                    raise TypeError(f"engine callable must return an EngineResult, got {type(result).__name__}")
+                # A synchronous engine can hold the event loop beyond the
+                # timeout callback. Check the same monotonic deadline before
+                # accepting its late result, even when cancellation could not
+                # pre-empt the call itself.
+                ctx.require_run_completion_allowed()
+        except TimeoutError:
+            if timeout.expired():
+                raise _SealedRuntimeDeadlineExceeded("sealed scan run deadline elapsed") from None
+            raise
+    except _SealedRuntimeDeadlineExceeded:
+        logger.warning("sealed runtime deadline elapsed for run %s", ctx.run_id)
+        return _apply_failure(
+            ctx,
+            error_message=_RUNTIME_DEADLINE_FAILURE_MESSAGE,
+        )
     except asyncio.CancelledError:
         # CancelledError is a BaseException, so the `except Exception` below would
         # MISS it and the run would fossilize at 'running' — the secondary
@@ -536,9 +919,7 @@ async def run_engine_async(
         # terminal 'failed' so the run is not left 'running', then RE-RAISE —
         # swallowing these would defeat interpreter shutdown. GeneratorExit is
         # deliberately NOT caught: it must propagate to close the frame.
-        logger.warning(
-            "engine interrupted for run %s; recording 'failed' and re-raising", ctx.run_id
-        )
+        logger.warning("engine interrupted for run %s; recording 'failed' and re-raising", ctx.run_id)
         _apply_failure(ctx)
         raise
     except Exception:
@@ -553,6 +934,10 @@ async def run_engine_async(
         # error_message=...), which the operator actually sees.
         logger.exception("engine execution failed for run %s", ctx.run_id)
         return _apply_failure(ctx)
+    finally:
+        ctx._dispatch_deadline_monotonic = None
+        ctx._run_deadline_monotonic = None
+        _ACTIVE_ENGINE_CONTEXT.reset(active_context_token)
 
     # The engine SUCCEEDED and its results are real. Persisting them is a SEPARATE
     # failure domain: a save that fails (a non-JSON-serializable value reaching a
@@ -594,7 +979,4 @@ def run_engine(
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(run_engine_async(ctx, engine, persist_records=persist_records))
-    raise RuntimeError(
-        "run_engine() was called from within a running event loop; "
-        "await run_engine_async(...) instead."
-    )
+    raise RuntimeError("run_engine() was called from within a running event loop; await run_engine_async(...) instead.")

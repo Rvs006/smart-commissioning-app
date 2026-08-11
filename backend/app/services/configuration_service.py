@@ -59,6 +59,11 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
     ),
     bacnet=ConfigurationSection(
         values={
+            # Stable operator-owned namespace for BACnet device identity. The
+            # project and site remain separate identity components, so
+            # "primary" safely names the main BACnet internetwork within each
+            # site while old snapshots gain a deterministic value on merge.
+            "Internetwork ID": "primary",
             "BACnet Network Number": "2001",
             "UDP Port": "47808",
             "Device Instance Range": "1 - 4194303",
@@ -431,8 +436,35 @@ class ConfigurationService:
             PARAM_FD_TTL: fd_ttl(stored),
         }
 
+    def bacnet_internetwork_defaults(
+        self,
+        project_id: str = DEFAULT_PROJECT_ID,
+        site_id: str = DEFAULT_SITE_ID,
+    ) -> dict[str, str]:
+        """Return the site's approved BACnet identity namespace for a run.
+
+        The route merges this small JSON-safe mapping into run parameters before
+        it assembles the immutable scan contract. Whitespace is presentation,
+        not identity, so the emitted value is canonicalized here even when a
+        legacy snapshot was stored without current save-time validation.
+        """
+        internetwork_id = str(
+            self.load(project_id, site_id).bacnet.values.get("Internetwork ID") or ""
+        ).strip()
+        errors: list[str] = []
+        self._validate_bacnet_internetwork_id(errors, internetwork_id)
+        if errors:
+            raise ValueError(
+                f"{errors[0]} Fix it on the Configuration page and Save, then run "
+                "discovery again."
+            )
+        return {"internetwork_id": internetwork_id}
+
     def _persist(self, configuration: ConfigurationSnapshot, project_id: str, site_id: str) -> ConfigurationSnapshot:
         configuration = self._merge_with_defaults(configuration.model_copy(deep=True))
+        configuration.bacnet.values["Internetwork ID"] = str(
+            configuration.bacnet.values.get("Internetwork ID") or ""
+        ).strip()
         self._resolve_secret_sentinels(configuration, self._repository.get_current(project_id, site_id))
         self._extract_password_secrets(configuration)
         self._drop_dangling_secret_refs(configuration)
@@ -653,6 +685,10 @@ class ConfigurationService:
             configuration.bacnet.values.get("BACnet Network Number", ""),
             minimum=0,
             maximum=65535,
+        )
+        self._validate_bacnet_internetwork_id(
+            errors,
+            configuration.bacnet.values.get("Internetwork ID", ""),
         )
         self._validate_port(errors, "MQTT Port", configuration.mqtt.values.get("Port", ""))
         self._validate_enabled_disabled(errors, "MQTT Use TLS", configuration.mqtt.values.get("Use TLS", ""))
@@ -900,6 +936,16 @@ class ConfigurationService:
     def _validate_non_empty(self, errors: list[str], label: str, value: str) -> None:
         if not value.strip():
             errors.append(f"{label} must not be empty.")
+
+    def _validate_bacnet_internetwork_id(self, errors: list[str], value: str) -> None:
+        normalized = value.strip()
+        if not normalized:
+            errors.append("BACnet Internetwork ID must not be empty.")
+            return
+        if len(normalized) > 255:
+            errors.append("BACnet Internetwork ID must be at most 255 characters.")
+        if not normalized.isprintable():
+            errors.append("BACnet Internetwork ID must contain printable characters only.")
 
     def _validate_positive_int(self, errors: list[str], label: str, value: str) -> None:
         if not value.isdigit():

@@ -31,7 +31,11 @@ from dramatiq.middleware import Interrupt, TimeLimitExceeded
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
-from smart_commissioning_core.engines.base import ThrottleConfig, make_cancel_checker
+from smart_commissioning_core.engines.base import (
+    ThrottleConfig,
+    make_cancel_checker,
+    resolve_throttle_config,
+)
 from smart_commissioning_core.engines.comparison import process_mapping_validation_run
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import process_mqtt_discovery_run
@@ -39,6 +43,8 @@ from smart_commissioning_core.engines.point_validation import process_bacnet_val
 from smart_commissioning_core.execution_context import (
     SecretMaterialUnavailableError,
     resolve_context_parameters,
+    scan_authority_bindings,
+    verify_bound_import_rows,
     verify_stored_context,
 )
 from smart_commissioning_core.mqtt_config_publish_processor import process_mqtt_config_publish_run
@@ -86,14 +92,10 @@ discovery_repository = DiscoveryRepository(_engine)
 register_worker_mqtt_secret_resolver()
 
 
-# -- conservative worker-side scan throttle defaults ------------------------
-# Mirrors the backend Settings defaults (the worker has no API Settings object).
-_DEFAULT_SCAN_MAX_CONCURRENCY = 16
-_DEFAULT_SCAN_RATE_LIMIT_PER_SEC = 10.0
-_DEFAULT_SCAN_CONNECT_TIMEOUT_S = 5.0
-# Hard floor for the rate limiter: a request may lower the rate but can never
-# disable it (None/unlimited). Mirrors engine_dispatch._MIN_RATE_LIMIT_PER_SEC.
-_MIN_SCAN_RATE_LIMIT_PER_SEC = 0.1
+# -- conservative worker-side scan throttle default -------------------------
+# The backend passes its Settings policy explicitly; the worker has no API
+# Settings object, so it uses the shared core policy defaults.
+_DEFAULT_SCAN_POLICY = ThrottleConfig()
 _WORKER_HEARTBEAT_SECONDS = settings.heartbeat_seconds
 _WORKER_LEASE_SECONDS = settings.lease_seconds
 
@@ -242,18 +244,13 @@ def _with_worker_lease(
 
 
 def _build_throttle(parameters: dict) -> ThrottleConfig:
-    # Request parameters may only NARROW the operator policy, never exceed it:
-    # concurrency is clamped to the default ceiling and the rate limiter can
-    # never be removed (a non-positive request rate falls back to the default).
-    requested_concurrency = _positive_int(parameters.get("scan_max_concurrency"), _DEFAULT_SCAN_MAX_CONCURRENCY)
-    concurrency = max(1, min(requested_concurrency, _DEFAULT_SCAN_MAX_CONCURRENCY))
-    timeout = _positive_float(parameters.get("scan_connect_timeout_s"), _DEFAULT_SCAN_CONNECT_TIMEOUT_S)
-    parsed = _to_float(parameters.get("scan_rate_limit_per_sec"))
-    if parsed is None or parsed <= 0:
-        rate = _DEFAULT_SCAN_RATE_LIMIT_PER_SEC
-    else:
-        rate = max(parsed, _MIN_SCAN_RATE_LIMIT_PER_SEC)
-    return ThrottleConfig(max_concurrency=concurrency, rate_limit_per_sec=rate, connect_timeout_s=timeout)
+    """Resolve the same sealed, policy-bounded throttle as the backend."""
+    return resolve_throttle_config(
+        parameters,
+        max_concurrency=_DEFAULT_SCAN_POLICY.max_concurrency,
+        rate_limit_per_sec=_DEFAULT_SCAN_POLICY.rate_limit_per_sec,
+        connect_timeout_s=_DEFAULT_SCAN_POLICY.connect_timeout_s,
+    )
 
 
 def _is_dry_run(parameters: dict) -> bool:
@@ -286,11 +283,15 @@ def _effective_parameters(
 
 def _import_loader(context: RunContextV1) -> Callable[[str], list[dict[str, Any]]]:
     allowed = {binding.resource_id for binding in (*context.registers, *context.imports)}
+    scan_authorities = scan_authority_bindings(context)
 
     def load(import_id: str) -> list[dict[str, Any]]:
         if import_id not in allowed:
             raise ValueError("requested import is not bound to the execution context")
-        return list(import_repository.get_accepted_rows(import_id))
+        rows = list(import_repository.get_accepted_rows(import_id))
+        if import_id in scan_authorities:
+            verify_bound_import_rows(context, import_id, rows)
+        return rows
 
     return load
 
@@ -546,25 +547,3 @@ def recover_expired_run_leases() -> None:
             "Recovered expired run leases",
             extra={"recovered_count": len(recovered)},
         )
-
-
-def _positive_int(value, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _positive_float(value, default: float) -> float:
-    parsed = _to_float(value)
-    if parsed is None or parsed <= 0:
-        return default
-    return parsed
-
-
-def _to_float(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None

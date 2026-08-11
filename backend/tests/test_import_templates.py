@@ -83,6 +83,36 @@ class NumericValidationTests(unittest.TestCase):
         self.assertEqual([("BACnet device instance", "invalid_numeric")], errors)
 
 
+class BacnetInternetworkTemplateTests(unittest.TestCase):
+    def test_bacnet_templates_offer_internetwork_identity_without_requiring_it(self) -> None:
+        for import_type in ("bacnet_register", "bacnet_points"):
+            with self.subTest(import_type=import_type):
+                profile = PROFILES[import_type]
+                self.assertIn("Internetwork ID", profile.optional_columns)
+                self.assertNotIn("Internetwork ID", profile.required_columns)
+                self.assertEqual(EXAMPLE_ROWS[import_type]["Internetwork ID"], "primary")
+
+                legacy_row = dict(EXAMPLE_ROWS[import_type])
+                legacy_row.pop("Internetwork ID")
+                self.assertEqual([], profile.validate_row(legacy_row, row_number=2))
+
+    def test_supplied_bacnet_internetwork_identity_is_bounded_and_printable(self) -> None:
+        for import_type in ("bacnet_register", "bacnet_points"):
+            profile = PROFILES[import_type]
+            for value in ("x" * 256, "plant-a\nshadow"):
+                with self.subTest(import_type=import_type, value=repr(value)):
+                    row = dict(EXAMPLE_ROWS[import_type])
+                    row["Internetwork ID"] = value
+                    errors = [
+                        (error.field, error.code)
+                        for error in profile.validate_row(row, row_number=2)
+                    ]
+                    self.assertEqual(
+                        [("Internetwork ID", "invalid_internetwork_id")],
+                        errors,
+                    )
+
+
 class UnitVocabularyTests(unittest.TestCase):
     def _errors(self, unit: str) -> list[tuple[str, str]]:
         row = dict(EXAMPLE_ROWS["bacnet_points"])

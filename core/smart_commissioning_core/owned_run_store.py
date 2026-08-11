@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
@@ -175,6 +176,22 @@ class OwnedRunStore:
         if self.ownership_lost:
             return True
         return self._repository.is_cancel_requested(run_id, self.lease.owner_token)
+
+    def require_active_control(self, *, now: datetime | None = None) -> None:
+        """Prove this exact owner may dispatch one more outbound attempt.
+
+        Unlike ``heartbeat()``, this check is read-only and never renews the
+        lease. Denials and database errors propagate so callers fail closed.
+        """
+
+        with self._lifecycle_lock:
+            self._require_run(self.lease.run_id)
+            self._repository.require_active_control(
+                self.lease.run_id,
+                self.lease.owner_token,
+                self.lease.attempt,
+                now=now,
+            )
 
     def replace_devices(self, run_id: str, records: Sequence[Mapping[str, Any]]) -> int:
         self._require_run(run_id)

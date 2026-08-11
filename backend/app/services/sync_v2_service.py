@@ -19,6 +19,7 @@ from smart_commissioning_core.sync_v2 import (
     _assert_no_forbidden_artifact_material,
     open_sync_v2_bundle,
     receipt_dict,
+    validate_sync_v2_authority_snapshots,
     validate_sync_v2_item,
 )
 from sqlalchemy.engine import Engine
@@ -98,6 +99,25 @@ def ingest_sync_v2_bundle(
             )
             continue
 
+        try:
+            authority_snapshots = validate_sync_v2_authority_snapshots(
+                opened,
+                item,
+            )
+        except SyncV2Error as error:
+            receipt_class = "partial_bundle" if str(error) == "partial_bundle" else "malformed"
+            receipts.append(
+                _reject(
+                    repository,
+                    opened,
+                    principal,
+                    descriptor,
+                    receipt_class,
+                    now=now,
+                )
+            )
+            continue
+
         receipt_class, artifact = _verify_artifact(
             opened,
             descriptor,
@@ -121,10 +141,12 @@ def ingest_sync_v2_bundle(
                 item=item,
                 edge_id=principal.edge_id,
                 credential_id=principal.credential_id,
+                signing_key_fingerprint=principal.signing_key_fingerprint,
                 bundle_id=opened.manifest.bundle_id,
                 item_id=descriptor.item_id,
                 item_sha256=descriptor.item_sha256,
                 artifact_sha256=descriptor.artifact_sha256,
+                authority_snapshots=authority_snapshots,
                 artifact_factory=_verified_artifact_factory(artifact),
                 now=now,
             )
@@ -222,9 +244,9 @@ def _store_verified_artifact(artifact: dict[str, object]) -> dict[str, object]:
         artifact_bytes,
         artifact_sha256,
     )
-    return {
-        key: value for key, value in artifact.items() if key != "artifact_bytes"
-    } | {"storage_relpath": storage_relpath}
+    return {key: value for key, value in artifact.items() if key != "artifact_bytes"} | {
+        "storage_relpath": storage_relpath
+    }
 
 
 def _verified_artifact_factory(
