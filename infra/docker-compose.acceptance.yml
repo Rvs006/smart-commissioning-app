@@ -36,6 +36,10 @@ services:
 
   frontend:
     network_mode: "service:network-executor"
+    extra_hosts:
+      # The shared namespace has no Compose service alias for api. Nginx still
+      # proxies locally because api and frontend share network-executor.
+      - "api:127.0.0.1"
     ports: !reset []
     depends_on:
       network-executor:

@@ -244,7 +244,10 @@ class OwnedRunHeartbeat:
 
                 self._last_success = self._monotonic()
                 if consecutive_failures:
-                    logger.info(
+                    # Recovery is an operationally significant transition. Keep
+                    # it visible in hosted worker logs even when Dramatiq raises
+                    # its effective console threshold above INFO.
+                    logger.warning(
                         "owned-run heartbeat recovered for run_id=%s executor=%s "
                         "after %d failed attempt(s)",
                         run_id,
