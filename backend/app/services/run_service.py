@@ -67,9 +67,9 @@ from app.schemas.jobs import (
     ValidationIssueRecord,
 )
 from app.services.report_artifacts import (
-    REPORT_RENDERER_VERSION,
     REPORT_SNAPSHOT_SCHEMA_VERSION,
     canonical_json_bytes,
+    effective_report_renderer_version,
     snapshot_sha256,
     verify_signed_manifest,
 )
@@ -639,7 +639,7 @@ class RunService:
             "report_title": request.report_title
             or (_DEFAULT_UDMI_REPORT_TITLE if request.report_type == "udmi_validation" else _DEFAULT_REPORT_TITLE),
             "report_generated_at": datetime.now(UTC).isoformat(),
-            "renderer_version": REPORT_RENDERER_VERSION,
+            "renderer_version": effective_report_renderer_version(),
             "udmi_report_variant": request.udmi_report_variant,
         }
         snapshot_sources: list[RunRecord] = []
@@ -734,7 +734,7 @@ class RunService:
             "schema_versions": {
                 source_id: provenance["schema_versions"] for source_id, provenance in source_context_provenance.items()
             },
-            "renderer_version": REPORT_RENDERER_VERSION,
+            "renderer_version": effective_report_renderer_version(),
             "displayed_counts": self._displayed_counts(
                 snapshot_sources,
                 discovery_snapshots=discovery_snapshots,
@@ -750,7 +750,7 @@ class RunService:
                     "report_title": parameters["report_title"],
                     "udmi_report_variant": request.udmi_report_variant,
                     "report_generated_at": parameters["report_generated_at"],
-                    "renderer_version": REPORT_RENDERER_VERSION,
+                    "renderer_version": effective_report_renderer_version(),
                     "evidence_set_id": evidence_set_id,
                 },
                 "udmi_report_snapshot": parameters.get("udmi_report_snapshot"),
