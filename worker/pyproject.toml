@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-commissioning-worker"
-version = "0.1.41"
+version = "0.1.42"
 description = "Background worker scaffold for Smart Commissioning discovery and validation jobs."
 requires-python = ">=3.12"
 license = "MIT"
