@@ -984,12 +984,25 @@ class RunService:
     def get_run(self, run_id: str) -> RunRecord:
         # Read paths are observational only. Lease expiry and stale-worker
         # recovery belong to the periodic recovery task, never to GET or SSE.
-        return RunRecord.model_validate(self._store.get_run(run_id))
+        payload = self._store.get_run(run_id)
+        # The shared file-record contract intentionally omits execution_mode.
+        # Run detail responses expose it separately so hosted/queued clients
+        # can verify the execution lane without changing list-record shape.
+        with query_session_factory(self._engine)() as session:
+            payload["execution_mode"] = session.scalar(
+                select(Run.execution_mode).where(Run.id == run_id)
+            )
+        return RunRecord.model_validate(payload)
 
     def get_run_read_only(self, run_id: str) -> RunRecord:
         """Return one run through the deferred/query-only database path."""
 
-        return RunRecord.model_validate(self._store.get_run_read_only(run_id))
+        payload = self._store.get_run_read_only(run_id)
+        with query_session_factory(self._engine)() as session:
+            payload["execution_mode"] = session.scalar(
+                select(Run.execution_mode).where(Run.id == run_id)
+            )
+        return RunRecord.model_validate(payload)
 
     def get_run_attempt_read_only(self, run_id: str) -> int:
         """Return the executor attempt without reserving SQLite's writer slot."""
