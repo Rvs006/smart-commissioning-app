@@ -239,6 +239,7 @@ def _report_record_from_row(run: Run, issues: list[RunIssue]) -> RunRecord:
             "progress_percent": run.progress_percent,
             "created_at": run.created_at,
             "updated_at": run.updated_at,
+            "execution_mode": run.execution_mode,
             "edge_id": run.edge_id,
             "parameters": dict(run.parameters) if isinstance(run.parameters, Mapping) else {},
             "result_summary": (dict(run.result_summary) if isinstance(run.result_summary, Mapping) else {}),

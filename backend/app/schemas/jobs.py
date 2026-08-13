@@ -318,6 +318,9 @@ class RunRecord(JobSummary):
     result_summary: dict[str, object] = Field(default_factory=dict)
     issues: list[ValidationIssueRecord] = Field(default_factory=list)
     error_message: str | None = None
+    # Execution lane is persisted on the run and exposed so hosted acceptance
+    # can verify queued worker runs after restart and terminalization.
+    execution_mode: str | None = None
 
     @field_serializer("parameters")
     def _redact_parameters(self, parameters: dict[str, object]) -> dict[str, object]:
