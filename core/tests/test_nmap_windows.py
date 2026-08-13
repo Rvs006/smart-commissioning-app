@@ -305,6 +305,11 @@ class NmapWindowsBoundaryTests(unittest.TestCase):
                         side_effect=_windows_library,
                         create=True,
                     ),
+                    patch(
+                        "smart_commissioning_core.engines.ip.nmap_windows.ctypes.get_last_error",
+                        return_value=122,
+                        create=True,
+                    ),
                 ):
                     writable = CtypesNmapTrustBackend().is_user_writable(
                         r"C:\\Program Files\\Nmap\\nmap.exe"
