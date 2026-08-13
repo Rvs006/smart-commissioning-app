@@ -84,7 +84,7 @@ class ApiKeyModeTests(_AuthClientTestCase):
     def test_health_endpoints_reachable_without_key(self) -> None:
         health = self.client.get("/api/v1/health")
         self.assertEqual(health.status_code, 200)
-        self.assertEqual(health.json()["version"], "0.1.41")
+        self.assertEqual(health.json()["version"], "0.1.42")
         self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
 
     def test_health_uses_the_portable_bundle_version_when_stamped(self) -> None:

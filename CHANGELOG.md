@@ -5,6 +5,47 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.1.42] - 2026-08-13
+
+This recovery release restores the intended IP, BACnet/IP, MQTT, and portable
+operator flows while retaining the sealed discovery controls introduced in
+v0.1.41.
+
+### Added
+
+- Live IP and BACnet scans require a one-use authorization bound to an immutable
+  dry-run packet plan, selected interface, import revision, and effective
+  throttle policy.
+- Named users can receive audited project and site grants, with grant creation,
+  revocation, activation preflight, and effective-scope visibility in the UI.
+
+### Changed
+
+- Discovery execution rechecks owner, lease, authorization window, current user
+  role, scope grant, and sealed runtime deadlines before outbound work.
+- Edge-to-hub sync and encrypted backups carry and verify the exact import
+  authority rows needed to reconstruct scan evidence.
+
+### Fixed
+
+- Blank IP target editors explicitly use the accepted IP register, including
+  register-driven scans with operator exclusions.
+- BACnet Preview follows the sealed-preview authorization flow, configured
+  non-default UDP ports reach the transport, and persisted point values render
+  in the live-data table.
+- Completed MQTT captures enter Results from their terminal snapshot even when a
+  supplementary topic refresh is temporarily unavailable.
+- Windows portable releases exclude copied virtual environments and stamp the
+  requested application version into API health and report evidence.
+- Reports and backups fail closed when sealed terminal results, discovery
+  projections, report snapshots, or archive membership no longer agree.
+- Generate All creates PDF, DOCX, XLSX, and evidence-pack reports one at a time,
+  preventing the four jobs from competing for the same database and memory.
+- First-use evidence signing creates one shared key under concurrent requests,
+  and a completed report returns without redundant post-commit database reads.
+
 ## [0.1.41] - 2026-08-13
 
 The v0.1.41 release makes discovery authority, progressive evidence, and
@@ -37,41 +78,6 @@ operator-managed Nmap execution explicit, sealed, and reviewable.
   material, and unsafe embedded values without echoing the rejected input.
 - SQLite writer reservations are released before report-source verification,
   retention folding, and ordinary read-only authentication work.
-
-## [Unreleased]
-
-### Added
-
-- Live IP and BACnet scans now require a one-use authorization bound to an
-  immutable dry-run packet plan, selected interface, import revision, and
-  effective throttle policy.
-- Named users can receive audited project and site grants, with grant creation,
-  revocation, activation preflight, and effective-scope visibility in the UI.
-
-### Changed
-
-- Discovery execution rechecks owner, lease, authorization window, current user
-  role, scope grant, and sealed runtime deadlines before outbound work.
-- Edge-to-hub sync and encrypted backups carry and verify the exact import
-  authority rows needed to reconstruct scan evidence.
-
-### Fixed
-
-- Blank IP target editors now explicitly use the accepted IP register, including
-  register-driven scans with operator exclusions.
-- BACnet Preview follows the sealed-preview authorization flow, configured
-  non-default UDP ports reach the transport, and persisted point values render
-  in the live-data table.
-- Completed MQTT captures enter Results from their terminal snapshot even when
-  a supplementary topic refresh is temporarily unavailable.
-- Windows portable candidates exclude copied virtual environments and stamp the
-  requested application version into API health and report evidence.
-- Reports and backups fail closed when sealed terminal results, discovery
-  projections, report snapshots, or archive membership no longer agree.
-- Generate All creates PDF, DOCX, XLSX, and evidence-pack reports one at a time,
-  preventing the four jobs from competing for the same database and memory.
-- First-use evidence signing creates one shared key under concurrent requests,
-  and a completed report returns without redundant post-commit database reads.
 
 ## [0.1.40] - 2026-08-07
 
