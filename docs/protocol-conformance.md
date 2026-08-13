@@ -5,7 +5,8 @@ BACnet - honestly separated into **tested** (covered by in-process unit tests),
 **simulated** (offline fixture/fake), and **live-untested** (requires on-site
 validation against real brokers/hardware). Accurate to
 `core/smart_commissioning_core/udmi_validation.py`, `mqtt_transport.py`,
-`mqtt_settings.py`, and `engines/bacnet_discovery.py`.
+`mqtt_settings.py`, `engines/bacnet_discovery.py`, and the discovery workflow
+UI.
 
 ## 1. UDMI
 
@@ -91,6 +92,12 @@ remaining-length varint encoding/decoding.
 | Keep-alive PINGREQ | Tested (framing); live-untested | Long/indefinite captures ping at half the configured keep-alive; broker-drop errors preserve partial evidence. |
 | QoS > 0 PUBLISH acknowledgement | Not implemented | SUBSCRIBE requests the configured maximum QoS, but outbound config PUBLISH remains QoS0 and the client is not a general-purpose QoS1/2 session implementation. Validate Niagara publishes at QoS0 (as in field engineer's 2026-07-10 broker log) or set subscribe QoS0 until this is implemented. |
 
+Terminal MQTT discovery Results are built from the sealed run and results
+snapshot. A live-topic refresh is supplemental: if it fails after the run is
+terminal, persisted result rows remain visible rather than holding the operator
+on the Run step. This UI path is regression-tested; real-broker operation still
+requires field validation.
+
 Connection settings (`mqtt_settings.py`) parse broker host/port, client id,
 keep-alive, username/password, and TLS material; `secret://` references are not
 treated as file paths (so masked references never get mis-loaded). The transport
@@ -120,6 +127,7 @@ abstraction with two implementations:
 | Who-Is / I-Am over a device-instance range | Simulated (tested) / real (live-untested) | Default range is the full 0–4194303 22-bit space unless narrowed. |
 | Per-device object-list read | Simulated (tested) / real (live-untested) | Real path may need APDU chunking on large devices (flagged UNVERIFIED). |
 | present-value read per object | Simulated (tested) / real (live-untested) | Per-point read errors are recorded without aborting the device scan. |
+| Configured BACnet UDP port | Tested (contract and transport plan) / real (live-untested) | The saved `BACnet UDP Port` is preserved in the sealed plan and used for the local bind instead of silently reverting to 47808. |
 | Throttle + cooperative cancellation | Tested | Devices scanned as throttled units; cancellation yields partial results. |
 | Dry-run plan (no Who-Is broadcast) | Tested | Returns the planned instance range + actions with no I/O. |
 | Authorization gate before a real scan | Tested | A real (non-dry-run) scan requires the authorization contract. |

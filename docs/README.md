@@ -7,7 +7,8 @@ old handoff still says "ready to send."
 Status meanings:
 
 - **Current**: maintained guidance for the present codebase.
-- **Candidate**: v0.1.40 material that still needs field acceptance evidence.
+- **Candidate**: a build prepared for field validation but not yet published as a
+  GitHub release.
 - **Versioned**: accurate for the named release and retained for rollback or
   audit work.
 - **Historical**: a completed plan, sent message, or dated review record.
@@ -41,18 +42,37 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Hosted Docker | v0.1.40 release | [Docker deployment and rollback](docker-deployment-rollback-v0.1.40.md) |
+| Hosted Docker | v0.1.41 release | [Docker deployment and rollback](docker-deployment-rollback-v0.1.41.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
-| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md) |
+| Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), and [v0.1.41](migration-rollback-v0.1.41.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.40 release
+## v0.1.42 protocol-recovery candidate
 
-Field acceptance is open. These files define the application gate, evidence
-manifest, two field gates, release gate, and rollback route for the current
-release.
+The protocol-recovery code is merged into `main`, but v0.1.42 has not been
+tagged or published as a GitHub release. Use this record only when validating
+the identified IP, BACnet, and MQTT repairs on approved hardware.
+
+- [Candidate validation guide](v0.1.42-protocol-recovery-validation.md)
+- [Field quick-start](field-quickstart.md#v0142-protocol-recovery-check)
+- [Nmap and Wireshark learning recommendation](research/2026-08-10-youtube-nmap-wireshark-recommendation.md)
+
+## v0.1.41 release
+
+v0.1.41 is the current published GitHub release. Field acceptance remains open.
+
+- [Release notes](release-notes-v0.1.41.md)
+- [Release validation record](release-validation-v0.1.41.md)
+- [Migration and rollback](migration-rollback-v0.1.41.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.41.md)
+- [Field acceptance checklist](v0.1.41-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.41-evidence-manifest.md)
+
+## v0.1.40 release record
+
+These files are retained for rollback, field comparison, and audit work.
 
 - [Release notes](release-notes-v0.1.40.md)
 - [Release validation record](release-validation-v0.1.40.md)
