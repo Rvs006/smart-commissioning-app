@@ -989,9 +989,16 @@ class RunService:
         # Run detail responses expose it separately so hosted/queued clients
         # can verify the execution lane without changing list-record shape.
         with query_session_factory(self._engine)() as session:
-            payload["execution_mode"] = session.scalar(
+            persisted_execution_mode = session.scalar(
                 select(Run.execution_mode).where(Run.id == run_id)
             )
+        summary = payload.get("result_summary")
+        summary_execution_mode = summary.get("execution_mode") if isinstance(summary, Mapping) else None
+        payload["execution_mode"] = (
+            summary_execution_mode
+            if isinstance(summary_execution_mode, str)
+            else persisted_execution_mode
+        )
         return RunRecord.model_validate(payload)
 
     def get_run_read_only(self, run_id: str) -> RunRecord:
@@ -999,9 +1006,16 @@ class RunService:
 
         payload = self._store.get_run_read_only(run_id)
         with query_session_factory(self._engine)() as session:
-            payload["execution_mode"] = session.scalar(
+            persisted_execution_mode = session.scalar(
                 select(Run.execution_mode).where(Run.id == run_id)
             )
+        summary = payload.get("result_summary")
+        summary_execution_mode = summary.get("execution_mode") if isinstance(summary, Mapping) else None
+        payload["execution_mode"] = (
+            summary_execution_mode
+            if isinstance(summary_execution_mode, str)
+            else persisted_execution_mode
+        )
         return RunRecord.model_validate(payload)
 
     def get_run_attempt_read_only(self, run_id: str) -> int:
