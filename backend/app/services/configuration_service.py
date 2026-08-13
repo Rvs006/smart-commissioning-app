@@ -12,8 +12,8 @@ from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
 from smart_commissioning_core.engines.bacnet_params import (
     MODE_FOREIGN_DEVICE,
-    PARAM_BACNET_PORT,
     PARAM_BACNET_MODE,
+    PARAM_BACNET_PORT,
     PARAM_BBMD_ADDRESS,
     PARAM_BBMD_PORT,
     PARAM_FD_TTL,
