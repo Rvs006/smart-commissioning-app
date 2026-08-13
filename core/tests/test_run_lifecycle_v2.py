@@ -18,6 +18,8 @@ from smart_commissioning_core.db.models import (
     DiscoveredPoint,
     DiscoveredTopic,
     Run,
+    RunDispatch,
+    RunExecutionContext,
     RunIssue,
     RunLifecycleConflict,
     RunResult,
@@ -36,7 +38,21 @@ from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from sqlalchemy import event, func, select, update
 
 
-def _context(protocol_key: str | None = None) -> RunContextV1:
+def _context(
+    protocol_key: str | None = None,
+    *,
+    resource_keys: tuple[str, ...] = (),
+    dry_run: bool = False,
+) -> RunContextV1:
+    engine_parameters: dict[str, object] = {
+        "authorized": True,
+        "dry_run": dry_run,
+    }
+    if resource_keys:
+        engine_parameters["scan_contract_v1"] = {
+            "scan_contract_version": "1.0",
+            "resource_keys": list(resource_keys),
+        }
     return RunContextV1.model_validate(
         {
             "project_id": "project-north",
@@ -46,7 +62,7 @@ def _context(protocol_key: str | None = None) -> RunContextV1:
             "registers": [],
             "imports": [],
             "schema_versions": {"udmi": "1.5.2"},
-            "engine_parameters": {"authorized": True, "dry_run": True},
+            "engine_parameters": engine_parameters,
             "network_interface": "192.0.2.10/24",
             "connection_settings": {"broker_host": "broker.example", "broker_port": 8883},
             "secret_references": {},
@@ -100,10 +116,20 @@ class LifecycleTestCase(unittest.TestCase):
         Base.metadata.create_all(self.engine)
         self.repository = RunLifecycleRepository(self.engine)
 
-    def create_run(self, *, protocol_key: str | None = None) -> tuple[str, str]:
+    def create_run(
+        self,
+        *,
+        protocol_key: str | None = None,
+        resource_keys: tuple[str, ...] = (),
+        dry_run: bool = False,
+    ) -> tuple[str, str]:
         envelope = self.repository.create_run_with_context(
             job_type="mqtt_discovery",
-            context=_context(protocol_key),
+            context=_context(
+                protocol_key,
+                resource_keys=resource_keys,
+                dry_run=dry_run,
+            ),
             execution_mode="dramatiq_worker",
         )
         return envelope.run_id, envelope.dispatch_id
@@ -134,8 +160,108 @@ class DispatchAndContextTests(LifecycleTestCase):
 
         self.assertEqual(raised.exception.active_run_id, first_run)
 
+    def test_two_resource_keys_are_reserved_by_one_live_run(self) -> None:
+        first_key = "bacnet:192.0.2.10:47808"
+        second_key = "bacnet:192.0.2.10:47809"
+
+        run_id, _ = self.create_run(
+            protocol_key=first_key,
+            resource_keys=(second_key, first_key, second_key),
+        )
+
+        with session_factory(self.engine)() as session:
+            slots = list(
+                session.scalars(
+                    select(ActiveProtocolSlot)
+                    .where(ActiveProtocolSlot.run_id == run_id)
+                    .order_by(ActiveProtocolSlot.protocol_key)
+                )
+            )
+        self.assertEqual(
+            [slot.protocol_key for slot in slots],
+            [first_key, second_key],
+        )
+
+    def test_second_key_conflict_rolls_back_the_entire_new_run(self) -> None:
+        free_key = "bacnet:192.0.2.11:47808"
+        conflicting_key = "bacnet:192.0.2.11:47809"
+        active_run_id, _ = self.create_run(resource_keys=(conflicting_key,))
+        rejected_run_id = "run_multi_resource_conflict"
+        rejected_dispatch_id = "dispatch_multi_resource_conflict"
+
+        with self.assertRaises(ProtocolConflictError) as raised:
+            self.repository.create_run_with_context(
+                job_type="bacnet_discovery",
+                context=_context(resource_keys=(free_key, conflicting_key)),
+                execution_mode="dramatiq_worker",
+                run_id=rejected_run_id,
+                dispatch_id=rejected_dispatch_id,
+            )
+
+        self.assertEqual(raised.exception.protocol_key, conflicting_key)
+        self.assertEqual(raised.exception.active_run_id, active_run_id)
+        with session_factory(self.engine)() as session:
+            self.assertIsNone(session.get(Run, rejected_run_id))
+            self.assertIsNone(session.get(RunExecutionContext, rejected_run_id))
+            self.assertIsNone(session.get(RunDispatch, rejected_dispatch_id))
+            self.assertIsNone(session.get(ActiveProtocolSlot, free_key))
+            self.assertEqual(
+                session.get(ActiveProtocolSlot, conflicting_key).run_id,
+                active_run_id,
+            )
+
+    def test_dry_run_preview_reserves_no_resource_slots(self) -> None:
+        first_key = "bacnet:192.0.2.12:47808"
+        second_key = "bacnet:192.0.2.12:47809"
+        active_run_id, _ = self.create_run(resource_keys=(first_key,))
+
+        preview_run_id, _ = self.create_run(
+            protocol_key=first_key,
+            resource_keys=(second_key, first_key),
+            dry_run=True,
+        )
+
+        with session_factory(self.engine)() as session:
+            preview_slot_count = session.scalar(
+                select(func.count())
+                .select_from(ActiveProtocolSlot)
+                .where(ActiveProtocolSlot.run_id == preview_run_id)
+            )
+            self.assertEqual(preview_slot_count, 0)
+            self.assertEqual(
+                session.get(ActiveProtocolSlot, first_key).run_id,
+                active_run_id,
+            )
+            self.assertIsNone(session.get(ActiveProtocolSlot, second_key))
+
 
 class ClaimAndFencingTests(LifecycleTestCase):
+    def test_claim_propagates_owner_to_every_resource_slot(self) -> None:
+        resource_keys = (
+            "bacnet:192.0.2.20:47808",
+            "bacnet:192.0.2.20:47809",
+        )
+        run_id, dispatch_id = self.create_run(resource_keys=resource_keys)
+
+        lease = self.repository.claim_run(
+            run_id,
+            dispatch_id,
+            lease_seconds=60,
+            owner_token="worker-owner",
+        )
+
+        self.assertIsNotNone(lease)
+        with session_factory(self.engine)() as session:
+            slots = list(
+                session.scalars(
+                    select(ActiveProtocolSlot)
+                    .where(ActiveProtocolSlot.run_id == run_id)
+                    .order_by(ActiveProtocolSlot.protocol_key)
+                )
+            )
+        self.assertEqual([slot.protocol_key for slot in slots], list(resource_keys))
+        self.assertEqual({slot.owner_token for slot in slots}, {"worker-owner"})
+
     def test_one_hundred_concurrent_claims_have_one_winner(self) -> None:
         run_id, dispatch_id = self.create_run()
 
@@ -522,7 +648,11 @@ class ClaimAndFencingTests(LifecycleTestCase):
 
 class TerminalSealTests(LifecycleTestCase):
     def test_finalization_is_one_transaction_and_identical_replay_is_idempotent(self) -> None:
-        run_id, dispatch_id = self.create_run(protocol_key="mqtt:" + "c" * 64)
+        resource_keys = (
+            "bacnet:192.0.2.30:47808",
+            "bacnet:192.0.2.30:47809",
+        )
+        run_id, dispatch_id = self.create_run(resource_keys=resource_keys)
         lease = self.repository.claim_run(run_id, dispatch_id, lease_seconds=60)
         result = _terminal(marker="sealed")
 
@@ -696,16 +826,35 @@ class TerminalSealTests(LifecycleTestCase):
 
 class CancellationAndRecoveryTests(LifecycleTestCase):
     def test_cancelling_queued_run_seals_without_claim(self) -> None:
-        run_id, _ = self.create_run(protocol_key="mqtt:" + "e" * 64)
+        run_id, _ = self.create_run(
+            resource_keys=(
+                "bacnet:192.0.2.40:47808",
+                "bacnet:192.0.2.40:47809",
+            )
+        )
 
         outcome = self.repository.request_cancel(run_id)
 
         self.assertEqual(outcome.state, "cancelled")
         seal = self.repository.get_seal(run_id)
         self.assertEqual(seal.terminal_status, "cancelled")
+        with session_factory(self.engine)() as session:
+            self.assertEqual(
+                session.scalar(
+                    select(func.count())
+                    .select_from(ActiveProtocolSlot)
+                    .where(ActiveProtocolSlot.run_id == run_id)
+                ),
+                0,
+            )
 
     def test_dead_owner_is_recovered_after_lease_expiry(self) -> None:
-        run_id, dispatch_id = self.create_run(protocol_key="mqtt:" + "f" * 64)
+        run_id, dispatch_id = self.create_run(
+            resource_keys=(
+                "bacnet:192.0.2.50:47808",
+                "bacnet:192.0.2.50:47809",
+            )
+        )
         claimed_at = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
         lease = self.repository.claim_run(
             run_id,
@@ -740,6 +889,15 @@ class CancellationAndRecoveryTests(LifecycleTestCase):
         preserved = self.repository.get_seal(run_id)
         self.assertEqual(preserved.terminal_status, "failed")
         self.assertEqual(preserved.result_sha256, recovered_digest)
+        with session_factory(self.engine)() as session:
+            self.assertEqual(
+                session.scalar(
+                    select(func.count())
+                    .select_from(ActiveProtocolSlot)
+                    .where(ActiveProtocolSlot.run_id == run_id)
+                ),
+                0,
+            )
 
     def test_conflicting_store_finalization_immediately_fences_late_writes(self) -> None:
         run_id, dispatch_id = self.create_run()

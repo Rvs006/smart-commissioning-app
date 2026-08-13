@@ -21,6 +21,7 @@ into the other API test modules' runs.
 """
 
 import unittest
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 from harness import ApiTestCase
@@ -55,9 +56,31 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
     def setUpClass(cls) -> None:
         super().setUpClass()
 
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.db_run_store import DbRunStore
+
+        DbRunStore(get_engine()).create_run(
+            project_id=_PROJECT_ID,
+            site_id=_SITE_ID,
+            job_type="ip_discovery",
+            parameters={"requested_from": "test_discovery_source_interface_guard"},
+        )
+
         # Runs are created as an engineer (run creation is engineer+), provisioned
-        # once via the shared admin key.
-        cls._engineer_key = cls._provision_user("nic-guard-engineer", "engineer")
+        # once via the standalone shared admin key and explicitly granted this
+        # suite's dedicated project/site.
+        engineer = cls._provision_user("nic-guard-engineer", "engineer")
+        cls._engineer_key = engineer["api_key"]
+        grant = cls.client.post(
+            f"/api/v1/users/{engineer['user']['id']}/scope-grants",
+            headers=cls._admin_headers(),
+            json={
+                "project_id": _PROJECT_ID,
+                "site_id": _SITE_ID,
+                "reason": "Source-interface guard test fixture",
+            },
+        )
+        assert grant.status_code == 201, grant.text
 
         # Save a configuration whose device."Source Interface" is a concrete NIC
         # for the DEDICATED guard project/site (see module docstring).
@@ -84,19 +107,25 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
         return {"X-API-Key": cls._engineer_key}
 
     @classmethod
-    def _provision_user(cls, username: str, role: str) -> str:
+    def _provision_user(cls, username: str, role: str) -> dict:
         response = cls.client.post(
             "/api/v1/users",
             headers=cls._admin_headers(),
             json={"username": username, "role": role},
         )
         assert response.status_code == 201, response.text
-        return response.json()["api_key"]
+        return response.json()
 
     def _engineer_headers(self) -> dict[str, str]:
         return {"X-API-Key": self._engineer_key}
 
-    def _post_ip_run(self, parameters: dict) -> object:
+    def _post_ip_run(
+        self,
+        parameters: dict,
+        *,
+        preview_run_id: str | None = None,
+        scan_authorization_id: str | None = None,
+    ) -> object:
         return self.client.post(
             "/api/v1/discovery/ip/runs",
             headers=self._engineer_headers(),
@@ -105,8 +134,28 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
                 "site_id": _SITE_ID,
                 "job_type": "ip_discovery",
                 "parameters": parameters,
+                "preview_run_id": preview_run_id,
+                "scan_authorization_id": scan_authorization_id,
             },
         )
+
+    def _authorized_live_payload(self, parameters: dict) -> tuple[str, str]:
+        preview = self._post_ip_run({**parameters, "dry_run": True})
+        self.assertEqual(preview.status_code, 200, preview.text)
+        now = datetime.now(UTC)
+        authorization = self.client.post(
+            "/api/v1/discovery/scan-authorizations",
+            headers=self._admin_headers(),
+            json={
+                "preview_run_id": preview.json()["run_id"],
+                "ticket": "CHG-NIC-GUARD",
+                "purpose": "Source-interface dispatch guard test",
+                "not_before": (now - timedelta(minutes=1)).isoformat(),
+                "not_after": (now + timedelta(hours=1)).isoformat(),
+            },
+        )
+        self.assertEqual(authorization.status_code, 201, authorization.text)
+        return preview.json()["run_id"], authorization.json()["authorization_id"]
 
     def _run_count(self) -> int:
         response = self.client.get("/api/v1/discovery/runs", headers=self._engineer_headers())
@@ -114,9 +163,16 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
         return len(response.json()["runs"])
 
     def test_unavailable_source_interface_rejected_before_run_creation(self) -> None:
+        preview_run_id, authorization_id = self._authorized_live_payload(
+            {"addresses": ["192.168.77.10"]}
+        )
         runs_before = self._run_count()
         with patch(_GUARD_TARGET, side_effect=ValueError(_NOT_PRESENT_DETAIL)) as guard:
-            response = self._post_ip_run({"authorized": True, "addresses": ["192.168.77.10"]})
+            response = self._post_ip_run(
+                {},
+                preview_run_id=preview_run_id,
+                scan_authorization_id=authorization_id,
+            )
         self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(response.json()["detail"], _NOT_PRESENT_DETAIL)
         guard.assert_called_once_with("192.168.77.5")
@@ -131,15 +187,19 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
         guard.assert_not_called()
 
     def test_available_source_interface_creates_run_with_injected_parameters(self) -> None:
+        preview_run_id, authorization_id = self._authorized_live_payload(
+            {
+                "addresses": ["192.168.77.10"],
+                "ports": [9],
+                "scan_connect_timeout_s": 1,
+                "scan_rate_limit_per_sec": 1,
+            }
+        )
         with patch(_GUARD_TARGET, return_value=None) as guard:
             response = self._post_ip_run(
-                {
-                    "authorized": True,
-                    "addresses": ["192.168.77.10"],
-                    "ports": [9],
-                    "scan_connect_timeout_s": 1,
-                    "scan_rate_limit_per_sec": 0,
-                }
+                {},
+                preview_run_id=preview_run_id,
+                scan_authorization_id=authorization_id,
             )
         self.assertEqual(response.status_code, 200, response.text)
         guard.assert_called_once_with("192.168.77.5")

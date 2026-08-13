@@ -173,6 +173,97 @@ class ReportListProjectionTests(ApiTestCase):
         self.assertEqual(body["offset"], 1)
         self.assertEqual(body["has_more"], 1 + 2 < baseline_total + 3)
 
+    def test_report_list_integrity_queries_are_bounded_for_a_one_row_page(self) -> None:
+        from app.api.routes import reports as reports_route
+        from app.services import run_service as run_service_module
+        from sqlalchemy import event
+
+        baseline_total = self.client.get("/api/v1/reports").json()["total"]
+        created = [self._create_report([]) for _index in range(12)]
+        select_statements: list[str] = []
+
+        def count_selects(
+            _connection,
+            _cursor,
+            statement: str,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                select_statements.append(statement)
+
+        engine = reports_route.service.engine
+        event.listen(engine, "before_cursor_execute", count_selects)
+        try:
+            with patch.object(
+                run_service_module,
+                "verify_report_evidence_run",
+                wraps=run_service_module.verify_report_evidence_run,
+            ) as verify_report:
+                response = self.client.get("/api/v1/reports?limit=1")
+        finally:
+            event.remove(engine, "before_cursor_execute", count_selects)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(
+            [row["report_id"] for row in body["reports"]],
+            [created[-1]["report_id"]],
+        )
+        self.assertEqual(body["total"], baseline_total + len(created))
+        self.assertEqual(
+            verify_report.call_count,
+            1,
+            "Deep canonical verification must be bounded by the requested page size.",
+        )
+        self.assertLessEqual(
+            len(select_statements),
+            7,
+            "A one-row page must use a fixed batch of integrity queries, not "
+            "one verifier query set per archived report.",
+        )
+
+    def test_report_list_fails_closed_for_selected_tampered_metadata(self) -> None:
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.models import Run
+        from sqlalchemy import select, update
+
+        self._create_report([])
+        tampered = self._create_report([])
+        self._create_report([])
+
+        engine = get_engine()
+        with engine.begin() as connection:
+            original_parameters = dict(
+                connection.scalar(
+                    select(Run.parameters).where(Run.id == tampered["report_id"])
+                )
+            )
+            parameters = dict(original_parameters)
+            parameters["report_title"] = "Mutable title must stay concealed"
+            connection.execute(
+                update(Run)
+                .where(Run.id == tampered["report_id"])
+                .values(parameters=parameters)
+            )
+
+        try:
+            response = self.client.get("/api/v1/reports?limit=2")
+        finally:
+            with engine.begin() as connection:
+                connection.execute(
+                    update(Run)
+                    .where(Run.id == tampered["report_id"])
+                    .values(parameters=original_parameters)
+                )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json(),
+            {"detail": "Stored report evidence failed integrity verification."},
+        )
+
     def test_report_list_rejects_an_unbounded_limit(self) -> None:
         response = self.client.get("/api/v1/reports?limit=101")
         self.assertEqual(response.status_code, 422, response.text)

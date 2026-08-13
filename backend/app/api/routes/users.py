@@ -12,11 +12,14 @@ Routes:
                                             only); invalidates the old key and
                                             returns a NEW plaintext key
                                             (displayed exactly once).
+  * GET  /api/v1/users/scope-activation-preflight
+                                          — fail-closed readiness check before
+                                            named-user edge/hub scope rollout.
 
 All routes already sit behind require_auth (the parent protected router). The
-admin-only routes additionally depend on require_role(Role.ADMIN), which 403s a
-non-admin principal. Bootstrap: until the first user exists, the shared/local
-principal is ADMIN, so an operator can create the first named user.
+admin-only routes additionally require true global authority. A synthetic
+shared/local principal keeps that authority only on standalone deployments;
+edge and hub administration requires an active named admin.
 
 The raw per-user key is generated here, returned exactly ONCE per issuance (by
 create and by key re-issue), and never stored — only its SHA-256 hash lands in
@@ -29,17 +32,28 @@ from __future__ import annotations
 import secrets
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from smart_commissioning_core.db.repositories import LastAdminError, UserRepository
-from smart_commissioning_core.rbac import Role
 from sqlalchemy.exc import IntegrityError
 
-from app.core.auth import AuthPrincipal, get_principal, hash_api_key, require_role
+from app.core.auth import AuthPrincipal, get_principal, hash_api_key
 from app.core.db import get_engine
+from app.core.scopes import (
+    ScopeGrantConflictError,
+    ScopeGrantRepository,
+    ScopeGrantTargetError,
+    effective_scopes,
+    has_global_scope,
+    require_global_admin,
+)
 from app.schemas.users import (
+    CreateScopeGrantRequest,
     CreateUserRequest,
     CreateUserResponse,
     MeResponse,
+    RevokeScopeGrantRequest,
+    ScopeActivationPreflightResponse,
+    ScopeGrantResponse,
     UpdateRoleRequest,
     UserResponse,
 )
@@ -54,6 +68,10 @@ def _repository() -> UserRepository:
     return UserRepository(get_engine())
 
 
+def _scope_repository() -> ScopeGrantRepository:
+    return ScopeGrantRepository(get_engine())
+
+
 @router.get("/me", response_model=MeResponse)
 def get_me(principal: AuthPrincipal = Depends(get_principal)) -> MeResponse:
     """Return the current principal's identity. Available to any authenticated caller."""
@@ -61,6 +79,8 @@ def get_me(principal: AuthPrincipal = Depends(get_principal)) -> MeResponse:
         username=principal.username,
         role=principal.role,
         source=principal.source,
+        global_scope=has_global_scope(principal),
+        effective_scopes=effective_scopes(principal),
     )
 
 
@@ -68,7 +88,7 @@ def get_me(principal: AuthPrincipal = Depends(get_principal)) -> MeResponse:
     "/users",
     response_model=CreateUserResponse,
     status_code=201,
-    dependencies=[Depends(require_role(Role.ADMIN))],
+    dependencies=[Depends(require_global_admin)],
 )
 def create_user(payload: CreateUserRequest) -> CreateUserResponse:
     """Create a user and return it WITH a one-time plaintext API key (admin only).
@@ -95,17 +115,27 @@ def create_user(payload: CreateUserRequest) -> CreateUserResponse:
 @router.get(
     "/users",
     response_model=list[UserResponse],
-    dependencies=[Depends(require_role(Role.ADMIN))],
+    dependencies=[Depends(require_global_admin)],
 )
 def list_users() -> list[UserResponse]:
     """List all users (admin only). Never includes key hashes or key material."""
     return [UserResponse(**user) for user in _repository().list_users()]
 
 
+@router.get(
+    "/users/scope-activation-preflight",
+    response_model=ScopeActivationPreflightResponse,
+    dependencies=[Depends(require_global_admin)],
+)
+def scope_activation_preflight() -> ScopeActivationPreflightResponse:
+    """Check readiness without creating mutable deployment or activation state."""
+    return ScopeActivationPreflightResponse(**_scope_repository().activation_preflight())
+
+
 @router.post(
     "/users/{user_id}/deactivate",
     response_model=UserResponse,
-    dependencies=[Depends(require_role(Role.ADMIN))],
+    dependencies=[Depends(require_global_admin)],
 )
 def deactivate_user(user_id: str) -> UserResponse:
     """Deactivate a user (admin only). Their key then fails authentication (401).
@@ -126,7 +156,7 @@ def deactivate_user(user_id: str) -> UserResponse:
 @router.post(
     "/users/{user_id}/key",
     response_model=CreateUserResponse,
-    dependencies=[Depends(require_role(Role.ADMIN))],
+    dependencies=[Depends(require_global_admin)],
 )
 def reissue_user_key(user_id: str) -> CreateUserResponse:
     """Re-issue a user's API key (admin only); the old key stops working at once.
@@ -158,7 +188,7 @@ def reissue_user_key(user_id: str) -> CreateUserResponse:
 @router.post(
     "/users/{user_id}/role",
     response_model=UserResponse,
-    dependencies=[Depends(require_role(Role.ADMIN))],
+    dependencies=[Depends(require_global_admin)],
 )
 def update_user_role(user_id: str, payload: UpdateRoleRequest) -> UserResponse:
     """Change a user's role (admin only).
@@ -174,3 +204,74 @@ def update_user_role(user_id: str, payload: UpdateRoleRequest) -> UserResponse:
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found.")
     return UserResponse(**updated)
+
+
+@router.post(
+    "/users/{user_id}/scope-grants",
+    response_model=ScopeGrantResponse,
+    status_code=201,
+)
+def create_scope_grant(
+    user_id: str,
+    payload: CreateScopeGrantRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> ScopeGrantResponse:
+    """Grant one existing project/site to an active named user."""
+    try:
+        grant = _scope_repository().create(
+            user_id=user_id,
+            project_id=payload.project_id,
+            site_id=payload.site_id,
+            reason=payload.reason,
+            principal=principal,
+        )
+    except ScopeGrantTargetError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ScopeGrantConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return ScopeGrantResponse(**grant)
+
+
+@router.get(
+    "/users/{user_id}/scope-grants",
+    response_model=list[ScopeGrantResponse],
+)
+def list_scope_grants(
+    user_id: str,
+    include_revoked: bool = Query(default=False),
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> list[ScopeGrantResponse]:
+    """List a named user's current grants, with optional revoked history."""
+    try:
+        grants = _scope_repository().list_for_user(
+            user_id,
+            include_revoked=include_revoked,
+        )
+    except ScopeGrantTargetError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return [ScopeGrantResponse(**grant) for grant in grants]
+
+
+@router.post(
+    "/users/{user_id}/scope-grants/{grant_id}/revoke",
+    response_model=ScopeGrantResponse,
+)
+def revoke_scope_grant(
+    user_id: str,
+    grant_id: str,
+    payload: RevokeScopeGrantRequest,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> ScopeGrantResponse:
+    """Revoke one current grant while retaining its audited history row."""
+    try:
+        grant = _scope_repository().revoke(
+            user_id=user_id,
+            grant_id=grant_id,
+            reason=payload.reason,
+            principal=principal,
+        )
+    except ScopeGrantTargetError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ScopeGrantConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return ScopeGrantResponse(**grant)

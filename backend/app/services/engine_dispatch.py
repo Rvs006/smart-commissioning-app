@@ -34,15 +34,10 @@ from smart_commissioning_core.engines.bacnet_discovery import resolve_bacnet_bac
 from smart_commissioning_core.engines.base import (  # noqa: F401
     ThrottleConfig,
     make_cancel_checker,
+    resolve_throttle_config,
 )
 
 logger = logging.getLogger(__name__)
-
-# Hard floor for the active-scan rate limiter. A request may lower the rate but
-# can never disable it (set it to None / unlimited): the limiter always stays a
-# positive bound so a request cannot remove the operator's safety throttle.
-_MIN_RATE_LIMIT_PER_SEC = 0.1
-
 
 def build_throttle(
     parameters: dict[str, Any],
@@ -51,40 +46,18 @@ def build_throttle(
     rate_limit_per_sec: float,
     connect_timeout_s: float,
 ) -> ThrottleConfig:
-    """Build a ThrottleConfig from request parameters over service defaults.
+    """Build the shared policy-bounded throttle for inline API execution.
 
     Request parameters ``scan_max_concurrency`` / ``scan_rate_limit_per_sec`` /
     ``scan_connect_timeout_s`` may only NARROW the operator's policy, never
-    exceed it (a request cannot widen the blast radius of a scan against a live
-    building network):
-
-    * ``max_concurrency`` is clamped to ``min(request, settings default)``.
-    * the rate limiter can never be disabled by a request: a non-positive /
-      missing / unparseable ``scan_rate_limit_per_sec`` falls back to the
-      operator default, and any positive request rate is enforced as a floor of
-      a small positive value so the bound always stays active (a request can
-      lower the rate but cannot remove the limit).
+    exceed it. A frozen ``scan_contract_v1.effective_throttle`` takes
+    precedence so inline execution uses the same sealed values as the worker.
     """
-    requested_concurrency = _positive_int(parameters.get("scan_max_concurrency"), default=max_concurrency)
-    concurrency = max(1, min(requested_concurrency, max_concurrency))
-    timeout = _positive_float(parameters.get("scan_connect_timeout_s"), default=connect_timeout_s)
-
-    # The operator default is the rate used when a request omits / disables the
-    # override (rate <= 0 => "use the default"); never None (unlimited).
-    default_rate = rate_limit_per_sec if rate_limit_per_sec > 0 else _MIN_RATE_LIMIT_PER_SEC
-    raw_rate = parameters.get("scan_rate_limit_per_sec")
-    parsed_rate = _to_float(raw_rate)
-    if parsed_rate is None or parsed_rate <= 0:
-        rate = default_rate
-    else:
-        # A request may lower the rate, but the limiter must stay a positive
-        # bound — clamp to a small positive floor so it can never be removed.
-        rate = max(parsed_rate, _MIN_RATE_LIMIT_PER_SEC)
-
-    return ThrottleConfig(
-        max_concurrency=concurrency,
-        rate_limit_per_sec=rate,
-        connect_timeout_s=timeout,
+    return resolve_throttle_config(
+        parameters,
+        max_concurrency=max_concurrency,
+        rate_limit_per_sec=rate_limit_per_sec,
+        connect_timeout_s=connect_timeout_s,
     )
 
 
@@ -259,25 +232,3 @@ def make_discovery_loader(repository: DiscoveryRepository) -> Callable[[str], li
         return list(repository.list_points(run_id))
 
     return load
-
-
-def _positive_int(value: Any, *, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
-
-
-def _positive_float(value: Any, *, default: float) -> float:
-    parsed = _to_float(value)
-    if parsed is None or parsed <= 0:
-        return default
-    return parsed
-
-
-def _to_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None

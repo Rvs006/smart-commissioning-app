@@ -44,6 +44,7 @@ class UdmiValidationExportApiTests(ApiTestCase):
             },
         )
         assert response.status_code == 201, response.text
+        cls._viewer_id = response.json()["user"]["id"]
         cls._viewer_key = response.json()["api_key"]
 
     @classmethod
@@ -85,6 +86,16 @@ class UdmiValidationExportApiTests(ApiTestCase):
             ),
             expected_job_type=job_type,
         )
+        grant = self.client.post(
+            f"/api/v1/users/{self._viewer_id}/scope-grants",
+            headers=self._admin_headers(),
+            json={
+                "project_id": "demo-project",
+                "site_id": effective_site_id,
+                "reason": "Validation export fixture access",
+            },
+        )
+        self.assertEqual(grant.status_code, 201, grant.text)
         if status in {"queued", "running"}:
             if status == "running":
                 owned = run_service.claim_owned_run(run.run_id)

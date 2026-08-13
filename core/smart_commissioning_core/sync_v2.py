@@ -25,8 +25,17 @@ from pydantic import (
 )
 from sqlalchemy.engine import Engine
 
-from smart_commissioning_core.db.repositories import TERMINAL_RUN_STATUSES, SyncRepository
+from smart_commissioning_core.db.repositories import (
+    TERMINAL_RUN_STATUSES,
+    ImportRepository,
+    SyncRepository,
+)
 from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
+from smart_commissioning_core.execution_context import (
+    ExecutionContextIntegrityError,
+    scan_authority_bindings,
+    verify_bound_import_rows,
+)
 from smart_commissioning_core.integrity import (
     SigningKey,
     public_key_fingerprint,
@@ -35,6 +44,10 @@ from smart_commissioning_core.integrity import (
 )
 from smart_commissioning_core.run_context import RunContextV1, canonical_sha256
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
+from smart_commissioning_core.sealed_run_integrity import (
+    SealedRunIntegrityError,
+    verify_report_evidence_run,
+)
 from smart_commissioning_core.sync_identity import EdgeIdentity
 
 PROTOCOL_VERSION = "2.0"
@@ -132,6 +145,8 @@ _SAFE_SENSITIVE_KEY_SUFFIXES = frozenset(
 _MAX_ARTIFACT_ARCHIVE_MEMBERS = 4096
 _MAX_ARTIFACT_ARCHIVE_UNCOMPRESSED_BYTES = 200 * 1024 * 1024
 _MAX_ARTIFACT_ARCHIVE_DEPTH = 3
+_MAX_AUTHORITIES_PER_ITEM = 2
+_MAX_AUTHORITY_MEMBER_BYTES = 64 * 1024 * 1024
 _LEGACY_REPORT_PARAMETER_KEYS = (
     "output_format",
     "report_type",
@@ -147,7 +162,11 @@ _REPORT_PARAMETER_KEYS = (
     *_LEGACY_REPORT_PARAMETER_KEYS,
     "evidence_set_id",
     "udmi_report_variant",
+    "source_run_snapshots",
+    "source_run_seals",
+    "source_discovery_snapshots",
 )
+_OPTIONAL_REPORT_PARAMETER_KEYS = ("udmi_scope", "udmi_report_snapshot")
 _LEGACY_REPORT_SNAPSHOT_KEYS = frozenset(
     {
         "schema_version",
@@ -171,9 +190,7 @@ _LEGACY_REPORT_SNAPSHOT_KEYS = frozenset(
         "udmi_scope",
     }
 )
-_REPORT_SNAPSHOT_KEYS = frozenset(
-    {*_LEGACY_REPORT_SNAPSHOT_KEYS, "evidence_set_id"}
-)
+_REPORT_SNAPSHOT_KEYS = frozenset({*_LEGACY_REPORT_SNAPSHOT_KEYS, "evidence_set_id"})
 _LEGACY_REPORT_METADATA_KEYS = frozenset(
     {
         "output_format",
@@ -184,9 +201,7 @@ _LEGACY_REPORT_METADATA_KEYS = frozenset(
         "renderer_version",
     }
 )
-_REPORT_METADATA_KEYS = frozenset(
-    {*_LEGACY_REPORT_METADATA_KEYS, "evidence_set_id", "udmi_report_variant"}
-)
+_REPORT_METADATA_KEYS = frozenset({*_LEGACY_REPORT_METADATA_KEYS, "evidence_set_id", "udmi_report_variant"})
 
 
 class SyncV2Error(RuntimeError):
@@ -218,10 +233,29 @@ class SyncV2Descriptor(BaseModel):
             raise ValueError("artifact descriptor fields must be all present or all absent")
         if self.item_member != f"items/{self.item_id}.json":
             raise ValueError("item member does not match item id")
-        if self.artifact_member is not None and self.artifact_member != (
-            f"artifacts/sha256/{self.artifact_sha256}"
-        ):
+        if self.artifact_member is not None and self.artifact_member != (f"artifacts/sha256/{self.artifact_sha256}"):
             raise ValueError("artifact member does not match artifact digest")
+        return self
+
+
+class SyncV2AuthorityDescriptor(BaseModel):
+    """One immutable import identity backed by a content-addressed row member."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    import_id: str = Field(min_length=1, max_length=64)
+    import_type: str = Field(min_length=1, max_length=64)
+    project_id: str = Field(min_length=1, max_length=255)
+    site_id: str = Field(min_length=1, max_length=255)
+    accepted_count: StrictInt = Field(ge=0)
+    accepted_rows_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    member: str = Field(min_length=1, max_length=255)
+    member_size: StrictInt = Field(ge=1, le=_MAX_AUTHORITY_MEMBER_BYTES)
+
+    @model_validator(mode="after")
+    def _member_is_content_addressed(self) -> SyncV2AuthorityDescriptor:
+        if self.member != (f"authorities/sha256/{self.accepted_rows_sha256}.json"):
+            raise ValueError("authority member does not match accepted-row digest")
         return self
 
 
@@ -234,6 +268,9 @@ class SyncV2Manifest(BaseModel):
     edge_id: str = Field(min_length=1, max_length=255)
     created_at: str
     items: tuple[SyncV2Descriptor, ...]
+    # None preserves authentication of v2 bundles produced before authority
+    # snapshots were added. New writers always emit an explicit list.
+    authorities: tuple[SyncV2AuthorityDescriptor, ...] | None = None
     signature_algorithm: Literal["ed25519"]
     signing_key_id: str = Field(min_length=1, max_length=64)
     public_key_pem: str
@@ -404,21 +441,22 @@ def _validate_wire_parameters(
         return
 
     parameter_keys = set(parameters)
-    if parameter_keys not in (
-        set(_LEGACY_REPORT_PARAMETER_KEYS),
-        set(_REPORT_PARAMETER_KEYS),
+    legacy_parameter_keys = set(_LEGACY_REPORT_PARAMETER_KEYS)
+    current_parameter_keys = set(_REPORT_PARAMETER_KEYS)
+    is_legacy_shape = parameter_keys == legacy_parameter_keys
+    if not is_legacy_shape and (
+        not current_parameter_keys.issubset(parameter_keys)
+        or not parameter_keys.issubset(current_parameter_keys | set(_OPTIONAL_REPORT_PARAMETER_KEYS))
     ):
         raise SyncV2Error("malformed_item")
-    has_evidence_set_id = parameter_keys == set(_REPORT_PARAMETER_KEYS)
+    has_evidence_set_id = not is_legacy_shape
     if not isinstance(report_snapshot, dict) or not isinstance(artifact_manifest, dict):
         raise SyncV2Error("malformed_item")
     if parameters["report_snapshot_v2"] != report_snapshot:
         raise SyncV2Error("malformed_item")
     if parameters["report_snapshot_sha256"] != context_hash:
         raise SyncV2Error("malformed_item")
-    expected_snapshot_keys = (
-        _REPORT_SNAPSHOT_KEYS if has_evidence_set_id else _LEGACY_REPORT_SNAPSHOT_KEYS
-    )
+    expected_snapshot_keys = _REPORT_SNAPSHOT_KEYS if has_evidence_set_id else _LEGACY_REPORT_SNAPSHOT_KEYS
     if set(report_snapshot) != expected_snapshot_keys:
         raise SyncV2Error("malformed_item")
     if (
@@ -430,17 +468,12 @@ def _validate_wire_parameters(
         or report_snapshot.get("source_run_ids") != parameters["source_run_ids"]
         or report_snapshot.get("renderer_version") != parameters["renderer_version"]
         or artifact_manifest.get("renderer_version") != parameters["renderer_version"]
-        or (
-            has_evidence_set_id
-            and report_snapshot.get("evidence_set_id")
-            != parameters["evidence_set_id"]
-        )
+        or (has_evidence_set_id and report_snapshot.get("evidence_set_id") != parameters["evidence_set_id"])
+        or (has_evidence_set_id and artifact_manifest.get("evidence_set_id") != parameters["evidence_set_id"])
     ):
         raise SyncV2Error("malformed_item")
     metadata = report_snapshot.get("report_metadata")
-    expected_metadata_keys = (
-        _REPORT_METADATA_KEYS if has_evidence_set_id else _LEGACY_REPORT_METADATA_KEYS
-    )
+    expected_metadata_keys = _REPORT_METADATA_KEYS if has_evidence_set_id else _LEGACY_REPORT_METADATA_KEYS
     if not isinstance(metadata, dict) or set(metadata) != expected_metadata_keys:
         raise SyncV2Error("malformed_item")
     if any(metadata[key] != parameters[key] for key in expected_metadata_keys):
@@ -459,9 +492,12 @@ def build_sync_v2_bundle(
     """Build deterministic v2 bytes from sealed terminal runs only."""
 
     repository = SyncRepository(engine)
+    import_repository = ImportRepository(engine)
     selected = run_ids if run_ids is not None else SyncV2Repository(engine).list_pending_run_ids()
     members: list[tuple[str, bytes]] = []
     descriptors: list[dict[str, object]] = []
+    authority_descriptors: dict[str, dict[str, object]] = {}
+    authority_members: dict[str, bytes] = {}
     seen: set[str] = set()
     for run_id in selected:
         if run_id in seen:
@@ -473,6 +509,20 @@ def build_sync_v2_bundle(
         if export["run"].get("status") not in TERMINAL_RUN_STATUSES:
             raise SyncV2Error(f"Cannot bundle non-terminal run: {run_id}")
         item, artifact = _build_item(export, artifact_loader=artifact_loader)
+        for authority, member_bytes in _authority_exports_for_item(
+            item,
+            import_repository=import_repository,
+        ):
+            import_id = str(authority["import_id"])
+            previous = authority_descriptors.get(import_id)
+            if previous is not None and previous != authority:
+                raise SyncV2Error(f"Run {run_id} has a conflicting scan authority identity.")
+            authority_descriptors[import_id] = authority
+            member = str(authority["member"])
+            prior_member = authority_members.get(member)
+            if prior_member is not None and prior_member != member_bytes:
+                raise SyncV2Error(f"Run {run_id} has conflicting scan authority bytes for one digest.")
+            authority_members[member] = member_bytes
         item_bytes = canonical_json_bytes(item)
         result_sha256 = str(item["seal"]["result_sha256"])
         item_id = sha256_bytes(f"{run_id}\0{result_sha256}".encode())[:32]
@@ -513,6 +563,7 @@ def build_sync_v2_bundle(
         "edge_id": edge_identity.edge_id,
         "created_at": created_at.isoformat(),
         "items": descriptors,
+        "authorities": [authority_descriptors[import_id] for import_id in sorted(authority_descriptors)],
         "signature_algorithm": "ed25519",
         "signing_key_id": signing_key.public_key_fingerprint(),
         "public_key_pem": signing_key.public_key_pem(),
@@ -524,7 +575,13 @@ def build_sync_v2_bundle(
     manifest["signed_manifest_sha256"] = sha256_bytes(signed_body)
     manifest["signature"] = base64.b64encode(signing_key.sign(signed_body)).decode("ascii")
     manifest_bytes = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
-    return _write_zip([*members, (_MANIFEST_MEMBER, manifest_bytes)])
+    return _write_zip(
+        [
+            *members,
+            *sorted(authority_members.items()),
+            (_MANIFEST_MEMBER, manifest_bytes),
+        ]
+    )
 
 
 def open_sync_v2_bundle(
@@ -541,7 +598,7 @@ def open_sync_v2_bundle(
         with ZipFile(BytesIO(bundle)) as archive:
             infos = archive.infolist()
             names = [info.filename for info in infos]
-            if len(infos) > 1 + (2 * max_items):
+            if len(infos) > 1 + ((2 + _MAX_AUTHORITIES_PER_ITEM) * max_items):
                 raise SyncV2Error("Bundle member count exceeds the configured limit.")
             if len(names) != len(set(names)):
                 raise SyncV2Error("Bundle contains duplicate members.")
@@ -570,6 +627,11 @@ def open_sync_v2_bundle(
         raise SyncV2Error("Bundle contains duplicate item IDs.")
     if len({item.run_id for item in manifest.items}) != len(manifest.items):
         raise SyncV2Error("Bundle contains duplicate run IDs.")
+    authorities = manifest.authorities or ()
+    if len(authorities) > _MAX_AUTHORITIES_PER_ITEM * len(manifest.items):
+        raise SyncV2Error("Bundle authority count exceeds the configured limit.")
+    if len({authority.import_id for authority in authorities}) != len(authorities):
+        raise SyncV2Error("Bundle contains duplicate authority import IDs.")
     try:
         created_at = datetime.fromisoformat(manifest.created_at)
     except ValueError as error:
@@ -579,12 +641,13 @@ def open_sync_v2_bundle(
     if manifest.edge_id != expected_edge_id:
         raise SyncV2Error("Bundle identity does not match the authenticated credential.")
     actual_fingerprint = _fingerprint_from_pem(manifest.public_key_pem)
-    if (
-        actual_fingerprint != manifest.signing_key_id
-        or actual_fingerprint != expected_signing_key_fingerprint
-    ):
+    if actual_fingerprint != manifest.signing_key_id or actual_fingerprint != expected_signing_key_fingerprint:
         raise SyncV2Error("Bundle signing key does not match the authenticated credential.")
     raw = manifest.model_dump(mode="json")
+    if manifest.authorities is None:
+        # Preserve the exact pre-authority manifest shape while retaining the
+        # explicit null artifact fields inside legacy item descriptors.
+        raw.pop("authorities", None)
     if _bundle_id(raw) != manifest.bundle_id:
         raise SyncV2Error("Bundle ID does not match its canonical manifest.")
     signed_body = _signed_manifest_body(raw)
@@ -596,13 +659,11 @@ def open_sync_v2_bundle(
         raise SyncV2Error("Bundle signature encoding is invalid.") from error
     if not verify_bytes(signed_body, signature, manifest.public_key_pem):
         raise SyncV2Error("Bundle signature is invalid.")
-    declared = {
-        descriptor.item_member for descriptor in manifest.items
-    } | {
-        descriptor.artifact_member
-        for descriptor in manifest.items
-        if descriptor.artifact_member is not None
-    }
+    declared = (
+        {descriptor.item_member for descriptor in manifest.items}
+        | {descriptor.artifact_member for descriptor in manifest.items if descriptor.artifact_member is not None}
+        | {authority.member for authority in authorities}
+    )
     extras = set(members) - declared
     if extras:
         raise SyncV2Error("Bundle contains undeclared members.")
@@ -631,9 +692,7 @@ def validate_sync_v2_item(raw: bytes, descriptor: SyncV2Descriptor) -> dict[str,
     except ValidationError as error:
         raise SyncV2Error("malformed_item") from error
     result_sha256 = terminal.sha256()
-    expected_item_id = sha256_bytes(
-        f"{descriptor.run_id}\0{result_sha256}".encode()
-    )[:32]
+    expected_item_id = sha256_bytes(f"{descriptor.run_id}\0{result_sha256}".encode())[:32]
     if descriptor.item_id != expected_item_id:
         raise SyncV2Error("malformed_item")
     if result_sha256 != descriptor.result_sha256:
@@ -669,11 +728,7 @@ def validate_sync_v2_item(raw: bytes, descriptor: SyncV2Descriptor) -> dict[str,
         raise SyncV2Error("malformed_item")
     context_hash: str
     is_report = run.get("job_type") == "report_generation"
-    context_payload = (
-        item.execution_context.model_dump(mode="json")
-        if item.execution_context is not None
-        else None
-    )
+    context_payload = item.execution_context.model_dump(mode="json") if item.execution_context is not None else None
     if not is_report and context_payload is not None:
         try:
             context = RunContextV1.model_validate(context_payload["context_json"])
@@ -706,8 +761,94 @@ def validate_sync_v2_item(raw: bytes, descriptor: SyncV2Descriptor) -> dict[str,
         report_snapshot=item.report_snapshot,
         artifact_manifest=item.artifact_manifest,
     )
+    if is_report and "evidence_set_id" in run["parameters"]:
+        try:
+            verify_report_evidence_run(
+                run_id=descriptor.run_id,
+                run={**run, "result_sha256": result_sha256},
+                context=None,
+                result=result,
+                seal=seal,
+                issues=list(terminal.issues),
+                devices=list(terminal.devices),
+                points=list(terminal.points),
+                topics=list(terminal.topics),
+            )
+        except (SealedRunIntegrityError, TypeError, ValueError) as error:
+            raise SyncV2Error("malformed_item") from error
     _assert_no_secret_material(item.model_dump(mode="json"))
     return item.model_dump(mode="json")
+
+
+def validate_sync_v2_authority_snapshots(
+    opened: OpenedSyncV2Bundle,
+    item: Mapping[str, Any],
+) -> list[dict[str, object]]:
+    """Verify all authority members against one already-validated run item."""
+
+    context_wrapper = item.get("execution_context")
+    if context_wrapper is None:
+        return []
+    if not isinstance(context_wrapper, Mapping):
+        raise SyncV2Error("malformed_item")
+    try:
+        context = RunContextV1.model_validate(context_wrapper.get("context_json"))
+        bindings = scan_authority_bindings(context)
+        import_types = _scan_authority_import_types(context)
+    except (ValidationError, ExecutionContextIntegrityError) as error:
+        raise SyncV2Error("malformed_item") from error
+    if not bindings:
+        return []
+
+    descriptors = {descriptor.import_id: descriptor for descriptor in (opened.manifest.authorities or ())}
+    verified: list[dict[str, object]] = []
+    for import_id, (digest, accepted_count) in sorted(bindings.items()):
+        descriptor = descriptors.get(import_id)
+        if descriptor is None:
+            raise SyncV2Error("partial_bundle")
+        if (
+            descriptor.import_type != import_types.get(import_id)
+            or descriptor.project_id != context.project_id
+            or descriptor.site_id != context.site_id
+            or descriptor.accepted_count != accepted_count
+            or descriptor.accepted_rows_sha256 != digest
+        ):
+            raise SyncV2Error("malformed_item")
+        member_bytes = opened.members.get(descriptor.member)
+        if member_bytes is None:
+            raise SyncV2Error("partial_bundle")
+        if len(member_bytes) != descriptor.member_size:
+            raise SyncV2Error("malformed_item")
+        try:
+            snapshot = strict_json_loads(member_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as error:
+            raise SyncV2Error("malformed_item") from error
+        if (
+            not isinstance(snapshot, dict)
+            or set(snapshot) != {"schema_version", "accepted_rows"}
+            or snapshot.get("schema_version") != "1.0"
+            or not isinstance(snapshot.get("accepted_rows"), list)
+        ):
+            raise SyncV2Error("malformed_item")
+        rows = snapshot["accepted_rows"]
+        try:
+            verify_bound_import_rows(context, import_id, rows)
+            _assert_no_secret_material(snapshot)
+        except (ExecutionContextIntegrityError, SyncV2Error) as error:
+            raise SyncV2Error("malformed_item") from error
+        verified.append(
+            {
+                "import_id": import_id,
+                "import_type": descriptor.import_type,
+                "project_id": descriptor.project_id,
+                "site_id": descriptor.site_id,
+                "accepted_count": accepted_count,
+                "accepted_rows_sha256": digest,
+                "member": descriptor.member,
+                "accepted_rows": rows,
+            }
+        )
+    return verified
 
 
 def receipt_dict(
@@ -743,15 +884,15 @@ def _build_item(
     parameters = dict(run.get("parameters") or {})
     is_report = run.get("job_type") == "report_generation"
     safe_parameters = (
-        {key: parameters[key] for key in _REPORT_PARAMETER_KEYS if key in parameters}
+        {
+            key: parameters[key]
+            for key in (*_REPORT_PARAMETER_KEYS, *_OPTIONAL_REPORT_PARAMETER_KEYS)
+            if key in parameters
+        }
         if is_report
         else {"context_sha256": seal.get("context_sha256")}
     )
-    safe_run = {
-        key: value
-        for key, value in run.items()
-        if key not in {"parameters", "issues"}
-    }
+    safe_run = {key: value for key, value in run.items() if key not in {"parameters", "issues"}}
     safe_run["parameters"] = safe_parameters
     safe_run["issues"] = list(terminal.issues)
     context = export.get("context")
@@ -783,6 +924,108 @@ def _build_item(
     return item, artifact
 
 
+def _authority_exports_for_item(
+    item: Mapping[str, Any],
+    *,
+    import_repository: ImportRepository,
+) -> list[tuple[dict[str, object], bytes]]:
+    """Load and rehash every import authority bound to one execution context."""
+
+    context_wrapper = item.get("execution_context")
+    if context_wrapper is None:
+        # Reports travel from their complete frozen report snapshot. They never
+        # consult or export current import rows.
+        return []
+    if not isinstance(context_wrapper, Mapping):
+        raise SyncV2Error("Run execution context is malformed.")
+    try:
+        context = RunContextV1.model_validate(context_wrapper.get("context_json"))
+        bindings = scan_authority_bindings(context)
+        import_types = _scan_authority_import_types(context)
+    except (ValidationError, ExecutionContextIntegrityError) as error:
+        raise SyncV2Error("Run scan authority binding is malformed.") from error
+
+    exports: list[tuple[dict[str, object], bytes]] = []
+    for import_id, (digest, accepted_count) in sorted(bindings.items()):
+        try:
+            record = import_repository.get(import_id)
+        except FileNotFoundError as error:
+            raise SyncV2Error(f"Run scan authority import is missing: {import_id}") from error
+        rows = record.get("accepted_rows")
+        if not isinstance(rows, list):
+            raise SyncV2Error(f"Run scan authority rows are malformed: {import_id}")
+        try:
+            verify_bound_import_rows(context, import_id, rows)
+        except ExecutionContextIntegrityError as error:
+            raise SyncV2Error(f"Run scan authority changed after preview: {import_id}") from error
+        expected_type = import_types.get(import_id)
+        if (
+            expected_type is None
+            or record.get("import_type") != expected_type
+            or record.get("project_id") != context.project_id
+            or record.get("site_id") != context.site_id
+        ):
+            raise SyncV2Error(f"Run scan authority type or scope changed after preview: {import_id}")
+        snapshot = {"schema_version": "1.0", "accepted_rows": rows}
+        _assert_no_secret_material(snapshot)
+        try:
+            member_bytes = canonical_json_bytes(snapshot)
+        except (TypeError, ValueError, UnicodeEncodeError) as error:
+            raise SyncV2Error(f"Run scan authority rows are not canonical JSON: {import_id}") from error
+        if len(member_bytes) > _MAX_AUTHORITY_MEMBER_BYTES:
+            raise SyncV2Error(f"Run scan authority snapshot exceeds the byte limit: {import_id}")
+        member = f"authorities/sha256/{digest}.json"
+        exports.append(
+            (
+                {
+                    "import_id": import_id,
+                    "import_type": expected_type,
+                    "project_id": context.project_id,
+                    "site_id": context.site_id,
+                    "accepted_count": accepted_count,
+                    "accepted_rows_sha256": digest,
+                    "member": member,
+                    "member_size": len(member_bytes),
+                },
+                member_bytes,
+            )
+        )
+    return exports
+
+
+def _scan_authority_import_types(context: RunContextV1) -> dict[str, str]:
+    """Resolve the contract lane to the exact import profile it requires."""
+
+    contract = context.engine_parameters.get("scan_contract_v1")
+    if not isinstance(contract, Mapping):
+        return {}
+    resolved: dict[str, str] = {}
+
+    def bind(candidate: object, import_type: str) -> None:
+        if candidate is None:
+            return
+        if not isinstance(candidate, Mapping):
+            raise ExecutionContextIntegrityError("scan authority metadata is malformed")
+        import_id = str(candidate.get("import_id") or "").strip()
+        if not import_id:
+            raise ExecutionContextIntegrityError("scan authority import id is malformed")
+        previous = resolved.get(import_id)
+        if previous is not None and previous != import_type:
+            raise ExecutionContextIntegrityError("scan authority import id is bound to conflicting import types")
+        resolved[import_id] = import_type
+
+    ip_contract = contract.get("ip")
+    if isinstance(ip_contract, Mapping):
+        bind(ip_contract.get("authority"), "ip_register")
+    bacnet_contract = contract.get("bacnet")
+    if isinstance(bacnet_contract, Mapping):
+        authorities = bacnet_contract.get("authorities")
+        if isinstance(authorities, Mapping):
+            bind(authorities.get("devices"), "bacnet_register")
+            bind(authorities.get("points"), "bacnet_points")
+    return resolved
+
+
 def _assert_no_secret_material(value: Any, *, key: str | None = None) -> None:
     raw_key = (key or "").strip()
     acronym_split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", raw_key)
@@ -790,14 +1033,10 @@ def _assert_no_secret_material(value: Any, *, key: str | None = None) -> None:
     normalized_key = re.sub(r"[^a-z0-9]+", "_", camel_split.casefold()).strip("_")
     compact_key = normalized_key.replace("_", "")
     suffix = normalized_key.rsplit("_", 1)[-1]
-    safe_metadata_key = (
-        normalized_key not in _SENSITIVE_KEYS
-        and suffix in _SAFE_SENSITIVE_KEY_SUFFIXES
-    )
+    safe_metadata_key = normalized_key not in _SENSITIVE_KEYS and suffix in _SAFE_SENSITIVE_KEY_SUFFIXES
     padded_key = f"_{normalized_key}_"
     sensitive_key = not safe_metadata_key and (
-        compact_key in _SENSITIVE_COMPACT_KEYS
-        or any(f"_{candidate}_" in padded_key for candidate in _SENSITIVE_KEYS)
+        compact_key in _SENSITIVE_COMPACT_KEYS or any(f"_{candidate}_" in padded_key for candidate in _SENSITIVE_KEYS)
     )
     if sensitive_key and value not in (None, "", "********"):
         if not _is_secret_reference(value):
@@ -837,11 +1076,7 @@ def _assert_no_forbidden_artifact_material(
 ) -> None:
     """Reject PEM material in raw or compressed report content under hard bounds."""
 
-    if (
-        max_archive_members < 1
-        or max_archive_uncompressed_bytes < 1
-        or max_archive_depth < 1
-    ):
+    if max_archive_members < 1 or max_archive_uncompressed_bytes < 1 or max_archive_depth < 1:
         raise ValueError("Artifact archive scan limits must be positive.")
     if len(artifact) > max_archive_uncompressed_bytes:
         raise SyncV2Error("Report artifact exceeds the secret-scan byte limit.")
@@ -853,9 +1088,7 @@ def _assert_no_forbidden_artifact_material(
         nonlocal expanded_bytes, scanned_members
         text = payload.decode("latin-1")
         if _PRIVATE_KEY_PEM_RE.search(text) or _CERTIFICATE_PEM_RE.search(text):
-            raise SyncV2Error(
-                "Report artifact contains forbidden private-key or certificate material."
-            )
+            raise SyncV2Error("Report artifact contains forbidden private-key or certificate material.")
         if not is_zipfile(BytesIO(payload)):
             return
         if depth >= max_archive_depth:
@@ -869,19 +1102,13 @@ def _assert_no_forbidden_artifact_material(
                 for info in infos:
                     scanned_members += 1
                     if scanned_members > max_archive_members:
-                        raise SyncV2Error(
-                            "Report artifact archive member count exceeds the scan limit."
-                        )
+                        raise SyncV2Error("Report artifact archive member count exceeds the scan limit.")
                     _validate_artifact_member_name(info.filename)
                     if info.flag_bits & 0x1:
-                        raise SyncV2Error(
-                            "Encrypted report artifact members are not supported."
-                        )
+                        raise SyncV2Error("Encrypted report artifact members are not supported.")
                     expanded_bytes += info.file_size
                     if expanded_bytes > max_archive_uncompressed_bytes:
-                        raise SyncV2Error(
-                            "Report artifact archive expands beyond the scan limit."
-                        )
+                        raise SyncV2Error("Report artifact archive expands beyond the scan limit.")
                     if info.is_dir():
                         continue
                     child = archive.read(info)
@@ -912,11 +1139,7 @@ def _validate_artifact_member_name(name: str) -> None:
 
 def _signed_manifest_body(manifest: Mapping[str, object]) -> bytes:
     return canonical_json_bytes(
-        {
-            key: value
-            for key, value in manifest.items()
-            if key not in {"signature", "signed_manifest_sha256"}
-        }
+        {key: value for key, value in manifest.items() if key not in {"signature", "signed_manifest_sha256"}}
     )
 
 
@@ -954,7 +1177,7 @@ def _validate_member_name(name: str) -> None:
     if not name or "\\" in name or path.is_absolute() or ".." in path.parts:
         raise SyncV2Error("Bundle contains an unsafe member path.")
     if name != _MANIFEST_MEMBER and not (
-        name.startswith("items/") or name.startswith("artifacts/sha256/")
+        name.startswith("items/") or name.startswith("artifacts/sha256/") or name.startswith("authorities/sha256/")
     ):
         raise SyncV2Error("Bundle contains an unsupported member path.")
 

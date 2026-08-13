@@ -9,7 +9,10 @@ fully-rejected import does not count as "on file", and an absent one is a 404.
 
 import io
 
+from app.core.db import get_engine
 from harness import ApiTestCase
+from smart_commissioning_core.db.repositories import ImportRepository
+from smart_commissioning_core.run_context import canonical_sha256
 
 _HEADER = (
     "Project/site,System,Asset ID,Expected topic,Expected schema version,"
@@ -55,6 +58,14 @@ class ImportLatestApiTests(ApiTestCase):
         self.assertEqual(body["import_id"], import_id)
         self.assertEqual(body["import_type"], "mqtt_register")
         self.assertEqual(body["accepted_rows"], 1)
+
+        record = ImportRepository(get_engine()).get(import_id)
+        stored = record["summary"]
+        self.assertEqual(stored["authority_schema_version"], "1.0")
+        self.assertEqual(
+            stored["accepted_rows_sha256"],
+            canonical_sha256(record["accepted_rows"]),
+        )
 
     def test_latest_is_404_when_no_import_is_on_file(self) -> None:
         response = self._latest("ip_register", project_id=_PROJECT, site_id=_SITE)

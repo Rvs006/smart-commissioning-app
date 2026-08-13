@@ -43,6 +43,118 @@ class SmokeSyncV2UnitTests(unittest.TestCase):
         self.assertEqual(key, "sync-key-one-time-public-test")
         self.assertNotIn(key, output.getvalue())
 
+    def test_named_admin_provisioning_uses_offline_compose_exec_and_returns_last_line(
+        self,
+    ) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                "Created named administrator.\n"
+                "Copy once:\n"
+                "named-admin-key-one-time-public-test\n"
+            ),
+            stderr="",
+        )
+        output = io.StringIO()
+        with mock.patch(
+            "smoke_sync_v2.subprocess.run",
+            return_value=completed,
+        ) as run, contextlib.redirect_stdout(output):
+            key = smoke_sync_v2._provision_named_admin(
+                self._args(),
+                username="sync-smoke-admin-public",
+            )
+
+        self.assertEqual(key, "named-admin-key-one-time-public-test")
+        self.assertNotIn(key, output.getvalue())
+        run.assert_called_once_with(
+            [
+                "docker",
+                "compose",
+                "-f",
+                "infra/docker-compose.yml",
+                "-f",
+                "infra/docker-compose.sync.yml",
+                "--env-file",
+                "infra/.env",
+                "-p",
+                "public-test",
+                "exec",
+                "-T",
+                "hub-api",
+                "python",
+                "-m",
+                "app.scripts.bootstrap_admin",
+                "--username",
+                "sync-smoke-admin-public",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_named_admin_provisioning_failure_does_not_disclose_captured_secret(
+        self,
+    ) -> None:
+        captured_secret = "captured-bootstrap-secret-public-test"
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=2,
+            stdout=f"unexpected output\n{captured_secret}\n",
+            stderr=f"unexpected error {captured_secret}\n",
+        )
+        with mock.patch("smoke_sync_v2.subprocess.run", return_value=completed):
+            with self.assertRaisesRegex(RuntimeError, "exit 2") as raised:
+                smoke_sync_v2._provision_named_admin(
+                    self._args(),
+                    username="sync-smoke-admin-public",
+                )
+        self.assertNotIn(captured_secret, str(raised.exception))
+
+    def test_report_access_requires_named_admin_on_hub_and_is_byte_reproducible(
+        self,
+    ) -> None:
+        shared_key = "shared-bootstrap-key-public-test"
+        named_key = "named-admin-key-public-test"
+        report_id = "report-public-test"
+        artifact = b"%PDF-1.4\npublic-test\n%%EOF\n"
+        observed: list[tuple[str, str]] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            key = request.headers.get("X-API-Key", "")
+            observed.append((request.url.path, key))
+            if request.url.path.endswith("/me"):
+                return httpx.Response(
+                    200,
+                    json={"global_scope": key == named_key},
+                    request=request,
+                )
+            if key == shared_key:
+                return httpx.Response(404, request=request)
+            return httpx.Response(200, content=artifact, request=request)
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            smoke_sync_v2._assert_hub_report_access(
+                client,
+                hub="https://hub.invalid/api/v1",
+                shared_api_key=shared_key,
+                named_admin_key=named_key,
+                report_id=report_id,
+                expected_artifact=artifact,
+            )
+
+        self.assertEqual(
+            observed,
+            [
+                ("/api/v1/me", shared_key),
+                (f"/api/v1/reports/{report_id}/download", shared_key),
+                ("/api/v1/me", named_key),
+                (f"/api/v1/reports/{report_id}/download", named_key),
+                (f"/api/v1/reports/{report_id}/download", named_key),
+            ],
+        )
+
     def test_receipt_assertion_requires_complete_contract(self) -> None:
         response = httpx.Response(
             200,

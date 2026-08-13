@@ -15,6 +15,7 @@ from openpyxl.styles import Font, PatternFill
 from smart_commissioning_core.db.repositories import ImportRepository
 from smart_commissioning_core.dbo_units import KNOWN_CANONICAL_UNITS, canonical_unit
 from smart_commissioning_core.engines.comparison_common import parse_tolerance
+from smart_commissioning_core.run_context import canonical_sha256
 from sqlalchemy.engine import Engine
 
 from app.core.db import get_engine
@@ -106,6 +107,25 @@ def _validate_numeric(row: dict[str, str], row_number: int, field: str) -> list[
         return []
     if not value.isdigit():
         return [ImportErrorRecord(row_number=row_number, field=field, code="invalid_numeric", message=f"{field} must be numeric.")]
+    return []
+
+
+def _validate_internetwork_id(
+    row: dict[str, str], row_number: int, field: str
+) -> list[ImportErrorRecord]:
+    """Validate the optional site-local BACnet identity namespace."""
+    value = row.get(field, "").strip()
+    if not value:
+        return []
+    if len(value) > 255 or not value.isprintable():
+        return [
+            ImportErrorRecord(
+                row_number=row_number,
+                field=field,
+                code="invalid_internetwork_id",
+                message=f"{field} must contain at most 255 printable characters.",
+            )
+        ]
     return []
 
 
@@ -529,11 +549,16 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "BACnet network",
             "IP address",
         ),
+        # Optional for v0.1.40 files. New templates stamp the same site-local
+        # identity configured under BACnet Discovery so device instances remain
+        # unambiguous when a project contains more than one internetwork.
+        optional_columns=("Internetwork ID",),
         duplicate_key_fields=("Asset ID", "BACnet device instance"),
         extra_checks=(
             _field_check("IP address", _validate_ip),
             _field_check("BACnet device instance", _validate_numeric),
             _field_check("BACnet network", _validate_numeric),
+            _field_check("Internetwork ID", _validate_internetwork_id),
         ),
     ),
     "mqtt_register": ImportProfile(
@@ -612,12 +637,16 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Expected value type",
             "Required/optional flag",
         ),
+        # Optional for historical point manifests; the discovery contract binds
+        # a missing value to the selected site's approved internetwork ID.
+        optional_columns=("Internetwork ID",),
         duplicate_key_fields=("Asset ID", "Object instance", "Expected point name"),
         extra_checks=(
             _field_check("Device instance", _validate_numeric),
             _field_check("BACnet network", _validate_numeric),
             _field_check("Object instance", _validate_numeric),
             _field_check("Expected units", _validate_units),
+            _field_check("Internetwork ID", _validate_internetwork_id),
         ),
     ),
     "mqtt_points": ImportProfile(
@@ -694,6 +723,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "BACnet device instance": "2001117",
         "BACnet network": "2001",
         "IP address": "192.0.2.117",
+        "Internetwork ID": "primary",
     },
     "mqtt_register": {
         "Project/site": "Example Site / Plant Room",
@@ -740,6 +770,7 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "Expected units": "degrees-celsius",
         "Expected value type": "number",
         "Required/optional flag": "required",
+        "Internetwork ID": "primary",
     },
     "mqtt_points": {
         "Asset ID": "AHU-L03-017",
@@ -942,6 +973,8 @@ class ImportService:
         # content digest beside the frozen row snapshot so every validation run
         # and report can prove which bytes supplied the expected schedule.
         stored_summary["file_sha256"] = hashlib.sha256(file_bytes).hexdigest()
+        stored_summary["accepted_rows_sha256"] = canonical_sha256(accepted_rows)
+        stored_summary["authority_schema_version"] = "1.0"
 
         self._repository.create(
             import_id=import_id,

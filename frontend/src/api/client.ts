@@ -26,10 +26,17 @@ export function roleAtLeast(role: Role | string | undefined, minimum: Role): boo
 
 // GET /api/v1/me — the current principal. source distinguishes a per-user key
 // from the bootstrap shared/local admin.
+export type EffectiveScope = {
+  project_id: string;
+  site_id: string;
+};
+
 export type MeResponse = {
   username: string;
   role: Role;
   source: "user_key" | "shared_key" | "local";
+  global_scope: boolean;
+  effective_scopes: EffectiveScope[];
 };
 
 // A user as returned by the admin /users endpoints (never includes key material).
@@ -47,6 +54,30 @@ export type UserRecord = {
 export type CreateUserResponse = {
   user: UserRecord;
   api_key: string;
+};
+
+export type ScopeGrantRecord = {
+  grant_id: string;
+  user_id: string;
+  project_id: string;
+  site_id: string;
+  active: boolean;
+  granted_by: string;
+  reason: string;
+  granted_at: string;
+  revoked_by: string | null;
+  revoke_reason: string | null;
+  revoked_at: string | null;
+};
+
+export type ScopeActivationPreflight = {
+  ready: boolean;
+  active_named_admin_count: number;
+  unscoped_active_non_admin_users: Array<{
+    id: string;
+    username: string;
+    role: Role;
+  }>;
 };
 
 export type ConfigurationSection = {
@@ -908,6 +939,63 @@ export function updateUserRole(
     headers: { "Content-Type": "application/json" },
     method: "POST",
   }, context);
+}
+
+export function getScopeActivationPreflight(
+  context?: ApiRequestContext,
+): Promise<ScopeActivationPreflight> {
+  return request<ScopeActivationPreflight>("/users/scope-activation-preflight", undefined, context);
+}
+
+export function listUserScopeGrants(
+  userId: string,
+  input: { includeRevoked?: boolean; context?: ApiRequestContext } = {},
+): Promise<ScopeGrantRecord[]> {
+  const query = input.includeRevoked ? "?include_revoked=true" : "";
+  return request<ScopeGrantRecord[]>(
+    `/users/${encodeURIComponent(userId)}/scope-grants${query}`,
+    undefined,
+    input.context,
+  );
+}
+
+export function createUserScopeGrant(input: {
+  userId: string;
+  projectId: string;
+  siteId: string;
+  reason: string;
+  context?: ApiRequestContext;
+}): Promise<ScopeGrantRecord> {
+  return request<ScopeGrantRecord>(
+    `/users/${encodeURIComponent(input.userId)}/scope-grants`,
+    {
+      body: JSON.stringify({
+        project_id: input.projectId,
+        reason: input.reason,
+        site_id: input.siteId,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function revokeUserScopeGrant(input: {
+  userId: string;
+  grantId: string;
+  reason: string;
+  context?: ApiRequestContext;
+}): Promise<ScopeGrantRecord> {
+  return request<ScopeGrantRecord>(
+    `/users/${encodeURIComponent(input.userId)}/scope-grants/${encodeURIComponent(input.grantId)}/revoke`,
+    {
+      body: JSON.stringify({ reason: input.reason }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function getConfiguration(context?: ApiRequestContext): Promise<ConfigurationSnapshot> {

@@ -16,7 +16,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import httpx
 from app.schemas.jobs import ReportRequest
-from app.services.report_artifacts import REPORT_RENDERER_VERSION
+from app.services.report_artifacts import (
+    ARTIFACT_MANIFEST_SCHEMA_VERSION,
+    REPORT_RENDERER_VERSION,
+)
 from app.services.report_artifacts import canonical_json_bytes as artifact_json_bytes
 from app.services.run_service import RunService
 from smart_commissioning_core import __version__ as APPLICATION_VERSION
@@ -95,6 +98,76 @@ def _provision_credential(
     return raw_key
 
 
+def _provision_named_admin(
+    args: argparse.Namespace,
+    *,
+    username: str,
+) -> str:
+    command = [
+        *_compose_prefix(args),
+        "exec",
+        "-T",
+        args.hub_service,
+        "python",
+        "-m",
+        "app.scripts.bootstrap_admin",
+        "--username",
+        username,
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Hub named-admin provisioning failed with exit {completed.returncode}."
+        )
+    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    raw_key = lines[-1] if lines else ""
+    if len(raw_key) < 16:
+        raise RuntimeError("Hub named-admin provisioning returned no one-time key.")
+    return raw_key
+
+
+def _assert_hub_report_access(
+    client: httpx.Client,
+    *,
+    hub: str,
+    shared_api_key: str,
+    named_admin_key: str,
+    report_id: str,
+    expected_artifact: bytes,
+) -> None:
+    shared_headers = {"X-API-Key": shared_api_key}
+    shared_me = client.get(f"{hub}/me", headers=shared_headers)
+    shared_me.raise_for_status()
+    if shared_me.json().get("global_scope") is not False:
+        raise RuntimeError("Hub shared key unexpectedly has global scope.")
+
+    concealed = client.get(
+        f"{hub}/reports/{report_id}/download",
+        headers=shared_headers,
+    )
+    if concealed.status_code != 404:
+        raise RuntimeError("Hub shared key did not receive the required report 404.")
+
+    named_headers = {"X-API-Key": named_admin_key}
+    named_me = client.get(f"{hub}/me", headers=named_headers)
+    named_me.raise_for_status()
+    if named_me.json().get("global_scope") is not True:
+        raise RuntimeError("Hub named administrator has no global scope.")
+
+    first = client.get(
+        f"{hub}/reports/{report_id}/download",
+        headers=named_headers,
+    )
+    second = client.get(
+        f"{hub}/reports/{report_id}/download",
+        headers=named_headers,
+    )
+    first.raise_for_status()
+    second.raise_for_status()
+    if first.content != expected_artifact or second.content != expected_artifact:
+        raise RuntimeError("Hub report download is not the exact edge artifact.")
+
+
 class EdgeFixture:
     def __init__(self, root: Path) -> None:
         database_root = root / "edge"
@@ -129,13 +202,14 @@ class EdgeFixture:
             )
         artifact = f"%PDF-1.4\npublic hosted sync smoke {marker}\n%%EOF\n".encode()
         unsigned = {
-            "schema_version": "1.0",
+            "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
             "report_id": run.run_id,
             "snapshot_sha256": run.parameters["report_snapshot_sha256"],
             "file_name": f"sync-smoke-{marker}.pdf",
             "media_type": "application/pdf",
             "byte_size": len(artifact),
             "renderer_version": REPORT_RENDERER_VERSION,
+            "evidence_set_id": run.parameters["evidence_set_id"],
             "artifact_sha256": sha256_bytes(artifact),
             "artifact_relpath": f"edge-{marker}.pdf",
             "origin": self.identity.edge_id,
@@ -323,6 +397,13 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="sync-v2-hosted-") as temp_dir:
         edge = EdgeFixture(Path(temp_dir))
         try:
+            named_admin_key = _provision_named_admin(
+                args,
+                username=(
+                    "sync-v2-smoke-admin-"
+                    f"{edge.bundle_key.public_key_fingerprint()[:12]}"
+                ),
+            )
             sync_key = _provision_credential(
                 args,
                 edge_id=edge.identity.edge_id,
@@ -369,13 +450,14 @@ def main(argv: list[str] | None = None) -> int:
                 if sync_key in retry.text or sentinel in retry.text:
                     raise RuntimeError("Secret material crossed the Sync v2 receipt boundary.")
 
-                download_headers = {"X-API-Key": args.api_key}
-                one = client.get(f"{hub}/reports/{primary}/download", headers=download_headers)
-                two = client.get(f"{hub}/reports/{primary}/download", headers=download_headers)
-                one.raise_for_status()
-                two.raise_for_status()
-                if one.content != edge.artifacts[primary] or one.content != two.content:
-                    raise RuntimeError("Hub report download is not the exact edge artifact.")
+                _assert_hub_report_access(
+                    client,
+                    hub=hub,
+                    shared_api_key=args.api_key,
+                    named_admin_key=named_admin_key,
+                    report_id=primary,
+                    expected_artifact=edge.artifacts[primary],
+                )
 
                 conflict_bundle = _conflict_bundle(primary_bundle, edge.bundle_key)
                 conflict = client.post(
@@ -437,6 +519,8 @@ def main(argv: list[str] | None = None) -> int:
                 "credential_scope": "passed",
                 "mixed_receipts": "passed",
                 "secret_boundary": "passed",
+                "shared_key_scope_boundary": "passed",
+                "named_admin_report_access": "passed",
             },
             sort_keys=True,
         )

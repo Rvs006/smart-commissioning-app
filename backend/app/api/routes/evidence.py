@@ -22,17 +22,22 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.rbac import Role
 
-from app.api.routes.reports import _build_report_artifact, _to_report_summary
-from app.core.auth import require_role
+from app.api.routes.reports import _report_artifact_for_serving, _to_report_summary
+from app.core.auth import AuthPrincipal, get_principal, require_role
+from app.core.config import get_settings
 from app.core.runtime import ARTIFACTS_ROOT, IMPORT_FILES_ROOT, REPORT_SIGNING_ROOT, SECRETS_ROOT
-from app.services.backup_service import BackupError, BackupSources, create_backup_bundle
+from app.core.scopes import load_scoped_report, require_global_admin
+from app.services.backup_service import (
+    BackupError,
+    BackupSources,
+    create_backup_bundle,
+    encrypt_backup_bundle,
+)
 from app.services.report_artifacts import (
-    load_content_addressed_artifact,
-    load_report_artifact,
+    ReportArtifactIntegrityError,
     verify_signed_manifest,
 )
 from app.services.reports_integrity import (
@@ -51,8 +56,6 @@ service = RunService()
 # bundle and previewing retention are engineer+; APPLYING retention is a
 # destructive purge reserved for admin.
 require_viewer = require_role(Role.VIEWER)
-require_engineer = require_role(Role.ENGINEER)
-require_admin = require_role(Role.ADMIN)
 
 
 class ReportVerifyResponse(BaseModel):
@@ -69,12 +72,19 @@ class ReportVerifyResponse(BaseModel):
     computed_hash: str
 
 
+class BackupRequest(BaseModel):
+    recipient_public_key_pem: str | None = Field(default=None, max_length=16_384)
+
+
 @router.get(
     "/reports/{report_id}/verify",
     response_model=ReportVerifyResponse,
     dependencies=[Depends(require_viewer)],
 )
-def verify_report(report_id: str) -> ReportVerifyResponse:
+def verify_report(
+    report_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ReportVerifyResponse:
     """Recompute the report artifact hash and verify its stored signature.
 
     The artifact is regenerated deterministically from the persisted run record
@@ -83,36 +93,25 @@ def verify_report(report_id: str) -> ReportVerifyResponse:
     generation time. If the report was never downloaded/generated there is no
     integrity record yet -> 404.
     """
+    load_scoped_report(report_id, principal, engine=service.engine)
     try:
-        run = service.get_run(report_id)
-    except FileNotFoundError as error:
+        run = service.get_report_for_serving(report_id)
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.") from error
     if run.job_type != "report_generation":
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.")
 
-    metadata = run.result_summary.get(INTEGRITY_KEY) if isinstance(run.result_summary, dict) else None
-    manifest = (
-        run.result_summary.get("artifact_manifest")
-        if isinstance(run.result_summary, dict)
-        else None
-    )
-    if isinstance(manifest, dict):
-        try:
-            synced = SyncV2Repository(service.engine).get_artifact(report_id)
-            if synced is not None:
-                if synced["manifest"] != manifest:
-                    raise RuntimeError(
-                        "Synchronized artifact manifest conflicts with sealed evidence."
-                    )
-                artifact = load_content_addressed_artifact(
-                    str(synced["storage_relpath"]),
-                    expected_hash=str(synced["artifact_sha256"]),
-                    expected_size=int(synced["byte_size"]),
-                )
-            else:
-                artifact = load_report_artifact(manifest)
-        except (FileNotFoundError, RuntimeError) as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+    report = _to_report_summary(run)
+    try:
+        artifact, _media_type, manifest = _report_artifact_for_serving(
+            run,
+            report.output_format,
+            require_valid_signature=False,
+        )
+    except ReportArtifactIntegrityError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    if manifest is not None:
         computed_hash = sha256_bytes(artifact)
         stored_hash = manifest.get("artifact_sha256")
         stored_key_id = manifest.get("signing_key_id")
@@ -134,14 +133,14 @@ def verify_report(report_id: str) -> ReportVerifyResponse:
             stored_hash=stored_hash if isinstance(stored_hash, str) else None,
             computed_hash=computed_hash,
         )
+
+    metadata = run.result_summary.get(INTEGRITY_KEY) if isinstance(run.result_summary, dict) else None
     if not isinstance(metadata, dict):
         raise HTTPException(
             status_code=404,
             detail=f"Report '{report_id}' has no integrity record; generate/download it first.",
         )
 
-    report = _to_report_summary(report_id)
-    artifact, _ = _build_report_artifact(run, report.output_format)
     outcome = verify_artifact(artifact, metadata)
 
     fingerprint = outcome.get("public_key_fingerprint")
@@ -162,14 +161,32 @@ def verify_report(report_id: str) -> ReportVerifyResponse:
     )
 
 
-@router.post("/backup", dependencies=[Depends(require_engineer)])
-def create_backup() -> Response:
+@router.post("/backup")
+def create_backup(
+    request: BackupRequest | None = None,
+    principal: AuthPrincipal = Depends(require_global_admin),
+) -> Response:
     """Build a signed backup bundle and return it as a download.
 
     Destructive-adjacent but read-only on the source: it snapshots the SQLite DB
     (online backup API), the secrets dir, and import files. Auth is enforced by
     the parent protected router.
     """
+    recipient_public_key_pem = (
+        str(request.recipient_public_key_pem or "").strip() if request is not None else ""
+    )
+    encryption_required = (
+        principal.source == "user_key" or get_settings().deployment_role != "standalone"
+    )
+    if encryption_required and not recipient_public_key_pem:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Whole-runtime backup download requires a recipient RSA public key "
+                "for named-user, edge, and hub deployments."
+            ),
+        )
+
     sources = BackupSources(
         database_url=service.engine.url.render_as_string(hide_password=False),
         secrets_root=SECRETS_ROOT,
@@ -184,13 +201,23 @@ def create_backup() -> Response:
             created_at=created_at,
             signing_key=load_signing_key(),
         )
+        if recipient_public_key_pem:
+            bundle = encrypt_backup_bundle(bundle, recipient_public_key_pem)
     except BackupError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    file_name = f"smart_commissioning_backup_{created_at.strftime('%Y%m%dT%H%M%SZ')}.zip"
+    encrypted = bool(recipient_public_key_pem)
+    suffix = "scbackup" if encrypted else "zip"
+    file_name = (
+        f"smart_commissioning_backup_{created_at.strftime('%Y%m%dT%H%M%SZ')}.{suffix}"
+    )
     return Response(
         content=bundle,
-        media_type="application/zip",
+        media_type=(
+            "application/vnd.smart-commissioning.backup+json"
+            if encrypted
+            else "application/zip"
+        ),
         headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
     )
 
@@ -207,16 +234,22 @@ class RetentionApplyRequest(RetentionPreviewRequest):
     )
 
 
-@router.post("/retention/preview", dependencies=[Depends(require_engineer)])
-def retention_preview(request: RetentionPreviewRequest) -> dict[str, object]:
+@router.post("/retention/preview")
+def retention_preview(
+    request: RetentionPreviewRequest,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
     """DRY-RUN: report runs that WOULD be purged under the policy. Deletes nothing."""
     cutoff = cutoff_from_keep_days(request.keep_days)
     result = RetentionService(service.engine).preview(before=cutoff)
     return result.as_dict()
 
 
-@router.post("/retention/apply", dependencies=[Depends(require_admin)])
-def retention_apply(request: RetentionApplyRequest) -> dict[str, object]:
+@router.post("/retention/apply")
+def retention_apply(
+    request: RetentionApplyRequest,
+    _principal: AuthPrincipal = Depends(require_global_admin),
+) -> dict[str, object]:
     """Destructive purge of eligible (non-evidence) runs older than the cutoff.
 
     Requires both ``confirm=true`` and ``acknowledge="DELETE"``; the service

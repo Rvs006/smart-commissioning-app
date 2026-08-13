@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
@@ -7,13 +8,46 @@ from smart_commissioning_core.db.db_run_store import (
     DbRunStore,
 )
 from smart_commissioning_core.db.engine import session_factory
-from smart_commissioning_core.db.models import Run, RunResult, RunSeal
-from smart_commissioning_core.db.repositories import DiscoveryRepository
+from smart_commissioning_core.db.models import (
+    ActiveProtocolSlot,
+    DiscoveredDevice,
+    DiscoveredPoint,
+    DiscoveredTopic,
+    ReportEvidenceContract,
+    Run,
+    RunDispatch,
+    RunExecutionContext,
+    RunIssue,
+    RunLifecycleConflict,
+    RunLink,
+    RunResult,
+    RunSeal,
+    ScanAuthorization,
+    SyncArtifact,
+    SyncDeliveryState,
+    SyncReceipt,
+)
+from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+from smart_commissioning_core.execution_context import (
+    ExecutionContextIntegrityError,
+    scan_authority_bindings,
+    verify_bound_import_rows,
+)
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.owned_run_store import OwnedRunStore
+from smart_commissioning_core.run_context import RunContextV1
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
-from sqlalchemy import func, select, text, update
+from smart_commissioning_core.sealed_run_integrity import (
+    SealedRunIntegrityError,
+    VerifiedLegacyReportEvidence,
+    VerifiedReportEvidence,
+    VerifiedSealedRun,
+    verify_legacy_report_evidence_run,
+    verify_report_evidence_run,
+    verify_sealed_run,
+)
+from sqlalchemy import and_, false, func, or_, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -47,6 +81,46 @@ from app.services.validation_export import build_validation_export
 
 logger = logging.getLogger(__name__)
 
+ScopePairs = set[tuple[str, str]] | None
+
+
+def _limit_statement_to_scopes(statement, scope_pairs: ScopePairs):
+    """Apply an exact project/site allow-list; ``None`` means global access."""
+    if scope_pairs is None:
+        return statement
+    if not scope_pairs:
+        return statement.where(false())
+    return statement.where(
+        or_(
+            *(and_(Run.project_id == project_id, Run.site_id == site_id) for project_id, site_id in sorted(scope_pairs))
+        )
+    )
+
+
+def _limit_report_contract_to_scopes(statement, scope_pairs: ScopePairs):
+    """Apply list scope against immutable report-contract ownership."""
+
+    if scope_pairs is None:
+        return statement
+    if not scope_pairs:
+        return statement.where(false())
+    return statement.where(
+        or_(
+            *(
+                and_(
+                    ReportEvidenceContract.project_id == project_id,
+                    ReportEvidenceContract.site_id == site_id,
+                )
+                for project_id, site_id in sorted(scope_pairs)
+            )
+        )
+    )
+
+
+class ReportListIntegrityError(RuntimeError):
+    """A selected report page contains evidence that no longer verifies."""
+
+
 DISCOVERY_JOB_TYPES: set[JobType] = {"ip_discovery", "bacnet_discovery", "mqtt_discovery"}
 VALIDATION_JOB_TYPES: set[JobType] = {
     "udmi_validation",
@@ -79,8 +153,105 @@ def _build_evidence_set_id(
         "report_scope": report_scope,
     }
     return f"evidence_{snapshot_sha256(identity)[:24]}"
+
+
 _DEFAULT_UDMI_REPORT_TITLE = "UDMI Validation Report"
 _TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def _project_verified_report_record(
+    run: RunRecord,
+    verified: VerifiedReportEvidence | VerifiedLegacyReportEvidence | None,
+) -> RunRecord:
+    """Project a report only from the evidence contract that verified it."""
+
+    if run.job_type != "report_generation":
+        raise FileNotFoundError(run.run_id)
+    if isinstance(verified, VerifiedLegacyReportEvidence):
+        return run.model_copy(
+            update={
+                "project_id": verified.project_id,
+                "site_id": verified.site_id,
+                "parameters": dict(verified.parameters),
+            }
+        )
+    if not isinstance(verified, VerifiedReportEvidence):
+        raise ValueError(f"Run '{run.run_id}' is not sealed report evidence.")
+    sealed_summary = dict(verified.terminal_result.summary)
+    if not isinstance(sealed_summary.get("artifact_manifest"), Mapping):
+        raise ValueError(f"Report '{run.run_id}' has no sealed artifact manifest.")
+    project_id = verified.snapshot.get("project_id")
+    site_id = verified.snapshot.get("site_id")
+    if not isinstance(project_id, str) or not isinstance(site_id, str):
+        raise ValueError(f"Report '{run.run_id}' has no sealed scope.")
+    metadata = verified.snapshot.get("report_metadata")
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"Report '{run.run_id}' has no sealed metadata.")
+    sealed_parameters: dict[str, object] = {
+        "report_snapshot_v2": dict(verified.snapshot),
+        "report_snapshot_sha256": verified.seal.context_sha256,
+    }
+    for field in (
+        "output_format",
+        "report_type",
+        "source_run_ids",
+        "renderer_version",
+        "evidence_set_id",
+        "source_run_snapshots",
+        "source_run_seals",
+        "source_discovery_snapshots",
+        "udmi_scope",
+        "udmi_report_snapshot",
+    ):
+        if field in verified.snapshot:
+            sealed_parameters[field] = verified.snapshot[field]
+    for field in (
+        "report_title_custom",
+        "report_title",
+        "report_generated_at",
+        "udmi_report_variant",
+    ):
+        if field in metadata:
+            sealed_parameters[field] = metadata[field]
+    return run.model_copy(
+        update={
+            "project_id": project_id,
+            "site_id": site_id,
+            "parameters": sealed_parameters,
+            "result_summary": sealed_summary,
+        }
+    )
+
+
+def _report_record_from_row(run: Run, issues: list[RunIssue]) -> RunRecord:
+    """Build the ordinary RunRecord projection without a lazy relationship query."""
+
+    return RunRecord.model_validate(
+        {
+            "run_id": run.id,
+            "project_id": run.project_id,
+            "site_id": run.site_id,
+            "job_type": run.job_type,
+            "status": run.status,
+            "stage": run.stage,
+            "progress_percent": run.progress_percent,
+            "created_at": run.created_at,
+            "updated_at": run.updated_at,
+            "edge_id": run.edge_id,
+            "parameters": dict(run.parameters) if isinstance(run.parameters, Mapping) else {},
+            "result_summary": (
+                dict(run.result_summary) if isinstance(run.result_summary, Mapping) else {}
+            ),
+            "issues": [
+                {
+                    field: getattr(issue, field)
+                    for field in ValidationIssueRecord.model_fields
+                }
+                for issue in issues
+            ],
+            "error_message": run.error_message,
+        }
+    )
 
 # Operator-facing message stamped on a run the startup sweep found fossilized at
 # "running" (see RunService.sweep_interrupted_runs). Credential-free and generic
@@ -136,9 +307,7 @@ def _worker_run_is_stale(
         return False
     observed = updated_at if updated_at.tzinfo is not None else updated_at.replace(tzinfo=UTC)
     current = now or datetime.now(UTC)
-    threshold = (
-        _QUEUED_WORKER_STALE_AFTER if status == "queued" else _RUNNING_WORKER_STALE_AFTER
-    )
+    threshold = _QUEUED_WORKER_STALE_AFTER if status == "queued" else _RUNNING_WORKER_STALE_AFTER
     return current - observed.astimezone(UTC) > threshold
 
 
@@ -193,6 +362,8 @@ class RunService:
             context=context,
             execution_mode=get_settings().job_execution_mode,
             edge_id=edge_identity().edge_id,
+            authorization_id=request.scan_authorization_id,
+            preview_run_id=request.preview_run_id,
         )
         logger.info("run created run_id=%s job_type=%s", envelope.run_id, expected_job_type)
         return self.get_run(envelope.run_id)
@@ -203,9 +374,7 @@ class RunService:
     def get_execution_context(self, run_id: str):
         return self._lifecycle.get_context(run_id)
 
-    def claim_owned_run(
-        self, run_id: str, *, lease_seconds: int = 60
-    ) -> OwnedRunStore | None:
+    def claim_owned_run(self, run_id: str, *, lease_seconds: int = 60) -> OwnedRunStore | None:
         dispatch = self._lifecycle.get_dispatch_for_run(run_id)
         lease = self._lifecycle.claim_run(
             run_id,
@@ -219,6 +388,167 @@ class RunService:
 
     def list_pending_dispatches(self):
         return self._lifecycle.list_pending_dispatches()
+
+    def _verify_scan_authorities_for_report(self, context: RunContextV1) -> None:
+        """Reject evidence built from authority rows changed after preview."""
+
+        repository = ImportRepository(self._engine)
+        for import_id in scan_authority_bindings(context):
+            try:
+                record = repository.get(import_id)
+            except FileNotFoundError as error:
+                raise ValueError(f"Scan authority import '{import_id}' is no longer available.") from error
+            rows = record.get("accepted_rows")
+            if not isinstance(rows, list):
+                raise ValueError(f"Scan authority import '{import_id}' has invalid accepted rows.")
+            try:
+                verify_bound_import_rows(context, import_id, rows)
+            except ExecutionContextIntegrityError as error:
+                raise ValueError(f"Scan authority import '{import_id}' failed integrity verification.") from error
+
+    def _verify_report_source_seal(
+        self,
+        run_id: str,
+    ) -> VerifiedSealedRun | VerifiedReportEvidence | VerifiedLegacyReportEvidence | None:
+        """Verify one source before any report evidence is frozen."""
+
+        with session_factory(self._engine)() as session:
+            run = session.get(Run, run_id)
+            if run is None:
+                raise FileNotFoundError(run_id)
+            context = session.get(RunExecutionContext, run_id)
+            result = session.get(RunResult, run_id)
+            seal = session.get(RunSeal, run_id)
+            contract = session.get(ReportEvidenceContract, run_id)
+            sync_artifact = session.get(SyncArtifact, run_id)
+            has_dispatch = (
+                session.scalar(select(RunDispatch.dispatch_id).where(RunDispatch.run_id == run_id).limit(1)) is not None
+            )
+            projection_rows = {
+                "issues": session.scalars(
+                    select(RunIssue).where(RunIssue.run_id == run_id).order_by(RunIssue.position, RunIssue.id)
+                ).all(),
+                "devices": session.scalars(
+                    select(DiscoveredDevice)
+                    .where(DiscoveredDevice.run_id == run_id)
+                    .order_by(DiscoveredDevice.position, DiscoveredDevice.id)
+                ).all(),
+                "points": session.scalars(
+                    select(DiscoveredPoint)
+                    .where(DiscoveredPoint.run_id == run_id)
+                    .order_by(DiscoveredPoint.position, DiscoveredPoint.id)
+                ).all(),
+                "topics": session.scalars(
+                    select(DiscoveredTopic)
+                    .where(DiscoveredTopic.run_id == run_id)
+                    .order_by(DiscoveredTopic.position, DiscoveredTopic.id)
+                ).all(),
+            }
+            run_projection = {
+                "job_type": run.job_type,
+                "project_id": run.project_id,
+                "site_id": run.site_id,
+                "parameters": run.parameters,
+                "status": run.status,
+                "stage": run.stage,
+                "result_summary": run.result_summary,
+                "error_message": run.error_message,
+                "result_sha256": run.result_sha256,
+                "terminal_at": run.terminal_at,
+                "owner_token": run.owner_token,
+                "attempt": run.attempt,
+                "claimed_at": run.claimed_at,
+                "heartbeat_at": run.heartbeat_at,
+                "lease_expires_at": run.lease_expires_at,
+                "state_version": run.state_version,
+                "execution_mode": run.execution_mode,
+                "created_at": run.created_at,
+                "updated_at": run.updated_at,
+                "modern_lifecycle_component_present": has_dispatch,
+                "sync_artifact_present": sync_artifact is not None,
+                "sync_artifact_manifest": (
+                    dict(sync_artifact.manifest_json)
+                    if sync_artifact is not None
+                    else None
+                ),
+            }
+            if run.job_type == "report_generation":
+                contract_version = contract.contract_version if contract is not None else None
+                if contract_version == "sealed_v1":
+                    verifier = verify_report_evidence_run
+                elif contract_version == "legacy_pre_lifecycle":
+                    verifier = verify_legacy_report_evidence_run
+                else:
+                    raise ValueError(
+                        f"Source report '{run_id}' has no recognized evidence contract."
+                    )
+            else:
+                verifier = verify_sealed_run
+            try:
+                return verifier(
+                    run_id=run_id,
+                    run=run_projection,
+                    context=(
+                        {
+                            "context_json": context.context_json,
+                            "context_sha256": context.context_sha256,
+                        }
+                        if context is not None
+                        else None
+                    ),
+                    result=(
+                        {
+                            "schema_version": result.schema_version,
+                            "terminal_status": result.terminal_status,
+                            "terminal_stage": result.terminal_stage,
+                            "summary": result.summary,
+                            "result_payload": result.result_payload,
+                            "result_sha256": result.result_sha256,
+                        }
+                        if result is not None
+                        else None
+                    ),
+                    seal=(
+                        {
+                            "terminal_status": seal.terminal_status,
+                            "context_sha256": seal.context_sha256,
+                            "result_sha256": seal.result_sha256,
+                            "sealed_at": seal.sealed_at,
+                        }
+                        if seal is not None
+                        else None
+                    ),
+                    **{label: [dict(row.__dict__) for row in rows] for label, rows in projection_rows.items()},
+                )
+            except SealedRunIntegrityError as error:
+                if run.job_type == "report_generation":
+                    raise ValueError(
+                        f"Source report '{run_id}' failed sealed evidence integrity verification: {error}"
+                    ) from error
+                if error.component == "context":
+                    raise ValueError(
+                        f"Source run '{run_id}' execution context failed integrity verification: {error}"
+                    ) from error
+                if error.component == "lifecycle":
+                    raise ValueError(
+                        f"Source run '{run_id}' is terminal but unsealed. "
+                        "Recover or rerun it before generating evidence."
+                    ) from error
+                raise ValueError(
+                    f"Source run '{run_id}' sealed result failed integrity verification: {error}"
+                ) from error
+
+    def get_report_for_serving(self, run_id: str) -> RunRecord:
+        """Return a report whose summary is sourced from verified sealed evidence.
+
+        Every report is dispatched by its immutable evidence contract. Sealed
+        reports return only their terminal summary; explicitly classified f6
+        historical reports retain deterministic regeneration compatibility.
+        """
+
+        verified = self._verify_report_source_seal(run_id)
+        run = self.get_run(run_id)
+        return _project_verified_report_record(run, verified)
 
     def recover_expired_leases(self) -> list[str]:
         return self._lifecycle.recover_expired_leases()
@@ -249,37 +579,23 @@ class RunService:
             # finalizer has committed a terminal result and immutable seal.
             # Pre-v0.1.26 rows have no execution-context row and remain readable
             # for backward-compatible historical reporting.
-            try:
-                context = self._lifecycle.get_context(source_run_id)
-            except FileNotFoundError:
-                context = None
-            if context is not None:
-                try:
-                    seal = self._lifecycle.get_seal(source_run_id)
-                except FileNotFoundError as error:
-                    raise ValueError(
-                        f"Source run '{source_run_id}' is terminal but unsealed. "
-                        "Recover or rerun it before generating evidence."
-                    ) from error
-                if seal.terminal_status != source.status:
-                    raise ValueError(
-                        f"Source run '{source_run_id}' has inconsistent terminal metadata."
-                    )
-                source_seals[source_run_id] = seal.model_dump(mode="json")
-                captured = context.context
-                source_context_provenance[source_run_id] = {
-                    "context_sha256": context.context_sha256,
-                    "configuration_version": captured.configuration_version,
-                    "configuration_sha256": sha256_bytes(
-                        canonical_json_bytes(captured.configuration_snapshot)
-                    ),
-                    "schema_versions": dict(captured.schema_versions),
-                    "credential_version_ids": sorted(
-                        f"{location}:{reference.version}"
-                        for location, reference in captured.secret_references.items()
-                    ),
-                    "application_version": captured.application_version,
-                }
+            verified = self._verify_report_source_seal(source_run_id)
+            if verified is not None:
+                source_seals[source_run_id] = verified.seal.model_dump(mode="json")
+                if isinstance(verified, VerifiedSealedRun):
+                    captured = verified.context
+                    self._verify_scan_authorities_for_report(captured)
+                    source_context_provenance[source_run_id] = {
+                        "context_sha256": verified.seal.context_sha256,
+                        "configuration_version": captured.configuration_version,
+                        "configuration_sha256": sha256_bytes(canonical_json_bytes(captured.configuration_snapshot)),
+                        "schema_versions": dict(captured.schema_versions),
+                        "credential_version_ids": sorted(
+                            f"{location}:{reference.version}"
+                            for location, reference in captured.secret_references.items()
+                        ),
+                        "application_version": captured.application_version,
+                    }
             if request.report_type == "udmi_validation":
                 if source.job_type != "udmi_validation":
                     raise ValueError(
@@ -298,11 +614,7 @@ class RunService:
             # existing downloadable artifact.
             "report_title_custom": custom_report_title,
             "report_title": request.report_title
-            or (
-                _DEFAULT_UDMI_REPORT_TITLE
-                if request.report_type == "udmi_validation"
-                else _DEFAULT_REPORT_TITLE
-            ),
+            or (_DEFAULT_UDMI_REPORT_TITLE if request.report_type == "udmi_validation" else _DEFAULT_REPORT_TITLE),
             "report_generated_at": datetime.now(UTC).isoformat(),
             "renderer_version": REPORT_RENDERER_VERSION,
             "udmi_report_variant": request.udmi_report_variant,
@@ -329,10 +641,7 @@ class RunService:
                 source_context_provenance=source_context_provenance,
             )
             parameters["udmi_report_snapshot"] = report_snapshot
-        source_snapshots = [
-            self._safe_report_value(source.model_dump(mode="json"))
-            for source in snapshot_sources
-        ]
+        source_snapshots = [self._safe_report_value(source.model_dump(mode="json")) for source in snapshot_sources]
         parameters["source_run_snapshots"] = source_snapshots
         if request.report_type == "udmi_validation":
             # Renderer snapshots deliberately omit raw payload bodies. Keep a
@@ -346,25 +655,15 @@ class RunService:
                 for source in snapshot_sources
             }
         parameters["source_run_seals"] = {
-            source.run_id: source_seals[source.run_id]
-            for source in snapshot_sources
-            if source.run_id in source_seals
+            source.run_id: source_seals[source.run_id] for source in snapshot_sources if source.run_id in source_seals
         }
         discovery_snapshots = self._snapshot_discovery_rows(snapshot_sources)
         parameters["source_discovery_snapshots"] = discovery_snapshots
         raw_scope = parameters.get("udmi_scope")
-        raw_selected_payloads = (
-            raw_scope.get("selected_payloads", []) if isinstance(raw_scope, dict) else []
-        )
-        selected_payloads = (
-            raw_selected_payloads if isinstance(raw_selected_payloads, list) else []
-        )
+        raw_selected_payloads = raw_scope.get("selected_payloads", []) if isinstance(raw_scope, dict) else []
+        selected_payloads = raw_selected_payloads if isinstance(raw_selected_payloads, list) else []
         selected_assets = sorted(
-            {
-                str(row.get("asset_id"))
-                for row in selected_payloads
-                if isinstance(row, dict) and row.get("asset_id")
-            },
+            {str(row.get("asset_id")) for row in selected_payloads if isinstance(row, dict) and row.get("asset_id")},
             key=str.casefold,
         )
         source_result_hashes = {
@@ -390,9 +689,7 @@ class RunService:
         parameters["evidence_set_id"] = evidence_set_id
         if isinstance(parameters.get("udmi_report_snapshot"), dict):
             parameters["udmi_report_snapshot"]["evidence_set_id"] = evidence_set_id
-            evidence_provenance = parameters["udmi_report_snapshot"].get(
-                "evidence_provenance"
-            )
+            evidence_provenance = parameters["udmi_report_snapshot"].get("evidence_provenance")
             if isinstance(evidence_provenance, dict):
                 evidence_provenance["evidence_set_id"] = evidence_set_id
         report_snapshot_v2 = {
@@ -412,8 +709,7 @@ class RunService:
                 if source.run_id in source_context_provenance
             },
             "schema_versions": {
-                source_id: provenance["schema_versions"]
-                for source_id, provenance in source_context_provenance.items()
+                source_id: provenance["schema_versions"] for source_id, provenance in source_context_provenance.items()
             },
             "renderer_version": REPORT_RENDERER_VERSION,
             "displayed_counts": self._displayed_counts(
@@ -479,6 +775,123 @@ class RunService:
             udmi_report_variant=request.udmi_report_variant,
         )
         return run, report
+
+    def discard_unmaterialized_report_run(
+        self,
+        run_id: str,
+        *,
+        expected_snapshot_sha256: str,
+    ) -> bool:
+        """Remove only the pristine report row owned by a failed create call.
+
+        Report materialization happens synchronously after ``create_report_run``
+        commits its queued row. A renderer, signer, storage, or finalization
+        failure must restore the externally atomic POST contract. This
+        compare-and-delete refuses any row that has acquired lifecycle,
+        discovery, or synchronization state, so cleanup can never erase an
+        existing or concurrently published report. An already-absent row is
+        treated as clean: a concurrent delete may remove the database row
+        before this request removes its still-unpublished local artifact.
+        """
+
+        factory = session_factory(self._engine)
+        with factory.begin() as session:
+            row = session.scalar(select(Run).where(Run.id == run_id).with_for_update())
+            if row is None:
+                return True
+            parameters = row.parameters if isinstance(row.parameters, dict) else {}
+            result_summary = row.result_summary if isinstance(row.result_summary, dict) else {}
+            contract = session.get(ReportEvidenceContract, run_id)
+            has_attached_rows = any(
+                (
+                    session.get(RunExecutionContext, run_id) is not None,
+                    session.scalar(
+                        select(RunDispatch.dispatch_id).where(RunDispatch.run_id == run_id)
+                    )
+                    is not None,
+                    session.scalar(
+                        select(ActiveProtocolSlot.protocol_key)
+                        .where(ActiveProtocolSlot.run_id == run_id)
+                        .limit(1)
+                    )
+                    is not None,
+                    session.scalar(
+                        select(ScanAuthorization.authorization_id)
+                        .where(
+                            or_(
+                                ScanAuthorization.preview_run_id == run_id,
+                                ScanAuthorization.consumed_run_id == run_id,
+                            )
+                        )
+                        .limit(1)
+                    )
+                    is not None,
+                    session.scalar(
+                        select(RunLink.id)
+                        .where(
+                            or_(
+                                RunLink.parent_run_id == run_id,
+                                RunLink.child_run_id == run_id,
+                            )
+                        )
+                        .limit(1)
+                    )
+                    is not None,
+                    session.get(RunResult, run_id) is not None,
+                    session.get(RunSeal, run_id) is not None,
+                    session.scalar(
+                        select(RunLifecycleConflict.id)
+                        .where(RunLifecycleConflict.run_id == run_id)
+                        .limit(1)
+                    )
+                    is not None,
+                    session.get(SyncArtifact, run_id) is not None,
+                    session.get(SyncDeliveryState, run_id) is not None,
+                    session.scalar(
+                        select(SyncReceipt.id).where(SyncReceipt.run_id == run_id).limit(1)
+                    )
+                    is not None,
+                    session.scalar(select(RunIssue.id).where(RunIssue.run_id == run_id).limit(1)) is not None,
+                    session.scalar(
+                        select(DiscoveredDevice.id).where(DiscoveredDevice.run_id == run_id).limit(1)
+                    )
+                    is not None,
+                    session.scalar(
+                        select(DiscoveredPoint.id).where(DiscoveredPoint.run_id == run_id).limit(1)
+                    )
+                    is not None,
+                    session.scalar(
+                        select(DiscoveredTopic.id).where(DiscoveredTopic.run_id == run_id).limit(1)
+                    )
+                    is not None,
+                )
+            )
+            pristine = (
+                row.job_type == "report_generation"
+                and row.status == "queued"
+                and row.stage == "awaiting_worker"
+                and row.progress_percent == 0
+                and row.terminal_at is None
+                and row.result_sha256 is None
+                and row.synced_at is None
+                and row.owner_token is None
+                and row.attempt == 0
+                and row.state_version == 0
+                and not row.cancel_requested
+                and result_summary == {"queued": True, "worker_required": True}
+                and parameters.get("report_snapshot_sha256") == expected_snapshot_sha256
+                and contract is not None
+                and contract.contract_version == "sealed_v1"
+                and not has_attached_rows
+            )
+            if not pristine:
+                return False
+
+            session.delete(contract)
+            session.delete(row)
+
+        logger.info("unmaterialized report run discarded run_id=%s", run_id)
+        return True
 
     def _snapshot_discovery_rows(self, sources: list[RunRecord]) -> dict[str, object]:
         repository = DiscoveryRepository(self._engine)
@@ -581,9 +994,7 @@ class RunService:
 
         ordered_ids = list(dict.fromkeys(report_id.strip() for report_id in report_ids))
         with session_factory(self._engine).begin() as session:
-            rows = session.execute(
-                select(Run).where(Run.id.in_(ordered_ids)).with_for_update()
-            ).scalars().all()
+            rows = session.execute(select(Run).where(Run.id.in_(ordered_ids)).with_for_update()).scalars().all()
             rows_by_id = {row.id: row for row in rows}
             for report_id in ordered_ids:
                 row = rows_by_id.get(report_id)
@@ -605,6 +1016,7 @@ class RunService:
         self,
         *,
         job_types: set[JobType] | None = None,
+        scope_pairs: ScopePairs = None,
         project_id: str | None = None,
         site_id: str | None = None,
         edge_id: str | None = None,
@@ -630,30 +1042,16 @@ class RunService:
             Run.created_at,
             Run.updated_at,
             Run.edge_id,
-            Run.result_summary["validation_incomplete"].as_boolean().label(
-                "validation_incomplete"
-            ),
+            Run.result_summary["validation_incomplete"].as_boolean().label("validation_incomplete"),
             Run.result_summary["capture_mode"].as_string().label("capture_mode"),
-            Run.result_summary["capture_window_seconds"].as_float().label(
-                "capture_window_seconds"
-            ),
-            Run.result_summary["capture_started_at"].as_string().label(
-                "capture_started_at"
-            ),
+            Run.result_summary["capture_window_seconds"].as_float().label("capture_window_seconds"),
+            Run.result_summary["capture_started_at"].as_string().label("capture_started_at"),
             Run.result_summary["capture_ended_at"].as_string().label("capture_ended_at"),
-            Run.result_summary["capture_duration_seconds"].as_float().label(
-                "capture_duration_seconds"
-            ),
-            Run.result_summary["broker_capture_attempted"].as_boolean().label(
-                "broker_capture_attempted"
-            ),
+            Run.result_summary["capture_duration_seconds"].as_float().label("capture_duration_seconds"),
+            Run.result_summary["broker_capture_attempted"].as_boolean().label("broker_capture_attempted"),
             Run.result_summary["window_completed"].as_boolean().label("window_completed"),
-            Run.result_summary["termination_reason"].as_string().label(
-                "termination_reason"
-            ),
-            Run.result_summary["acceptance_eligible"].as_boolean().label(
-                "acceptance_eligible"
-            ),
+            Run.result_summary["termination_reason"].as_string().label("termination_reason"),
+            Run.result_summary["acceptance_eligible"].as_boolean().label("acceptance_eligible"),
         ).order_by(Run.created_at.desc(), Run.id.desc())
         if project_id is not None:
             statement = statement.where(Run.project_id == project_id)
@@ -665,6 +1063,7 @@ class RunService:
             statement = statement.where(Run.edge_id == edge_id)
         if status is not None:
             statement = statement.where(Run.status == status)
+        statement = _limit_statement_to_scopes(statement, scope_pairs)
         if offset:
             statement = statement.offset(offset)
         if limit is not None:
@@ -711,7 +1110,13 @@ class RunService:
             )
         return projection
 
-    def list_report_records(self, *, limit: int = 100, offset: int = 0) -> list[RunRecord]:
+    def list_report_records(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        scope_pairs: ScopePairs = None,
+    ) -> list[RunRecord]:
         """Return report runs with their persisted metadata in one query.
 
         The Reports list needs the stored parameters to form names and source
@@ -722,13 +1127,9 @@ class RunService:
         """
         safe_limit = max(1, min(int(limit), 100))
         safe_offset = max(0, int(offset))
-        statement = (
-            select(Run)
-            .where(Run.job_type == "report_generation")
-            .order_by(Run.created_at.desc(), Run.id.desc())
-            .offset(safe_offset)
-            .limit(safe_limit)
-        )
+        statement = select(Run).where(Run.job_type == "report_generation")
+        statement = _limit_statement_to_scopes(statement, scope_pairs)
+        statement = statement.order_by(Run.created_at.desc(), Run.id.desc()).offset(safe_offset).limit(safe_limit)
         with session_factory(self._engine)() as session:
             rows = session.scalars(statement).all()
             return [
@@ -753,10 +1154,189 @@ class RunService:
                 for row in rows
             ]
 
-    def count_report_records(self) -> int:
+    def count_report_records(self, *, scope_pairs: ScopePairs = None) -> int:
         statement = select(func.count()).select_from(Run).where(Run.job_type == "report_generation")
+        statement = _limit_statement_to_scopes(statement, scope_pairs)
         with session_factory(self._engine)() as session:
             return int(session.scalar(statement) or 0)
+
+    def page_verified_report_records(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        scope_pairs: ScopePairs = None,
+    ) -> tuple[list[RunRecord], int]:
+        """Page by immutable contract scope, then verify only selected evidence.
+
+        ``total`` counts structurally complete contract rows. Canonical evidence
+        corruption on the selected page is an integrity failure for the whole
+        response, never a reason to scan ahead and silently change page contents.
+        """
+
+        safe_limit = max(1, min(int(limit), 100))
+        safe_offset = max(0, int(offset))
+
+        eligible_contracts = ("legacy_pre_lifecycle", "sealed_v1")
+        structural_conditions = (
+            Run.job_type == "report_generation",
+            ReportEvidenceContract.contract_version.in_(eligible_contracts),
+            Run.project_id == ReportEvidenceContract.project_id,
+            Run.site_id == ReportEvidenceContract.site_id,
+        )
+        count_statement = (
+            select(func.count())
+            .select_from(Run)
+            .join(RunResult, RunResult.run_id == Run.id)
+            .join(RunSeal, RunSeal.run_id == Run.id)
+            .join(ReportEvidenceContract, ReportEvidenceContract.run_id == Run.id)
+            .where(*structural_conditions)
+        )
+        count_statement = _limit_report_contract_to_scopes(
+            count_statement,
+            scope_pairs,
+        )
+        has_dispatch = (
+            select(RunDispatch.dispatch_id)
+            .where(RunDispatch.run_id == Run.id)
+            .exists()
+            .label("has_dispatch")
+        )
+        statement = (
+            select(
+                Run,
+                RunExecutionContext,
+                RunResult,
+                RunSeal,
+                ReportEvidenceContract,
+                SyncArtifact,
+                has_dispatch,
+            )
+            .join(RunResult, RunResult.run_id == Run.id)
+            .join(RunSeal, RunSeal.run_id == Run.id)
+            .join(ReportEvidenceContract, ReportEvidenceContract.run_id == Run.id)
+            .outerjoin(RunExecutionContext, RunExecutionContext.run_id == Run.id)
+            .outerjoin(SyncArtifact, SyncArtifact.run_id == Run.id)
+            .where(*structural_conditions)
+            .order_by(Run.created_at.desc(), Run.id.desc())
+            .offset(safe_offset)
+            .limit(safe_limit)
+        )
+        statement = _limit_report_contract_to_scopes(
+            statement,
+            scope_pairs,
+        )
+        with session_factory(self._engine)() as session:
+            total = int(session.scalar(count_statement) or 0)
+            candidates = session.execute(statement).all()
+
+            projections: dict[str, dict[str, list[object]]] = {
+                "issues": {},
+                "devices": {},
+                "points": {},
+                "topics": {},
+            }
+            selected_ids = [run.id for run, *_rest in candidates]
+            if selected_ids:
+                for label, model in (
+                    ("issues", RunIssue),
+                    ("devices", DiscoveredDevice),
+                    ("points", DiscoveredPoint),
+                    ("topics", DiscoveredTopic),
+                ):
+                    projection_statement = (
+                        select(model)
+                        .where(model.run_id.in_(selected_ids))
+                        .order_by(model.run_id, model.position, model.id)
+                    )
+                    for row in session.scalars(projection_statement):
+                        projections[label].setdefault(row.run_id, []).append(row)
+
+        visible: list[RunRecord] = []
+        for run, context, result, seal, contract, sync_artifact, has_dispatch_row in candidates:
+            try:
+                projection_rows = {
+                    label: [dict(row.__dict__) for row in rows.get(run.id, [])]
+                    for label, rows in projections.items()
+                }
+                run_projection = {
+                    "job_type": run.job_type,
+                    "project_id": run.project_id,
+                    "site_id": run.site_id,
+                    "parameters": run.parameters,
+                    "status": run.status,
+                    "stage": run.stage,
+                    "result_summary": run.result_summary,
+                    "error_message": run.error_message,
+                    "result_sha256": run.result_sha256,
+                    "terminal_at": run.terminal_at,
+                    "owner_token": run.owner_token,
+                    "attempt": run.attempt,
+                    "claimed_at": run.claimed_at,
+                    "heartbeat_at": run.heartbeat_at,
+                    "lease_expires_at": run.lease_expires_at,
+                    "state_version": run.state_version,
+                    "execution_mode": run.execution_mode,
+                    "created_at": run.created_at,
+                    "updated_at": run.updated_at,
+                    "modern_lifecycle_component_present": bool(has_dispatch_row),
+                    "sync_artifact_present": sync_artifact is not None,
+                    "sync_artifact_manifest": (
+                        dict(sync_artifact.manifest_json)
+                        if sync_artifact is not None
+                        else None
+                    ),
+                }
+                verifier = (
+                    verify_report_evidence_run
+                    if contract.contract_version == "sealed_v1"
+                    else verify_legacy_report_evidence_run
+                )
+                verified = verifier(
+                    run_id=run.id,
+                    run=run_projection,
+                    context=(
+                        {
+                            "context_json": context.context_json,
+                            "context_sha256": context.context_sha256,
+                        }
+                        if context is not None
+                        else None
+                    ),
+                    result={
+                        "schema_version": result.schema_version,
+                        "terminal_status": result.terminal_status,
+                        "terminal_stage": result.terminal_stage,
+                        "summary": result.summary,
+                        "result_payload": result.result_payload,
+                        "result_sha256": result.result_sha256,
+                    },
+                    seal={
+                        "terminal_status": seal.terminal_status,
+                        "context_sha256": seal.context_sha256,
+                        "result_sha256": seal.result_sha256,
+                        "sealed_at": seal.sealed_at,
+                    },
+                    **projection_rows,
+                )
+                issue_rows = projections["issues"].get(run.id, [])
+                report = _project_verified_report_record(
+                    _report_record_from_row(run, issue_rows),
+                    verified,
+                )
+            except (FileNotFoundError, RuntimeError, ValueError) as error:
+                raise ReportListIntegrityError(
+                    "Stored report evidence failed integrity verification."
+                ) from error
+            if scope_pairs is not None and (
+                report.project_id,
+                report.site_id,
+            ) not in scope_pairs:
+                raise ReportListIntegrityError(
+                    "Stored report evidence failed integrity verification."
+                )
+            visible.append(report)
+        return visible, total
 
     def runtime_ready(self) -> tuple[bool, str]:
         try:
@@ -841,11 +1421,7 @@ class RunService:
         before the live worker's next heartbeat. DbRunStore clears the marker on
         every accepted lifecycle, result-summary, or issue write.
         """
-        statement = (
-            select(Run.status, Run.result_summary, Run.updated_at)
-            .where(Run.id == run_id)
-            .with_for_update()
-        )
+        statement = select(Run.status, Run.result_summary, Run.updated_at).where(Run.id == run_id).with_for_update()
         with self._engine.begin() as connection:
             row = connection.execute(statement).one_or_none()
             if row is None:
@@ -856,9 +1432,7 @@ class RunService:
             now = datetime.now(UTC)
             first_observed_at = _stale_observed_at(summary)
             heartbeat_at = (
-                row.updated_at
-                if row.updated_at.tzinfo is not None
-                else row.updated_at.replace(tzinfo=UTC)
+                row.updated_at if row.updated_at.tzinfo is not None else row.updated_at.replace(tzinfo=UTC)
             ).astimezone(UTC)
             if first_observed_at is not None and heartbeat_at > first_observed_at:
                 # A result/issue write can advance updated_at even if the
@@ -963,9 +1537,7 @@ class RunService:
                     raise RuntimeError(f"Report run '{run_id}' is already terminal ({row.status}).")
                 report_snapshot = row.parameters.get("report_snapshot_v2")
                 expected_snapshot_hash = row.parameters.get("report_snapshot_sha256")
-                if not isinstance(report_snapshot, dict) or not isinstance(
-                    expected_snapshot_hash, str
-                ):
+                if not isinstance(report_snapshot, dict) or not isinstance(expected_snapshot_hash, str):
                     raise RuntimeError("Report run has no complete frozen snapshot.")
                 if snapshot_sha256(report_snapshot) != expected_snapshot_hash:
                     raise RuntimeError("Report run snapshot digest is inconsistent.")
@@ -1099,7 +1671,5 @@ class RunService:
         except Exception:  # pragma: no cover - identity I/O is best effort
             return None
         with self._engine.begin() as connection:
-            connection.execute(
-                update(Run).where(Run.id == run_id).values(edge_id=local_edge_id)
-            )
+            connection.execute(update(Run).where(Run.id == run_id).values(edge_id=local_edge_id))
         return local_edge_id

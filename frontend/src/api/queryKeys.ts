@@ -63,6 +63,10 @@ export const queryKeys = {
     [...workspaceRoot(scope, workspace), "reports"] as const,
   users: (scope: SessionScopeId, workspace: WorkspaceRef) =>
     [...workspaceRoot(scope, workspace), "users"] as const,
+  scopeActivationPreflight: (scope: SessionScopeId, workspace: WorkspaceRef) =>
+    [...workspaceRoot(scope, workspace), "scope-activation-preflight"] as const,
+  userScopeGrants: (scope: SessionScopeId, workspace: WorkspaceRef, userId: string) =>
+    [...workspaceRoot(scope, workspace), "users", userId, "scope-grants"] as const,
   hubRuns: (scope: SessionScopeId, workspace: WorkspaceRef, filters: string) =>
     [...workspaceRoot(scope, workspace), "hub-runs", filters] as const,
 };

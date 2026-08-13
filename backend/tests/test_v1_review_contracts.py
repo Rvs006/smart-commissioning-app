@@ -33,6 +33,7 @@ class ConfigurationReviewTests(unittest.TestCase):
         self.assertIn("BBMD UDP Port", configuration.bacnet.values)
         self.assertIn("Foreign Device", configuration.bacnet.values)
         self.assertIn("TTL", configuration.bacnet.values)
+        self.assertEqual(configuration.bacnet.values["Internetwork ID"], "primary")
         self.assertIn("MQTT Broker FQDN or IP Address", configuration.mqtt.values)
         self.assertIn("Client ID", configuration.mqtt.values)
         self.assertIn("Keep Alive Interval", configuration.mqtt.values)
@@ -42,6 +43,11 @@ class ConfigurationReviewTests(unittest.TestCase):
         self.assertIn("Restore Action", configuration.backups.values)
         self.assertNotIn("Certificate Validity", configuration.certificates.values)
         self.assertEqual(configuration.bacnet.values["Foreign Device"], "Disabled")
+
+        legacy = configuration.model_copy(deep=True)
+        del legacy.bacnet.values["Internetwork ID"]
+        merged = ConfigurationService()._merge_with_defaults(legacy)
+        self.assertEqual(merged.bacnet.values["Internetwork ID"], "primary")
 
     def test_source_interface_seeds_empty_meaning_never_chosen(self) -> None:
         # Empty means "never chosen": the frontend seeds its wired-first
@@ -158,6 +164,61 @@ class ConfigurationReviewTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("BACnet BBMD Address must not be empty.", result.errors)
 
+    def test_bacnet_internetwork_defaults_reads_the_saved_site_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = _temporary_engine(temp_dir)
+            try:
+                service = ConfigurationService(engine=engine)
+                configuration = service.load("plant-project", "north-wing", mask_secrets=False)
+                configuration.bacnet.values["Internetwork ID"] = "  plant-a  "
+                saved = service.save(
+                    configuration,
+                    project_id="plant-project",
+                    site_id="north-wing",
+                )
+                self.assertEqual(saved.bacnet.values["Internetwork ID"], "plant-a")
+
+                self.assertEqual(
+                    service.bacnet_internetwork_defaults("plant-project", "north-wing"),
+                    {"internetwork_id": "plant-a"},
+                )
+            finally:
+                engine.dispose()
+
+    def test_bacnet_internetwork_id_rejects_blank_long_or_non_printable_values(self) -> None:
+        invalid_values = (
+            ("   ", "BACnet Internetwork ID must not be empty."),
+            ("x" * 256, "BACnet Internetwork ID must be at most 255 characters."),
+            ("plant-a\nshadow", "BACnet Internetwork ID must contain printable characters only."),
+        )
+        for value, expected_error in invalid_values:
+            with self.subTest(value=repr(value)):
+                configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+                configuration.bacnet.values["Internetwork ID"] = value
+
+                result = ConfigurationService().validate(configuration)
+
+                self.assertFalse(result.valid)
+                self.assertIn(expected_error, result.errors)
+
+    def test_bacnet_internetwork_defaults_rejects_invalid_legacy_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = _temporary_engine(temp_dir)
+            try:
+                service = ConfigurationService(engine=engine)
+                configuration = service.load("legacy-project", "legacy-site", mask_secrets=False)
+                configuration.bacnet.values["Internetwork ID"] = "x" * 256
+                service.save(
+                    configuration,
+                    project_id="legacy-project",
+                    site_id="legacy-site",
+                )
+
+                with self.assertRaisesRegex(ValueError, "at most 255 characters"):
+                    service.bacnet_internetwork_defaults("legacy-project", "legacy-site")
+            finally:
+                engine.dispose()
+
     def test_secret_storage_returns_masked_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             engine = _temporary_engine(temp_dir)
@@ -190,6 +251,13 @@ class ImportTemplateReviewTests(unittest.TestCase):
         self.assertIn("Expected IP address", csv_template)
         self.assertIn("AHU-L03-017", csv_template)
         self.assertGreater(len(xlsx_template), 1000)
+
+        for import_type in ("bacnet_register", "bacnet_points"):
+            with self.subTest(import_type=import_type):
+                bacnet_csv = service.build_template(import_type, "csv").decode("utf-8-sig")
+                header, example = bacnet_csv.splitlines()[:2]
+                self.assertIn("Internetwork ID", header)
+                self.assertIn("primary", example)
 
 
 class ImportRegisterFlexibilityTests(unittest.TestCase):

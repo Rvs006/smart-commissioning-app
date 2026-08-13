@@ -9,6 +9,7 @@ import json
 import unittest
 import xml.etree.ElementTree as ElementTree
 import zipfile
+from datetime import UTC, datetime
 from unittest import mock
 from uuid import uuid4
 
@@ -875,8 +876,8 @@ class UdmiV1ReportTests(ApiTestCase):
                 "source_run_ids": ["missing-run"],
             },
         )
-        self.assertEqual(missing.status_code, 422)
-        self.assertIn("was not found", missing.json()["detail"])
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["detail"], "Run not found.")
 
         other_scope = self._seed_run(project_id="other-project")
         wrong_scope = self.client.post(
@@ -888,8 +889,8 @@ class UdmiV1ReportTests(ApiTestCase):
                 "source_run_ids": [other_scope],
             },
         )
-        self.assertEqual(wrong_scope.status_code, 422)
-        self.assertIn("does not belong", wrong_scope.json()["detail"])
+        self.assertEqual(wrong_scope.status_code, 404)
+        self.assertEqual(wrong_scope.json()["detail"], "Run not found.")
 
     def test_udmi_sources_must_have_the_right_type_and_be_terminal(self) -> None:
         wrong_type = self._seed_run(job_type="bacnet_validation")
@@ -1728,31 +1729,175 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(first, second)
         self.assertEqual(integrity_after_first, integrity_after_second)
 
-    def test_legacy_download_is_deterministic_and_read_only(self) -> None:
-        from app.api.routes import reports as reports_module
+    def test_stripped_modern_report_cannot_downgrade_to_legacy_download(self) -> None:
         from app.services.run_service import RunService
 
         report = self._create_report("zip", [], report_type="evidence_pack")
         service = RunService()
-        # Emulate a pre-v0.1.26 report that has neither a stored artifact nor
-        # integrity metadata. Compatibility downloads may rebuild it in memory,
-        # but a GET must not mutate the terminal record or sign it silently.
-        from smart_commissioning_core.db.models import Run
-        from sqlalchemy import update
+        from smart_commissioning_core.db.models import Run, RunResult, RunSeal
+        from sqlalchemy import delete, select, update
 
         with service.engine.begin() as connection:
+            parameters = dict(
+                connection.scalar(
+                    select(Run.parameters).where(Run.id == report["report_id"])
+                )
+            )
+            parameters.pop("report_snapshot_v2", None)
+            parameters.pop("report_snapshot_sha256", None)
+            connection.execute(
+                delete(RunResult).where(RunResult.run_id == report["report_id"])
+            )
+            connection.execute(
+                delete(RunSeal).where(RunSeal.run_id == report["report_id"])
+            )
             connection.execute(
                 update(Run)
                 .where(Run.id == report["report_id"])
-                .values(result_summary={})
+                .values(
+                    parameters=parameters,
+                    result_summary={
+                        "legacy_report_integrity": {
+                            "classification": "missing",
+                            "migration": "v0.1.26",
+                            "silently_resigned": False,
+                        }
+                    },
+                    result_sha256=None,
+                    terminal_at=None,
+                    owner_token=None,
+                    attempt=0,
+                    claimed_at=None,
+                    heartbeat_at=None,
+                    lease_expires_at=None,
+                    state_version=0,
+                )
             )
-        run = service.get_run(report["report_id"])
-        first, _ = reports_module._stored_or_legacy_artifact(run, "zip")
-        second = self._download(report["report_id"]).content
-        fresh = service.get_run(report["report_id"])
+
+        response = self.client.get(f"/api/v1/reports/{report['report_id']}/download")
+        self.assertEqual(response.status_code, 404, response.text)
+
+    def test_modern_report_without_contract_never_enters_legacy_fallback(self) -> None:
+        from app.services.run_service import RunService
+        from smart_commissioning_core.db.models import ReportEvidenceContract
+        from sqlalchemy import delete
+
+        report = self._create_report("zip", [], report_type="evidence_pack")
+        service = RunService()
+        with service.engine.begin() as connection:
+            connection.execute(
+                delete(ReportEvidenceContract).where(
+                    ReportEvidenceContract.run_id == report["report_id"]
+                )
+            )
+
+        response = self.client.get(f"/api/v1/reports/{report['report_id']}/download")
+        self.assertEqual(response.status_code, 404, response.text)
+
+    def test_f6_classified_legacy_report_download_is_deterministic_and_read_only(self) -> None:
+        from app.services.run_service import RunService
+        from smart_commissioning_core.db.db_run_store import get_or_create_project_and_site
+        from smart_commissioning_core.db.engine import session_factory
+        from smart_commissioning_core.db.models import (
+            ReportEvidenceContract,
+            Run,
+            RunResult,
+            RunSeal,
+        )
+        from smart_commissioning_core.run_context import canonical_sha256
+        from smart_commissioning_core.run_lifecycle import TerminalResultV1
+
+        service = RunService()
+        run_id = f"run_legacy_report_{uuid4().hex[:16]}"
+        now = datetime(2026, 7, 25, 10, 0, tzinfo=UTC)
+        parameters = {
+            "output_format": "zip",
+            "report_type": "evidence_pack",
+            "source_run_ids": [],
+            "report_title_custom": False,
+            "report_title": "Smart Commissioning Report",
+            "report_generated_at": now.isoformat(),
+        }
+        summary = {
+            "legacy_report_integrity": {
+                "classification": "missing",
+                "migration": "v0.1.26",
+                "silently_resigned": False,
+            }
+        }
+        terminal = TerminalResultV1(
+            status="succeeded",
+            stage="report_ready",
+            summary=summary,
+        )
+        result_sha256 = terminal.sha256()
+        context_sha256 = canonical_sha256(
+            {
+                "schema_version": "legacy-0",
+                "run_id": run_id,
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "job_type": "report_generation",
+                "parameters": parameters,
+                "execution_mode": "inline",
+            }
+        )
+        with session_factory(service.engine).begin() as session:
+            get_or_create_project_and_site(session, "demo-project", "demo-site")
+            session.add(
+                Run(
+                    id=run_id,
+                    project_id="demo-project",
+                    site_id="demo-site",
+                    job_type="report_generation",
+                    status=terminal.status,
+                    stage=terminal.stage,
+                    progress_percent=100,
+                    parameters=parameters,
+                    result_summary=summary,
+                    execution_mode="inline",
+                    result_sha256=result_sha256,
+                    terminal_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.flush()
+            session.add_all(
+                [
+                    ReportEvidenceContract(
+                        run_id=run_id,
+                        contract_version="legacy_pre_lifecycle",
+                        project_id="demo-project",
+                        site_id="demo-site",
+                        classified_at=now,
+                    ),
+                    RunResult(
+                        run_id=run_id,
+                        schema_version=terminal.schema_version,
+                        terminal_status=terminal.status,
+                        terminal_stage=terminal.stage,
+                        summary=summary,
+                        result_payload=terminal.model_dump(mode="json"),
+                        result_sha256=result_sha256,
+                        created_at=now,
+                    ),
+                    RunSeal(
+                        run_id=run_id,
+                        terminal_status=terminal.status,
+                        context_sha256=context_sha256,
+                        result_sha256=result_sha256,
+                        sealed_at=now,
+                    ),
+                ]
+            )
+
+        first = self._download(run_id).content
+        second = self._download(run_id).content
+        fresh = service.get_run(run_id)
 
         self.assertEqual(first, second)
-        self.assertEqual(fresh.result_summary, {})
+        self.assertEqual(fresh.result_summary, summary)
 
     def test_same_asset_id_in_two_sources_does_not_cross_contaminate_scope(self) -> None:
         first_summary = copy.deepcopy(_SCOPABLE_SUMMARY)

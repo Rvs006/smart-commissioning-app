@@ -126,6 +126,7 @@ __all__ = [
     "TARGET_ASSET_ID",
     "TARGET_ASSET_NAME",
     "TARGET_DEVICE_INSTANCE",
+    "TARGET_INTERNETWORK_ID",
     "TARGET_NETWORK",
     "UDP_PORT_MAX",
     "UDP_PORT_MIN",
@@ -167,6 +168,7 @@ _KNOWN_MODES = frozenset({MODE_BROADCAST, MODE_FOREIGN_DEVICE})
 
 TARGET_ADDRESS = "address"
 TARGET_DEVICE_INSTANCE = "device_instance"
+TARGET_INTERNETWORK_ID = "internetwork_id"
 TARGET_ASSET_ID = "asset_id"
 TARGET_ASSET_NAME = "asset_name"
 TARGET_NETWORK = "network"
@@ -209,6 +211,7 @@ class BacnetTarget:
 
     address: str
     device_instance: int
+    internetwork_id: str | None = None
     asset_id: str | None = None
     asset_name: str | None = None
     network: int | None = None
@@ -236,6 +239,8 @@ class BacnetTarget:
             TARGET_ADDRESS: self.address,
             TARGET_DEVICE_INSTANCE: self.device_instance,
         }
+        if self.internetwork_id is not None:
+            row[TARGET_INTERNETWORK_ID] = self.internetwork_id
         if self.asset_id is not None:
             row[TARGET_ASSET_ID] = self.asset_id
         if self.asset_name is not None:
@@ -313,6 +318,7 @@ def _parse_target_row(row: Any) -> BacnetTarget | None:
     return BacnetTarget(
         address=address,
         device_instance=instance,
+        internetwork_id=_optional_text(row.get(TARGET_INTERNETWORK_ID)),
         asset_id=_optional_text(row.get(TARGET_ASSET_ID)),
         asset_name=_optional_text(row.get(TARGET_ASSET_NAME)),
         network=_optional_int(row.get(TARGET_NETWORK)),

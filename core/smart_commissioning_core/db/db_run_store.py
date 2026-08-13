@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from smart_commissioning_core.db.engine import session_factory
 from smart_commissioning_core.db.models import (
     Project,
+    ReportEvidenceContract,
     Run,
     RunIssue,
     RunLifecycleConflict,
@@ -170,6 +171,17 @@ class DbRunStore:
         with self._session_factory.begin() as session:
             get_or_create_project_and_site(session, project_id, site_id)
             session.add(run)
+            session.flush()
+            if job_type == "report_generation":
+                session.add(
+                    ReportEvidenceContract(
+                        run_id=run.id,
+                        contract_version="sealed_v1",
+                        project_id=project_id,
+                        site_id=site_id,
+                        classified_at=now,
+                    )
+                )
             session.flush()
             return _run_to_dict(run)
 

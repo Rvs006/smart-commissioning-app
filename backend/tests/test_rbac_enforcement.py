@@ -51,11 +51,39 @@ class RbacEnforcementTests(ApiTestCase):
     def setUpClass(cls) -> None:
         super().setUpClass()
 
-        # Per-role user keys, provisioned once via the shared admin key.
-        cls._role_keys = {
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.db_run_store import DbRunStore
+
+        store = DbRunStore(get_engine())
+        for project_id, site_id in (
+            ("demo-project", "demo-site"),
+            ("rbac-transfer-project", "rbac-transfer-site"),
+        ):
+            store.create_run(
+                project_id=project_id,
+                site_id=site_id,
+                job_type="udmi_validation",
+                parameters={"requested_from": "test_rbac_scope_seed"},
+            )
+
+        # Per-role user identities, provisioned once via the standalone shared
+        # admin key. Named non-admins then receive the two explicit scopes used
+        # in this suite.
+        cls._role_users = {
             role: cls._provision_user(f"enf-{role}", role)
             for role in ("viewer", "reviewer", "engineer", "admin")
         }
+        cls._role_keys = {
+            role: provisioned["api_key"]
+            for role, provisioned in cls._role_users.items()
+        }
+        for role in ("viewer", "reviewer", "engineer"):
+            user_id = cls._role_users[role]["user"]["id"]
+            for project_id, site_id in (
+                ("demo-project", "demo-site"),
+                ("rbac-transfer-project", "rbac-transfer-site"),
+            ):
+                cls._grant_scope(user_id, project_id, site_id)
 
     # -- helpers --------------------------------------------------------------
 
@@ -64,14 +92,27 @@ class RbacEnforcementTests(ApiTestCase):
         return {"X-API-Key": _SHARED_KEY}
 
     @classmethod
-    def _provision_user(cls, username: str, role: str) -> str:
+    def _provision_user(cls, username: str, role: str) -> dict:
         response = cls.client.post(
             "/api/v1/users",
             headers=cls._admin_headers(),
             json={"username": username, "role": role},
         )
         assert response.status_code == 201, response.text
-        return response.json()["api_key"]
+        return response.json()
+
+    @classmethod
+    def _grant_scope(cls, user_id: str, project_id: str, site_id: str) -> None:
+        response = cls.client.post(
+            f"/api/v1/users/{user_id}/scope-grants",
+            headers=cls._admin_headers(),
+            json={
+                "project_id": project_id,
+                "site_id": site_id,
+                "reason": "RBAC enforcement test fixture",
+            },
+        )
+        assert response.status_code == 201, response.text
 
     def _headers(self, role: str) -> dict[str, str]:
         return {"X-API-Key": self._role_keys[role]}
@@ -158,13 +199,14 @@ class RbacEnforcementTests(ApiTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertIn("admin", response.json()["detail"])
 
-    def test_engineer_can_preview_retention(self) -> None:
+    def test_engineer_is_403_on_whole_runtime_retention_preview(self) -> None:
         response = self.client.post(
             "/api/v1/evidence/retention/preview",
             headers=self._headers("engineer"),
             json={"keep_days": 30},
         )
-        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIn("global admin", response.json()["detail"])
 
     def test_engineer_is_403_creating_users(self) -> None:
         response = self.client.post(

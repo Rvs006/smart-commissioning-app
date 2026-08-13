@@ -1,0 +1,68 @@
+{
+  "context": {
+    "project_id": "historic-project",
+    "site_id": "historic-site",
+    "configuration_snapshot": {
+      "device": {
+        "version": 3,
+        "values": {
+          "Source Interface": "10.24.1.17"
+        }
+      }
+    },
+    "configuration_version": 3,
+    "registers": [
+      {
+        "resource_id": "imp-historic-ip-register",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ],
+    "imports": [],
+    "schema_versions": {
+      "context": "1.0"
+    },
+    "engine_parameters": {
+      "addresses": [
+        "10.24.1.20",
+        "10.24.1.21"
+      ],
+      "authorized": true,
+      "dry_run": false,
+      "ports": [
+        80,
+        502
+      ],
+      "source_ip": "10.24.1.17"
+    },
+    "network_interface": "10.24.1.17/24",
+    "connection_settings": {},
+    "secret_references": {},
+    "requesting_principal": "historic-engineer",
+    "application_version": "0.1.26",
+    "protocol_key": null,
+    "schema_version": "1.0"
+  },
+  "context_sha256": "46031ae5609cf5540fe7319de581f21d05767f70f7189167022a8cc5713dbb74",
+  "terminal_result": {
+    "schema_version": "1.0",
+    "status": "succeeded",
+    "stage": "ip_scan_complete",
+    "summary": {
+      "responsive_hosts": 1,
+      "target_count": 2
+    },
+    "issues": [],
+    "devices": [],
+    "points": [],
+    "topics": [],
+    "error_message": null
+  },
+  "result_sha256": "b15c92af740f459c64bfceb91838a5534dffddcf72cbb61c292e6e471d294643",
+  "seal": {
+    "run_id": "run_historic_v1",
+    "terminal_status": "succeeded",
+    "context_sha256": "46031ae5609cf5540fe7319de581f21d05767f70f7189167022a8cc5713dbb74",
+    "result_sha256": "b15c92af740f459c64bfceb91838a5534dffddcf72cbb61c292e6e471d294643",
+    "sealed_at": "2026-07-27T10:11:12Z"
+  }
+}

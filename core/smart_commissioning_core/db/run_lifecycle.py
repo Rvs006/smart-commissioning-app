@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -29,8 +30,12 @@ from smart_commissioning_core.db.models import (
     RunExecutionContext,
     RunIssue,
     RunLifecycleConflict,
+    RunLink,
     RunResult,
     RunSeal,
+    ScanAuthorization,
+    User,
+    UserScopeGrant,
 )
 from smart_commissioning_core.records import ValidationIssueRecord
 from smart_commissioning_core.run_context import (
@@ -45,6 +50,7 @@ from smart_commissioning_core.run_lifecycle import (
     RunDispatchV1,
     RunLeaseV1,
     RunSealViewV1,
+    ScanAuthorizationV1,
     StoredRunContextV1,
     TerminalResultV1,
 )
@@ -56,6 +62,36 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _resource_keys(context: RunContextV1) -> tuple[str, ...]:
+    """Return the deterministic active-resource set frozen into one context."""
+
+    keys: set[str] = set()
+    scan_contract = context.engine_parameters.get("scan_contract_v1")
+    if isinstance(scan_contract, Mapping):
+        raw_keys = scan_contract.get("resource_keys", ())
+        if not isinstance(raw_keys, (list, tuple)):
+            raise ValueError("scan_contract_v1.resource_keys must be a list")
+        for raw_key in raw_keys:
+            if not isinstance(raw_key, str):
+                raise ValueError("scan_contract_v1.resource_keys must contain strings")
+            key = raw_key.strip()
+            if not key:
+                raise ValueError("scan_contract_v1.resource_keys must not contain blanks")
+            if len(key) > 80:
+                raise ValueError("scan_contract_v1.resource_keys entries cannot exceed 80 characters")
+            keys.add(key)
+    if context.protocol_key is not None:
+        keys.add(context.protocol_key)
+    dry_run = context.engine_parameters.get("dry_run")
+    if isinstance(dry_run, str):
+        is_dry_run = dry_run.strip().casefold() in {"1", "true", "yes", "on"}
+    else:
+        is_dry_run = bool(dry_run)
+    if is_dry_run:
+        return ()
+    return tuple(sorted(keys))
+
+
 class ProtocolConflictError(RuntimeError):
     """Raised before dispatch when a canonical protocol key is already reserved."""
 
@@ -63,6 +99,85 @@ class ProtocolConflictError(RuntimeError):
         self.protocol_key = protocol_key
         self.active_run_id = active_run_id
         super().__init__(f"protocol key is active for run {active_run_id}")
+
+
+class ScanAuthorizationError(ValueError):
+    """A live run could not consume or continue under its sealed approval."""
+
+
+class ActiveControlDeniedError(RuntimeError):
+    """The current executor may not schedule another outbound attempt."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"active control denied: {reason}")
+
+
+def _scan_contract(context: RunContextV1) -> Mapping[str, Any]:
+    value = context.engine_parameters.get("scan_contract_v1")
+    if not isinstance(value, Mapping):
+        raise ScanAuthorizationError("sealed preview is missing scan_contract_v1")
+    return value
+
+
+def _packet_plan_sha256(context: RunContextV1) -> str:
+    value = str(_scan_contract(context).get("packet_plan_sha256") or "").strip().lower()
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ScanAuthorizationError("sealed preview has an invalid packet plan digest")
+    return value
+
+
+def _is_dry_context(context: RunContextV1) -> bool:
+    value = context.engine_parameters.get("dry_run")
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _required_authorization_window_seconds(context: RunContextV1) -> float:
+    """Read the conservative profile bound from a versioned discovery contract."""
+    contract = _scan_contract(context)
+    for protocol in ("ip", "bacnet"):
+        protocol_contract = contract.get(protocol)
+        if not isinstance(protocol_contract, Mapping):
+            continue
+        estimate = protocol_contract.get("work_estimate")
+        if not isinstance(estimate, Mapping):
+            continue
+        raw_value = estimate.get("required_authorization_window_seconds")
+        if raw_value in (None, ""):
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError) as error:
+            raise ScanAuthorizationError(
+                "sealed preview has an invalid authorization-window estimate"
+            ) from error
+        if not math.isfinite(value) or value <= 0:
+            raise ScanAuthorizationError(
+                "sealed preview has an invalid authorization-window estimate"
+            )
+        return value
+    return 0.0
+
+
+def _retry_parent_run_id(context: RunContextV1) -> str | None:
+    contract = context.engine_parameters.get("scan_contract_v1")
+    if contract is None:
+        return None
+    if not isinstance(contract, Mapping):
+        raise ScanAuthorizationError("scan contract has an invalid relation snapshot")
+    snapshot = contract.get("relation_snapshot")
+    if snapshot is None:
+        return None
+    if not isinstance(snapshot, Mapping) or snapshot.get("relation") != "retry":
+        raise ScanAuthorizationError("scan contract has an invalid relation snapshot")
+    parent_run_id = str(snapshot.get("parent_run_id") or "").strip()
+    if not parent_run_id or len(parent_run_id) > 64:
+        raise ScanAuthorizationError("scan contract has an invalid retry parent")
+    if set(snapshot) != {"relation", "parent_run_id"}:
+        raise ScanAuthorizationError("scan contract has an invalid relation snapshot")
+    return parent_run_id
 
 
 class RunLifecycleRepository:
@@ -78,6 +193,191 @@ class RunLifecycleRepository:
         self._session_factory = session_factory(engine)
         self._fault_injector = fault_injector
 
+    # -- sealed preview authorizations -------------------------------------
+
+    def create_scan_authorization(
+        self,
+        *,
+        preview_run_id: str,
+        approved_by: str,
+        ticket: str,
+        purpose: str,
+        not_before: datetime,
+        not_after: datetime,
+        authorization_id: str | None = None,
+        now: datetime | None = None,
+    ) -> ScanAuthorizationV1:
+        authorization_id = authorization_id or f"auth_{uuid4().hex}"
+        approved_by = approved_by.strip()
+        ticket = ticket.strip()
+        purpose = purpose.strip()
+        if not approved_by:
+            raise ScanAuthorizationError("scan authorization requires an approver")
+        if not ticket:
+            raise ScanAuthorizationError("scan authorization requires a change ticket")
+        if not purpose:
+            raise ScanAuthorizationError("scan authorization requires a purpose")
+        if len(authorization_id) > 64 or len(approved_by) > 255 or len(ticket) > 255:
+            raise ScanAuthorizationError("scan authorization metadata exceeds its size limit")
+        created_at = now or _utcnow()
+        if not_before.tzinfo is None or not_after.tzinfo is None:
+            raise ScanAuthorizationError("scan authorization window must include a timezone")
+        if not_after <= not_before:
+            raise ScanAuthorizationError("scan authorization end must be after its start")
+        if not_after <= created_at:
+            raise ScanAuthorizationError("scan authorization window has already ended")
+
+        with self._session_factory.begin() as session:
+            preview, context, result, seal = self._load_sealed_preview(
+                session, preview_run_id
+            )
+            required_window = _required_authorization_window_seconds(context)
+            actual_window = (not_after - not_before).total_seconds()
+            if actual_window < required_window:
+                raise ScanAuthorizationError(
+                    "scan authorization window is shorter than the sealed preview "
+                    f"requires ({required_window:g} seconds)"
+                )
+            packet_digest = _packet_plan_sha256(context)
+            row = ScanAuthorization(
+                authorization_id=authorization_id,
+                preview_run_id=preview_run_id,
+                project_id=preview.project_id,
+                site_id=preview.site_id,
+                packet_plan_sha256=packet_digest,
+                approved_by=approved_by,
+                ticket=ticket,
+                purpose=purpose,
+                not_before=not_before,
+                not_after=not_after,
+                max_uses=1,
+                use_count=0,
+                created_at=created_at,
+            )
+            session.add(row)
+            session.flush()
+            return self._scan_authorization_view(row)
+
+    def get_scan_authorization(self, authorization_id: str) -> ScanAuthorizationV1:
+        with self._session_factory() as session:
+            row = session.get(ScanAuthorization, authorization_id)
+            if row is None:
+                raise FileNotFoundError(authorization_id)
+            return self._scan_authorization_view(row)
+
+    def list_scan_authorizations(
+        self,
+        *,
+        project_id: str | None = None,
+        site_id: str | None = None,
+        preview_run_id: str | None = None,
+    ) -> list[ScanAuthorizationV1]:
+        statement = select(ScanAuthorization)
+        if project_id is not None:
+            statement = statement.where(ScanAuthorization.project_id == project_id)
+        if site_id is not None:
+            statement = statement.where(ScanAuthorization.site_id == site_id)
+        if preview_run_id is not None:
+            statement = statement.where(
+                ScanAuthorization.preview_run_id == preview_run_id
+            )
+        statement = statement.order_by(
+            ScanAuthorization.created_at.desc(),
+            ScanAuthorization.authorization_id.desc(),
+        )
+        with self._session_factory() as session:
+            return [
+                self._scan_authorization_view(row)
+                for row in session.scalars(statement).all()
+            ]
+
+    def revoke_scan_authorization(
+        self,
+        authorization_id: str,
+        *,
+        revoked_by: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> ScanAuthorizationV1:
+        revoked_by = revoked_by.strip()
+        reason = reason.strip()
+        if not revoked_by or not reason:
+            raise ScanAuthorizationError("revocation requires an actor and reason")
+        with self._session_factory.begin() as session:
+            row = session.scalar(
+                select(ScanAuthorization)
+                .where(ScanAuthorization.authorization_id == authorization_id)
+                .with_for_update()
+            )
+            if row is None:
+                raise FileNotFoundError(authorization_id)
+            if row.revoked_at is None:
+                row.revoked_at = now or _utcnow()
+                row.revoked_by = revoked_by
+                row.revoke_reason = reason
+                session.flush()
+            return self._scan_authorization_view(row)
+
+    @staticmethod
+    def _scan_authorization_view(row: ScanAuthorization) -> ScanAuthorizationV1:
+        return ScanAuthorizationV1(
+            authorization_id=row.authorization_id,
+            preview_run_id=row.preview_run_id,
+            project_id=row.project_id,
+            site_id=row.site_id,
+            packet_plan_sha256=row.packet_plan_sha256,
+            approved_by=row.approved_by,
+            ticket=row.ticket,
+            purpose=row.purpose,
+            not_before=row.not_before,
+            not_after=row.not_after,
+            max_uses=row.max_uses,
+            use_count=row.use_count,
+            consumed_run_id=row.consumed_run_id,
+            revoked_at=row.revoked_at,
+            revoked_by=row.revoked_by,
+            revoke_reason=row.revoke_reason,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    def _load_sealed_preview(
+        session: Session,
+        preview_run_id: str,
+    ) -> tuple[Run, RunContextV1, RunResult, RunSeal]:
+        preview = session.get(Run, preview_run_id)
+        context_row = session.get(RunExecutionContext, preview_run_id)
+        result = session.get(RunResult, preview_run_id)
+        seal = session.get(RunSeal, preview_run_id)
+        if preview is None or context_row is None or result is None or seal is None:
+            raise ScanAuthorizationError(
+                "scan authorization requires a terminal sealed preview"
+            )
+        context = RunContextV1.model_validate(context_row.context_json)
+        if not _is_dry_context(context):
+            raise ScanAuthorizationError("authorization source run is not a dry preview")
+        if preview.status != "succeeded" or result.terminal_status != "succeeded":
+            raise ScanAuthorizationError("authorization source preview did not succeed")
+        if (
+            canonical_context_sha256(context) != context_row.context_sha256
+            or seal.context_sha256 != context_row.context_sha256
+        ):
+            raise ScanAuthorizationError("authorization source preview seal is invalid")
+        try:
+            actual_result_sha256 = TerminalResultV1.model_validate(
+                result.result_payload
+            ).sha256()
+        except Exception as error:
+            raise ScanAuthorizationError(
+                "authorization source preview result is invalid"
+            ) from error
+        if (
+            actual_result_sha256 != result.result_sha256
+            or seal.result_sha256 != result.result_sha256
+        ):
+            raise ScanAuthorizationError("authorization source preview seal is invalid")
+        return preview, context, result, seal
+
     # -- run/context/outbox -------------------------------------------------
 
     def create_run_with_context(
@@ -89,6 +389,8 @@ class RunLifecycleRepository:
         edge_id: str | None = None,
         run_id: str | None = None,
         dispatch_id: str | None = None,
+        authorization_id: str | None = None,
+        preview_run_id: str | None = None,
         now: datetime | None = None,
     ) -> DispatchEnvelopeV1:
         captured = (
@@ -100,12 +402,35 @@ class RunLifecycleRepository:
         actual_run_id = run_id or new_run_id(created_at)
         actual_dispatch_id = dispatch_id or f"dispatch_{uuid4().hex}"
         context_sha256 = canonical_context_sha256(captured)
-        protocol_key = captured.protocol_key
+        resource_keys = _resource_keys(captured)
+        retry_parent_run_id = _retry_parent_run_id(captured)
+        if (authorization_id is None) != (preview_run_id is None):
+            raise ScanAuthorizationError(
+                "live creation requires both authorization_id and preview_run_id"
+            )
+        if authorization_id is not None and _is_dry_context(captured):
+            raise ScanAuthorizationError("a dry preview cannot consume an authorization")
         try:
             with self._session_factory.begin() as session:
                 get_or_create_project_and_site(
                     session, captured.project_id, captured.site_id
                 )
+                authorization: ScanAuthorization | None = None
+                if authorization_id is not None and preview_run_id is not None:
+                    authorization = self._validate_authorization_for_create(
+                        session,
+                        authorization_id=authorization_id,
+                        preview_run_id=preview_run_id,
+                        context=captured,
+                        now=created_at,
+                    )
+                if retry_parent_run_id is not None:
+                    self._validate_retry_parent(
+                        session,
+                        parent_run_id=retry_parent_run_id,
+                        context=captured,
+                        job_type=job_type,
+                    )
                 session.add(
                     Run(
                         id=actual_run_id,
@@ -128,6 +453,50 @@ class RunLifecycleRepository:
                     )
                 )
                 session.flush()
+                if authorization is not None:
+                    consumed = session.execute(
+                        update(ScanAuthorization)
+                        .where(
+                            ScanAuthorization.authorization_id
+                            == authorization.authorization_id,
+                            ScanAuthorization.use_count == 0,
+                            ScanAuthorization.consumed_run_id.is_(None),
+                            ScanAuthorization.revoked_at.is_(None),
+                            ScanAuthorization.not_before <= created_at,
+                            ScanAuthorization.not_after > created_at,
+                        )
+                        .values(
+                            use_count=1,
+                            consumed_run_id=actual_run_id,
+                        )
+                    )
+                    if consumed.rowcount != 1:
+                        raise ScanAuthorizationError(
+                            "scan authorization was already used, revoked, or expired"
+                        )
+                    session.add(
+                        RunLink(
+                            parent_run_id=preview_run_id,
+                            child_run_id=actual_run_id,
+                            relation="preview",
+                            authorization_id=authorization.authorization_id,
+                            created_at=created_at,
+                        )
+                    )
+                if retry_parent_run_id is not None:
+                    session.add(
+                        RunLink(
+                            parent_run_id=retry_parent_run_id,
+                            child_run_id=actual_run_id,
+                            relation="retry",
+                            authorization_id=(
+                                authorization.authorization_id
+                                if authorization is not None
+                                else None
+                            ),
+                            created_at=created_at,
+                        )
+                    )
                 session.add(
                     RunExecutionContext(
                         run_id=actual_run_id,
@@ -146,7 +515,7 @@ class RunLifecycleRepository:
                         created_at=created_at,
                     )
                 )
-                if protocol_key is not None:
+                for protocol_key in resource_keys:
                     session.add(
                         ActiveProtocolSlot(
                             protocol_key=protocol_key,
@@ -157,7 +526,7 @@ class RunLifecycleRepository:
                     )
                 session.flush()
         except IntegrityError as error:
-            if protocol_key is not None:
+            for protocol_key in resource_keys:
                 active_run_id = self.get_protocol_conflict(protocol_key)
                 if active_run_id is not None:
                     raise ProtocolConflictError(protocol_key, active_run_id) from error
@@ -167,6 +536,139 @@ class RunLifecycleRepository:
             dispatch_id=actual_dispatch_id,
             context_sha256=context_sha256,
         )
+
+    @staticmethod
+    def _validate_retry_parent(
+        session: Session,
+        *,
+        parent_run_id: str,
+        context: RunContextV1,
+        job_type: str,
+    ) -> None:
+        parent = session.get(Run, parent_run_id)
+        parent_context_row = session.get(RunExecutionContext, parent_run_id)
+        result = session.get(RunResult, parent_run_id)
+        seal = session.get(RunSeal, parent_run_id)
+        if (
+            parent is None
+            or parent_context_row is None
+            or result is None
+            or seal is None
+        ):
+            raise ScanAuthorizationError("retry parent must be a sealed run")
+        try:
+            parent_context = RunContextV1.model_validate(parent_context_row.context_json)
+            actual_result_sha256 = TerminalResultV1.model_validate(
+                result.result_payload
+            ).sha256()
+        except Exception as error:
+            raise ScanAuthorizationError("retry parent has invalid sealed evidence") from error
+        if _is_dry_context(parent_context):
+            raise ScanAuthorizationError("retry parent must be a live run")
+        if (
+            parent.project_id != context.project_id
+            or parent.site_id != context.site_id
+            or parent.job_type != job_type
+        ):
+            raise ScanAuthorizationError(
+                "retry parent must have the same project, site, and job type"
+            )
+        if (
+            parent.status not in _TERMINAL_STATUSES
+            or result.terminal_status != parent.status
+            or seal.terminal_status != parent.status
+            or canonical_context_sha256(parent_context)
+            != parent_context_row.context_sha256
+            or seal.context_sha256 != parent_context_row.context_sha256
+            or actual_result_sha256 != result.result_sha256
+            or seal.result_sha256 != result.result_sha256
+        ):
+            raise ScanAuthorizationError("retry parent seal is invalid")
+
+    def list_run_links(
+        self,
+        run_id: str,
+        *,
+        direction: str = "parents",
+    ) -> list[dict[str, object]]:
+        """Return stable relational provenance without consulting context JSON."""
+        if direction not in {"parents", "children", "all"}:
+            raise ValueError("direction must be 'parents', 'children', or 'all'")
+        if direction == "parents":
+            statement = select(RunLink).where(RunLink.child_run_id == run_id)
+        elif direction == "children":
+            statement = select(RunLink).where(RunLink.parent_run_id == run_id)
+        else:
+            statement = select(RunLink).where(
+                or_(RunLink.parent_run_id == run_id, RunLink.child_run_id == run_id)
+            )
+        statement = statement.order_by(
+            RunLink.relation,
+            RunLink.parent_run_id,
+            RunLink.child_run_id,
+        )
+        with self._session_factory() as session:
+            return [
+                {
+                    "parent_run_id": link.parent_run_id,
+                    "child_run_id": link.child_run_id,
+                    "relation": link.relation,
+                    "authorization_id": link.authorization_id,
+                    "created_at": link.created_at,
+                }
+                for link in session.scalars(statement).all()
+            ]
+
+    def _validate_authorization_for_create(
+        self,
+        session: Session,
+        *,
+        authorization_id: str,
+        preview_run_id: str,
+        context: RunContextV1,
+        now: datetime,
+    ) -> ScanAuthorization:
+        authorization = session.scalar(
+            select(ScanAuthorization)
+            .where(ScanAuthorization.authorization_id == authorization_id)
+            .with_for_update()
+        )
+        if authorization is None:
+            raise ScanAuthorizationError("scan authorization was not found")
+        if authorization.preview_run_id != preview_run_id:
+            raise ScanAuthorizationError(
+                "scan authorization does not belong to the selected preview"
+            )
+        preview, preview_context, _result, _seal = self._load_sealed_preview(
+            session, preview_run_id
+        )
+        if (
+            authorization.project_id != context.project_id
+            or authorization.site_id != context.site_id
+            or preview.project_id != context.project_id
+            or preview.site_id != context.site_id
+        ):
+            raise ScanAuthorizationError(
+                "scan authorization does not belong to the requested project and site"
+            )
+        preview_digest = _packet_plan_sha256(preview_context)
+        live_digest = _packet_plan_sha256(context)
+        if (
+            authorization.packet_plan_sha256 != preview_digest
+            or live_digest != preview_digest
+        ):
+            raise ScanAuthorizationError(
+                "live packet plan does not match the authorized sealed preview"
+            )
+        if authorization.revoked_at is not None:
+            raise ScanAuthorizationError("scan authorization has been revoked")
+        if authorization.use_count >= authorization.max_uses:
+            raise ScanAuthorizationError("scan authorization has already been used")
+        if now < authorization.not_before:
+            raise ScanAuthorizationError("scan authorization window has not started")
+        if now >= authorization.not_after:
+            raise ScanAuthorizationError("scan authorization window has ended")
+        return authorization
 
     def get_context(self, run_id: str) -> StoredRunContextV1:
         with self._session_factory() as session:
@@ -260,6 +762,52 @@ class RunLifecycleRepository:
                 )
                 return None
             claimed_at = now or _utcnow()
+            authorization = session.scalar(
+                select(ScanAuthorization).where(
+                    ScanAuthorization.consumed_run_id == run_id
+                )
+            )
+            if authorization is not None:
+                denial_reason = self._authorization_denial_reason(
+                    authorization, claimed_at
+                )
+                if denial_reason is not None:
+                    guarded = session.execute(
+                        update(Run)
+                        .where(
+                            Run.id == run_id,
+                            Run.status == "queued",
+                            Run.owner_token.is_(None),
+                            Run.terminal_at.is_(None),
+                        )
+                        .values(status="failed")
+                        .execution_options(synchronize_session=False)
+                    )
+                    if guarded.rowcount == 1:
+                        session.expire(run)
+                        run = self._load_run(session, run_id)
+                        terminal = self._terminal_snapshot(
+                            session,
+                            run,
+                            status="failed",
+                            stage="authorization_invalid",
+                            summary={
+                                "authorization_id": authorization.authorization_id,
+                                "authorization_valid": False,
+                                "reason": denial_reason,
+                                "acceptance_eligible": False,
+                            },
+                            error_message=denial_reason,
+                        )
+                        self._apply_finalization(
+                            session,
+                            run,
+                            terminal,
+                            terminal.sha256(),
+                            context.context_sha256,
+                            claimed_at,
+                        )
+                    return None
             expires_at = claimed_at + timedelta(seconds=lease_seconds)
             result = session.execute(
                 update(Run)
@@ -301,6 +849,21 @@ class RunLifecycleRepository:
                 lease_expires_at=expires_at,
                 context_sha256=context.context_sha256,
             )
+
+    @staticmethod
+    def _authorization_denial_reason(
+        authorization: ScanAuthorization,
+        observed_at: datetime,
+    ) -> str | None:
+        if authorization.revoked_at is not None:
+            return "scan authorization was revoked before execution claim"
+        if authorization.use_count != 1 or authorization.consumed_run_id is None:
+            return "scan authorization consumption record is incomplete"
+        if observed_at < authorization.not_before:
+            return "scan authorization window has not started"
+        if observed_at >= authorization.not_after:
+            return "scan authorization window ended before execution claim"
+        return None
 
     def heartbeat(
         self,
@@ -433,6 +996,163 @@ class RunLifecycleRepository:
             ):
                 return True
             return bool(run.cancel_requested)
+
+    def require_active_control(
+        self,
+        run_id: str,
+        owner_token: str,
+        attempt: int,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Fail closed unless one executor still owns an authorized live run.
+
+        This is deliberately read-only. It does not update ``heartbeat_at``,
+        ``lease_expires_at``, progress, or any other liveness field. The one
+        transaction validates the owner/attempt/lease/cancel fence, the exact
+        preview authorization relation and window, and the initiating named
+        user's current activation and scope grant. A database read error is not
+        caught here, so control-store failure also prevents dispatch.
+        """
+
+        observed_at = now or _utcnow()
+        with self._session_factory.begin() as session:
+            control = session.execute(
+                select(Run, RunExecutionContext)
+                .join(RunExecutionContext, RunExecutionContext.run_id == Run.id)
+                .where(
+                    Run.id == run_id,
+                    Run.status == "running",
+                    Run.owner_token == owner_token,
+                    Run.attempt == attempt,
+                    Run.cancel_requested.is_(False),
+                    Run.terminal_at.is_(None),
+                    Run.lease_expires_at.is_not(None),
+                    Run.lease_expires_at > observed_at,
+                )
+            ).one_or_none()
+            if control is None:
+                raise ActiveControlDeniedError(
+                    "run owner, attempt, status, cancellation, or lease is no longer active"
+                )
+            run, context_row = control
+            context = RunContextV1.model_validate(context_row.context_json)
+            if canonical_context_sha256(context) != context_row.context_sha256:
+                raise ActiveControlDeniedError("frozen run context integrity check failed")
+            if run.project_id != context.project_id or run.site_id != context.site_id:
+                raise ActiveControlDeniedError("frozen run scope no longer matches")
+
+            if _is_dry_context(context):
+                return
+
+            authorization_row = session.execute(
+                select(ScanAuthorization, RunLink)
+                .join(
+                    RunLink,
+                    RunLink.authorization_id
+                    == ScanAuthorization.authorization_id,
+                )
+                .where(
+                    ScanAuthorization.consumed_run_id == run_id,
+                    RunLink.child_run_id == run_id,
+                    RunLink.relation == "preview",
+                )
+            ).one_or_none()
+            if authorization_row is None:
+                raise ActiveControlDeniedError(
+                    "live scan authorization linkage is missing"
+                )
+            authorization, link = authorization_row
+            if (
+                authorization.preview_run_id != link.parent_run_id
+                or link.authorization_id != authorization.authorization_id
+                or authorization.project_id != run.project_id
+                or authorization.site_id != run.site_id
+                or authorization.consumed_run_id != run_id
+                or authorization.use_count != 1
+                or authorization.max_uses != 1
+            ):
+                raise ActiveControlDeniedError(
+                    "live scan authorization linkage is invalid"
+                )
+            if authorization.revoked_at is not None:
+                raise ActiveControlDeniedError("scan authorization was revoked")
+            if observed_at < authorization.not_before:
+                raise ActiveControlDeniedError(
+                    "scan authorization window has not started"
+                )
+            if observed_at >= authorization.not_after:
+                raise ActiveControlDeniedError("scan authorization window has ended")
+            try:
+                packet_plan_sha256 = _packet_plan_sha256(context)
+            except ScanAuthorizationError as error:
+                raise ActiveControlDeniedError(
+                    "frozen scan authorization contract is invalid"
+                ) from error
+            if authorization.packet_plan_sha256 != packet_plan_sha256:
+                raise ActiveControlDeniedError(
+                    "frozen packet plan no longer matches its authorization"
+                )
+
+            self._require_active_initiator(session, run, context)
+
+    @staticmethod
+    def _require_active_initiator(
+        session: Session,
+        run: Run,
+        context: RunContextV1,
+    ) -> None:
+        try:
+            contract = _scan_contract(context)
+        except ScanAuthorizationError as error:
+            raise ActiveControlDeniedError(
+                "frozen scan contract is unavailable"
+            ) from error
+        source = contract.get("principal_source")
+        user_id = contract.get("initiating_user_id")
+        deployment_role = contract.get("deployment_role")
+
+        if source == "user_key":
+            if not isinstance(user_id, str) or not user_id.strip():
+                raise ActiveControlDeniedError(
+                    "stable initiating user identity is missing"
+                )
+            user = session.get(User, user_id.strip())
+            if user is None or not user.is_active:
+                raise ActiveControlDeniedError("initiating user is not active")
+            current_role = user.role
+            if current_role not in {"engineer", "admin"}:
+                raise ActiveControlDeniedError("initiating user is no longer an engineer or admin")
+            if current_role == "admin":
+                return
+            active_grant = session.scalar(
+                select(UserScopeGrant.grant_id)
+                .where(
+                    UserScopeGrant.user_id == user.id,
+                    UserScopeGrant.project_id == run.project_id,
+                    UserScopeGrant.site_id == run.site_id,
+                    UserScopeGrant.active_marker.is_(True),
+                )
+                .limit(1)
+            )
+            if active_grant is None:
+                raise ActiveControlDeniedError(
+                    "initiating user's project/site scope grant is not active"
+                )
+            return
+
+        if source in {"local", "shared_key"}:
+            if user_id not in (None, ""):
+                raise ActiveControlDeniedError(
+                    "synthetic principal cannot carry a named user identity"
+                )
+            if deployment_role != "standalone":
+                raise ActiveControlDeniedError(
+                    "synthetic principal is allowed only for a frozen standalone deployment"
+                )
+            return
+
+        raise ActiveControlDeniedError("initiating principal source is invalid")
 
     # -- cancellation/finalization -----------------------------------------
 

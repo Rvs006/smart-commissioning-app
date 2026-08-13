@@ -15,7 +15,13 @@ from smart_commissioning_core.db.repositories import DiscoveryRepository
 from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
 from smart_commissioning_core.rbac import Role
 
-from app.core.auth import require_role
+from app.core.auth import AuthPrincipal, get_principal, require_role
+from app.core.scopes import (
+    allowed_scope_pairs,
+    load_scoped_report,
+    load_scoped_run,
+    require_project_site_access,
+)
 from app.schemas.jobs import (
     ReportDeleteRequest,
     ReportDeleteResponse,
@@ -25,9 +31,9 @@ from app.schemas.jobs import (
     RunRecord,
 )
 from app.services.report_artifacts import (
+    ReportArtifactIntegrityError,
     delete_report_artifact,
-    load_content_addressed_artifact,
-    load_report_artifact,
+    load_owned_report_artifact,
     store_report_artifact,
 )
 from app.services.report_naming import build_report_file_name, report_content_disposition
@@ -35,6 +41,7 @@ from app.services.report_pdf import PdfDocument
 from app.services.run_service import (
     DISCOVERY_JOB_TYPES,
     VALIDATION_JOB_TYPES,
+    ReportListIntegrityError,
     RunService,
 )
 from app.services.udmi_report_model import (
@@ -53,6 +60,19 @@ service = RunService()
 # (creating a report run) is engineer+.
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
+
+
+def _require_scoped_report(report_id: str, principal: AuthPrincipal) -> None:
+    """Conceal foreign reports while preserving the caller-supplied ID in errors."""
+    try:
+        load_scoped_report(report_id, principal, engine=service.engine)
+    except HTTPException as error:
+        if error.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Report '{report_id}' was not found.",
+            ) from error
+        raise
 
 
 def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
@@ -114,7 +134,20 @@ def _to_report_summary(report_id: str | RunRecord) -> ReportSummary:
 
 
 @router.post("", response_model=ReportSummary, dependencies=[Depends(require_engineer)])
-def create_report(request: ReportRequest) -> ReportSummary:
+def create_report(
+    request: ReportRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ReportSummary:
+    require_project_site_access(
+        principal, request.project_id, request.site_id, engine=service.engine
+    )
+    for source_run_id in dict.fromkeys(request.source_run_ids):
+        scoped = load_scoped_run(source_run_id, principal, engine=service.engine)
+        if (scoped.project_id, scoped.site_id) != (
+            request.project_id,
+            request.site_id,
+        ):
+            raise HTTPException(status_code=404, detail="Run not found.")
     try:
         run, report = service.create_report_run(request)
     except ValueError as error:
@@ -124,11 +157,11 @@ def create_report(request: ReportRequest) -> ReportSummary:
         render_run = run.model_copy(
             update={"status": "succeeded", "stage": "report_ready", "progress_percent": 100}
         )
-        content, media_type = _build_report_artifact(render_run, report.output_format)
         snapshot_hash = run.parameters.get("report_snapshot_sha256")
         generated_at = run.parameters.get("report_generated_at")
         if not isinstance(snapshot_hash, str) or not isinstance(generated_at, str):
             raise RuntimeError("Report snapshot provenance is incomplete.")
+        content, media_type = _build_report_artifact(render_run, report.output_format)
         manifest = store_report_artifact(
             report_id=run.run_id,
             snapshot_hash=snapshot_hash,
@@ -141,24 +174,23 @@ def create_report(request: ReportRequest) -> ReportSummary:
         )
         service.complete_report_run(run.run_id, manifest)
     except Exception as error:
-        if manifest is not None:
+        snapshot_hash = run.parameters.get("report_snapshot_sha256")
+        discarded = False
+        if isinstance(snapshot_hash, str):
             try:
-                # Deletion can race the interval between writing immutable
-                # bytes and publishing their manifest. If finalization loses
-                # that race, remove only this report-owned directory entry.
+                discarded = service.discard_unmaterialized_report_run(
+                    run.run_id,
+                    expected_snapshot_sha256=snapshot_hash,
+                )
+            except Exception:
+                pass
+        if discarded and manifest is not None:
+            try:
+                # Remove only bytes owned by the row that cleanup just proved
+                # was still the pristine report created by this request.
                 delete_report_artifact(manifest, report_id=run.run_id)
             except (OSError, RuntimeError, ValueError):
                 pass
-        try:
-            service.update_run_status(
-                run.run_id,
-                status="failed",
-                stage="report_materialization_failed",
-                progress_percent=100,
-                error_message="The report artifact could not be materialized.",
-            )
-        except Exception:
-            pass
         raise HTTPException(status_code=500, detail="Report artifact materialization failed.") from error
     return _to_report_summary(render_run)
 
@@ -167,13 +199,19 @@ def create_report(request: ReportRequest) -> ReportSummary:
 def list_reports(
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    principal: AuthPrincipal = Depends(get_principal),
 ) -> ReportListResponse:
-    total = service.count_report_records()
+    scopes = allowed_scope_pairs(principal, engine=service.engine)
+    try:
+        records, total = service.page_verified_report_records(
+            limit=limit,
+            offset=offset,
+            scope_pairs=scopes,
+        )
+    except ReportListIntegrityError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return ReportListResponse(
-        reports=[
-            _to_report_summary(run)
-            for run in service.list_report_records(limit=limit, offset=offset)
-        ],
+        reports=[_to_report_summary(run) for run in records],
         total=total,
         limit=limit,
         offset=offset,
@@ -193,8 +231,14 @@ class ReportExportRequest(BaseModel):
     response_model=ReportDeleteResponse,
     dependencies=[Depends(require_engineer)],
 )
-def delete_reports(request: ReportDeleteRequest) -> ReportDeleteResponse:
+def delete_reports(
+    request: ReportDeleteRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ReportDeleteResponse:
     """Delete one or several generated reports after validating the full batch."""
+
+    for report_id in dict.fromkeys(request.report_ids):
+        _require_scoped_report(report_id, principal)
 
     try:
         deleted = service.delete_report_runs(request.report_ids)
@@ -232,7 +276,10 @@ def delete_reports(request: ReportDeleteRequest) -> ReportDeleteResponse:
 # keeps only one file); a single report keeps downloading directly via
 # /{report_id}/download.
 @router.post("/export", dependencies=[Depends(require_viewer)])
-def export_reports(request: ReportExportRequest) -> Response:
+def export_reports(
+    request: ReportExportRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
     # Resolve every id up front (order-preserving dedupe, a twice-ticked report
     # yields one member) so an unknown id 404s the WHOLE request rather than
     # returning a silently partial archive (honesty rule). Each member reuses the
@@ -243,9 +290,10 @@ def export_reports(request: ReportExportRequest) -> Response:
         if candidate_id in seen:
             continue
         seen.add(candidate_id)
+        _require_scoped_report(candidate_id, principal)
         try:
-            run = service.get_run(candidate_id)
-        except FileNotFoundError as error:
+            run = service.get_report_for_serving(candidate_id)
+        except (FileNotFoundError, RuntimeError, ValueError) as error:
             raise HTTPException(
                 status_code=404, detail=f"Report '{candidate_id}' was not found."
             ) from error
@@ -257,8 +305,13 @@ def export_reports(request: ReportExportRequest) -> Response:
     manifest_members: list[dict[str, object]] = []
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         for run in runs:
-            report = _to_report_summary(run.run_id)
-            content, _media_type = _stored_or_legacy_artifact(run, report.output_format)
+            report = _to_report_summary(run)
+            try:
+                content, _media_type = _stored_or_legacy_artifact(
+                    run, report.output_format
+                )
+            except ReportArtifactIntegrityError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
             # Pinned to the zip epoch (same as _normalize_zip_bytes) so the
             # bundle is byte-reproducible; member name embeds the run id, so
             # names are unique and never collide.
@@ -305,24 +358,35 @@ def export_reports(request: ReportExportRequest) -> Response:
 
 
 @router.get("/{report_id}", response_model=ReportSummary, dependencies=[Depends(require_viewer)])
-def get_report(report_id: str) -> ReportSummary:
+def get_report(
+    report_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ReportSummary:
+    _require_scoped_report(report_id, principal)
     try:
-        return _to_report_summary(report_id)
-    except FileNotFoundError as error:
+        return _to_report_summary(service.get_report_for_serving(report_id))
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.") from error
 
 
 @router.get("/{report_id}/download", dependencies=[Depends(require_viewer)])
-def download_report(report_id: str) -> Response:
+def download_report(
+    report_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> Response:
+    _require_scoped_report(report_id, principal)
     try:
-        run = service.get_run(report_id)
-    except FileNotFoundError as error:
+        run = service.get_report_for_serving(report_id)
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.") from error
     if run.job_type != "report_generation":
         raise HTTPException(status_code=404, detail=f"Report '{report_id}' was not found.")
 
-    report = _to_report_summary(report_id)
-    content, media_type = _stored_or_legacy_artifact(run, report.output_format)
+    report = _to_report_summary(run)
+    try:
+        content, media_type = _stored_or_legacy_artifact(run, report.output_format)
+    except ReportArtifactIntegrityError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return Response(
         content=content,
         media_type=media_type,
@@ -331,28 +395,50 @@ def download_report(report_id: str) -> Response:
 
 
 def _stored_or_legacy_artifact(run: object, output_format: str) -> tuple[bytes, str]:
-    summary = run.result_summary if isinstance(run.result_summary, dict) else {}
+    content, media_type, _manifest = _report_artifact_for_serving(run, output_format)
+    return content, media_type
+
+
+def _report_artifact_for_serving(
+    run: object,
+    output_format: str,
+    *,
+    require_valid_signature: bool = True,
+) -> tuple[bytes, str, dict[str, object] | None]:
+    """Load one report through its verified seal and owned signed manifest."""
+
+    run_id = getattr(run, "run_id", None)
+    if not isinstance(run_id, str):
+        raise ReportArtifactIntegrityError("Stored report id is invalid.")
+    try:
+        serving_run = service.get_report_for_serving(run_id)
+    except (FileNotFoundError, RuntimeError, ValueError) as error:
+        raise ReportArtifactIntegrityError(
+            "Stored report evidence failed sealed integrity verification."
+        ) from error
+    summary = (
+        serving_run.result_summary
+        if isinstance(serving_run.result_summary, dict)
+        else {}
+    )
     manifest = summary.get("artifact_manifest")
     if isinstance(manifest, dict):
-        media_type = manifest.get("media_type")
-        if not isinstance(media_type, str) or not media_type:
-            raise RuntimeError("Stored report manifest has no media type.")
-        synced = SyncV2Repository(service.engine).get_artifact(run.run_id)
-        if synced is not None:
-            if synced["manifest"] != manifest:
-                raise RuntimeError("Synchronized artifact manifest conflicts with sealed evidence.")
-            return (
-                load_content_addressed_artifact(
-                    str(synced["storage_relpath"]),
-                    expected_hash=str(synced["artifact_sha256"]),
-                    expected_size=int(synced["byte_size"]),
-                ),
-                media_type,
-            )
-        return load_report_artifact(manifest), media_type
+        artifact, media_type = load_owned_report_artifact(
+            report_id=run_id,
+            manifest=manifest,
+            synchronized=SyncV2Repository(service.engine).get_artifact(run_id),
+            require_valid_signature=require_valid_signature,
+        )
+        return artifact, media_type, dict(manifest)
     # Pre-v0.1.26 records remain downloadable, but the compatibility path is
     # strictly read-only and never creates provenance during GET.
-    return _build_report_artifact(run, output_format)
+    try:
+        artifact, media_type = _build_report_artifact(serving_run, output_format)
+    except (RuntimeError, ValueError) as error:
+        raise ReportArtifactIntegrityError(
+            "Historical report evidence could not be reconstructed."
+        ) from error
+    return artifact, media_type, None
 
 
 def _generated_at(run: object) -> str:

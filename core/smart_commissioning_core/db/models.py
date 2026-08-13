@@ -11,6 +11,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -337,10 +338,153 @@ class ActiveProtocolSlot(Base):
 
     protocol_key: Mapped[str] = mapped_column(String(80), primary_key=True)
     run_id: Mapped[str] = mapped_column(
-        ForeignKey("runs.id", ondelete="CASCADE"), unique=True, index=True
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
     )
     owner_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     acquired_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class ScanAuthorization(Base):
+    """One immutable, preview-bound, single-use active-scan approval."""
+
+    __tablename__ = "scan_authorizations"
+
+    authorization_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    preview_run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"), index=True)
+    packet_plan_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    approved_by: Mapped[str] = mapped_column(String(255))
+    ticket: Mapped[str] = mapped_column(String(255))
+    purpose: Mapped[str] = mapped_column(Text)
+    not_before: Mapped[datetime] = mapped_column(UTCDateTime())
+    not_after: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    max_uses: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    use_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    consumed_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id", ondelete="SET NULL"), unique=True, nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint("max_uses = 1", name="ck_scan_authorizations_single_use"),
+        CheckConstraint(
+            "use_count >= 0 AND use_count <= max_uses",
+            name="ck_scan_authorizations_use_count",
+        ),
+        CheckConstraint(
+            "not_after > not_before",
+            name="ck_scan_authorizations_window",
+        ),
+        Index(
+            "ix_scan_authorizations_scope_window",
+            "project_id",
+            "site_id",
+            "not_after",
+        ),
+    )
+
+
+class UserScopeGrant(Base):
+    """Audited project/site access granted to one named user.
+
+    Global role and resource scope are deliberately separate: ``User.role``
+    controls what an operator may do, while an active row here controls where a
+    non-admin named user may do it. ``active_marker`` is ``True`` for a current
+    grant and becomes ``NULL`` on revocation. Including it in the unique key
+    gives SQLite and PostgreSQL one active grant per user/scope while retaining
+    any number of immutable revoked-history rows.
+    """
+
+    __tablename__ = "user_scope_grants"
+
+    grant_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"), index=True)
+    active_marker: Mapped[bool | None] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=True
+    )
+    granted_by: Mapped[str] = mapped_column(String(255))
+    reason: Mapped[str] = mapped_column(Text)
+    granted_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    revoked_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "active_marker IS NULL OR active_marker IS TRUE",
+            name="ck_user_scope_grants_active_marker",
+        ),
+        CheckConstraint(
+            "(active_marker IS TRUE AND revoked_at IS NULL AND revoked_by IS NULL "
+            "AND revoke_reason IS NULL) OR "
+            "(active_marker IS NULL AND revoked_at IS NOT NULL "
+            "AND revoked_by IS NOT NULL AND revoke_reason IS NOT NULL)",
+            name="ck_user_scope_grants_revocation_state",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "project_id",
+            "site_id",
+            "active_marker",
+            name="uq_user_scope_grants_one_active",
+        ),
+        Index(
+            "ix_user_scope_grants_effective",
+            "user_id",
+            "project_id",
+            "site_id",
+            "active_marker",
+        ),
+    )
+
+class RunLink(Base):
+    """Typed relation between immutable runs, beginning with preview -> live."""
+
+    __tablename__ = "run_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parent_run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    child_run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    relation: Mapped[str] = mapped_column(String(32))
+    authorization_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scan_authorizations.authorization_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "relation IN ('preview', 'retry', 'property_expansion', 'soak_iteration')",
+            name="ck_run_links_relation",
+        ),
+        UniqueConstraint(
+            "parent_run_id",
+            "child_run_id",
+            "relation",
+            name="uq_run_links_pair_relation",
+        ),
+        UniqueConstraint(
+            "child_run_id",
+            "relation",
+            name="uq_run_links_child_relation",
+        ),
+        CheckConstraint("parent_run_id <> child_run_id", name="ck_run_links_distinct"),
+        Index("ix_run_links_parent_relation", "parent_run_id", "relation"),
+    )
 
 
 class RunResult(Base):
@@ -372,6 +516,33 @@ class RunSeal(Base):
     context_sha256: Mapped[str] = mapped_column(String(64), index=True)
     result_sha256: Mapped[str] = mapped_column(String(64), index=True)
     sealed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class ReportEvidenceContract(Base):
+    """Immutable provenance dispatch for report evidence verification."""
+
+    __tablename__ = "report_evidence_contracts"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    contract_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    site_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    classified_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "contract_version IN ('sealed_v1', 'legacy_pre_lifecycle')",
+            name="ck_report_evidence_contracts_version",
+        ),
+        Index(
+            "ix_report_evidence_contracts_scope",
+            "project_id",
+            "site_id",
+            "run_id",
+        ),
+    )
 
 
 class RunLifecycleConflict(Base):

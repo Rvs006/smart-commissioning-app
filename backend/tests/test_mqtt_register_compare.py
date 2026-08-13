@@ -177,19 +177,14 @@ class MqttRegisterCompareTests(_EngineApiTestCase):
         self.assertEqual(first, second)
 
     def test_dry_run_carries_no_comparison(self) -> None:
-        from app.api.routes import discovery as discovery_routes
-
         project = "reg-compare-dry"
-        # A register exists and topics are (artificially) present, but the run's
-        # summary still carries dry_run=true — a dry run sent no packets, so
-        # stamping "expected but unobserved" would fabricate an observation.
+        # A register exists, but a dry run sent no packets. Its sealed evidence
+        # therefore stays empty and cannot carry a comparison verdict.
         self._seed_register(project, self._register_rows(), import_id="imp_dry")
         run_id = self._new_run(project)  # leaves dry_run=true in the summary
-        discovery_routes._discovery_repository().replace_topics(run_id, self._observed_topics())
         data = self.client.get(f"/api/v1/discovery/runs/{run_id}/results").json()
         self.assertIsNone(data["register_comparison"])
-        for row in data["topics"]:
-            self.assertNotIn("register_match", row.get("attributes") or {})
+        self.assertEqual(data["topics"], [])
 
     def test_topics_endpoint_matches_results_stamps(self) -> None:
         project = "reg-compare-topics"

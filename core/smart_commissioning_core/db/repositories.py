@@ -10,7 +10,7 @@ written today by backend ImportService.
 
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -62,6 +62,10 @@ class LastAdminError(ValueError):
     """
 
 
+class ActiveAdminExistsError(ValueError):
+    """Raised when offline bootstrap finds an active named administrator."""
+
+
 def _user_to_dict(user: User) -> dict[str, object]:
     """Serialize a User WITHOUT the api_key_hash (never leaked over the API)."""
     return {
@@ -110,6 +114,42 @@ class UserRepository:
             created_at=created_at or datetime.now(UTC),
         )
         with self._session_factory.begin() as session:
+            session.add(record)
+            session.flush()
+            return _user_to_dict(record)
+
+    def create_bootstrap_admin(
+        self,
+        *,
+        user_id: str,
+        username: str,
+        api_key_hash: str,
+        created_at: datetime | None = None,
+    ) -> dict[str, object]:
+        """Create the sole active named admin when recovery has none.
+
+        The active-admin check and insert share one transaction. SQLite engines
+        in this project start write transactions with ``BEGIN IMMEDIATE``.
+        Postgres additionally takes a short table lock so concurrent bootstrap
+        or normal user inserts cannot both observe an empty admin set.
+
+        Raises :class:`ActiveAdminExistsError` when an active named admin is
+        already present and ``IntegrityError`` for duplicate identity data.
+        """
+        record = User(
+            id=user_id,
+            username=username,
+            role=_ADMIN_ROLE,
+            api_key_hash=api_key_hash,
+            is_active=True,
+            created_at=created_at or datetime.now(UTC),
+        )
+        with self._session_factory.begin() as session:
+            bind = session.get_bind()
+            if bind.dialect.name == "postgresql":
+                session.execute(text("LOCK TABLE users IN EXCLUSIVE MODE"))
+            if self._count_active_admins(session) != 0:
+                raise ActiveAdminExistsError("an active named administrator already exists")
             session.add(record)
             session.flush()
             return _user_to_dict(record)

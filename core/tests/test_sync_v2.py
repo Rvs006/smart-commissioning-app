@@ -1,3 +1,4 @@
+import base64
 import json
 import tempfile
 import unittest
@@ -16,10 +17,11 @@ from smart_commissioning_core.db.engine import (
 )
 from smart_commissioning_core.db.migrate import build_alembic_config, upgrade_to_head
 from smart_commissioning_core.db.models import Run
+from smart_commissioning_core.db.repositories import ImportRepository
 from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
 from smart_commissioning_core.db.sync_v2_repository import SyncV2Repository
 from smart_commissioning_core.integrity import SigningKey, sha256_bytes
-from smart_commissioning_core.run_context import RunContextV1
+from smart_commissioning_core.run_context import RunContextV1, canonical_sha256
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from smart_commissioning_core.sync_identity import EdgeIdentity
 from smart_commissioning_core.sync_v2 import (
@@ -128,6 +130,77 @@ class SyncV2CoreTests(unittest.TestCase):
             artifact_loader=lambda _manifest: b"unused",
         )
 
+    def _sealed_scan_run(
+        self,
+        marker: str,
+        *,
+        import_id: str,
+        rows: list[dict[str, object]],
+    ) -> str:
+        digest = canonical_sha256(rows)
+        ImportRepository(self.engine).create(
+            import_id=import_id,
+            import_type="ip_register",
+            project_id="project-public",
+            site_id="site-authority",
+            original_filename=f"{marker}.csv",
+            stored_file_path=f"imports/{marker}.csv",
+            summary={
+                "accepted_rows": len(rows),
+                "accepted_rows_sha256": digest,
+                "authority_schema_version": "1.0",
+            },
+            accepted_rows=rows,
+            created_at=_NOW,
+        )
+        context = RunContextV1(
+            project_id="project-public",
+            site_id="site-authority",
+            configuration_snapshot={},
+            configuration_version="fixture-1",
+            imports=({"resource_id": import_id, "sha256": digest},),
+            engine_parameters={
+                "scan_contract_v1": {
+                    "ip": {
+                        "authority": {
+                            "import_id": import_id,
+                            "accepted_rows_sha256": digest,
+                            "accepted_count": len(rows),
+                        }
+                    }
+                }
+            },
+            requesting_principal="sync-authority-test",
+            application_version="0.1.41",
+        )
+        envelope = self.lifecycle.create_run_with_context(
+            job_type="ip_discovery",
+            context=context,
+            execution_mode="inline",
+            edge_id=self.identity.edge_id,
+            now=_NOW,
+        )
+        lease = self.lifecycle.claim_run(
+            envelope.run_id,
+            envelope.dispatch_id,
+            owner_token=f"owner-{marker}",
+            lease_seconds=60,
+            now=_NOW,
+        )
+        self.assertIsNotNone(lease)
+        outcome = self.lifecycle.finalize_run(
+            envelope.run_id,
+            f"owner-{marker}",
+            TerminalResultV1(
+                status="succeeded",
+                stage="engine_complete",
+                summary={"marker": marker},
+            ),
+            now=_NOW,
+        )
+        self.assertTrue(outcome.applied)
+        return envelope.run_id
+
     def test_deterministic_bundle_round_trip_binds_result_and_context(self) -> None:
         run_id = self._sealed_run("roundtrip")
 
@@ -145,6 +218,207 @@ class SyncV2CoreTests(unittest.TestCase):
         item = validate_sync_v2_item(opened.members[descriptor.item_member], descriptor)
         self.assertEqual(item["run"]["run_id"], run_id)
         self.assertEqual(item["seal"]["context_sha256"], item["execution_context"]["context_sha256"])
+
+    def test_scan_authority_is_rehashed_and_exported_once_by_content_digest(self) -> None:
+        rows = [{"IP Address": "192.168.10.20", "Asset ID": "ahu-1"}]
+        first_import_id = "imp-sync-authority-first"
+        second_import_id = "imp-sync-authority-second"
+        first_run = self._sealed_scan_run(
+            "authority-first",
+            import_id=first_import_id,
+            rows=rows,
+        )
+        second_run = self._sealed_scan_run(
+            "authority-second",
+            import_id=second_import_id,
+            rows=rows,
+        )
+        digest = canonical_sha256(rows)
+
+        opened = open_sync_v2_bundle(
+            self._bundle([first_run, second_run]),
+            expected_edge_id=self.identity.edge_id,
+            expected_signing_key_fingerprint=self.key.public_key_fingerprint(),
+        )
+
+        self.assertEqual(len(opened.manifest.authorities), 2)
+        self.assertEqual(
+            {authority.import_id for authority in opened.manifest.authorities},
+            {first_import_id, second_import_id},
+        )
+        authority = opened.manifest.authorities[0]
+        for authority in opened.manifest.authorities:
+            self.assertEqual(authority.import_type, "ip_register")
+            self.assertEqual(authority.project_id, "project-public")
+            self.assertEqual(authority.site_id, "site-authority")
+            self.assertEqual(authority.accepted_count, 1)
+            self.assertEqual(authority.accepted_rows_sha256, digest)
+            self.assertEqual(
+                authority.member,
+                f"authorities/sha256/{digest}.json",
+            )
+        self.assertEqual(
+            len([name for name in opened.members if name.startswith("authorities/sha256/")]),
+            1,
+        )
+        self.assertEqual(
+            json.loads(opened.members[authority.member]),
+            {"schema_version": "1.0", "accepted_rows": rows},
+        )
+
+    def test_scan_authority_drift_stops_export_before_bundle_bytes_exist(self) -> None:
+        rows = [{"IP Address": "192.168.10.20"}]
+        import_id = "imp-sync-authority-drift"
+        run_id = self._sealed_scan_run(
+            "authority-drift",
+            import_id=import_id,
+            rows=rows,
+        )
+        factory = session_factory(self.engine)
+        from smart_commissioning_core.db.models import ImportRecord
+
+        with factory.begin() as session:
+            record = session.get(ImportRecord, import_id)
+            self.assertIsNotNone(record)
+            record.accepted_rows = [{"IP Address": "192.168.10.99"}]
+
+        with self.assertRaisesRegex(SyncV2Error, "scan authority"):
+            self._bundle([run_id])
+
+    def test_bacnet_device_and_point_authorities_are_both_exported(self) -> None:
+        devices = [{"Device Instance": "1001", "Asset ID": "ahu-1"}]
+        points = [{"Device Instance": "1001", "Object ID": "analogInput:1"}]
+        device_digest = canonical_sha256(devices)
+        point_digest = canonical_sha256(points)
+        imports = ImportRepository(self.engine)
+        for import_id, import_type, rows, digest in (
+            ("imp-sync-bacnet-devices", "bacnet_register", devices, device_digest),
+            ("imp-sync-bacnet-points", "bacnet_points", points, point_digest),
+        ):
+            imports.create(
+                import_id=import_id,
+                import_type=import_type,
+                project_id="project-public",
+                site_id="site-authority",
+                original_filename=f"{import_id}.csv",
+                stored_file_path=f"imports/{import_id}.csv",
+                summary={
+                    "accepted_rows": 1,
+                    "accepted_rows_sha256": digest,
+                    "authority_schema_version": "1.0",
+                },
+                accepted_rows=rows,
+                created_at=_NOW,
+            )
+        context = RunContextV1(
+            project_id="project-public",
+            site_id="site-authority",
+            configuration_snapshot={},
+            configuration_version="fixture-1",
+            imports=(
+                {"resource_id": "imp-sync-bacnet-devices", "sha256": device_digest},
+                {"resource_id": "imp-sync-bacnet-points", "sha256": point_digest},
+            ),
+            engine_parameters={
+                "scan_contract_v1": {
+                    "bacnet": {
+                        "authorities": {
+                            "devices": {
+                                "import_id": "imp-sync-bacnet-devices",
+                                "accepted_rows_sha256": device_digest,
+                                "accepted_count": 1,
+                            },
+                            "points": {
+                                "import_id": "imp-sync-bacnet-points",
+                                "accepted_rows_sha256": point_digest,
+                                "accepted_count": 1,
+                            },
+                        }
+                    }
+                }
+            },
+            requesting_principal="sync-authority-test",
+            application_version="0.1.41",
+        )
+        envelope = self.lifecycle.create_run_with_context(
+            job_type="bacnet_discovery",
+            context=context,
+            execution_mode="inline",
+            edge_id=self.identity.edge_id,
+            now=_NOW,
+        )
+        owner = "owner-bacnet-authorities"
+        self.assertIsNotNone(
+            self.lifecycle.claim_run(
+                envelope.run_id,
+                envelope.dispatch_id,
+                owner_token=owner,
+                lease_seconds=60,
+                now=_NOW,
+            )
+        )
+        outcome = self.lifecycle.finalize_run(
+            envelope.run_id,
+            owner,
+            TerminalResultV1(
+                status="succeeded",
+                stage="engine_complete",
+                summary={"marker": "bacnet-authorities"},
+            ),
+            now=_NOW,
+        )
+        self.assertTrue(outcome.applied)
+
+        opened = open_sync_v2_bundle(
+            self._bundle([envelope.run_id]),
+            expected_edge_id=self.identity.edge_id,
+            expected_signing_key_fingerprint=self.key.public_key_fingerprint(),
+        )
+
+        self.assertEqual(
+            {authority.import_id: authority.import_type for authority in opened.manifest.authorities},
+            {
+                "imp-sync-bacnet-devices": "bacnet_register",
+                "imp-sync-bacnet-points": "bacnet_points",
+            },
+        )
+
+    def test_manifest_without_authorities_field_remains_authenticated(self) -> None:
+        run_id = self._sealed_run("legacy-no-authorities")
+        with ZipFile(BytesIO(self._bundle([run_id]))) as archive:
+            members = {name: archive.read(name) for name in archive.namelist() if name != "manifest.json"}
+            manifest = json.loads(archive.read("manifest.json"))
+        manifest.pop("authorities")
+        manifest["bundle_id"] = sha256_bytes(
+            canonical_json_bytes(
+                {
+                    key: value
+                    for key, value in manifest.items()
+                    if key not in {"bundle_id", "signature", "signed_manifest_sha256"}
+                }
+            )
+        )
+        signed_body = canonical_json_bytes(
+            {key: value for key, value in manifest.items() if key not in {"signature", "signed_manifest_sha256"}}
+        )
+        manifest["signed_manifest_sha256"] = sha256_bytes(signed_body)
+        manifest["signature"] = base64.b64encode(self.key.sign(signed_body)).decode("ascii")
+        output = BytesIO()
+        with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+            for name, payload in sorted(members.items()):
+                archive.writestr(name, payload)
+            archive.writestr(
+                "manifest.json",
+                json.dumps(manifest, indent=2, sort_keys=True).encode(),
+            )
+
+        opened = open_sync_v2_bundle(
+            output.getvalue(),
+            expected_edge_id=self.identity.edge_id,
+            expected_signing_key_fingerprint=self.key.public_key_fingerprint(),
+        )
+
+        self.assertIsNone(opened.manifest.authorities)
 
     def test_secret_sentinel_is_rejected_before_bundle_creation(self) -> None:
         run_id = self._sealed_run("secret", summary={"api_key": "sentinel-never-export"})
@@ -184,9 +458,7 @@ class SyncV2CoreTests(unittest.TestCase):
         item = json.loads(opened.members[descriptor.item_member])
         item["run"]["parameters"]["context_sha256"] = "0" * 64
         raw = canonical_json_bytes(item)
-        tampered_descriptor = descriptor.model_copy(
-            update={"item_sha256": sha256_bytes(raw)}
-        )
+        tampered_descriptor = descriptor.model_copy(update={"item_sha256": sha256_bytes(raw)})
         with self.assertRaises(SyncV2Error):
             validate_sync_v2_item(raw, tampered_descriptor)
 
@@ -201,9 +473,7 @@ class SyncV2CoreTests(unittest.TestCase):
         item = json.loads(opened.members[descriptor.item_member])
         item["execution_context"]["ignored_extra"] = "ambiguous"
         raw = canonical_json_bytes(item)
-        tampered_descriptor = descriptor.model_copy(
-            update={"item_sha256": sha256_bytes(raw)}
-        )
+        tampered_descriptor = descriptor.model_copy(update={"item_sha256": sha256_bytes(raw)})
         with self.assertRaises(SyncV2Error):
             validate_sync_v2_item(raw, tampered_descriptor)
 
@@ -217,16 +487,12 @@ class SyncV2CoreTests(unittest.TestCase):
         descriptor = opened.manifest.items[0]
         item = json.loads(opened.members[descriptor.item_member])
         item["execution_context"]["context_json"]["project_id"] = "project-other"
-        context_hash = RunContextV1.model_validate(
-            item["execution_context"]["context_json"]
-        ).sha256()
+        context_hash = RunContextV1.model_validate(item["execution_context"]["context_json"]).sha256()
         item["execution_context"]["context_sha256"] = context_hash
         item["seal"]["context_sha256"] = context_hash
         item["run"]["parameters"]["context_sha256"] = context_hash
         raw = canonical_json_bytes(item)
-        tampered_descriptor = descriptor.model_copy(
-            update={"item_sha256": sha256_bytes(raw)}
-        )
+        tampered_descriptor = descriptor.model_copy(update={"item_sha256": sha256_bytes(raw)})
         with self.assertRaises(SyncV2Error):
             validate_sync_v2_item(raw, tampered_descriptor)
 
@@ -279,17 +545,13 @@ class SyncV2CoreTests(unittest.TestCase):
         descriptor = opened.manifest.items[0]
         raw = opened.members[descriptor.item_member]
         duplicate = b'{"schema_version":"2.0",' + raw[1:]
-        duplicate_descriptor = descriptor.model_copy(
-            update={"item_sha256": sha256_bytes(duplicate)}
-        )
+        duplicate_descriptor = descriptor.model_copy(update={"item_sha256": sha256_bytes(duplicate)})
         with self.assertRaises(SyncV2Error):
             validate_sync_v2_item(duplicate, duplicate_descriptor)
 
         non_finite = raw.replace(b'"progress_percent":100', b'"progress_percent":NaN')
         self.assertNotEqual(non_finite, raw)
-        non_finite_descriptor = descriptor.model_copy(
-            update={"item_sha256": sha256_bytes(non_finite)}
-        )
+        non_finite_descriptor = descriptor.model_copy(update={"item_sha256": sha256_bytes(non_finite)})
         with self.assertRaises(SyncV2Error):
             validate_sync_v2_item(non_finite, non_finite_descriptor)
 
@@ -326,21 +588,15 @@ class SyncV2CoreTests(unittest.TestCase):
         mutations = (
             lambda item: item["run"].update({"progress_percent": 7}),
             lambda item: item["run"].update({"error_message": "tampered"}),
-            lambda item: item["run"].update(
-                {"updated_at": "2026-07-27T08:00:01+00:00"}
-            ),
-            lambda item: item["result"].update(
-                {"created_at": "2026-07-27T08:00:01+00:00"}
-            ),
+            lambda item: item["run"].update({"updated_at": "2026-07-27T08:00:01+00:00"}),
+            lambda item: item["result"].update({"created_at": "2026-07-27T08:00:01+00:00"}),
         )
         for mutate in mutations:
             with self.subTest(mutate=mutate):
                 item = json.loads(json.dumps(original))
                 mutate(item)
                 raw = canonical_json_bytes(item)
-                tampered_descriptor = descriptor.model_copy(
-                    update={"item_sha256": sha256_bytes(raw)}
-                )
+                tampered_descriptor = descriptor.model_copy(update={"item_sha256": sha256_bytes(raw)})
                 with self.assertRaises(SyncV2Error):
                     validate_sync_v2_item(raw, tampered_descriptor)
 
@@ -396,8 +652,7 @@ class SyncV2CoreTests(unittest.TestCase):
         with ZipFile(nested, "w", ZIP_DEFLATED) as archive:
             archive.writestr(
                 "word/document.xml",
-                b"<w:t>-----BEGIN CERTIFICATE-----\nforbidden\n"
-                b"-----END CERTIFICATE-----</w:t>",
+                b"<w:t>-----BEGIN CERTIFICATE-----\nforbidden\n-----END CERTIFICATE-----</w:t>",
             )
         outer = BytesIO()
         with ZipFile(outer, "w", ZIP_DEFLATED) as archive:

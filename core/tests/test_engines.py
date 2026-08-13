@@ -13,6 +13,7 @@ from typing import Any
 
 from smart_commissioning_core.engines.base import (
     _PERSIST_FAILURE_MESSAGE,
+    _RUNTIME_DEADLINE_FAILURE_MESSAGE,
     _SANITIZED_FAILURE_MESSAGE,
     EngineContext,
     EngineResult,
@@ -107,6 +108,27 @@ def _ctx(
     )
 
 
+def _scan_contract(
+    *,
+    dispatch_seconds: float,
+    run_seconds: float,
+    job_type: str = "ip_discovery",
+) -> dict[str, Any]:
+    protocol = "ip" if job_type == "ip_discovery" else "bacnet"
+    return {
+        "scan_contract_v1": {
+            "scan_contract_version": "1.0",
+            "job_type": job_type,
+            protocol: {
+                "policy": {
+                    "dispatch_phase_seconds": dispatch_seconds,
+                    "run_deadline_seconds": run_seconds,
+                }
+            },
+        }
+    }
+
+
 class ThrottleConcurrencyTests(unittest.TestCase):
     def test_throttle_never_exceeds_max_concurrency(self) -> None:
         max_concurrency = 4
@@ -190,6 +212,61 @@ class ThrottleConcurrencyTests(unittest.TestCase):
         self.assertEqual(results, [0, 1, 2])
         self.assertEqual(contacted, [0, 1, 2], "no further targets should be contacted after cancel")
         self.assertLess(len(contacted), 10, "must stop early, not run all units")
+
+    def test_dispatch_deadline_expiring_during_rate_wait_stops_before_next_unit(self) -> None:
+        store = FakeRunStore()
+        contacted: list[int] = []
+        ctx = _ctx(
+            store,
+            parameters=_scan_contract(dispatch_seconds=0.01, run_seconds=0.5),
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=20.0),
+        )
+
+        def factory(value: int):
+            async def _coro() -> int:
+                contacted.append(value)
+                return value
+
+            return _coro
+
+        async def engine(engine_ctx: EngineContext) -> EngineResult:
+            throttle = Throttle(engine_ctx.throttle)
+            await throttle.run_throttled([factory(0), factory(1)], engine_ctx)
+            return EngineResult()
+
+        result = run_engine(ctx, engine)
+
+        self.assertEqual(contacted, [0])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.last_progress, 100)
+        self.assertEqual(store.last_error, _RUNTIME_DEADLINE_FAILURE_MESSAGE)
+
+    def test_slot_checks_bacnet_dispatch_deadline_after_rate_wait(self) -> None:
+        store = FakeRunStore()
+        contacted: list[int] = []
+        ctx = _ctx(
+            store,
+            parameters=_scan_contract(
+                dispatch_seconds=0.01,
+                run_seconds=0.5,
+                job_type="bacnet_discovery",
+            ),
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=20.0),
+        )
+
+        async def engine(engine_ctx: EngineContext) -> EngineResult:
+            throttle = Throttle(engine_ctx.throttle)
+            async with throttle.slot():
+                contacted.append(0)
+            async with throttle.slot():
+                contacted.append(1)
+            return EngineResult()
+
+        result = run_engine(ctx, engine)
+
+        self.assertEqual(contacted, [0])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.last_error, _RUNTIME_DEADLINE_FAILURE_MESSAGE)
 
     def test_throttle_config_validates(self) -> None:
         with self.assertRaises(ValueError):
@@ -380,6 +457,109 @@ class RunEngineTests(unittest.TestCase):
         result = asyncio.run(main())
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(store.summary_calls[-1]["discovered_assets"], [{"asset_id": "async"}])
+
+    def test_bacnet_run_deadline_bounds_a_quiet_long_engine(self) -> None:
+        store = FakeRunStore()
+        ctx = _ctx(
+            store,
+            parameters=_scan_contract(
+                dispatch_seconds=0.01,
+                run_seconds=0.03,
+                job_type="bacnet_discovery",
+            ),
+        )
+
+        async def engine(_ctx: EngineContext) -> EngineResult:
+            await asyncio.sleep(0.1)
+            return EngineResult(discovered_assets=[{"private": "must-not-persist"}])
+
+        async def main() -> tuple[dict[str, Any], float]:
+            started = asyncio.get_running_loop().time()
+            result = await run_engine_async(ctx, engine)
+            return result, asyncio.get_running_loop().time() - started
+
+        result, elapsed = asyncio.run(main())
+
+        self.assertEqual(result["status"], "failed")
+        self.assertLess(elapsed, 0.09)
+        self.assertEqual(store.summary_calls, [])
+        self.assertEqual(store.last_error, _RUNTIME_DEADLINE_FAILURE_MESSAGE)
+        self.assertLessEqual(len(store.last_error or ""), 200)
+        self.assertNotIn("must-not-persist", store.last_error or "")
+
+    def test_run_deadline_cancels_units_while_dispatch_waits_for_a_slot(self) -> None:
+        store = FakeRunStore()
+        events: list[str] = []
+        ctx = _ctx(
+            store,
+            parameters=_scan_contract(dispatch_seconds=0.25, run_seconds=0.3),
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+        )
+
+        async def first_unit() -> int:
+            events.append("started")
+            try:
+                await asyncio.sleep(1)
+                events.append("completed")
+                return 1
+            except asyncio.CancelledError:
+                events.append("cancelled")
+                raise
+
+        async def second_unit() -> int:
+            events.append("second-started")
+            return 2
+
+        async def engine(engine_ctx: EngineContext) -> EngineResult:
+            await Throttle(engine_ctx.throttle).run_throttled(
+                [lambda: first_unit(), lambda: second_unit()],
+                engine_ctx,
+            )
+            return EngineResult()
+
+        async def main() -> dict[str, Any]:
+            result = await run_engine_async(ctx, engine)
+            await asyncio.sleep(0.02)
+            return result
+
+        result = asyncio.run(main())
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(events, ["started", "cancelled"])
+
+    def test_legacy_context_without_scan_contract_remains_compatible(self) -> None:
+        store = FakeRunStore()
+
+        async def engine(_ctx: EngineContext) -> EngineResult:
+            await asyncio.sleep(0.04)
+            return EngineResult(discovered_assets=[{"asset_id": "legacy"}])
+
+        result = asyncio.run(run_engine_async(_ctx(store, parameters={}), engine))
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            store.summary_calls[-1]["discovered_assets"],
+            [{"asset_id": "legacy"}],
+        )
+
+    def test_malformed_present_scan_contract_fails_before_engine_runs(self) -> None:
+        store = FakeRunStore()
+        invoked = False
+        parameters = _scan_contract(dispatch_seconds=1, run_seconds=2)
+        del parameters["scan_contract_v1"]["ip"]["policy"]["run_deadline_seconds"]
+
+        def engine(_ctx: EngineContext) -> EngineResult:
+            nonlocal invoked
+            invoked = True
+            return EngineResult()
+
+        with self.assertLogs("smart_commissioning_core.engines.base", level="ERROR"):
+            result = run_engine(_ctx(store, parameters=parameters), engine)
+
+        self.assertFalse(invoked)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.last_error, _SANITIZED_FAILURE_MESSAGE)
+        self.assertEqual(store.summary_calls, [])
 
     def test_non_engine_result_return_is_treated_as_failure(self) -> None:
         store = FakeRunStore()

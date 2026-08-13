@@ -1,3 +1,4 @@
+import json
 import runpy
 import tempfile
 import unittest
@@ -16,7 +17,13 @@ from smart_commissioning_core.db.engine import (
     session_factory,
 )
 from smart_commissioning_core.db.migrate import build_alembic_config, upgrade_to_head
-from smart_commissioning_core.db.models import Project, RunResult, RunSeal, Site
+from smart_commissioning_core.db.models import (
+    Project,
+    ReportEvidenceContract,
+    RunResult,
+    RunSeal,
+    Site,
+)
 from smart_commissioning_core.db.repositories import (
     ConfigurationRepository,
     DiscoveryRepository,
@@ -126,6 +133,21 @@ class RunLifecycleTests(SqliteTestCase):
         for key in ("created_at", "updated_at"):
             parsed = datetime.fromisoformat(record[key])
             self.assertIsNotNone(parsed.tzinfo, f"{key} must be timezone-aware")
+
+    def test_report_creation_stamps_the_sealed_evidence_contract_atomically(self) -> None:
+        report = self.store.create_run(
+            project_id="demo-project",
+            site_id="demo-site",
+            job_type="report_generation",
+        )
+
+        with session_factory(self.engine)() as session:
+            contract = session.get(ReportEvidenceContract, report["run_id"])
+
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract.contract_version, "sealed_v1")
+        self.assertEqual(contract.project_id, "demo-project")
+        self.assertEqual(contract.site_id, "demo-site")
 
     def test_status_summary_and_issue_updates_roundtrip(self) -> None:
         run_id = self.store.create_run(project_id="demo-project", site_id="demo-site", job_type="udmi_validation")[
@@ -600,6 +622,47 @@ class MigrationTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
+    def test_multi_resource_downgrade_requires_drained_active_slots(self) -> None:
+        # Alembic's exception path can retain a pooled SQLite handle briefly on
+        # Windows even though the application engine is disposed below.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            url = default_sqlite_url(Path(temp_dir))
+            command.upgrade(build_alembic_config(url), "b8c9d0e1f2a3")
+            engine = create_engine_from_url(url)
+            try:
+                run_id = DbRunStore(engine).create_run(
+                    project_id="project-downgrade",
+                    site_id="site-downgrade",
+                    job_type="bacnet_discovery",
+                )["run_id"]
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO active_protocol_slots "
+                            "(protocol_key, run_id, owner_token, acquired_at) VALUES "
+                            "('interface:192.0.2.10', :run_id, NULL, :now), "
+                            "('bacnet:192.0.2.10:47808', :run_id, NULL, :now)"
+                        ),
+                        {"run_id": run_id, "now": datetime(2026, 8, 10, 20, 0)},
+                    )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "drain active protocol slots",
+                ):
+                    command.downgrade(build_alembic_config(url), "a7b8c9d0e1f2")
+
+                indexes = {
+                    index["name"]: index
+                    for index in inspect(engine).get_indexes("active_protocol_slots")
+                }
+                self.assertFalse(indexes["ix_active_protocol_slots_run_id"]["unique"])
+                with engine.connect() as connection:
+                    revision = connection.scalar(text("SELECT version_num FROM alembic_version"))
+                self.assertEqual(revision, "b8c9d0e1f2a3")
+            finally:
+                engine.dispose()
+
     def test_legacy_terminal_backfill_is_complete_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             url = default_sqlite_url(Path(temp_dir))
@@ -682,8 +745,11 @@ class MigrationTests(unittest.TestCase):
                 with session_factory(engine)() as session:
                     result = session.get(RunResult, "run_legacy")
                     seal = session.get(RunSeal, "run_legacy")
+                    contract = session.get(ReportEvidenceContract, "run_legacy")
                     self.assertIsNotNone(result)
                     self.assertIsNotNone(seal)
+                    self.assertIsNotNone(contract)
+                    self.assertEqual(contract.contract_version, "legacy_pre_lifecycle")
                     self.assertEqual(result.result_sha256, seal.result_sha256)
                     self.assertEqual(len(result.result_payload["devices"]), 1)
                     self.assertEqual(
@@ -695,6 +761,112 @@ class MigrationTests(unittest.TestCase):
                         },
                     )
                     self.assertEqual(session.scalar(select(func.count()).select_from(RunResult)), 1)
+            finally:
+                engine.dispose()
+
+    def test_report_contract_backfill_classifies_only_unambiguous_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            url = default_sqlite_url(Path(temp_dir))
+            command.upgrade(build_alembic_config(url), "d0e1f2a3b4c5")
+            engine = create_engine_from_url(url)
+            now = "2026-08-11 09:00:00+00:00"
+            rows = (
+                (
+                    "run_contract_legacy",
+                    {},
+                    {
+                        "legacy_report_integrity": {
+                            "classification": "missing",
+                            "migration": "v0.1.26",
+                            "silently_resigned": False,
+                        }
+                    },
+                ),
+                (
+                    "run_contract_snapshot",
+                    {"report_snapshot_v2": {}, "report_snapshot_sha256": "a" * 64},
+                    {},
+                ),
+                (
+                    "run_contract_manifest",
+                    {},
+                    {"artifact_manifest": {"report_id": "run_contract_manifest"}},
+                ),
+                ("run_contract_ambiguous", {}, {}),
+            )
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "INSERT INTO projects (id, name, created_at) "
+                            "VALUES ('project-contract', 'project-contract', :now)"
+                        ),
+                        {"now": now},
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO sites (id, project_id, name, created_at) "
+                            "VALUES ('site-contract', 'project-contract', 'site-contract', :now)"
+                        ),
+                        {"now": now},
+                    )
+                    for run_id, parameters, summary in rows:
+                        connection.execute(
+                            text(
+                                "INSERT INTO runs "
+                                "(id, project_id, site_id, job_type, status, stage, progress_percent, "
+                                "parameters, result_summary, execution_mode, error_message, "
+                                "cancel_requested, created_at, updated_at) VALUES "
+                                "(:run_id, 'project-contract', 'site-contract', 'report_generation', "
+                                "'succeeded', 'report_ready', 100, :parameters, :summary, "
+                                "'inline', NULL, 0, :now, :now)"
+                            ),
+                            {
+                                "run_id": run_id,
+                                "parameters": json.dumps(parameters),
+                                "summary": json.dumps(summary),
+                                "now": now,
+                            },
+                        )
+            finally:
+                engine.dispose()
+
+            upgrade_to_head(url)
+            engine = create_engine_from_url(url)
+            try:
+                with session_factory(engine)() as session:
+                    contracts = {
+                        row.run_id: (
+                            row.contract_version,
+                            row.project_id,
+                            row.site_id,
+                        )
+                        for row in session.scalars(select(ReportEvidenceContract)).all()
+                    }
+                self.assertEqual(
+                    contracts["run_contract_legacy"],
+                    ("legacy_pre_lifecycle", "project-contract", "site-contract"),
+                )
+                self.assertEqual(
+                    contracts["run_contract_snapshot"],
+                    ("sealed_v1", "project-contract", "site-contract"),
+                )
+                self.assertEqual(
+                    contracts["run_contract_manifest"],
+                    ("sealed_v1", "project-contract", "site-contract"),
+                )
+                self.assertNotIn("run_contract_ambiguous", contracts)
+                scope_index = next(
+                    index
+                    for index in inspect(engine).get_indexes(
+                        "report_evidence_contracts"
+                    )
+                    if index["name"] == "ix_report_evidence_contracts_scope"
+                )
+                self.assertEqual(
+                    scope_index["column_names"],
+                    ["project_id", "site_id", "run_id"],
+                )
             finally:
                 engine.dispose()
 

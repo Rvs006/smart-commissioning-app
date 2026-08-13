@@ -37,7 +37,7 @@ _SENSITIVE_KEYS = {
     "secret",
 }
 _MQTT_JOBS = {"mqtt_discovery", "udmi_validation", "mqtt_config_publish"}
-_BACNET_JOBS = {"bacnet_discovery", "bacnet_validation"}
+_BACNET_JOBS = {"bacnet_discovery"}
 
 
 def build_run_context(
@@ -73,7 +73,12 @@ def build_run_context(
     configuration_digest = hashlib.sha256(
         canonical_json_bytes(frozen_configuration)
     ).hexdigest()
-    imports = _import_bindings(engine, frozen_parameters)
+    imports = _import_bindings(
+        engine,
+        frozen_parameters,
+        project_id=project_id,
+        site_id=site_id,
+    )
     connection_settings, protocol_key = _protocol_binding(
         job_type, frozen_parameters, frozen_configuration
     )
@@ -87,7 +92,7 @@ def build_run_context(
         schema_versions=_schema_versions(frozen_parameters),
         engine_parameters=frozen_parameters,
         network_interface=_optional_string(
-            frozen_parameters.get("source_ip") or frozen_parameters.get("local_address")
+            frozen_parameters.get("local_address") or frozen_parameters.get("source_ip")
         ),
         connection_settings=connection_settings,
         secret_references=references,
@@ -150,8 +155,15 @@ def _freeze_secret_value(
     return reference
 
 
-def _import_bindings(engine, parameters: dict[str, Any]) -> tuple[ContextResourceV1, ...]:
+def _import_bindings(
+    engine,
+    parameters: dict[str, Any],
+    *,
+    project_id: str,
+    site_id: str,
+) -> tuple[ContextResourceV1, ...]:
     repository = ImportRepository(engine)
+    scan_authorities = _scan_authority_bindings(parameters)
     bindings: list[ContextResourceV1] = []
     seen: set[str] = set()
     for key, raw_value in parameters.items():
@@ -163,15 +175,71 @@ def _import_bindings(engine, parameters: dict[str, Any]) -> tuple[ContextResourc
         seen.add(import_id)
         try:
             record = repository.get(import_id)
-        except FileNotFoundError:
+        except FileNotFoundError as error:
+            if import_id in scan_authorities:
+                raise ValueError(
+                    f"selected import authority '{import_id}' is no longer available"
+                ) from error
             continue
+        authority = scan_authorities.get(import_id)
+        if authority is not None:
+            if (
+                record.get("project_id") != project_id
+                or record.get("site_id") != site_id
+                or record.get("import_type") != authority["import_type"]
+            ):
+                raise ValueError("selected import authority does not belong to this run scope")
+            rows = record.get("accepted_rows")
+            if not isinstance(rows, list):
+                raise ValueError("selected import authority rows are malformed")
+            actual_digest = hashlib.sha256(canonical_json_bytes(rows)).hexdigest()
+            if actual_digest != authority["accepted_rows_sha256"]:
+                raise ValueError("selected import authority digest verification failed")
+            if len(rows) != authority["accepted_count"]:
+                raise ValueError("selected import authority row count verification failed")
+            binding_digest = actual_digest
+        else:
+            binding_digest = hashlib.sha256(canonical_json_bytes(record)).hexdigest()
         bindings.append(
             ContextResourceV1(
                 resource_id=import_id,
-                sha256=hashlib.sha256(canonical_json_bytes(record)).hexdigest(),
+                sha256=binding_digest,
             )
         )
     return tuple(bindings)
+
+
+def _scan_authority_bindings(parameters: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    contract = parameters.get("scan_contract_v1")
+    if not isinstance(contract, dict):
+        return {}
+    candidates: list[object] = []
+    ip_contract = contract.get("ip")
+    if isinstance(ip_contract, dict):
+        candidates.append(ip_contract.get("authority"))
+    bacnet_contract = contract.get("bacnet")
+    if isinstance(bacnet_contract, dict):
+        authorities = bacnet_contract.get("authorities")
+        if isinstance(authorities, dict):
+            candidates.extend(authorities.values())
+    bindings: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        import_id = str(candidate.get("import_id") or "").strip()
+        import_type = str(candidate.get("import_type") or "").strip()
+        digest = str(candidate.get("accepted_rows_sha256") or "").strip().lower()
+        try:
+            accepted_count = int(candidate.get("accepted_count"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if import_id and import_type and len(digest) == 64 and accepted_count >= 0:
+            bindings[import_id] = {
+                "import_type": import_type,
+                "accepted_rows_sha256": digest,
+                "accepted_count": accepted_count,
+            }
+    return bindings
 
 
 def _schema_versions(parameters: dict[str, Any]) -> dict[str, str]:

@@ -164,6 +164,23 @@ class HubSyncApiTests(ApiTestCase):
         cls.env = {"TRUSTED_EDGES_INLINE": trusted_json, **_ENV_OVERRIDES}
         super().setUpClass()
 
+        # User-facing hub routes require a named principal. Keep the legacy
+        # shared key configured for the authentication-boundary test, but use
+        # a real global administrator for list/detail/create assertions.
+        from app.core.auth import hash_api_key
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.repositories import UserRepository
+
+        cls.hub_admin_key = "hub-sync-named-admin-key"
+        UserRepository(get_engine()).create_user(
+            user_id="user-hub-sync-admin",
+            username="hub-sync-admin",
+            role="admin",
+            api_key_hash=hash_api_key(cls.hub_admin_key),
+            created_at=_FIXED_NOW,
+        )
+        cls.client.headers["X-API-Key"] = cls.hub_admin_key
+
     @classmethod
     def tearDownClass(cls) -> None:
         super().tearDownClass()

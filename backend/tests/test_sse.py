@@ -201,11 +201,14 @@ class SseEventsApiTests(ApiTestCase):
 
     def test_client_abort_mid_stream_does_not_raise(self) -> None:
         import app.api.routes.events as events_module
+        from app.core.auth import AuthPrincipal
+        from smart_commissioning_core.rbac import Role
 
         run_id = self._seed_nonterminal_run()
+        principal = AuthPrincipal(None, "shared-key", Role.ADMIN, "shared_key")
 
         async def close_after_first_frame() -> None:
-            stream = events_module._run_event_stream(run_id)
+            stream = events_module._run_event_stream(run_id, principal)
             await stream.__anext__()
             with self.assertRaises(StopAsyncIteration):
                 await stream.athrow(asyncio.CancelledError)
