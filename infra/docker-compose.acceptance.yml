@@ -2,6 +2,10 @@
 # real capture can remain active across the ownership-lease boundary without
 # depending on a public network or storing field identifiers.
 services:
+  api:
+    environment:
+      SMART_COMMISSIONING_NETWORK_EXECUTOR_ID: "release-acceptance-network"
+
   worker:
     restart: "no"
     # The release acceptance worker intentionally shares the API container's
@@ -9,6 +13,8 @@ services:
     # identity on both sides while production keeps its separate-container
     # fail-closed default.
     network_mode: "service:api"
+    environment:
+      SMART_COMMISSIONING_NETWORK_EXECUTOR_ID: "release-acceptance-network"
 
   mqtt-acceptance:
     image: "eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c"
