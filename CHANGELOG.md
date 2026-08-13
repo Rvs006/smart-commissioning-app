@@ -57,6 +57,15 @@ operator-managed Nmap execution explicit, sealed, and reviewable.
 
 ### Fixed
 
+- Blank IP target editors now explicitly use the accepted IP register, including
+  register-driven scans with operator exclusions.
+- BACnet Preview follows the sealed-preview authorization flow, configured
+  non-default UDP ports reach the transport, and persisted point values render
+  in the live-data table.
+- Completed MQTT captures enter Results from their terminal snapshot even when
+  a supplementary topic refresh is temporarily unavailable.
+- Windows portable candidates exclude copied virtual environments and stamp the
+  requested application version into API health and report evidence.
 - Reports and backups fail closed when sealed terminal results, discovery
   projections, report snapshots, or archive membership no longer agree.
 - Generate All creates PDF, DOCX, XLSX, and evidence-pack reports one at a time,

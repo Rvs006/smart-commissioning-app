@@ -284,6 +284,34 @@ function projectedIpAsset(entry: ProjectedObservationRecord): DiscoveryAssetObse
   };
 }
 
+function bacnetPointCell(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "[Unserializable value]";
+    }
+  }
+  return String(value);
+}
+
+function bacnetPointRow(point: DiscoveryRowRecord) {
+  const attributes = isPlainObject(point.attributes) ? point.attributes : {};
+  const observedValue = isPlainObject(point.observed_value) ? point.observed_value.value : undefined;
+  const readError = attributes.read_error ?? point.read_error;
+  return {
+    device: attributes.device_instance ?? point.device_ref ?? point.device_instance ?? point.instance,
+    object: point.point_name ?? point.point_id ?? point.object_key ?? point.object_name,
+    outcome: readError ? "Read failed" : (point.outcome ?? point.status ?? "Read"),
+    position: point.position,
+    units: point.units ?? point.property ?? point.property_name,
+    value: observedValue ?? point.value ?? point.present_value,
+  };
+}
+
 function provisionalDiscoveryViewFor(
   route: string,
   runId: string,
@@ -445,6 +473,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const module = getModuleByRoute(moduleRoute);
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
+  const isSealedNetworkDiscoveryModule =
+    module.route === "ip-scanner" || module.route === "bacnet-discovery";
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -690,7 +720,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         previewRunId: scanPreviewRunId ?? undefined,
         context: { client: apiClient },
       }),
-    enabled: isDiscoveryModule && !scanDryRun && Boolean(scanPreviewRunId),
+    enabled: isSealedNetworkDiscoveryModule && !scanDryRun && Boolean(scanPreviewRunId),
   });
 
   // Discovery run monitor — same polling contract, against the discovery
@@ -1264,7 +1294,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const refetchDiscoveryRun = discoveryRunQuery.refetch;
   const refetchValidationIssues = validationIssuesQuery.refetch;
   const refetchDiscoveryResults = discoveryResultsQuery.refetch;
-  const refetchCaptureTopics = captureTopicsQuery.refetch;
   useEffect(() => {
     const run = activeRun;
     if (
@@ -1297,12 +1326,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           if (results.isError || results.data?.run_id !== run.runId) {
             throw new Error("Final discovery evidence did not match the active run.");
           }
-          if (run.ref.jobType === "mqtt_discovery") {
-            const topics = await refetchCaptureTopics();
-            if (topics.isError || topics.data?.run_id !== run.runId) {
-              throw new Error("Final MQTT topics did not match the active run.");
-            }
-          }
         }
 
         if (!disposed) {
@@ -1312,9 +1335,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             requirements:
               run.kind === "validation"
                 ? ["run", "issues"]
-                : run.ref.jobType === "mqtt_discovery"
-                  ? ["run", "results", "topics"]
-                  : ["run", "results"],
+                : ["run", "results"],
           });
         }
       } catch (cause) {
@@ -1333,7 +1354,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     };
   }, [
     activeRun,
-    refetchCaptureTopics,
     refetchDiscoveryResults,
     refetchDiscoveryRun,
     refetchValidationIssues,
@@ -1646,7 +1666,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }
 
       if (action.kind === "discovery") {
-        if (action.runKind !== "ip" || module.route !== "ip-scanner") {
+        const requiresSealedPreview = action.runKind === "ip" || action.runKind === "bacnet";
+        if (!requiresSealedPreview) {
           return startDiscoveryRun({
             context: { client: apiClient },
             jobType: action.jobType,
@@ -1737,7 +1758,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // adapters. Treat each submission as a fresh evidence barrier even when
       // the backend reuses that identifier.
       evidenceSyncRef.current = null;
-      if (variables.actionId === "ip-discovery" || variables.actionId === "ip-discovery.run") {
+      const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
+      if (
+        action?.kind === "discovery" &&
+        (action.runKind === "ip" || action.runKind === "bacnet")
+      ) {
         setScanPreviewActive(variables.dryRun);
       }
       dispatchRun({ type: "submitting" });
@@ -1752,11 +1777,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     onSuccess: (result, variables) => {
       const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
       if ("run_id" in result) {
-        if (action?.kind === "discovery" && variables.dryRun) {
+        const requiresSealedPreview =
+          action?.kind === "discovery" &&
+          (action.runKind === "ip" || action.runKind === "bacnet");
+        if (requiresSealedPreview && variables.dryRun) {
           setScanPreviewRunId(result.run_id);
           setScanAuthorizationId(null);
           setScanPreviewActive(true);
-        } else if (action?.kind === "discovery" && action.runKind === "ip") {
+        } else if (requiresSealedPreview) {
           setScanPreviewActive(false);
         }
         setScopedRunUrl(result.run_id);
@@ -3504,9 +3532,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const nmapSelectionBlocked =
     module.route === "ip-scanner" && scanProvider === "operator_managed_nmap" && !nmapAvailable;
   const discoveryBlocked =
-    (module.route === "ip-scanner" &&
+    (isSealedNetworkDiscoveryModule &&
       !scanDryRun &&
       (!scanAuthorized || !scanPreviewRunId || !scanAuthorizationId)) ||
+    (module.route === "mqtt-discovery" && !scanDryRun && !scanAuthorized) ||
     nmapSelectionBlocked;
 
   // Import warnings are informational (their rows stay accepted), so they get
@@ -4039,42 +4068,45 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           onChange={(event) => setScanAuthorized(event.target.checked)}
                           type="checkbox"
                         />
-                        I am authorized to scan this network. A sealed preview and approved
-                        authorization are also required.
+                        {isSealedNetworkDiscoveryModule
+                          ? "I am authorized to scan this network. A sealed preview and approved authorization are also required."
+                          : "I am authorized to scan this network and capture MQTT messages from this broker."}
                       </label>
-                      <label>
-                        Sealed preview authorization
-                        <select
-                          aria-describedby="scan-authorization-help"
-                          disabled={!scanPreviewRunId || scanAuthorizationsQuery.isLoading}
-                          onChange={(event) => setScanAuthorizationId(event.target.value || null)}
-                          value={scanAuthorizationId ?? ""}
-                        >
-                          <option value="">
-                            {scanPreviewRunId
-                              ? "Select an approved authorization"
-                              : "Run a dry preview first"}
-                          </option>
-                          {(scanAuthorizationsQuery.data ?? []).map((authorization) => (
-                            <option
-                              disabled={Boolean(
-                                authorization.revoked_at ||
-                                authorization.consumed_run_id ||
-                                authorization.use_count >= authorization.max_uses,
-                              )}
-                              key={authorization.authorization_id}
-                              value={authorization.authorization_id}
-                            >
-                              {authorization.authorization_id} · {authorization.use_count}/
-                              {authorization.max_uses}
+                      {isSealedNetworkDiscoveryModule && (
+                        <label>
+                          Sealed preview authorization
+                          <select
+                            aria-describedby="scan-authorization-help"
+                            disabled={!scanPreviewRunId || scanAuthorizationsQuery.isLoading}
+                            onChange={(event) => setScanAuthorizationId(event.target.value || null)}
+                            value={scanAuthorizationId ?? ""}
+                          >
+                            <option value="">
+                              {scanPreviewRunId
+                                ? "Select an approved authorization"
+                                : "Run a dry preview first"}
                             </option>
-                          ))}
-                        </select>
-                        <span id="scan-authorization-help" className="field-note">
-                          Preview {scanPreviewRunId ?? "not created"}; start sends only this preview
-                          and authorization reference.
-                        </span>
-                      </label>
+                            {(scanAuthorizationsQuery.data ?? []).map((authorization) => (
+                              <option
+                                disabled={Boolean(
+                                  authorization.revoked_at ||
+                                  authorization.consumed_run_id ||
+                                  authorization.use_count >= authorization.max_uses,
+                                )}
+                                key={authorization.authorization_id}
+                                value={authorization.authorization_id}
+                              >
+                                {authorization.authorization_id} · {authorization.use_count}/
+                                {authorization.max_uses}
+                              </option>
+                            ))}
+                          </select>
+                          <span id="scan-authorization-help" className="field-note">
+                            Preview {scanPreviewRunId ?? "not created"}; start sends only this preview
+                            and authorization reference.
+                          </span>
+                        </label>
+                      )}
                     </>
                   )}
                 </div>
@@ -4110,10 +4142,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       ? ENGINEER_REQUIRED_TOOLTIP
                       : nmapSelectionBlocked
                         ? "Operator-managed Nmap is not confirmed and available for this site."
-                        : startedRunActive
-                          ? "A run is already in progress. Stop it before starting another."
-                          : scanBlocked
-                            ? "Confirm scan authorization (or enable dry run) before starting a real scan."
+                          : startedRunActive
+                            ? "A run is already in progress. Stop it before starting another."
+                            : scanBlocked
+                            ? isSealedNetworkDiscoveryModule
+                              ? "Confirm scan authorization and select a sealed preview (or enable dry run) before starting a real scan."
+                              : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
                             : mqttOverCapBlocked
                               ? "Run time exceeds the 48-hour capture limit."
                               : overCapBlocked
@@ -4131,10 +4165,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           onClick={() =>
                             runMutation.mutate({
                               actionId: action.id,
-                              dryRun:
-                                action.kind === "discovery" &&
-                                action.runKind === "ip" &&
-                                scanDryRun,
+                              dryRun: action.kind === "discovery" && scanDryRun,
                             })
                           }
                           title={blockedTooltip}
@@ -6072,22 +6103,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             <th scope="col">Position</th>
                             <th scope="col">Device</th>
                             <th scope="col">Object</th>
-                            <th scope="col">Property</th>
+                            <th scope="col">Units</th>
                             <th scope="col">Value</th>
                             <th scope="col">Outcome</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {bacnetPointsQuery.data?.points.map((point, index) => (
-                            <tr key={String(point.id ?? point.position ?? index)}>
-                              <td>{String(point.position ?? "—")}</td>
-                              <td>{String(point.device_instance ?? point.instance ?? "—")}</td>
-                              <td>{String(point.object_key ?? point.object_name ?? "—")}</td>
-                              <td>{String(point.property ?? point.property_name ?? "—")}</td>
-                              <td>{String(point.value ?? point.present_value ?? "—")}</td>
-                              <td>{String(point.outcome ?? point.status ?? "Not recorded")}</td>
-                            </tr>
-                          ))}
+                          {bacnetPointsQuery.data?.points.map((point, index) => {
+                            const row = bacnetPointRow(point);
+                            return (
+                              <tr key={String(point.id ?? row.position ?? index)}>
+                                <td>{bacnetPointCell(row.position)}</td>
+                                <td>{bacnetPointCell(row.device)}</td>
+                                <td>{bacnetPointCell(row.object)}</td>
+                                <td>{bacnetPointCell(row.units)}</td>
+                                <td>{bacnetPointCell(row.value)}</td>
+                                <td>{bacnetPointCell(row.outcome)}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -7984,10 +8018,17 @@ function buildDiscoveryParameters(
       const expressions = serializeIpTargetRows(targetRows, exclusionRows);
       parameters.target_expressions = expressions.target_expressions;
       parameters.exclusions = expressions.exclusions;
+      // A register-driven scan may still carry exclusions. The backend requires
+      // this explicit opt-in before it expands registered addresses, rather than
+      // treating an empty target editor as permission to scan them.
+      if (expressions.target_expressions.length === 0) {
+        parameters.use_register_addresses = true;
+      }
       return parameters;
     }
-    // Compatibility fallback for existing deep links and saved drafts. Blank
-    // sends nothing so the backend falls back to the imported IP register.
+    // Compatibility fallback for existing deep links and saved drafts. A blank
+    // target list deliberately scans the imported IP register, but the backend
+    // requires that intent on the wire before it will expand those addresses.
     const target = options.target?.trim();
     if (target) {
       if (target.includes("/")) {
@@ -8001,6 +8042,8 @@ function buildDiscoveryParameters(
       } else {
         parameters.addresses = [target];
       }
+    } else {
+      parameters.use_register_addresses = true;
     }
   }
   // MQTT discovery: forward the operator's topic filter and capture window so

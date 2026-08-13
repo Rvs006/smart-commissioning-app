@@ -15,8 +15,10 @@ app.core.auth because it is the ASGI test transport's synthetic host and can
 never appear as a real TCP peer address.
 """
 
+import os
 import unittest
 import uuid
+from unittest.mock import patch
 
 from harness import ApiTestCase
 
@@ -84,6 +86,13 @@ class ApiKeyModeTests(_AuthClientTestCase):
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["version"], "0.1.41")
         self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
+
+    def test_health_uses_the_portable_bundle_version_when_stamped(self) -> None:
+        with patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": "v0.1.42"}):
+            health = self.client.get("/api/v1/health")
+
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.json()["version"], "v0.1.42")
 
     def test_import_format_helpers_reachable_without_key(self) -> None:
         # The import profile list and blank templates are public format helpers

@@ -23,7 +23,15 @@ from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.1"
+# The source release contract scans this fallback directly. Portable candidates
+# override it at runtime through :func:`effective_report_renderer_version`.
 REPORT_RENDERER_VERSION = "0.1.41"
+
+
+def effective_report_renderer_version() -> str:
+    """Return the portable build stamp, or the source release fallback."""
+
+    return os.environ.get("SMART_COMMISSIONING_APP_VERSION") or REPORT_RENDERER_VERSION
 
 _SIGNED_MANIFEST_FIELDS = (
     "schema_version",
@@ -131,7 +139,7 @@ def store_report_artifact(
         "file_name": file_name,
         "media_type": media_type,
         "byte_size": len(artifact),
-        "renderer_version": REPORT_RENDERER_VERSION,
+        "renderer_version": effective_report_renderer_version(),
         "artifact_sha256": artifact_hash,
         "artifact_relpath": stored_name,
         "origin": origin,

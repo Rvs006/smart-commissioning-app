@@ -67,6 +67,7 @@ from smart_commissioning_core.engines.bacnet_params import (
     MODE_BROADCAST,
     MODE_FOREIGN_DEVICE,
     PARAM_BACNET_MODE,
+    PARAM_BACNET_PORT,
     PARAM_BACNET_TARGETS,
     PARAM_BBMD_ADDRESS,
     PARAM_BBMD_PORT,
@@ -1029,7 +1030,7 @@ class BacnetTransportPlanTests(unittest.TestCase):
         # byte-identically — NOT helpfully re-rendered with ":47808". Whether
         # NetworkPortObject parses a port suffix is not verbatim-verified, and
         # today's working path is the wrong place to find that out.
-        plan = build_transport_plan(self._params())
+        plan = build_transport_plan(self._params(**{PARAM_BACNET_PORT: DEFAULT_BBMD_PORT}))
 
         self.assertEqual(plan.local_address, "192.168.1.10/24")
         self.assertEqual(plan.mode, MODE_BROADCAST)
@@ -1064,6 +1065,13 @@ class BacnetTransportPlanTests(unittest.TestCase):
         plan = build_transport_plan(self._params(local_address="192.168.1.10/24:47812"))
         self.assertEqual(plan.local_address, "192.168.1.10/24:47812")
         self.assertEqual(plan.udp_port, 47812)
+        self.assertEqual(plan.bind_ip, "192.168.1.10")
+
+    def test_broadcast_plan_uses_the_frozen_configured_udp_port(self) -> None:
+        plan = build_transport_plan(self._params(**{PARAM_BACNET_PORT: 49000}))
+
+        self.assertEqual(plan.local_address, "192.168.1.10/24:49000")
+        self.assertEqual(plan.udp_port, 49000)
         self.assertEqual(plan.bind_ip, "192.168.1.10")
 
     def test_foreign_device_plan_binds_its_own_port_and_names_the_bbmd_port_explicitly(self) -> None:

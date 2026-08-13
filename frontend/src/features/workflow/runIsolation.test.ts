@@ -373,7 +373,7 @@ describe("frontend run and session isolation", () => {
     expect(unchanged.phase).toBe("active");
   });
 
-  it("settles only after every terminal evidence requirement succeeds", () => {
+  it("settles MQTT from the terminal result snapshot without a live topics refresh", () => {
     const scope = createSessionScopeId();
     const active = toRunRef(
       scope,
@@ -391,19 +391,12 @@ describe("frontend run and session isolation", () => {
     });
     state = runControllerReducer(state, { type: "terminal-observed", runId: "run-mqtt" });
     expect(state.phase).toBe("terminal-sync");
-    expect(evidenceRequirementsFor(active)).toEqual(["run", "results", "topics"]);
+    expect(evidenceRequirementsFor(active)).toEqual(["run", "results"]);
 
     state = runControllerReducer(state, {
       type: "evidence-succeeded",
       runId: "run-mqtt",
       requirements: ["run", "results"],
-    });
-    expect(state.phase).toBe("terminal-sync");
-
-    state = runControllerReducer(state, {
-      type: "evidence-succeeded",
-      runId: "run-mqtt",
-      requirements: ["topics"],
     });
     expect(state.phase).toBe("settled");
   });

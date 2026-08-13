@@ -38,6 +38,7 @@ THE CONTRACT
 Transport keys (flat JSON-safe scalars — they must survive the Dramatiq message
 round-trip to the worker unchanged):
 
+    bacnet_port    int   local BACnet/IP UDP port; default 47808
     bacnet_mode    str   "broadcast" (default) | "foreign_device"
     bbmd_address   str   bare IP of the BBMD, e.g. "10.0.0.5"
     bbmd_port      int   BBMD UDP port; soft default 47808
@@ -117,6 +118,7 @@ __all__ = [
     "FD_TTL_MIN",
     "MODE_BROADCAST",
     "MODE_FOREIGN_DEVICE",
+    "PARAM_BACNET_PORT",
     "PARAM_BACNET_MODE",
     "PARAM_BACNET_TARGETS",
     "PARAM_BBMD_ADDRESS",
@@ -144,6 +146,7 @@ __all__ = [
 # Import and use these BY NAME on both sides of the seam. See the module
 # docstring: a re-spelled literal is exactly the failure this module prevents.
 
+PARAM_BACNET_PORT = "bacnet_port"
 PARAM_BACNET_MODE = "bacnet_mode"
 PARAM_BBMD_ADDRESS = "bbmd_address"
 PARAM_BBMD_PORT = "bbmd_port"

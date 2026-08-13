@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response
@@ -16,7 +17,10 @@ def get_health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": "smart-commissioning-api",
-        "version": __version__,
+        # A portable bundle stamps its executable, frontend, and runtime
+        # evidence through this value. The source package version remains the
+        # development fallback for hosted and direct-source runs.
+        "version": os.environ.get("SMART_COMMISSIONING_APP_VERSION") or __version__,
         "environment": get_settings().environment,
         "timestamp": datetime.now(UTC).isoformat(),
     }
