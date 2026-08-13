@@ -206,6 +206,14 @@ def _with_worker_lease(
             if heartbeat.ownership_lost or owned_store.ownership_lost:
                 return
             try:
+                # Stamp the effective executor before a long-running actor
+                # begins. This keeps run-detail reads truthful even when an
+                # API restart or cancellation happens before terminal output
+                # is written.
+                owned_store.update_result_summary(
+                    run_id,
+                    {"execution_mode": "dramatiq_worker"},
+                )
                 function(run_id, context, owned_store)
             except (
                 SecretMaterialUnavailableError,
