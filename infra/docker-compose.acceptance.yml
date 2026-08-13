@@ -17,7 +17,7 @@ services:
     environment:
       SMART_COMMISSIONING_NETWORK_EXECUTOR_ID: "release-acceptance-network"
     network_mode: "service:network-executor"
-    ports: []
+    ports: !reset []
     depends_on:
       network-executor:
         condition: service_started
@@ -36,7 +36,7 @@ services:
 
   frontend:
     network_mode: "service:network-executor"
-    ports: []
+    ports: !reset []
     depends_on:
       network-executor:
         condition: service_started
