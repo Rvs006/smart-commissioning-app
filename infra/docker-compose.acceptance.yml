@@ -4,6 +4,11 @@
 services:
   worker:
     restart: "no"
+    # The release acceptance worker intentionally shares the API container's
+    # network namespace. This gives queued discovery the same frozen NIC
+    # identity on both sides while production keeps its separate-container
+    # fail-closed default.
+    network_mode: "service:api"
 
   mqtt-acceptance:
     image: "eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c"

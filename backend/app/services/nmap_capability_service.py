@@ -9,7 +9,7 @@ Nmap. Windows detection and trust inspection enter through an injected probe.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Protocol
 from uuid import uuid4
 
@@ -39,7 +39,7 @@ from smart_commissioning_core.engines.ip.nmap_windows import (
     nmap_uninstall_registry,
 )
 from smart_commissioning_core.run_context import canonical_sha256
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -580,6 +580,15 @@ class NmapCapabilityService:
             confirmed_at=now,
         )
         with self._session_factory.begin() as session:
+            latest_confirmed_at = session.scalar(
+                select(func.max(NmapInstallationConfirmation.confirmed_at)).where(
+                    NmapInstallationConfirmation.policy_id == policy.policy_id,
+                    NmapInstallationConfirmation.deployment_id == self.deployment_id,
+                    NmapInstallationConfirmation.network_executor_id == self.network_executor_id,
+                )
+            )
+            if latest_confirmed_at is not None and row.confirmed_at <= latest_confirmed_at:
+                row.confirmed_at = latest_confirmed_at + timedelta(microseconds=1)
             session.add(row)
             session.flush()
             response = self._confirmation_response(row)
