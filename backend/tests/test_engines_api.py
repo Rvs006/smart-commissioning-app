@@ -24,6 +24,7 @@ from harness import ApiTestCase
 from smart_commissioning_core.engines.bacnet_params import (
     MODE_FOREIGN_DEVICE,
     PARAM_BACNET_MODE,
+    PARAM_BACNET_PORT,
     PARAM_BACNET_TARGETS,
     PARAM_BBMD_ADDRESS,
     PARAM_BBMD_PORT,
@@ -631,6 +632,16 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         self.assertEqual(parameters[PARAM_BACNET_MODE], MODE_FOREIGN_DEVICE)
 
     # -- transport: the zero-regression path -------------------------------
+
+    def test_configured_udp_port_is_persisted_for_the_bacnet_transport(self) -> None:
+        # A frozen source interface contains only IP/prefix. The saved port must
+        # therefore travel independently to the worker; otherwise the transport
+        # silently binds the fallback 47808 on every non-default site.
+        self._save_bacnet_config("custom-bacnet-port", {"UDP Port": "49000"})
+
+        parameters = self._persisted_parameters(self._dry_run("custom-bacnet-port"))
+
+        self.assertEqual(parameters[PARAM_BACNET_PORT], 49000)
 
     def test_default_install_injects_no_transport_parameters(self) -> None:
         # A project with no saved config gets the seeded defaults. Nothing may be

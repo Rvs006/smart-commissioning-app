@@ -23,7 +23,10 @@ from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.1"
-REPORT_RENDERER_VERSION = "0.1.41"
+# Portable candidates stamp the same version into the EXE, frontend, API, run
+# context, and signed report manifests. Source and hosted runs retain the
+# package version until their deployment explicitly supplies a release stamp.
+REPORT_RENDERER_VERSION = os.environ.get("SMART_COMMISSIONING_APP_VERSION") or "0.1.41"
 
 _SIGNED_MANIFEST_FIELDS = (
     "schema_version",

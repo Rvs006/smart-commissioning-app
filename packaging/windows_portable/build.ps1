@@ -158,7 +158,7 @@ function Invoke-Native {
 # copied core/ tree stays lean (no __pycache__, *.egg-info, local build/dist).
 function Remove-PythonCaches([string]$Root) {
     Get-ChildItem -LiteralPath $Root -Recurse -Force -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist") -or $_.Name -like "*.egg-info" } |
+        Where-Object { $_.Name -in @(".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist") -or $_.Name -like "*.egg-info" } |
         Sort-Object { $_.FullName.Length } -Descending |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
     # -Include is silently dropped when combined with -LiteralPath on Windows PowerShell 5.1

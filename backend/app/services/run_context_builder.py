@@ -7,6 +7,7 @@ import os
 from typing import Any
 
 from smart_commissioning_core.db.repositories import ImportRepository
+from smart_commissioning_core.engines.bacnet_params import PARAM_BACNET_PORT
 from smart_commissioning_core.run_context import (
     ContextResourceV1,
     RunContextV1,
@@ -295,7 +296,7 @@ def _protocol_binding(
         bind_address = str(
             parameters.get("local_address") or parameters.get("source_ip") or "0.0.0.0"
         )
-        port = int(parameters.get("bacnet_port") or bacnet.get("UDP Port") or 47808)
+        port = int(parameters.get(PARAM_BACNET_PORT) or bacnet.get("UDP Port") or 47808)
         return {"bind_address": bind_address, "port": port}, canonical_bacnet_protocol_key(
             bind_address=bind_address, port=port
         )

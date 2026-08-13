@@ -598,6 +598,38 @@ describe("ModulePage discovery wiring", () => {
     });
   });
 
+  it("uses the accepted IP register when no target override is supplied", async () => {
+    let previewBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          previewBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) return jsonResponse(terminalRun);
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) return jsonResponse(resultsPayload);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(previewBody).not.toBeNull());
+    const parameters = (previewBody as unknown as { parameters: Record<string, unknown> }).parameters;
+    expect(parameters.use_register_addresses).toBe(true);
+    expect(parameters).not.toHaveProperty("target_expressions");
+  });
+
   it("shows only confirmed Nmap profiles and submits the exact fixed profile contract", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(
@@ -721,6 +753,25 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
   }
+
+  it("sends an MQTT dry-run preview instead of an unauthorized live capture", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect(
+      (postedBody as unknown as { parameters: Record<string, unknown> }).parameters.dry_run,
+    ).toBe(true);
+  });
 
   it("converts an hours capture duration to seconds on the MQTT discovery wire", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
@@ -984,6 +1035,64 @@ describe("ModulePage discovery wiring", () => {
     expect(screen.getByText("Delivery QoS")).toBeInTheDocument();
     expect(screen.getByText("Received at")).toBeInTheDocument();
     expect(screen.queryByText("Published")).not.toBeInTheDocument();
+  });
+
+  it("opens MQTT results from the sealed result snapshot when the live topics refresh fails", async () => {
+    const mqttResultsPayload = {
+      run_id: "run-mqtt-1",
+      job_type: "mqtt_discovery",
+      status: "succeeded",
+      result_summary: { topics_discovered: 1, messages_captured: 1 },
+      discovered_assets: [],
+      devices: [],
+      points: [],
+      topics: [
+        {
+          topic: "site/AHU-1/state",
+          message_count: 1,
+          last_payload: { retained: true, temperature: 21.5 },
+          created_at: "2026-08-13T09:05:00Z",
+          attributes: { last_retained: true, last_qos: 1 },
+        },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return {
+            ok: false,
+            status: 503,
+            statusText: "Service Unavailable",
+            json: async () => ({ detail: "broker snapshot temporarily unavailable" }),
+          } as unknown as Response;
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse(mqttResultsPayload);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse({ ...mqttTerminal, result_summary: mqttResultsPayload.result_summary });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+
+    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    expect((await screen.findAllByText("site/AHU-1/state")).length).toBeGreaterThan(0);
+    expect(document.querySelector('[data-step="results"]')).toBeInTheDocument();
   });
 
   it("filters the results table by text, preserves selection, and never shows the scan empty state for a filter miss (ISSUE-4)", async () => {
@@ -1602,6 +1711,108 @@ describe("ModulePage BACnet backend provenance", () => {
     clearApiKey();
   });
 
+  it("uses a sealed BACnet preview before the authorized live request", async () => {
+    let previewBody: Record<string, unknown> | null = null;
+    let liveBody: Record<string, unknown> | null = null;
+    const previewRunId = "run-bacnet-preview-1";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          if ((body.parameters as Record<string, unknown>).dry_run === true) {
+            previewBody = body;
+            return jsonResponse({
+              run_id: previewRunId,
+              job_type: "bacnet_discovery",
+              status: "queued",
+              message: "BACnet preview accepted.",
+            });
+          }
+          liveBody = body;
+          return jsonResponse({
+            run_id: "run-bacnet-live-1",
+            job_type: "bacnet_discovery",
+            status: "queued",
+            message: "BACnet discovery accepted.",
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${previewRunId}/results`)) {
+          return jsonResponse({
+            run_id: previewRunId,
+            job_type: "bacnet_discovery",
+            status: "succeeded",
+            result_summary: { dry_run: true },
+            discovered_assets: [],
+            devices: [],
+            points: [],
+            topics: [],
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${previewRunId}`)) {
+          return jsonResponse({
+            ...terminalRun,
+            run_id: previewRunId,
+            job_type: "bacnet_discovery",
+            result_summary: { dry_run: true },
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-bacnet-live-1")) {
+          return jsonResponse({
+            ...terminalRun,
+            run_id: "run-bacnet-live-1",
+            job_type: "bacnet_discovery",
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-bacnet-live-1/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: "run-bacnet-live-1",
+            job_type: "bacnet_discovery",
+            devices: [],
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("bacnet-discovery");
+
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(previewBody).not.toBeNull());
+    expect((previewBody as unknown as { parameters: Record<string, unknown> }).parameters).toMatchObject({
+      dry_run: true,
+    });
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", {
+      name: /Sealed preview authorization/i,
+    });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(liveBody).not.toBeNull());
+    expect(liveBody).toMatchObject({
+      job_type: "bacnet_discovery",
+      parameters: {},
+      preview_run_id: previewRunId,
+      scan_authorization_id: previewAuthorization.authorization_id,
+    });
+  });
+
   // Drives a BACnet discovery run to a terminal, succeeded state whose results
   // carry result_summary.backend, then returns once the live table is showing.
   async function runBacnetWithBackend(backend: string) {
@@ -1662,6 +1873,26 @@ describe("ModulePage BACnet backend provenance", () => {
         if (url.endsWith("/api/v1/discovery/runs/run-bacnet-1/results")) {
           return jsonResponse(bacnetResults);
         }
+        if (url.includes("/api/v1/discovery/runs/run-bacnet-1/points")) {
+          return jsonResponse({
+            run_id: "run-bacnet-1",
+            job_type: "bacnet_discovery",
+            status: "succeeded",
+            points: [
+              {
+                device_ref: "device-1001",
+                point_id: "analog-input,1",
+                point_name: "Supply air temperature",
+                observed_value: { value: 21.5 },
+                units: "degreesCelsius",
+                attributes: { device_instance: 1001, object_type: "analog-input" },
+              },
+            ],
+            total: 1,
+            next_cursor: null,
+            has_more: false,
+          });
+        }
         if (url.endsWith("/api/v1/discovery/runs/run-bacnet-1")) {
           return jsonResponse(bacnetTerminalRun);
         }
@@ -1671,8 +1902,20 @@ describe("ModulePage BACnet backend provenance", () => {
 
     renderModule("bacnet-discovery");
 
-    const runButton = await screen.findByRole("button", { name: "Run" });
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+    await waitFor(() => expect(screen.getByText(/Run ID: run-bacnet-1/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", {
+      name: /Sealed preview authorization/i,
+    });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    const runButton = await screen.findByRole("button", { name: "Run" });
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
 
@@ -1707,6 +1950,16 @@ describe("ModulePage BACnet backend provenance", () => {
     await runBacnetWithBackend("bacpypes3");
     expect(await screen.findByRole("columnheader", { name: "IP Address" })).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: "Network Number" })).toBeInTheDocument();
+  });
+
+  it("renders the persisted BACnet point schema in Points / Live Data", async () => {
+    await runBacnetWithBackend("bacpypes3");
+    expect(await screen.findByRole("columnheader", { name: "Units" })).toBeInTheDocument();
+    const pointRow = screen.getByText("Supply air temperature").closest("tr") as HTMLTableRowElement;
+    expect(within(pointRow).getByText("1001")).toBeInTheDocument();
+    expect(within(pointRow).getByText("degreesCelsius")).toBeInTheDocument();
+    expect(within(pointRow).getByText("21.5")).toBeInTheDocument();
+    expect(within(pointRow).getByText("Read")).toBeInTheDocument();
   });
 });
 

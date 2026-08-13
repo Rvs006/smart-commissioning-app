@@ -91,6 +91,7 @@ from smart_commissioning_core.engines.bacnet_params import (
     DEFAULT_BBMD_PORT,
     MODE_BROADCAST,
     MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_PORT,
     PARAM_BACNET_MODE,
     PARAM_BBMD_ADDRESS,
     PARAM_BBMD_PORT,
@@ -663,14 +664,33 @@ def build_transport_plan(
     if not ip:
         raise ValueError(_NO_SOURCE_INTERFACE_MESSAGE)
 
-    resolved_port = udp_port if udp_port is not None else (embedded_port or DEFAULT_LOCAL_UDP_PORT)
+    configured_port: int | None = None
+    if parameters.get(PARAM_BACNET_PORT) is not None:
+        try:
+            configured_port = int(parameters[PARAM_BACNET_PORT])
+        except (TypeError, ValueError) as error:
+            raise ValueError("BACnet UDP Port must be a whole number between 1 and 65535.") from error
+        if not 1 <= configured_port <= 65_535:
+            raise ValueError("BACnet UDP Port must be between 1 and 65535.")
+
+    # The contract carries the default port too, but it must not turn the
+    # established ``ip/prefix`` local-broadcast address into ``ip/prefix:47808``.
+    # Only a non-default saved port (or the dedicated FD-lane override) changes
+    # the address passed to bacpypes3.
+    use_configured_port = configured_port not in {None, DEFAULT_LOCAL_UDP_PORT}
+    if udp_port is not None:
+        resolved_port = udp_port
+    elif use_configured_port:
+        resolved_port = configured_port
+    else:
+        resolved_port = embedded_port or DEFAULT_LOCAL_UDP_PORT
     # ZERO-REGRESSION PIN: when no port override is needed, hand bacpypes3 the
     # operator's address string BYTE-IDENTICALLY to today rather than helpfully
     # re-rendering it with ":47808". Today's working local-broadcast path must
     # not be the place we discover that NetworkPortObject parses a port suffix
     # differently than we assume; that risk is confined to the new FD lane,
     # which genuinely cannot express port 47809 any other way.
-    if udp_port is None or udp_port == embedded_port:
+    if (udp_port is None and not use_configured_port) or resolved_port == embedded_port:
         plan_address = str(raw_address).strip()
     else:
         plan_address = format_local_address(ip, prefix, resolved_port)

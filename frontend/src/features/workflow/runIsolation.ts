@@ -252,7 +252,10 @@ export function evidenceRequirementsFor(runRef: RunRef): readonly EvidenceRequir
   if (runRef.family === "validation") {
     return ["run", "issues"];
   }
-  return runRef.jobType === "mqtt_discovery" ? ["run", "results", "topics"] : ["run", "results"];
+  // The terminal discovery result is the sealed snapshot. MQTT topic polling
+  // is a supplementary live-capture view, and a transient failure there must
+  // never hide topics already persisted in that result from the operator.
+  return ["run", "results"];
 }
 
 function isTerminalSynchronizationComplete(

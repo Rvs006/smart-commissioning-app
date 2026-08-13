@@ -450,10 +450,11 @@ def _resolve_bacnet_transport(project_id: str, site_id: str, parameters: dict) -
     ``mqtt_subscribe_defaults`` + ``setdefault`` shape.
 
     ``setdefault`` per key, so an operator run-parameter override wins — consistent
-    with source_ip / local_address / qos on these routes. Nothing is injected
-    unless the saved config has Foreign Device = Enabled, so a default install's
-    run parameters are unchanged and discovery stays local-broadcast exactly as
-    it behaves today.
+    with source_ip / local_address / qos on these routes. A non-default saved
+    BACnet UDP port is always injected. Foreign-device fields are injected only
+    when the saved config has Foreign Device = Enabled, so a default install's
+    run parameters remain unchanged and discovery stays local-broadcast exactly
+    as it behaves today.
 
     An unusable BBMD Address surfaces as a 400 here, at run creation, with a
     fix-your-config message — no orphaned run is persisted, and the run never

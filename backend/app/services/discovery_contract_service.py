@@ -20,6 +20,7 @@ from smart_commissioning_core.discovery_observations import (
 from smart_commissioning_core.engines.bacnet_params import (
     DEFAULT_BBMD_PORT,
     MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_PORT,
     PARAM_BACNET_TARGETS,
     TARGET_ADDRESS,
     TARGET_ASSET_ID,
@@ -500,7 +501,7 @@ def resolve_bacnet_discovery_parameters(
     request = BacnetScanParametersV1(
         lanes=tuple(lanes),
         local_address=_optional_text(resolved.get("local_address")),
-        bacnet_port=resolved.get("bacnet_port") or DEFAULT_BBMD_PORT,
+        bacnet_port=resolved.get(PARAM_BACNET_PORT) or DEFAULT_BBMD_PORT,
         bbmd_address=bbmd_address(resolved),
         bbmd_port=bbmd_port(resolved),
         bbmd_ttl_seconds=fd_ttl(resolved),
@@ -583,7 +584,7 @@ def resolve_bacnet_discovery_parameters(
     resolved["internetwork_id"] = request.internetwork_id
     resolved["device_instance_low"] = request.instance_low
     resolved["device_instance_high"] = request.instance_high
-    resolved["bacnet_port"] = request.bacnet_port
+    resolved[PARAM_BACNET_PORT] = request.bacnet_port
     resolved["base_read_set"] = list(request.base_read_set)
     resolved["authorized_property_ceiling"] = list(
         request.authorized_property_ceiling

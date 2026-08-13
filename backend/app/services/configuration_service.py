@@ -12,6 +12,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from smart_commissioning_core.db.repositories import ConfigurationRepository
 from smart_commissioning_core.engines.bacnet_params import (
     MODE_FOREIGN_DEVICE,
+    PARAM_BACNET_PORT,
     PARAM_BACNET_MODE,
     PARAM_BBMD_ADDRESS,
     PARAM_BBMD_PORT,
@@ -380,11 +381,11 @@ class ConfigurationService:
     ) -> dict:
         """BACnet transport run-parameters from saved config (mirrors :meth:`mqtt_subscribe_defaults`).
 
-        Returns the flat, JSON-safe scalars the engine reads — ``bacnet_mode`` /
-        ``bbmd_address`` / ``bbmd_port`` / ``fd_ttl``, spelled by importing the
-        shared contract, never as literals — so they survive the Dramatiq
-        round-trip to the worker unchanged. Addresses "I set the BBMD fields and
-        the scan ignored them".
+        Returns the flat, JSON-safe scalars the engine reads — ``bacnet_port`` /
+        ``bacnet_mode`` / ``bbmd_address`` / ``bbmd_port`` / ``fd_ttl``, spelled
+        by importing the shared contract, never as literals — so they survive the
+        Dramatiq round-trip to the worker unchanged. Addresses "I set the BACnet
+        port or BBMD fields and the scan ignored them".
 
         THE TRIGGER IS "Foreign Device" == Enabled (casefolded) AND NOTHING ELSE.
         Not the confusingly-named "BBMD" toggle, not a non-empty "BBMD Address":
@@ -408,8 +409,17 @@ class ConfigurationService:
           save, and neither is worth blocking a lab scan over.
         """
         values = self.load(project_id, site_id).bacnet.values
+        # Reuse the shared soft reader for legacy snapshots. New configuration
+        # is validated on save, but a bad persisted port must not prevent the
+        # normal default-port scan. Omit the default to preserve the existing
+        # local-broadcast path byte-for-byte.
+        local_port = bbmd_port({PARAM_BBMD_PORT: values.get("UDP Port")})
+        defaults: dict[str, object] = {}
+        if local_port != 47_808:
+            defaults[PARAM_BACNET_PORT] = local_port
+
         if str(values.get("Foreign Device") or "").strip().casefold() != "enabled":
-            return {}
+            return defaults
         address = str(values.get("BBMD Address") or "").strip()
         if not address:
             raise ValueError(
@@ -430,6 +440,7 @@ class ConfigurationService:
         # the same functions back off the run parameters).
         stored = {PARAM_BBMD_PORT: values.get("BBMD UDP Port"), PARAM_FD_TTL: values.get("TTL")}
         return {
+            **defaults,
             PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
             PARAM_BBMD_ADDRESS: str(parsed),
             PARAM_BBMD_PORT: bbmd_port(stored),

@@ -23,7 +23,7 @@ COPY core/ ./core/
 COPY backend/ ./backend/
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir ./core ./backend
+    && python -m pip install --no-cache-dir "./core[bacnet]" ./backend
 
 # Resolve `app` and `smart_commissioning_core` from the source trees instead
 # of site-packages: the runtime root must stay at /app/backend/runtime (where
