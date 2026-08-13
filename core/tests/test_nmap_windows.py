@@ -108,7 +108,8 @@ class _TokenAccessAdvapi:
         desired_value = int(desired_access.value)
         if privilege_set is None:
             privilege_set_length._obj.value = 64
-            ctypes.set_last_error(122)
+            if hasattr(ctypes, "set_last_error"):
+                ctypes.set_last_error(122)
             return False
         self.access_checks.append((token_value, desired_value, self.ace_grantee))
         granted_access._obj.value = 0x00000002
