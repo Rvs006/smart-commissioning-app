@@ -302,6 +302,7 @@ class NmapWindowsBoundaryTests(unittest.TestCase):
                     patch(
                         "smart_commissioning_core.engines.ip.nmap_windows.ctypes.WinDLL",
                         side_effect=_windows_library,
+                        create=True,
                     ),
                 ):
                     writable = CtypesNmapTrustBackend().is_user_writable(
