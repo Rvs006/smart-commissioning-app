@@ -9,18 +9,29 @@ the task's ``live_untested`` output and requires on-site validation.
 """
 
 import socket
+import time
 import unittest
+from copy import deepcopy
+from datetime import datetime
 from typing import Any
 from unittest import mock
 
 from smart_commissioning_core.engines import ip_scan
 from smart_commissioning_core.engines.base import ThrottleConfig
+from smart_commissioning_core.engines.ip import ProviderIdentityEvidenceV1
+from smart_commissioning_core.owned_run_store import OwnershipLostError
+from smart_commissioning_core.run_context import canonical_sha256
 
 
 class FakeRunStore:
     """In-memory RunStore capturing run wrapper calls, with cancellation support."""
 
-    def __init__(self, *, cancel_after: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cancel_after: int | None = None,
+        observations_enabled: bool = False,
+    ) -> None:
         self.status_calls: list[dict[str, Any]] = []
         self.summary_calls: list[dict[str, Any]] = []
         self.issues_calls: list[list[Any]] = []
@@ -29,6 +40,9 @@ class FakeRunStore:
         self._cancel = False
         self._cancel_checks = 0
         self._cancel_after = cancel_after
+        self.observations: list[Any] = []
+        if not observations_enabled:
+            self.append_observation = None  # type: ignore[method-assign]
 
     def update_run_status(self, run_id: str, *, status: str, stage: str | None = None,
                           progress_percent: int | None = None, error_message: str | None = None) -> dict[str, Any]:
@@ -61,8 +75,1959 @@ class FakeRunStore:
             self._cancel = True
         return self._cancel
 
+    def append_observation(self, observation: Any) -> Any:
+        self.observations.append(observation)
+        return {"cursor": len(self.observations), "idempotent": False}
+
 
 _AUTH = {"authorized": True}
+
+
+def _frozen_ip_contract(
+    *,
+    authority: dict[str, object] | None = None,
+    attempt_ceiling: int = 4,
+) -> dict[str, object]:
+    return {
+        "scan_contract_version": "1.0",
+        "job_type": "ip_discovery",
+        "ip": {
+            "provider": "builtin_tcp_connect",
+            "profile": "gentle",
+            "provider_state": {
+                "provider": "builtin_tcp_connect",
+                "execution_enabled": True,
+            },
+            "authority": authority,
+            "policy": {
+                "profile": "gentle",
+                "per_target_concurrency": 1,
+                "min_target_spacing_ms": 0,
+                "retries": 0,
+                "retry_backoff_ms": 0,
+                "total_dispatch_attempt_ceiling": attempt_ceiling,
+                "dispatch_phase_seconds": 10,
+                "run_deadline_seconds": 20,
+            },
+        },
+    }
+
+
+def _live_frozen_ip_parameters(
+    *,
+    address: str = "127.0.0.1",
+    ports: list[int] | None = None,
+) -> dict[str, Any]:
+    """One complete production-shaped frozen TCP plan for dispatch guards."""
+
+    tcp_ports = ports or [443]
+    source_identity = {
+        "schema_version": "1.0",
+        "selection": "explicit",
+        "executor_scope": "test-executor",
+        "interface_id": "if:1",
+        "interface_name": "loopback",
+        "source_ip": "127.0.0.1",
+        "prefix_length": 8,
+        "local_address": "127.0.0.1/8",
+        "default_route_metric": None,
+    }
+    targets = {
+        "target_expressions": [{"kind": "address", "address": address}],
+        "exclusions": [],
+        "target_count": 1,
+        "excluded_count": 0,
+        "expanded_target_sha256": canonical_sha256([address]),
+        "grouped_ranges": [{"start": address, "end": address, "count": 1}],
+        "sample_addresses": [address],
+    }
+    contract: dict[str, Any] = {
+        "scan_contract_version": "1.0",
+        "job_type": "ip_discovery",
+        "source_interface": source_identity,
+        "effective_throttle": {
+            "max_concurrency": 1,
+            "rate_limit_per_sec": 1.0,
+            "connect_timeout_s": 1.0,
+        },
+        "ip": {
+            "provider": "builtin_tcp_connect",
+            "profile": "gentle",
+            "targets": targets,
+            "ports": [{"port": port, "protocol": "tcp"} for port in tcp_ports],
+            "not_attempted_ports_by_address": {},
+            "provider_state": {
+                "provider": "builtin_tcp_connect",
+                "execution_enabled": True,
+            },
+            "policy": {
+                "profile": "gentle",
+                "max_targets": 256,
+                "max_protocol_ports_per_target": 64,
+                "total_dispatch_attempt_ceiling": 6000,
+                "profile_max_concurrency": 8,
+                "per_target_concurrency": 1,
+                "profile_max_rate_limit_per_sec": 10.0,
+                "min_target_spacing_ms": 100.0,
+                "retries": 0,
+                "retry_backoff_ms": 0.0,
+                "dispatch_phase_seconds": 60,
+                "cleanup_margin_seconds": 0,
+                "run_deadline_seconds": 60,
+                "risk_acknowledgement_required": False,
+                "risk_acknowledged": False,
+            },
+        },
+    }
+    contract["packet_plan_sha256"] = canonical_sha256(contract)
+    return {
+        **_AUTH,
+        "addresses": [address],
+        "ports": tcp_ports,
+        "source_ip": "127.0.0.1",
+        "local_address": "127.0.0.1/8",
+        "source_interface_identity_v1": source_identity,
+        "scan_contract_v1": contract,
+    }
+
+
+class U3IPAcceptanceTests(unittest.TestCase):
+    class _Writer:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    def test_a4_icmp_blocked_tcp_443_connected_is_reachable(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        class HTTPSOnlyTransport:
+            async def connect(
+                self,
+                target_ip: str,
+                port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                self.target = (target_ip, port, source_ip)
+                return U3IPAcceptanceTests._Writer()
+
+        transport = HTTPSOnlyTransport()
+        with mock.patch.object(
+            ip_scan,
+            "_icmp_probe",
+            create=True,
+        ) as forbidden_icmp:
+            result = ip_scan.process_ip_discovery_run(
+                "run_a4_tcp_liveness",
+                {**_AUTH, "addresses": ["192.0.2.44"], "ports": [443]},
+                run_store=store,
+                execution_mode="test",
+                tcp_transport=transport,
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        forbidden_icmp.assert_not_called()
+        self.assertEqual(transport.target, ("192.0.2.44", 443, None))
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["reachability_state"], "reachable")
+        self.assertEqual(asset["observed_ports"], [
+            {"port": 443, "protocol": "tcp", "service": "https"}
+        ])
+
+    def test_a5_all_timeouts_keep_each_reason_and_host_unconfirmed(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        class TimeoutTransport:
+            async def connect(
+                self,
+                _target_ip: str,
+                _port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                del source_ip
+                raise TimeoutError
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_a5_all_timeouts",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.45"],
+                "ports": [80, 443, 502],
+                "expected_ports_by_address": {
+                    "192.0.2.45": "80/tcp,443/tcp,502/tcp"
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            tcp_transport=TimeoutTransport(),
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["reachability_state"], "unconfirmed")
+        self.assertEqual(asset["policy_verdict"], "unconfirmed")
+        self.assertEqual(asset["missing_expected_ports"], [])
+        self.assertEqual(
+            [row["port"] for row in asset["port_observations"]],
+            [80, 443, 502],
+        )
+        for row in asset["port_observations"]:
+            self.assertEqual(row["probe_outcome"], "timed_out")
+            self.assertEqual(row["reachability_state"], "unconfirmed")
+            self.assertEqual(row["policy_verdict"], "unconfirmed")
+            self.assertEqual(
+                row["reason"],
+                "The TCP connection did not complete before the application deadline.",
+            )
+        self.assertNotIn(
+            "expected_closed",
+            [row["policy_verdict"] for row in asset["port_observations"]],
+        )
+
+    def test_a6_forbidden_tcp_23_preserves_frozen_provenance(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        rows: list[dict[str, object]] = [
+            {
+                "Asset ID": "BMS-23",
+                "Expected IP address": "192.0.2.46",
+                "Forbidden ports": "23/tcp",
+            }
+        ]
+        rows_digest = canonical_sha256(rows)
+        packet_digest = "6" * 64
+        contract = _frozen_ip_contract(
+            authority={
+                "import_id": "imp-a6-register",
+                "import_type": "ip_register",
+                "accepted_rows_sha256": rows_digest,
+                "accepted_count": 1,
+            }
+        )
+        contract["packet_plan_sha256"] = packet_digest
+        contract["source_interface"] = {
+            "source_ip": "127.0.0.1",
+            "local_address": "127.0.0.1/8",
+        }
+        loaded: list[str] = []
+
+        class TelnetTransport:
+            async def connect(
+                self,
+                _target_ip: str,
+                port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                self.bound = (port, source_ip)
+                return U3IPAcceptanceTests._Writer()
+
+        transport = TelnetTransport()
+
+        def load(import_id: str) -> list[dict[str, object]]:
+            loaded.append(import_id)
+            return rows
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_a6_forbidden_telnet",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.46"],
+                "ports": [23],
+                "source_ip": "127.0.0.1",
+                "forbidden_ports_by_address": {"192.0.2.46": "23/tcp"},
+                "scan_contract_v1": contract,
+            },
+            run_store=store,
+            execution_mode="test",
+            tcp_transport=transport,
+            import_loader=load,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(loaded, ["imp-a6-register"])
+        self.assertEqual(transport.bound, (23, "127.0.0.1"))
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["policy_verdict"], "forbidden_open")
+        self.assertEqual(asset["register_match"], "expected_match")
+        [port_event] = [
+            event
+            for event in store.observations
+            if event.entity_kind == "port"
+            and event.payload["ip_v1"]["attempts"] == 1
+        ]
+        payload = port_event.payload["ip_v1"]
+        self.assertEqual(payload["provider"], "builtin_tcp_connect")
+        self.assertEqual(payload["provider_contract_version"], "1.0")
+        self.assertEqual(payload["probe_outcome"], "connected")
+        self.assertEqual(payload["policy_verdict"], "forbidden_open")
+        self.assertEqual(
+            payload["provenance"],
+            {
+                "profile": "gentle",
+                "source_ip": "127.0.0.1",
+                "source_interface": "127.0.0.1/8",
+                "packet_plan_sha256": packet_digest,
+                "register_import_id": "imp-a6-register",
+                "register_rows_sha256": rows_digest,
+            },
+        )
+        self.assertIsNotNone(port_event.observed_at.tzinfo)
+        dispatched_at = datetime.fromisoformat(
+            payload["last_packet_dispatched_at"]
+        )
+        self.assertIsNotNone(dispatched_at.tzinfo)
+        self.assertIsNotNone(datetime.fromisoformat(asset["last_seen_at"]).tzinfo)
+
+    def test_a9_stop_mid_host_meets_dispatch_and_terminal_bounds(self) -> None:
+        class TimingStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.stop_persisted_at: float | None = None
+                self.terminal_at: float | None = None
+
+            def request_cancel(self, run_id: str) -> dict[str, Any]:
+                self.stop_persisted_at = time.monotonic()
+                return super().request_cancel(run_id)
+
+            def update_run_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                updated = super().update_run_status(*args, **kwargs)
+                if kwargs.get("status") in {"cancelled", "failed", "succeeded"}:
+                    self.terminal_at = time.monotonic()
+                return updated
+
+        store = TimingStore()
+        dispatch_times: list[float] = []
+        application_deadline_s = 0.1
+
+        class StopAfterFirstTransport:
+            async def connect(
+                self,
+                _target_ip: str,
+                port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                del source_ip
+                dispatch_times.append(time.monotonic())
+                if port == 80:
+                    store.request_cancel("run_a9_stop_timing")
+                    return U3IPAcceptanceTests._Writer()
+                self.fail("Stop must prevent the untouched port from dispatching")
+
+        transport = StopAfterFirstTransport()
+        transport.fail = self.fail  # type: ignore[attr-defined]
+        result = ip_scan.process_ip_discovery_run(
+            "run_a9_stop_timing",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.47"],
+                "ports": [80, 443],
+                "expected_ports_by_address": {
+                    "192.0.2.47": "80/tcp,443/tcp"
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(
+                max_concurrency=1,
+                rate_limit_per_sec=None,
+                connect_timeout_s=application_deadline_s,
+            ),
+            tcp_transport=transport,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(len(dispatch_times), 1)
+        self.assertIsNotNone(store.stop_persisted_at)
+        self.assertIsNotNone(store.terminal_at)
+        stop_at = store.stop_persisted_at or 0.0
+        terminal_at = store.terminal_at or float("inf")
+        self.assertLessEqual(max(dispatch_times), stop_at + 2.0)
+        longest_in_flight_deadline = max(dispatch_times) + application_deadline_s
+        self.assertLessEqual(terminal_at, longest_in_flight_deadline + 2.0)
+        [asset] = store.record_summary["discovered_assets"]
+        by_port = {row["port"]: row for row in asset["port_observations"]}
+        self.assertEqual(by_port[80]["probe_outcome"], "connected")
+        self.assertEqual(by_port[80]["attempts"], 1)
+        self.assertEqual(by_port[443]["coverage_state"], "not_attempted")
+        self.assertEqual(by_port[443]["attempts"], 0)
+        self.assertIsNone(by_port[443]["probe_outcome"])
+        self.assertEqual(asset["missing_expected_ports"], [])
+
+
+class RegisterAuthorityIntegrationTests(unittest.TestCase):
+    def test_duplicate_expected_ip_requires_ambiguous_review(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        rows: list[dict[str, object]] = [
+            {"Asset ID": "AHU-1", "Expected IP address": "192.0.2.18"},
+            {"Asset ID": "AHU-2", "Expected IP address": "192.0.2.18"},
+        ]
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_duplicate_expected_ip",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.18"],
+                "ports": [443],
+                "scan_contract_v1": _frozen_ip_contract(
+                    authority={
+                        "import_id": "imp-duplicate-ip",
+                        "import_type": "ip_register",
+                        "accepted_rows_sha256": canonical_sha256(rows),
+                        "accepted_count": 2,
+                    }
+                ),
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+            import_loader=lambda _import_id: rows,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["register_match"], "ambiguous_review")
+        self.assertEqual(asset["candidate_device_keys"], ["AHU-1", "AHU-2"])
+        self.assertIsNone(asset["matched_device_key"])
+
+    def test_expected_ip_wins_without_calling_identity_observer(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        rows: list[dict[str, object]] = [
+            {
+                "Asset ID": "AHU-18",
+                "Asset name": "Roof AHU 18",
+                "Expected IP address": "192.0.2.18",
+            }
+        ]
+        digest = canonical_sha256(rows)
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        async def forbidden_identity_observer(
+            _host: str,
+        ) -> ProviderIdentityEvidenceV1:
+            self.fail("expected-IP precedence must not call identity observation")
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_expected_ip_precedence",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.18"],
+                "ports": [443],
+                "scan_contract_v1": _frozen_ip_contract(
+                    authority={
+                        "import_id": "imp-ip-18",
+                        "import_type": "ip_register",
+                        "accepted_rows_sha256": digest,
+                        "accepted_count": 1,
+                    }
+                ),
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+            import_loader=lambda _import_id: rows,
+            identity_observer=forbidden_identity_observer,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["register_match"], "expected_match")
+        self.assertEqual(asset["expected_ip"], "192.0.2.18")
+        self.assertEqual(asset["observed_ip"], "192.0.2.18")
+        self.assertEqual(asset["match_basis"], "expected_ip")
+        metrics = store.record_summary["ip_headline_metrics_v1"]["metrics"]
+        self.assertEqual(metrics[2]["value"], 1)
+        self.assertEqual(metrics[3]["value"], 0)
+
+    def test_unique_high_confidence_identity_surfaces_wrong_ip_review(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        rows: list[dict[str, object]] = [
+            {
+                "Project/site": "demo",
+                "System": "air",
+                "Asset ID": "AHU-17",
+                "Asset name": "Roof AHU 17",
+                "Expected IP address": "192.0.2.17",
+                "Expected hostname": "ahu-17",
+            }
+        ]
+        original_rows = deepcopy(rows)
+        digest = canonical_sha256(rows)
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        async def observe_identity(_host: str) -> ProviderIdentityEvidenceV1:
+            return ProviderIdentityEvidenceV1(
+                evidence_kind="approved_provider",
+                confidence="high",
+                asset_id="AHU-17",
+                corroborating_fields=("asset_id",),
+            )
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_wrong_ip_review",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.99"],
+                "ports": [443],
+                "scan_contract_v1": _frozen_ip_contract(
+                    authority={
+                        "import_id": "imp-ip-17",
+                        "import_type": "ip_register",
+                        "accepted_rows_sha256": digest,
+                        "accepted_count": 1,
+                    }
+                ),
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+            import_loader=lambda import_id: rows if import_id == "imp-ip-17" else [],
+            identity_observer=observe_identity,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["register_match"], "wrong_ip_review")
+        self.assertEqual(asset["expected_ip"], "192.0.2.17")
+        self.assertEqual(asset["observed_ip"], "192.0.2.99")
+        self.assertEqual(asset["match_basis"], "asset_id")
+        self.assertEqual(asset["comparison_reason"], "unique_identity_wrong_ip")
+        self.assertEqual(asset["candidate_device_keys"], ["AHU-17"])
+
+        [finalized] = [
+            observation
+            for observation in store.observations
+            if observation.entity_kind == "host" and observation.phase == "finalize"
+        ]
+        record = finalized.payload["projection_v1"]["record"]
+        self.assertEqual(record["address"], "192.0.2.99")
+        self.assertEqual(record["attributes"]["register_address"], "192.0.2.17")
+        self.assertEqual(record["attributes"]["register_asset_id"], "AHU-17")
+        self.assertEqual(
+            record["attributes"]["register_asset_name"],
+            "Roof AHU 17",
+        )
+        self.assertEqual(
+            record["attributes"]["register_match"],
+            "wrong_ip_review",
+        )
+        self.assertEqual(rows, original_rows)
+        self.assertNotIn("accepted_rows", store.record_summary)
+        metrics = store.record_summary["ip_headline_metrics_v1"]["metrics"]
+        self.assertEqual(metrics[2]["value"], 0)
+        self.assertEqual(metrics[3]["value"], 1)
+
+    def test_authority_count_or_digest_mismatch_fails_before_any_probe(self) -> None:
+        rows: list[dict[str, object]] = [
+            {
+                "Asset ID": "AHU-17",
+                "Asset name": "Roof AHU 17",
+                "Expected IP address": "192.0.2.17",
+            }
+        ]
+        valid_digest = canonical_sha256(rows)
+
+        for label, accepted_count, digest in (
+            ("count", 2, valid_digest),
+            ("digest", 1, "0" * 64),
+        ):
+            with self.subTest(label=label):
+                store = FakeRunStore(observations_enabled=True)
+                forbidden_probe = mock.AsyncMock(return_value=True)
+
+                result = ip_scan.process_ip_discovery_run(
+                    f"run_bad_authority_{label}",
+                    {
+                        **_AUTH,
+                        "addresses": ["192.0.2.99"],
+                        "ports": [443],
+                        "scan_contract_v1": _frozen_ip_contract(
+                            authority={
+                                "import_id": "imp-ip-17",
+                                "import_type": "ip_register",
+                                "accepted_rows_sha256": digest,
+                                "accepted_count": accepted_count,
+                            }
+                        ),
+                    },
+                    run_store=store,
+                    execution_mode="test",
+                    connect=forbidden_probe,
+                    import_loader=lambda _import_id: rows,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                forbidden_probe.assert_not_awaited()
+                self.assertEqual(store.observations, [])
+
+    def test_missing_frozen_authority_fails_while_present_empty_is_valid(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[tuple[str, int]] = []
+
+        async def forbidden_probe(
+            host: str,
+            port: int,
+            _timeout: float,
+        ) -> bool:
+            contacted.append((host, port))
+            return True
+
+        def missing_import(_import_id: str) -> list[dict[str, Any]]:
+            raise FileNotFoundError("frozen import was deleted")
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_missing_authority",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.31"],
+                "ports": [443],
+                "scan_contract_v1": _frozen_ip_contract(
+                    authority={
+                        "import_id": "imp-missing",
+                        "import_type": "ip_register",
+                        "accepted_rows_sha256": canonical_sha256([]),
+                        "accepted_count": 0,
+                    }
+                ),
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=forbidden_probe,
+            import_loader=missing_import,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [])
+        self.assertEqual(store.observations, [])
+
+
+class HeadlineMetricIntegrationTests(unittest.TestCase):
+    def test_no_authority_configures_only_reachable_devices(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        async def one_reachable(host: str, _port: int, _timeout: float) -> bool:
+            return host == "192.0.2.20"
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_metrics_without_authority",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.20", "192.0.2.21"],
+                "ports": [443],
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=one_reachable,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            store.record_summary["ip_headline_metrics_v1"],
+            {
+                "schema_version": "1.0",
+                "metrics": [
+                    {
+                        "schema_version": "1.0",
+                        "heading": "Expected Devices",
+                        "configured": False,
+                        "value": None,
+                        "denominator": None,
+                        "percentage": None,
+                        "pending_count": None,
+                        "finalized_count": None,
+                    },
+                    {
+                        "schema_version": "1.0",
+                        "heading": "Reachable Devices",
+                        "configured": True,
+                        "value": 1,
+                        "denominator": 2,
+                        "percentage": 50.0,
+                        "pending_count": 0,
+                        "finalized_count": 2,
+                    },
+                    {
+                        "schema_version": "1.0",
+                        "heading": "Register Matches",
+                        "configured": False,
+                        "value": None,
+                        "denominator": None,
+                        "percentage": None,
+                        "pending_count": None,
+                        "finalized_count": None,
+                    },
+                    {
+                        "schema_version": "1.0",
+                        "heading": "Unexpected / Unregistered Hosts",
+                        "configured": False,
+                        "value": None,
+                        "denominator": None,
+                        "percentage": None,
+                        "pending_count": None,
+                        "finalized_count": None,
+                    },
+                ],
+            },
+        )
+
+    def test_selected_empty_authority_keeps_register_metrics_configured(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        rows: list[dict[str, object]] = []
+        digest = canonical_sha256(rows)
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_metrics_empty_authority",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.30"],
+                "ports": [443],
+                "scan_contract_v1": _frozen_ip_contract(
+                    authority={
+                        "import_id": "imp-empty",
+                        "import_type": "ip_register",
+                        "accepted_rows_sha256": digest,
+                        "accepted_count": 0,
+                    }
+                ),
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+            import_loader=lambda _import_id: rows,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        metrics = store.record_summary["ip_headline_metrics_v1"]["metrics"]
+        self.assertEqual(
+            [metric["heading"] for metric in metrics],
+            [
+                "Expected Devices",
+                "Reachable Devices",
+                "Register Matches",
+                "Unexpected / Unregistered Hosts",
+            ],
+        )
+        self.assertEqual(
+            [metric["configured"] for metric in metrics],
+            [True, True, True, True],
+        )
+        self.assertEqual(
+            [metric["value"] for metric in metrics],
+            [0, 1, 0, 1],
+        )
+        self.assertEqual(
+            [metric["denominator"] for metric in metrics],
+            [0, 1, 0, 1],
+        )
+        self.assertIsNone(metrics[0]["percentage"])
+        self.assertIsNone(metrics[2]["percentage"])
+
+
+class ProgressiveObservationTests(unittest.TestCase):
+    def test_status_detail_bounds_all_large_port_categories_deterministically(self) -> None:
+        ports = tuple(range(10_000, 11_000))
+
+        detail = ip_scan.format_ip_status_detail(
+            "reachable: TCP connection refused on probed ports",
+            responsive_ports=ports,
+            forbidden_open_ports=ports,
+            unexpected_open_ports=ports,
+            missing_expected_ports=ports,
+        )
+
+        self.assertLessEqual(len(detail), ip_scan.IP_STATUS_DETAIL_MAX_CHARS)
+        self.assertIn("responsive: 1000 total; sample: 10000,10001", detail)
+        self.assertIn("FORBIDDEN PORTS OPEN: 1000 total; sample: 10000,10001", detail)
+        self.assertIn("UNEXPECTED PORTS OPEN: 1000 total; sample: 10000,10001", detail)
+        self.assertIn("MISSING EXPECTED PORTS: 1000 total; sample: 10000,10001", detail)
+
+    def test_stop_on_maximum_host_plan_bounds_durable_cutoff_writes(self) -> None:
+        class SlowObservationStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.stop_persisted_at: float | None = None
+                self.terminal_at: float | None = None
+
+            def request_cancel(self, run_id: str) -> dict[str, Any]:
+                self.stop_persisted_at = time.monotonic()
+                return super().request_cancel(run_id)
+
+            def append_observation(self, observation: Any) -> Any:
+                time.sleep(0.002)
+                return super().append_observation(observation)
+
+            def update_run_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                updated = super().update_run_status(*args, **kwargs)
+                if kwargs.get("status") in {"cancelled", "failed", "succeeded"}:
+                    self.terminal_at = time.monotonic()
+                return updated
+
+        store = SlowObservationStore()
+        store.request_cancel("run_maximum_stop")
+        hosts = [
+            f"10.20.{index // 256}.{index % 256}"
+            for index in range(ip_scan.MAX_HOSTS_CEILING)
+        ]
+
+        async def forbidden_dispatch(
+            _host: str,
+            _port: int,
+            _timeout: float,
+        ) -> bool:
+            self.fail("a persisted Stop must prevent every packet")
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_maximum_stop",
+            {**_AUTH, "addresses": hosts, "ports": [443]},
+            run_store=store,
+            execution_mode="test",
+            connect=forbidden_dispatch,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(len(store.record_summary["discovered_assets"]), len(hosts))
+        self.assertLessEqual(len(store.observations), 5)
+        self.assertIsNotNone(store.stop_persisted_at)
+        self.assertIsNotNone(store.terminal_at)
+        self.assertLessEqual(
+            store.terminal_at or float("inf"),
+            (store.stop_persisted_at or 0.0) + 2.0,
+        )
+
+    def test_stop_on_4096_port_plan_skips_untouched_durable_writes(self) -> None:
+        class SlowObservationStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.stop_persisted_at: float | None = None
+                self.terminal_at: float | None = None
+
+            def request_cancel(self, run_id: str) -> dict[str, Any]:
+                self.stop_persisted_at = time.monotonic()
+                return super().request_cancel(run_id)
+
+            def append_observation(self, observation: Any) -> Any:
+                time.sleep(0.002)
+                return super().append_observation(observation)
+
+            def update_run_status(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+                updated = super().update_run_status(*args, **kwargs)
+                if kwargs.get("status") in {"cancelled", "failed", "succeeded"}:
+                    self.terminal_at = time.monotonic()
+                return updated
+
+        store = SlowObservationStore()
+        contacted: list[int] = []
+
+        async def stop_after_first(_host: str, port: int, _timeout: float) -> bool:
+            contacted.append(port)
+            if port == 1:
+                store.request_cancel("run_4096_port_stop")
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_4096_port_stop",
+            {**_AUTH, "addresses": ["192.0.2.88"], "ports": list(range(1, 4097))},
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+            connect=stop_after_first,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(contacted, [1])
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(len(asset["port_observations"]), 4096)
+        self.assertEqual(asset["port_observations"][0]["probe_outcome"], "connected")
+        self.assertTrue(
+            all(
+                item["coverage_state"] == "not_attempted"
+                for item in asset["port_observations"][1:]
+            )
+        )
+        durable_ports = [
+            item for item in store.observations if item.entity_kind == "port"
+        ]
+        self.assertEqual(len(durable_ports), 1)
+        self.assertIsNotNone(store.stop_persisted_at)
+        self.assertIsNotNone(store.terminal_at)
+        self.assertLessEqual(
+            store.terminal_at or float("inf"),
+            (store.stop_persisted_at or 0.0) + 2.0,
+        )
+
+    def test_one_target_emits_a_stable_staged_trace(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_progressive_ip",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.10"],
+                "ports": [443],
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            [
+                (item.phase, item.entity_kind, item.outcome)
+                for item in store.observations
+            ],
+            [
+                ("planned", "host", "planned"),
+                ("reachability", "host", "started"),
+                ("reachability", "port", "connected"),
+                ("comparison", "host", "evaluated"),
+                ("finalize", "host", "observed"),
+            ],
+        )
+        self.assertEqual(
+            [item.entity_version for item in store.observations],
+            [1, 2, 1, 3, 4],
+        )
+        self.assertEqual(
+            store.observations[-1].payload["ip_v1"]["target"],
+            "192.0.2.10",
+        )
+
+    def test_concurrent_port_completion_keeps_frozen_plan_order(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        async def completes_out_of_order(
+            _host: str,
+            port: int,
+            _timeout: float,
+        ) -> bool:
+            if port == 80:
+                import asyncio
+
+                await asyncio.sleep(0.02)
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_progressive_order",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.11"],
+                "ports": [80, 443],
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=2, rate_limit_per_sec=None),
+            connect=completes_out_of_order,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(
+            [
+                item.payload["ip_v1"]["port"]
+                for item in store.observations
+                if item.entity_kind == "port"
+            ],
+            [80, 443],
+        )
+
+    def test_stop_while_waiting_for_a_slot_returns_cancelled_partial_evidence(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[int] = []
+
+        async def stop_after_first(
+            _host: str,
+            port: int,
+            _timeout: float,
+        ) -> bool:
+            contacted.append(port)
+            if port == 80:
+                import asyncio
+
+                await asyncio.sleep(0)
+                store._cancel = True
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_progressive_stop",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.12"],
+                "ports": [80, 443],
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+            connect=stop_after_first,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(contacted, [80])
+        not_attempted = [
+            item
+            for item in store.observations
+            if item.entity_kind == "port" and item.outcome == "not_attempted"
+        ]
+        self.assertEqual(not_attempted, [])
+        [asset] = store.record_summary["discovered_assets"]
+        by_port = {item["port"]: item for item in asset["port_observations"]}
+        self.assertEqual(list(by_port), [80, 443])
+        self.assertEqual(by_port[443]["attempts"], 0)
+        self.assertEqual(by_port[443]["coverage_state"], "not_attempted")
+        self.assertIsNone(by_port[443]["probe_outcome"])
+        self.assertEqual(by_port[443]["policy_verdict"], "not_attempted")
+        self.assertEqual(by_port[443]["control_reason"], "stop_requested")
+        host_final = [
+            item
+            for item in store.observations
+            if item.entity_kind == "host" and item.phase == "finalize"
+        ][0]
+        self.assertEqual(host_final.payload["ip_v1"]["coverage_state"], "cancelled")
+        self.assertEqual(
+            host_final.payload["ip_v1"]["control_reason"],
+            "stop_requested",
+        )
+        reachable_metric = store.record_summary["ip_headline_metrics_v1"][
+            "metrics"
+        ][1]
+        self.assertEqual(reachable_metric["value"], 0)
+        self.assertEqual(reachable_metric["finalized_count"], 1)
+
+    def test_stop_finishes_the_frozen_plan_with_unattempted_rows(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[tuple[str, int]] = []
+
+        async def stop_after_first(
+            host: str,
+            port: int,
+            _timeout: float,
+        ) -> bool:
+            contacted.append((host, port))
+            store._cancel = True
+            return True
+
+        hosts = ["192.0.2.40", "192.0.2.41"]
+        result = ip_scan.process_ip_discovery_run(
+            "run_stop_across_hosts",
+            {
+                **_AUTH,
+                "addresses": hosts,
+                "ports": [80, 443],
+                "expected_ports_by_address": {
+                    host: "80/tcp,443/tcp" for host in hosts
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+            connect=stop_after_first,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(contacted, [("192.0.2.40", 80)])
+        self.assertEqual(store.record_summary["control_reason"], "stop_requested")
+        self.assertEqual(store.record_summary["hosts_scanned"], 1)
+        assets = store.record_summary["discovered_assets"]
+        self.assertEqual([asset["ip_address"] for asset in assets], hosts)
+        self.assertEqual(
+            [
+                (asset["ip_address"], port["port"])
+                for asset in assets
+                for port in asset["port_observations"]
+            ],
+            [
+                ("192.0.2.40", 80),
+                ("192.0.2.40", 443),
+                ("192.0.2.41", 80),
+                ("192.0.2.41", 443),
+            ],
+        )
+        unattempted = [
+            port
+            for asset in assets
+            for port in asset["port_observations"]
+            if port["attempts"] == 0
+        ]
+        self.assertEqual(len(unattempted), 3)
+        for port in unattempted:
+            self.assertEqual(port["coverage_state"], "not_attempted")
+            self.assertIsNone(port["probe_outcome"])
+            self.assertEqual(port["policy_verdict"], "not_attempted")
+            self.assertEqual(port["control_reason"], "stop_requested")
+        self.assertTrue(
+            all(asset["missing_expected_ports"] == [] for asset in assets)
+        )
+        tcp_entities = [
+            item.entity_key
+            for item in store.observations
+            if item.entity_kind == "port"
+            and item.payload["ip_v1"]["transport"] == "tcp"
+        ]
+        self.assertEqual(
+            tcp_entities,
+            [
+                "port:192.0.2.40:80:tcp",
+            ],
+        )
+        finalized_hosts = [
+            item.entity_key
+            for item in store.observations
+            if item.entity_kind == "host" and item.phase == "finalize"
+        ]
+        self.assertEqual(
+            finalized_hosts,
+            ["host:192.0.2.40"],
+        )
+
+    def test_stop_before_first_host_emits_the_entire_unattempted_plan(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        store._cancel = True
+        hosts = ["192.0.2.42", "192.0.2.43"]
+
+        async def forbidden_dispatch(
+            _host: str,
+            _port: int,
+            _timeout: float,
+        ) -> bool:
+            self.fail("Stop before the first host must prevent every packet")
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_stop_before_first_host",
+            {
+                **_AUTH,
+                "addresses": hosts,
+                "ports": [80, 443],
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=forbidden_dispatch,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(store.record_summary["control_reason"], "stop_requested")
+        self.assertEqual(store.record_summary["hosts_scanned"], 0)
+        assets = store.record_summary["discovered_assets"]
+        self.assertEqual([asset["ip_address"] for asset in assets], hosts)
+        planned_ports = [
+            (asset["ip_address"], port["port"])
+            for asset in assets
+            for port in asset["port_observations"]
+        ]
+        self.assertEqual(
+            planned_ports,
+            [
+                ("192.0.2.42", 80),
+                ("192.0.2.42", 443),
+                ("192.0.2.43", 80),
+                ("192.0.2.43", 443),
+            ],
+        )
+        for asset in assets:
+            self.assertEqual(asset["coverage_state"], "not_attempted")
+            self.assertEqual(asset["missing_expected_ports"], [])
+            for port in asset["port_observations"]:
+                self.assertEqual(port["attempts"], 0)
+                self.assertEqual(port["coverage_state"], "not_attempted")
+                self.assertIsNone(port["probe_outcome"])
+                self.assertEqual(port["control_reason"], "stop_requested")
+        finalized_hosts = [
+            item.entity_key
+            for item in store.observations
+            if item.entity_kind == "host" and item.phase == "finalize"
+        ]
+        self.assertEqual(
+            finalized_hosts,
+            ["host:192.0.2.42"],
+        )
+
+    def test_frozen_target_spacing_applies_between_port_dispatches(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        dispatched: list[float] = []
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            import asyncio
+
+            dispatched.append(asyncio.get_running_loop().time())
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_progressive_spacing",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.13"],
+                "ports": [80, 443],
+                "scan_contract_v1": {
+                    "scan_contract_version": "1.0",
+                    "job_type": "ip_discovery",
+                    "ip": {
+                        "provider": "builtin_tcp_connect",
+                        "profile": "gentle",
+                        "provider_state": {
+                            "provider": "builtin_tcp_connect",
+                            "execution_enabled": True,
+                        },
+                        "policy": {
+                            "profile": "gentle",
+                            "per_target_concurrency": 2,
+                            "min_target_spacing_ms": 30,
+                            "retries": 0,
+                            "retry_backoff_ms": 0,
+                            "total_dispatch_attempt_ceiling": 2,
+                            "dispatch_phase_seconds": 10,
+                            "run_deadline_seconds": 20,
+                        },
+                    },
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=2, rate_limit_per_sec=None),
+            connect=connected,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(len(dispatched), 2)
+        self.assertGreaterEqual(dispatched[1] - dispatched[0], 0.025)
+
+    def test_builtin_scan_never_runs_dns_or_arp_enrichment(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        with (
+            mock.patch(
+                "socket.gethostbyaddr",
+                side_effect=AssertionError("DNS must not be called"),
+            ),
+            mock.patch(
+                "subprocess.run",
+                side_effect=AssertionError("ARP subprocess must not be started"),
+            ),
+        ):
+            result = ip_scan.process_ip_discovery_run(
+                "run_no_enrichment",
+                {
+                    **_AUTH,
+                    "addresses": ["192.0.2.20"],
+                    "ports": [443],
+                    "reverse_dns": True,
+                },
+                run_store=store,
+                execution_mode="test",
+                connect=connected,
+            )
+
+        self.assertEqual(result["status"], "succeeded")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertIsNone(asset["hostname"])
+        self.assertIsNone(asset["mac_address"])
+
+    def test_bacnet_udp_omission_carries_the_capability_action(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_bacnet_capability",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.21"],
+                "ports": [443],
+                "not_attempted_ports_by_address": {
+                    "192.0.2.21": [
+                        {
+                            "protocol": "udp",
+                            "port": 47808,
+                            "reason": "unsupported_protocol",
+                            "capability": "use_bacnet_discovery",
+                        }
+                    ]
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        [omission] = [
+            item
+            for item in store.observations
+            if item.entity_kind == "port"
+            and item.payload["ip_v1"]["transport"] == "udp"
+        ]
+        self.assertEqual(omission.outcome, "not_attempted")
+        self.assertEqual(
+            omission.payload["ip_v1"]["capability_action"],
+            "use_bacnet_discovery",
+        )
+
+
+class TypedProbeSemanticsTests(unittest.TestCase):
+    def test_pre_dispatch_stop_records_zero_attempts_and_no_packet_time(self) -> None:
+        store = FakeRunStore(cancel_after=5, observations_enabled=True)
+
+        class ForbiddenTransport:
+            async def connect(
+                self,
+                _target_ip: str,
+                _port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                del source_ip
+                self.fail("pre-dispatch Stop must not reach the TCP transport")
+
+        transport = ForbiddenTransport()
+        transport.fail = self.fail  # type: ignore[attr-defined]
+        result = ip_scan.process_ip_discovery_run(
+            "run_pre_dispatch_stop",
+            {**_AUTH, "addresses": ["192.0.2.3"], "ports": [443]},
+            run_store=store,
+            execution_mode="test",
+            tcp_transport=transport,
+        )
+
+        self.assertEqual(result["status"], "cancelled")
+        [asset] = store.record_summary["discovered_assets"]
+        [port] = asset["port_observations"]
+        self.assertEqual(port["attempts"], 0)
+        self.assertIsNone(port["last_packet_dispatched_at"])
+        self.assertIsNone(port["probe_outcome"])
+        self.assertEqual(port["coverage_state"], "not_attempted")
+        self.assertEqual(port["control_reason"], "stop_requested")
+
+    def test_control_reason_preserves_the_denial_that_caused_the_cutoff(self) -> None:
+        class CancelledContext:
+            def is_cancelled(self) -> bool:
+                return True
+
+        class ActiveContext:
+            def is_cancelled(self) -> bool:
+                return False
+
+        cancelled = CancelledContext()
+        active = ActiveContext()
+        cases = [
+            (
+                OwnershipLostError("run_control_reason"),
+                cancelled,
+                "ownership_lost",
+            ),
+            (
+                RuntimeError("scan authorization was revoked"),
+                cancelled,
+                "authorization_revoked",
+            ),
+            (
+                RuntimeError("scan authorization window has ended"),
+                cancelled,
+                "authorization_expired",
+            ),
+            (
+                RuntimeError(
+                    "initiating user's project/site scope grant is not active"
+                ),
+                cancelled,
+                "grant_revoked",
+            ),
+            (
+                RuntimeError("database read failed"),
+                cancelled,
+                "control_store_error",
+            ),
+            (
+                RuntimeError(
+                    "run owner, attempt, status, cancellation, or lease is no "
+                    "longer active"
+                ),
+                cancelled,
+                "stop_requested",
+            ),
+            (
+                RuntimeError(
+                    "run owner, attempt, status, cancellation, or lease is no "
+                    "longer active"
+                ),
+                active,
+                "ownership_lost",
+            ),
+        ]
+
+        for error, context, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(ip_scan._control_reason(error, context), expected)
+
+    def test_retry_reacquires_control_and_keeps_attempt_versions(self) -> None:
+        class ControlledStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.active_checks = 0
+
+            def require_active_control(self) -> None:
+                self.active_checks += 1
+
+        class Writer:
+            def close(self) -> None:
+                pass
+
+            async def wait_closed(self) -> None:
+                pass
+
+        class RetryTransport:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def connect(
+                self,
+                _target_ip: str,
+                _port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                self.calls += 1
+                if self.calls == 1:
+                    raise TimeoutError
+                return Writer()
+
+        store = ControlledStore()
+        transport = RetryTransport()
+        result = ip_scan.process_ip_discovery_run(
+            "run_typed_retry",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.27"],
+                "ports": [443],
+                "scan_contract_v1": {
+                    "scan_contract_version": "1.0",
+                    "job_type": "ip_discovery",
+                    "ip": {
+                        "provider": "builtin_tcp_connect",
+                        "profile": "gentle",
+                        "provider_state": {
+                            "provider": "builtin_tcp_connect",
+                            "execution_enabled": True,
+                        },
+                        "policy": {
+                            "profile": "gentle",
+                            "per_target_concurrency": 1,
+                            "min_target_spacing_ms": 1,
+                            "retries": 1,
+                            "retry_backoff_ms": 0,
+                            "total_dispatch_attempt_ceiling": 2,
+                            "dispatch_phase_seconds": 10,
+                            "run_deadline_seconds": 20,
+                        },
+                    },
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            tcp_transport=transport,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(transport.calls, 2)
+        self.assertGreaterEqual(store.active_checks, 2)
+        port_events = [
+            item for item in store.observations if item.entity_kind == "port"
+        ]
+        self.assertEqual([item.entity_version for item in port_events], [1, 2])
+        self.assertEqual(
+            [item.payload["ip_v1"]["probe_outcome"] for item in port_events],
+            ["timed_out", "connected"],
+        )
+
+    def test_authorization_loss_keeps_partial_results_and_fails(self) -> None:
+        class RevokedStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.active_checks = 0
+
+            def require_active_control(self) -> None:
+                self.active_checks += 1
+                if self.active_checks >= 3:
+                    raise RuntimeError("scan authorization was revoked")
+
+        store = RevokedStore()
+        contacted: list[int] = []
+
+        async def connected(_host: str, port: int, _timeout: float) -> bool:
+            contacted.append(port)
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_authorization_lost",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.26"],
+                "ports": [80, 443],
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+            connect=connected,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [80])
+        self.assertEqual(
+            store.record_summary["control_reason"],
+            "authorization_revoked",
+        )
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(
+            [item["port"] for item in asset["port_observations"]],
+            [80, 443],
+        )
+        unattempted = asset["port_observations"][1]
+        self.assertEqual(unattempted["attempts"], 0)
+        self.assertEqual(unattempted["coverage_state"], "not_attempted")
+        self.assertIsNone(unattempted["probe_outcome"])
+        self.assertEqual(unattempted["policy_verdict"], "not_attempted")
+        self.assertEqual(
+            unattempted["control_reason"],
+            "authorization_revoked",
+        )
+        durable_unattempted = [
+            item
+            for item in store.observations
+            if item.entity_kind == "port" and item.outcome == "not_attempted"
+        ]
+        self.assertEqual(durable_unattempted, [])
+        diagnostic = [
+            item for item in store.observations if item.entity_kind == "diagnostic"
+        ][0]
+        self.assertEqual(
+            diagnostic.payload["ip_v1"]["control_reason"],
+            "authorization_revoked",
+        )
+
+    def test_post_drain_control_loss_preserves_final_probe_as_partial_failure(self) -> None:
+        """Control is checked again after the last in-flight connect returns."""
+
+        class RevokedAfterDrainStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.active_checks = 0
+
+            def require_active_control(self) -> None:
+                self.active_checks += 1
+                # One check occurs when the throttle slot is acquired and one
+                # immediately before the packet dispatch.  The third is the
+                # post-drain fence under test.
+                if self.active_checks == 3:
+                    raise RuntimeError("scan authorization was revoked")
+
+        store = RevokedAfterDrainStore()
+        contacted: list[int] = []
+
+        async def connected(_host: str, port: int, _timeout: float) -> bool:
+            contacted.append(port)
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_post_drain_authorization_loss",
+            {**_AUTH, "addresses": ["192.0.2.48"], "ports": [443]},
+            run_store=store,
+            execution_mode="test",
+            connect=connected,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [443])
+        self.assertEqual(store.record_summary["control_reason"], "authorization_revoked")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["coverage_state"], "attempted")
+        self.assertEqual(asset["port_observations"][0]["probe_outcome"], "connected")
+        diagnostic = next(
+            item for item in store.observations if item.entity_kind == "diagnostic"
+        )
+        self.assertEqual(diagnostic.payload["ip_v1"]["control_reason"], "authorization_revoked")
+
+    def test_ownership_loss_is_not_relabelled_as_stop_requested(self) -> None:
+        class OwnershipStore(FakeRunStore):
+            def __init__(self) -> None:
+                super().__init__(observations_enabled=True)
+                self.active_checks = 0
+                self.ownership_lost = False
+
+            def require_active_control(self) -> None:
+                self.active_checks += 1
+                if self.active_checks >= 3:
+                    self.ownership_lost = True
+                    raise OwnershipLostError("run_ownership_lost")
+
+            def is_cancel_requested(self, run_id: str) -> bool:
+                del run_id
+                return self.ownership_lost
+
+        store = OwnershipStore()
+        contacted: list[int] = []
+
+        async def connected(_host: str, port: int, _timeout: float) -> bool:
+            contacted.append(port)
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_ownership_lost",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.31"],
+                "ports": [80, 443],
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=1, rate_limit_per_sec=None),
+            connect=connected,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [80])
+        self.assertEqual(store.record_summary["control_reason"], "ownership_lost")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(
+            [item["port"] for item in asset["port_observations"]],
+            [80, 443],
+        )
+        self.assertEqual(
+            asset["port_observations"][1]["control_reason"],
+            "ownership_lost",
+        )
+
+    def test_stop_interrupts_retry_backoff_without_another_dispatch(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[int] = []
+
+        async def time_out_then_stop(
+            _host: str,
+            port: int,
+            _timeout: float,
+        ) -> bool:
+            contacted.append(port)
+            store._cancel = True
+            return False
+
+        started = time.monotonic()
+        result = ip_scan.process_ip_discovery_run(
+            "run_stop_during_backoff",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.32"],
+                "ports": [443],
+                "scan_contract_v1": {
+                    "scan_contract_version": "1.0",
+                    "job_type": "ip_discovery",
+                    "ip": {
+                        "provider": "builtin_tcp_connect",
+                        "profile": "gentle",
+                        "provider_state": {
+                            "provider": "builtin_tcp_connect",
+                            "execution_enabled": True,
+                        },
+                        "policy": {
+                            "profile": "gentle",
+                            "per_target_concurrency": 1,
+                            "min_target_spacing_ms": 0,
+                            "retries": 1,
+                            "retry_backoff_ms": 1500,
+                            "total_dispatch_attempt_ceiling": 2,
+                            "dispatch_phase_seconds": 10,
+                            "run_deadline_seconds": 20,
+                        },
+                    },
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=time_out_then_stop,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(contacted, [443])
+        self.assertLess(elapsed, 1.0)
+
+    def test_stop_interrupts_target_pacing_without_another_dispatch(self) -> None:
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[int] = []
+
+        async def connect_then_stop(
+            _host: str,
+            port: int,
+            _timeout: float,
+        ) -> bool:
+            contacted.append(port)
+            if port == 80:
+                store._cancel = True
+            return True
+
+        started = time.monotonic()
+        result = ip_scan.process_ip_discovery_run(
+            "run_stop_during_pacing",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.33"],
+                "ports": [80, 443],
+                "scan_contract_v1": {
+                    "scan_contract_version": "1.0",
+                    "job_type": "ip_discovery",
+                    "ip": {
+                        "provider": "builtin_tcp_connect",
+                        "profile": "gentle",
+                        "provider_state": {
+                            "provider": "builtin_tcp_connect",
+                            "execution_enabled": True,
+                        },
+                        "policy": {
+                            "profile": "gentle",
+                            "per_target_concurrency": 2,
+                            "min_target_spacing_ms": 1500,
+                            "retries": 0,
+                            "retry_backoff_ms": 0,
+                            "total_dispatch_attempt_ceiling": 2,
+                            "dispatch_phase_seconds": 10,
+                            "run_deadline_seconds": 20,
+                        },
+                    },
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            throttle=ThrottleConfig(max_concurrency=2, rate_limit_per_sec=None),
+            connect=connect_then_stop,
+        )
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(contacted, [80])
+        self.assertLess(elapsed, 1.0)
+        [asset] = store.record_summary["discovered_assets"]
+        unattempted = asset["port_observations"][1]
+        self.assertEqual(unattempted["port"], 443)
+        self.assertEqual(unattempted["coverage_state"], "not_attempted")
+        self.assertIsNone(unattempted["probe_outcome"])
+
+    def test_frozen_non_builtin_provider_cannot_fall_through_without_state(self) -> None:
+        store = FakeRunStore()
+        contacted: list[tuple[str, int]] = []
+
+        async def legacy(host: str, port: int, _timeout: float) -> bool:
+            contacted.append((host, port))
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_disabled_provider",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.28"],
+                "ports": [443],
+                "scan_contract_v1": {
+                    "scan_contract_version": "1.0",
+                    "job_type": "ip_discovery",
+                    "ip": {
+                        "provider": "operator_managed_nmap",
+                        "policy": {
+                            "dispatch_phase_seconds": 10,
+                            "run_deadline_seconds": 20,
+                        },
+                    },
+                },
+            },
+            run_store=store,
+            execution_mode="test",
+            connect=legacy,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [])
+
+    def test_live_contract_failures_dispatch_zero_packets(self) -> None:
+        """Live modes must never fall back to flat legacy TCP parameters."""
+
+        cases: dict[str, Any] = {
+            "absent": {**_AUTH, "addresses": ["127.0.0.1"], "ports": [443]},
+            "malformed": {**_live_frozen_ip_parameters(), "scan_contract_v1": []},
+            "wrong-job": _live_frozen_ip_parameters(),
+            "forged-digest": _live_frozen_ip_parameters(),
+            "missing-source": _live_frozen_ip_parameters(),
+        }
+        cases["wrong-job"]["scan_contract_v1"]["job_type"] = "bacnet_discovery"
+        cases["forged-digest"]["scan_contract_v1"]["packet_plan_sha256"] = "0" * 64
+        del cases["missing-source"]["source_interface_identity_v1"]
+
+        for name, parameters in cases.items():
+            with self.subTest(name=name):
+                store = FakeRunStore(observations_enabled=True)
+                contacted: list[tuple[str, int]] = []
+
+                async def spy(
+                    host: str,
+                    port: int,
+                    _timeout: float,
+                    contacted: list[tuple[str, int]] = contacted,
+                ) -> bool:
+                    contacted.append((host, port))
+                    return True
+
+                result = ip_scan.process_ip_discovery_run(
+                    f"run_live_contract_{name}",
+                    parameters,
+                    run_store=store,
+                    execution_mode="inline",
+                    connect=spy,
+                )
+
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(contacted, [])
+
+    def test_live_contract_rejects_flat_target_or_port_drift_before_dispatch(self) -> None:
+        parameters = _live_frozen_ip_parameters()
+        parameters["ports"] = [80]
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[tuple[str, int]] = []
+
+        async def spy(host: str, port: int, _timeout: float) -> bool:
+            contacted.append((host, port))
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_live_flat_drift",
+            parameters,
+            run_store=store,
+            execution_mode="inline",
+            connect=spy,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(contacted, [])
+
+    def test_live_contract_keeps_trusted_udp_omission_out_of_tcp_dispatch(self) -> None:
+        parameters = _live_frozen_ip_parameters()
+        contract = parameters["scan_contract_v1"]
+        contract["ip"]["ports"].append({"port": 47808, "protocol": "udp"})
+        contract["ip"]["not_attempted_ports_by_address"] = {
+            "127.0.0.1": [
+                {
+                    "port": 47808,
+                    "protocol": "udp",
+                    "source": "expected",
+                    "reason": "unsupported_protocol",
+                    "capability": "use_bacnet_discovery",
+                }
+            ]
+        }
+        parameters["not_attempted_ports_by_address"] = deepcopy(
+            contract["ip"]["not_attempted_ports_by_address"]
+        )
+        contract["packet_plan_sha256"] = canonical_sha256(
+            {key: value for key, value in contract.items() if key != "packet_plan_sha256"}
+        )
+        store = FakeRunStore(observations_enabled=True)
+        contacted: list[int] = []
+
+        async def spy(_host: str, port: int, _timeout: float) -> bool:
+            contacted.append(port)
+            return True
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_live_trusted_udp_omission",
+            parameters,
+            run_store=store,
+            execution_mode="inline",
+            connect=spy,
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(contacted, [443])
+
+    def test_conflicting_transport_adapters_fail_inside_the_run_lifecycle(self) -> None:
+        store = FakeRunStore()
+
+        async def legacy(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        class Transport:
+            async def connect(
+                self,
+                _target_ip: str,
+                _port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                raise AssertionError(source_ip)
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_conflicting_adapters",
+            {**_AUTH, "addresses": ["192.0.2.29"], "ports": [443]},
+            run_store=store,
+            execution_mode="test",
+            connect=legacy,
+            tcp_transport=Transport(),
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(store.last_status, "failed")
+
+    def test_refusal_proves_closed_and_timeout_stays_unconfirmed(self) -> None:
+        store = FakeRunStore()
+
+        class MixedTransport:
+            async def connect(
+                self,
+                _target_ip: str,
+                port: int,
+                *,
+                source_ip: str | None,
+            ) -> Any:
+                self.assert_source = source_ip
+                if port == 80:
+                    raise ConnectionRefusedError(10061, "refused")
+                raise TimeoutError
+
+        result = ip_scan.process_ip_discovery_run(
+            "run_typed_negative",
+            {
+                **_AUTH,
+                "addresses": ["192.0.2.30"],
+                "ports": [80, 443],
+                "expected_ports_by_address": {"192.0.2.30": "80/tcp,443/tcp"},
+            },
+            run_store=store,
+            execution_mode="test",
+            tcp_transport=MixedTransport(),
+        )
+
+        self.assertEqual(result["status"], "succeeded")
+        [asset] = store.record_summary["discovered_assets"]
+        self.assertEqual(asset["reachability_state"], "unconfirmed")
+        by_port = {item["port"]: item for item in asset["port_observations"]}
+        self.assertEqual(by_port[80]["probe_outcome"], "connection_refused")
+        self.assertEqual(by_port[80]["policy_verdict"], "expected_closed")
+        self.assertEqual(by_port[443]["probe_outcome"], "timed_out")
+        self.assertEqual(by_port[443]["policy_verdict"], "unconfirmed")
+        self.assertEqual(asset["missing_expected_ports"], [80])
+        reachable_metric = store.record_summary["ip_headline_metrics_v1"][
+            "metrics"
+        ][1]
+        self.assertEqual(reachable_metric["value"], 0)
 
 
 class SourceInterfaceTests(unittest.TestCase):
@@ -147,6 +2112,41 @@ class TargetExpansionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ip_scan._expand_hosts({"cidr": "10.0.0.0/8"})
 
+    def test_huge_cidr_and_range_reject_before_materializing_hosts(self) -> None:
+        sentinel_network = mock.Mock(num_addresses=2**32)
+        sentinel_network.hosts.side_effect = AssertionError(
+            "huge CIDRs must be rejected before host iteration"
+        )
+        with mock.patch.object(
+            ip_scan.ipaddress,
+            "ip_network",
+            return_value=sentinel_network,
+        ):
+            with self.assertRaisesRegex(ValueError, "exceeding max_hosts=1"):
+                ip_scan._expand_hosts({"cidr": "0.0.0.0/0", "max_hosts": 1})
+        sentinel_network.hosts.assert_not_called()
+
+        original_ip_address = ip_scan.ipaddress.ip_address
+        parsed_addresses = 0
+
+        def parse_only(value: object):
+            nonlocal parsed_addresses
+            parsed_addresses += 1
+            if parsed_addresses > 2:
+                raise AssertionError("huge ranges must be rejected before expansion")
+            return original_ip_address(value)
+
+        with mock.patch.object(ip_scan.ipaddress, "ip_address", side_effect=parse_only):
+            with self.assertRaisesRegex(ValueError, "exceeding max_hosts=1"):
+                ip_scan._expand_hosts(
+                    {
+                        "start": "0.0.0.0",
+                        "end": "255.255.255.255",
+                        "max_hosts": 1,
+                    }
+                )
+        self.assertEqual(parsed_addresses, 2)
+
     def test_ports_default_and_validation(self) -> None:
         self.assertEqual(ip_scan._resolve_ports({}), list(ip_scan.DEFAULT_PORTS))
         self.assertEqual(ip_scan._resolve_ports({"ports": [22, 22, 80]}), [22, 80])
@@ -158,10 +2158,48 @@ class TargetExpansionTests(unittest.TestCase):
 
 class PortSpecAndForbiddenTests(unittest.TestCase):
     def test_parse_port_spec_handles_ranges_and_protocols(self) -> None:
-        self.assertEqual(ip_scan._parse_port_spec("443/tcp, 47808/udp"), [443, 47808])
+        self.assertEqual(ip_scan._parse_port_spec("443/tcp, 80"), [443, 80])
         self.assertEqual(ip_scan._parse_port_spec("1-3, 80"), [1, 2, 3, 80])
         with self.assertRaises(ValueError):
             ip_scan._parse_port_spec("not-a-port")
+        with self.assertRaisesRegex(ValueError, "UDP"):
+            ip_scan._parse_port_spec("47808/udp")
+
+    def test_udp_specs_never_reach_tcp_transport_from_top_level_or_host_maps(self) -> None:
+        for label, parameters in (
+            ("top-level", {**_AUTH, "addresses": ["192.0.2.70"], "port_specification": "47808/udp"}),
+            (
+                "per-address",
+                {
+                    **_AUTH,
+                    "addresses": ["192.0.2.70"],
+                    "ports": [443],
+                    "expected_ports_by_address": {"192.0.2.70": "47808/udp"},
+                },
+            ),
+        ):
+            with self.subTest(label=label):
+                store = FakeRunStore()
+                contacted: list[tuple[str, int]] = []
+
+                async def spy(
+                    host: str,
+                    port: int,
+                    _timeout: float,
+                    contacted: list[tuple[str, int]] = contacted,
+                ) -> bool:
+                    contacted.append((host, port))
+                    return True
+
+                result = ip_scan.process_ip_discovery_run(
+                    f"run_udp_{label}",
+                    parameters,
+                    run_store=store,
+                    execution_mode="test",
+                    connect=spy,
+                )
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(contacted, [])
 
     def test_resolve_ports_from_specification_and_cap(self) -> None:
         # The operator's port_specification string is honoured (was ignored).
@@ -263,7 +2301,7 @@ class DryRunTests(unittest.TestCase):
         # 2 hosts x 2 ports = 4 (ip, port) targets
         self.assertEqual(plan["target_count"], 4)
         self.assertIn({"ip": "10.0.0.1", "port": 80}, plan["targets"])
-        self.assertIn("reverse-dns", plan["actions"])
+        self.assertNotIn("reverse-dns", plan["actions"])
         self.assertEqual(summary["hosts_responsive"], 0)
 
     def test_dry_run_does_not_require_authorization(self) -> None:
@@ -606,8 +2644,7 @@ class LoopbackSocketTests(unittest.TestCase):
         self.assertIn(open_port, observed, "the open loopback port must be detected")
         self.assertNotIn(closed_port, observed, "the closed port must not be reported open")
 
-    def test_reverse_dns_injected(self) -> None:
-        # Use an injected connect + injected reverse lookup so this is hermetic.
+    def test_reverse_dns_injection_is_ignored(self) -> None:
         store = FakeRunStore()
 
         async def fake_connect(host: str, port: int, timeout: float) -> bool:
@@ -617,13 +2654,11 @@ class LoopbackSocketTests(unittest.TestCase):
             "run_rdns", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80], "reverse_dns": True},
             run_store=store, execution_mode="x",
             connect=fake_connect,
-            reverse_lookup=lambda ip: "localhost.test",
         )
         self.assertEqual(result["status"], "succeeded")
-        self.assertEqual(store.summary_calls[-1]["discovered_assets"][0]["hostname"], "localhost.test")
+        self.assertIsNone(store.summary_calls[-1]["discovered_assets"][0]["hostname"])
 
-    def test_arp_mac_injected(self) -> None:
-        # Inject connect + arp_lookup so this is hermetic (no subprocess / ARP).
+    def test_arp_injection_is_ignored(self) -> None:
         store = FakeRunStore()
 
         async def fake_connect(host: str, port: int, timeout: float) -> bool:
@@ -633,11 +2668,10 @@ class LoopbackSocketTests(unittest.TestCase):
             "run_arp", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80]},
             run_store=store, execution_mode="x",
             connect=fake_connect,
-            arp_lookup=lambda ip: "02:00:00:00:00:03",
         )
         self.assertEqual(result["status"], "succeeded")
         asset = store.summary_calls[-1]["discovered_assets"][0]
-        self.assertEqual(asset["mac_address"], "02:00:00:00:00:03")
+        self.assertIsNone(asset["mac_address"])
         # match_basis stays "ip": MAC is enrichment, not the discovery basis.
         self.assertEqual(asset["match_basis"], "ip")
 
@@ -654,7 +2688,6 @@ class LoopbackSocketTests(unittest.TestCase):
             "run_arp_none", {**_AUTH, "cidr": "127.0.0.1/32", "ports": [80]},
             run_store=store, execution_mode="x",
             connect=fake_connect,
-            arp_lookup=lambda ip: None,
         )
         self.assertEqual(result["status"], "succeeded")
         self.assertIsNone(store.summary_calls[-1]["discovered_assets"][0]["mac_address"])
@@ -677,14 +2710,13 @@ class ExpectedHostnameTests(unittest.TestCase):
             {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
              "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
             run_store=store, execution_mode="x", connect=fake_connect,
-            reverse_lookup=lambda ip: "ahu-l03-017",
         )
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
         self.assertEqual(summary["hosts_with_hostname_mismatch"], 0)
         self.assertNotIn("HOSTNAME MISMATCH", summary["discovered_assets"][0]["status_detail"])
 
-    def test_mismatched_hostname_flagged_with_counter(self) -> None:
+    def test_expected_hostname_is_not_compared_without_provider_evidence(self) -> None:
         store = FakeRunStore()
         persisted: list[tuple[str, list[dict[str, Any]]]] = []
 
@@ -696,19 +2728,18 @@ class ExpectedHostnameTests(unittest.TestCase):
             {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
              "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
             run_store=store, execution_mode="x", connect=fake_connect,
-            reverse_lookup=lambda ip: "boiler-b1-002",
             persist_records=lambda rid, recs: persisted.append((rid, list(recs))),
         )
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
-        self.assertEqual(summary["hosts_with_hostname_mismatch"], 1)
-        self.assertIn(
-            "HOSTNAME MISMATCH: expected ahu-l03-017, got boiler-b1-002",
+        self.assertEqual(summary["hosts_with_hostname_mismatch"], 0)
+        self.assertNotIn(
+            "HOSTNAME MISMATCH",
             summary["discovered_assets"][0]["status_detail"],
         )
         # The register's expectation is persisted alongside the observation.
         self.assertEqual(persisted[0][1][0]["attributes"]["expected_hostname"], "ahu-l03-017")
-        self.assertEqual(persisted[0][1][0]["attributes"]["hostname"], "boiler-b1-002")
+        self.assertIsNone(persisted[0][1][0]["attributes"]["hostname"])
 
     def test_domain_suffix_and_case_ignored(self) -> None:
         # Reverse DNS returns an FQDN while the register carries the short name;
@@ -723,7 +2754,6 @@ class ExpectedHostnameTests(unittest.TestCase):
             {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
              "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
             run_store=store, execution_mode="x", connect=fake_connect,
-            reverse_lookup=lambda ip: "AHU-L03-017.site.example.com",
         )
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
@@ -743,7 +2773,6 @@ class ExpectedHostnameTests(unittest.TestCase):
             {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
              "expected_hostname_by_address": {"10.0.0.1": "ahu-l03-017"}},
             run_store=store, execution_mode="x", connect=fake_connect,
-            reverse_lookup=lambda ip: None,
         )
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
@@ -763,7 +2792,6 @@ class ExpectedHostnameTests(unittest.TestCase):
             {**_AUTH, "cidr": "10.0.0.1/32", "ports": [80], "reverse_dns": True,
              "expected_hostname_by_address": {"10.0.0.9": "other-asset"}},
             run_store=store, execution_mode="x", connect=fake_connect,
-            reverse_lookup=lambda ip: "rogue-host.site.example.com",
         )
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
@@ -812,10 +2840,10 @@ class RegisterPortUnionTests(unittest.TestCase):
         self.assertEqual(attributes["scanned_ports"], [80, 445])
         self.assertEqual(attributes["scanned_port_count"], 2)
 
-    def test_missing_expected_port_flagged_with_counter(self) -> None:
-        # 80 answers but the register also expects 445, which is closed ->
-        # MISSING EXPECTED PORTS verdict + run-summary counter (previously
-        # there was NO expected-port-closed verdict at all).
+    def test_legacy_false_result_does_not_claim_expected_port_is_closed(self) -> None:
+        # The compatibility callback returns only a Boolean. False can mean a
+        # timeout, routing failure, or refusal, so it cannot prove that 445 is
+        # closed. The typed provider has a separate refusal regression above.
         store = FakeRunStore()
         persisted: list[tuple[str, list[dict[str, Any]]]] = []
 
@@ -831,11 +2859,14 @@ class RegisterPortUnionTests(unittest.TestCase):
         )
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
-        self.assertEqual(summary["hosts_with_missing_expected"], 1)
+        self.assertEqual(summary["hosts_with_missing_expected"], 0)
         detail = summary["discovered_assets"][0]["status_detail"]
-        self.assertIn("MISSING EXPECTED PORTS: 445", detail)
+        self.assertNotIn("MISSING EXPECTED PORTS", detail)
         self.assertNotIn("EXPECTED PORTS OK", detail)
-        self.assertEqual(persisted[0][1][0]["attributes"]["missing_expected_ports"], [445])
+        self.assertEqual(
+            persisted[0][1][0]["attributes"]["missing_expected_ports"],
+            [],
+        )
 
     def test_all_expected_open_records_explicit_pass(self) -> None:
         # field engineer's field case: blank port field (-> defaults) with the register
@@ -946,54 +2977,6 @@ class RegisterPortUnionTests(unittest.TestCase):
         attributes = {r["address"]: r["attributes"] for r in persisted[0][1]}
         self.assertIsNone(attributes["10.0.0.2"]["expected_ports"])
         self.assertEqual(attributes["10.0.0.2"]["scanned_ports"], [80])
-
-
-class ArpLookupUnitTests(unittest.TestCase):
-    """Pure ARP-cache parsing / normalisation (subprocess + /proc mocked)."""
-
-    def test_normalise_dashes_to_colons_upper(self) -> None:
-        self.assertEqual(ip_scan._normalise_mac("02-00-00-00-00-03"), "02:00:00:00:00:03")
-
-    def test_all_zero_incomplete_entry_degrades_to_none(self) -> None:
-        # An incomplete ARP entry must render blank, never a fabricated 00:00:...
-        self.assertIsNone(ip_scan._normalise_mac("00:00:00:00:00:00"))
-        self.assertIsNone(ip_scan._normalise_mac("00-00-00-00-00-00"))
-
-    def test_arp_lookup_posix_parses_proc_table(self) -> None:
-        proc = (
-            "IP address       HW type     Flags       HW address            Mask     Device\n"
-            "10.0.0.5         0x1         0x2         02:00:00:00:00:03     *        eth0\n"
-            "10.0.0.6         0x1         0x0         00:00:00:00:00:00     *        eth0\n"
-        )
-        with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
-            self.assertEqual(ip_scan._arp_lookup_posix("10.0.0.5"), "02:00:00:00:00:03")
-        # Incomplete (all-zero) entry -> None, not a fabricated MAC.
-        with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
-            self.assertIsNone(ip_scan._arp_lookup_posix("10.0.0.6"))
-        # Absent host -> None.
-        with mock.patch("builtins.open", mock.mock_open(read_data=proc)):
-            self.assertIsNone(ip_scan._arp_lookup_posix("10.0.0.9"))
-
-    def test_arp_lookup_windows_parses_arp_output(self) -> None:
-        output = (
-            "\nInterface: 10.0.0.2 --- 0x5\n"
-            "  Internet Address      Physical Address      Type\n"
-            "  10.0.0.5              02-00-00-00-00-03     dynamic\n"
-        )
-        completed = mock.Mock(stdout=output)
-        with mock.patch.object(ip_scan.subprocess, "run", return_value=completed):
-            self.assertEqual(ip_scan._arp_lookup_windows("10.0.0.5"), "02:00:00:00:00:03")
-        # A "no entries" dump degrades to None.
-        completed_none = mock.Mock(stdout="No ARP Entries Found.\n")
-        with mock.patch.object(ip_scan.subprocess, "run", return_value=completed_none):
-            self.assertIsNone(ip_scan._arp_lookup_windows("10.0.0.5"))
-
-    def test_arp_lookup_never_raises_on_subprocess_failure(self) -> None:
-        # Locked-down host: the arp binary is absent. The public entry point must
-        # degrade to None, never propagate the error into the sweep.
-        with mock.patch.object(ip_scan.subprocess, "run", side_effect=FileNotFoundError):
-            with mock.patch("builtins.open", side_effect=FileNotFoundError):
-                self.assertIsNone(ip_scan._arp_lookup("10.0.0.5"))
 
 
 if __name__ == "__main__":

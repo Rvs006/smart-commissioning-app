@@ -157,6 +157,32 @@ class BuildThrottleTests(unittest.TestCase):
 
         self.assertEqual(throttle.rate_limit_per_sec, 0.01)
 
+    def test_operator_nmap_uses_its_provider_guard_instead_of_the_builtin_guard(self) -> None:
+        throttle = build_throttle(
+            {
+                "scan_contract_v1": {
+                    "job_type": "ip_discovery",
+                    "ip": {
+                        "provider": "operator_managed_nmap",
+                        "provider_state": {
+                            "provider": "operator_managed_nmap",
+                            "execution_enabled": True,
+                        },
+                    },
+                    "effective_throttle": {
+                        "max_concurrency": 1,
+                        "rate_limit_per_sec": 1.0,
+                        "connect_timeout_s": 1.0,
+                    },
+                },
+            },
+            max_concurrency=16,
+            rate_limit_per_sec=10,
+            connect_timeout_s=5,
+        )
+
+        self.assertEqual(throttle.max_concurrency, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

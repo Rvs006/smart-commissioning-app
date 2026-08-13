@@ -1,55 +1,150 @@
-"""Unit tests for engine_dispatch.resolve_source_interface (source-NIC selection).
+"""Parameter binding tests for concrete source-interface identity."""
 
-HONESTY: no sockets, no network. This exercises the pure parameter-injection
-resolver that maps the configured device."Source Interface" value into the run
-parameters the active-scan engines read (source_ip for IP/MQTT, local_address for
-BACnet). Whether binding those actually forces egress out a chosen physical NIC
-is on-site-validation surface (see the proposal, section 8.3).
-"""
+from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from app.services.engine_dispatch import resolve_source_interface
+from smart_commissioning_core.source_interface import (
+    SOURCE_INTERFACE_IDENTITY_KEY,
+    FrozenSourceInterfaceV1,
+)
+
+
+def _identity(
+    *,
+    selection: str,
+    source_ip: str,
+    prefix_length: int,
+) -> FrozenSourceInterfaceV1:
+    return FrozenSourceInterfaceV1(
+        selection=selection,
+        executor_scope="edge-london-1",
+        interface_id="windows-guid:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        interface_name="Ethernet 3",
+        source_ip=source_ip,
+        prefix_length=prefix_length,
+        local_address=f"{source_ip}/{prefix_length}",
+        default_route_metric=15 if selection == "default_route" else None,
+    )
 
 
 class ResolveSourceInterfaceTests(unittest.TestCase):
-    def test_auto_is_a_no_op(self) -> None:
-        # The literal "Auto (OS default route)" (any case) binds nothing.
-        parameters: dict = {}
-        resolve_source_interface(parameters, "Auto (OS default route)")
-        self.assertEqual(parameters, {})
-        resolve_source_interface(parameters, "auto (os default route)")
-        self.assertEqual(parameters, {})
+    def test_auto_and_omitted_values_freeze_the_concrete_default_route(self) -> None:
+        frozen = _identity(
+            selection="default_route",
+            source_ip="192.168.10.20",
+            prefix_length=24,
+        )
+        for configured in (None, "", "   ", "Auto (OS default route)", "auto (os default route)"):
+            with self.subTest(configured=configured), patch(
+                "app.services.engine_dispatch.interface_service.resolve_source_interface_identity",
+                return_value=frozen,
+            ) as resolver:
+                parameters: dict = {}
+                resolve_source_interface(
+                    parameters,
+                    configured,
+                    executor_scope="edge-london-1",
+                )
 
-    def test_empty_and_none_are_no_ops(self) -> None:
-        for value in (None, "", "   "):
+                self.assertEqual(parameters["source_ip"], "192.168.10.20")
+                self.assertEqual(parameters["local_address"], "192.168.10.20/24")
+                self.assertEqual(
+                    parameters[SOURCE_INTERFACE_IDENTITY_KEY],
+                    frozen.model_dump(mode="json"),
+                )
+                resolver.assert_called_once_with(
+                    selection="default_route",
+                    executor_scope="edge-london-1",
+                )
+
+    def test_configured_explicit_interface_freezes_actual_stable_identity(self) -> None:
+        frozen = _identity(selection="explicit", source_ip="1.2.3.4", prefix_length=24)
+        with patch(
+            "app.services.engine_dispatch.interface_service.resolve_source_interface_identity",
+            return_value=frozen,
+        ) as resolver:
             parameters: dict = {}
-            resolve_source_interface(parameters, value)
-            self.assertEqual(parameters, {})
+            resolve_source_interface(
+                parameters,
+                "1.2.3.4/24",
+                executor_scope="edge-london-1",
+            )
 
-    def test_ip_with_prefix_sets_both_keys(self) -> None:
-        parameters: dict = {}
-        resolve_source_interface(parameters, "1.2.3.4/24")
+        resolver.assert_called_once_with(
+            selection="explicit",
+            executor_scope="edge-london-1",
+            source_ip="1.2.3.4",
+            prefix_length=24,
+        )
         self.assertEqual(parameters["source_ip"], "1.2.3.4")
         self.assertEqual(parameters["local_address"], "1.2.3.4/24")
 
-    def test_bare_ip_defaults_local_address_to_slash_32(self) -> None:
-        parameters: dict = {}
-        resolve_source_interface(parameters, "1.2.3.4")
-        self.assertEqual(parameters["source_ip"], "1.2.3.4")
-        self.assertEqual(parameters["local_address"], "1.2.3.4/32")
+    def test_bare_configured_ip_uses_the_nics_actual_prefix(self) -> None:
+        frozen = _identity(selection="explicit", source_ip="1.2.3.4", prefix_length=16)
+        with patch(
+            "app.services.engine_dispatch.interface_service.resolve_source_interface_identity",
+            return_value=frozen,
+        ) as resolver:
+            parameters: dict = {}
+            resolve_source_interface(
+                parameters,
+                "1.2.3.4",
+                executor_scope="edge-london-1",
+            )
 
-    def test_malformed_value_raises_value_error(self) -> None:
-        for value in ("not-an-ip", "1.2.3.4/33", "999.1.1.1", "1.2.3.4/abc"):
-            with self.assertRaises(ValueError):
-                resolve_source_interface({}, value)
+        resolver.assert_called_once_with(
+            selection="explicit",
+            executor_scope="edge-london-1",
+            source_ip="1.2.3.4",
+            prefix_length=None,
+        )
+        self.assertEqual(parameters["local_address"], "1.2.3.4/16")
 
-    def test_existing_source_ip_and_local_address_are_not_clobbered(self) -> None:
-        # An explicit run-level override wins over the configured interface.
-        parameters: dict = {"source_ip": "10.0.0.9", "local_address": "10.0.0.9/8"}
-        resolve_source_interface(parameters, "1.2.3.4/24")
-        self.assertEqual(parameters["source_ip"], "10.0.0.9")
-        self.assertEqual(parameters["local_address"], "10.0.0.9/8")
+    def test_run_level_source_fields_win_over_saved_configuration(self) -> None:
+        frozen = _identity(selection="explicit", source_ip="10.0.0.9", prefix_length=8)
+        parameters: dict = {
+            "source_ip": "10.0.0.9",
+            "local_address": "10.0.0.9/8",
+            SOURCE_INTERFACE_IDENTITY_KEY: {"spoofed": True},
+        }
+        with patch(
+            "app.services.engine_dispatch.interface_service.resolve_source_interface_identity",
+            return_value=frozen,
+        ) as resolver:
+            resolve_source_interface(
+                parameters,
+                "1.2.3.4/24",
+                executor_scope="edge-london-1",
+            )
+
+        resolver.assert_called_once_with(
+            selection="explicit",
+            executor_scope="edge-london-1",
+            source_ip="10.0.0.9",
+            prefix_length=8,
+        )
+        self.assertEqual(parameters[SOURCE_INTERFACE_IDENTITY_KEY], frozen.model_dump(mode="json"))
+
+    def test_malformed_or_inconsistent_explicit_values_fail_before_inventory(self) -> None:
+        for parameters, configured in (
+            ({}, "not-an-ip"),
+            ({}, "1.2.3.4/33"),
+            ({"source_ip": "999.1.1.1"}, None),
+            ({"source_ip": "1.2.3.4", "local_address": "1.2.4.4/24"}, None),
+            ({"source_ip": "2001:db8::1"}, None),
+        ):
+            with self.subTest(parameters=parameters, configured=configured), patch(
+                "app.services.engine_dispatch.interface_service.resolve_source_interface_identity"
+            ) as resolver, self.assertRaises(ValueError):
+                resolve_source_interface(
+                    parameters,
+                    configured,
+                    executor_scope="edge-london-1",
+                )
+            resolver.assert_not_called()
 
 
 if __name__ == "__main__":

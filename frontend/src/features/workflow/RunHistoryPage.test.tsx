@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { clearApiKey } from "../../api/client";
 import { SessionProvider } from "../../app/session";
 import { RunHistoryPage } from "./RunHistoryPage";
@@ -88,10 +88,21 @@ function renderPage() {
     <QueryClientProvider client={queryClient}>
       <SessionProvider>
         <MemoryRouter>
+          <LocationProbe />
           <RunHistoryPage />
         </MemoryRouter>
       </SessionProvider>
     </QueryClientProvider>,
+  );
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <output data-testid="history-location">
+      {location.pathname}
+      {location.search}
+    </output>
   );
 }
 
@@ -165,6 +176,52 @@ describe("RunHistoryPage", () => {
     expect(await screen.findByText("No runs to show")).toBeInTheDocument();
   });
 
+  it("keeps a compatible sealed pair in the URL and exposes typed differences", async () => {
+    const comparisonRuns = {
+      runs: [
+        ...runsPayload.runs,
+        {
+          ...runsPayload.runs[0],
+          run_id: "run-succeeded-2",
+          created_at: "2026-06-11T10:00:00Z",
+          updated_at: "2026-06-11T10:06:00Z",
+        },
+      ],
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/v1/runs")) return jsonResponse(comparisonRuns);
+      if (url.includes("/api/v1/discovery/runs/run-succeeded-2/comparison")) {
+        return jsonResponse({
+          baseline_run_id: "run-succeeded-1",
+          candidate_run_id: "run-succeeded-2",
+          job_type: "ip_discovery",
+          compatible: true,
+          reason: null,
+          additions: [{ key: "192.0.2.10", value: { ip_address: "192.0.2.10" } }],
+          removals: [],
+          changes: [],
+        });
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    await screen.findByText("run-succeeded-1");
+    fireEvent.change(screen.getByLabelText("Comparison baseline"), {
+      target: { value: "run-succeeded-1" },
+    });
+    fireEvent.change(screen.getByLabelText("Comparison candidate"), {
+      target: { value: "run-succeeded-2" },
+    });
+    expect(await screen.findByText("1 additions")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open in module" }));
+    expect(screen.getByTestId("history-location")).toHaveTextContent(
+      "/ip-scanner?run=run-succeeded-2&compare=run-succeeded-1",
+    );
+  });
+
   it("downloads raw JSON evidence for a terminal UDMI run, including failed runs", async () => {
     const fileBlob = new Blob(['{"schema_version":"1.0"}'], { type: "application/json" });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
@@ -183,7 +240,9 @@ describe("RunHistoryPage", () => {
       throw new Error(`Unexpected fetch in test: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
-    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => undefined);
     renderPage();
 
     await screen.findByText("run-failed-udmi");
@@ -193,9 +252,11 @@ describe("RunHistoryPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Download raw JSON for run-failed-udmi" }));
 
     await waitFor(() => {
-      expect(fetchMock.mock.calls.some(([url]) =>
-        String(url).includes("/api/v1/validation/runs/run-failed-udmi/export.json"),
-      )).toBe(true);
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/api/v1/validation/runs/run-failed-udmi/export.json"),
+        ),
+      ).toBe(true);
       expect(clickSpy).toHaveBeenCalled();
     });
   });

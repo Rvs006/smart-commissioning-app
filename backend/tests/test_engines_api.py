@@ -35,6 +35,7 @@ from smart_commissioning_core.engines.bacnet_params import (
     TARGET_INTERNETWORK_ID,
     TARGET_NETWORK,
 )
+from smart_commissioning_core.source_interface import FrozenSourceInterfaceV1
 
 _API_KEY = "test-engines-api-key"
 
@@ -45,6 +46,24 @@ _ENV_OVERRIDES = {
 }
 
 _AUTH = {"authorized": True}
+
+
+def _test_source_identity(
+    source_ip: str,
+    prefix_length: int,
+    *,
+    selection: str = "explicit",
+) -> FrozenSourceInterfaceV1:
+    return FrozenSourceInterfaceV1(
+        selection=selection,
+        executor_scope="inline:smart-commissioning-local",
+        interface_id="windows-guid:00000000-0000-0000-0000-000000000001",
+        interface_name="Test source interface",
+        source_ip=source_ip,
+        prefix_length=prefix_length,
+        local_address=f"{source_ip}/{prefix_length}",
+        default_route_metric=1 if selection == "default_route" else None,
+    )
 
 
 class _EngineApiTestCase(ApiTestCase):
@@ -116,6 +135,68 @@ class _EngineApiTestCase(ApiTestCase):
 
 
 class IpDiscoveryApiTests(_EngineApiTestCase):
+    def test_inline_processor_receives_a_strict_import_loader(self) -> None:
+        from app.api.routes import discovery as discovery_routes
+        from smart_commissioning_core.db.repositories import ImportRepository
+        from smart_commissioning_core.run_context import canonical_sha256
+
+        empty_import_id = "imp_ip_empty_loader_contract"
+        ImportRepository(discovery_routes.service.engine).create(
+            import_id=empty_import_id,
+            import_type="ip_register",
+            project_id="demo-project",
+            site_id="demo-site",
+            original_filename="empty-ip-register.csv",
+            stored_file_path="",
+            summary={
+                "accepted_rows": 0,
+                "rejected_rows": 0,
+                "file_sha256": "a" * 64,
+                "accepted_rows_sha256": canonical_sha256([]),
+                "authority_schema_version": "1.0",
+            },
+            accepted_rows=[],
+        )
+        captured: dict[str, object] = {}
+
+        def processor(
+            run_id,
+            _parameters,
+            *,
+            run_store,
+            import_loader,
+            **_kwargs,
+        ):
+            captured["import_loader"] = import_loader
+            return run_store.update_run_status(
+                run_id,
+                status="succeeded",
+                stage="engine_complete",
+                progress_percent=100,
+            )
+
+        with patch(
+            "app.api.routes.discovery.process_ip_discovery_run",
+            side_effect=processor,
+        ):
+            response = self._post(
+                "/api/v1/discovery/ip/runs",
+                {
+                    "cidr": "192.0.2.10/32",
+                    "ports": [443],
+                    "dry_run": True,
+                },
+                "ip_discovery",
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        import_loader = captured["import_loader"]
+        if not callable(import_loader):
+            self.fail("inline IP execution did not receive an import loader")
+        self.assertEqual(import_loader(empty_import_id), [])
+        with self.assertRaises(FileNotFoundError):
+            import_loader("imp_ip_deleted_authority")
+
     def test_inline_loopback_scan_discovers_persists_and_lists(self) -> None:
         # Open a real ephemeral loopback listener so the production default
         # asyncio connect probe finds an open port on 127.0.0.1.
@@ -125,17 +206,30 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         listener.listen(8)
         open_port = listener.getsockname()[1]
         try:
-            response = self._sealed_live(
-                "/api/v1/discovery/ip/runs",
-                {
-                    "cidr": "127.0.0.1/32",
-                    "ports": [open_port],
-                    "scan_max_concurrency": 4,
-                    "scan_rate_limit_per_sec": 0,  # disable rate limiting for speed
-                    "scan_connect_timeout_s": 2,
-                },
-                "ip_discovery",
-            )
+            with (
+                patch(
+                    "app.services.engine_dispatch.interface_service.resolve_source_interface_identity",
+                    return_value=_test_source_identity(
+                        "127.0.0.1",
+                        8,
+                        selection="default_route",
+                    ),
+                ),
+                patch(
+                    "app.api.routes.discovery.interface_service.guard_frozen_source_interface"
+                ),
+            ):
+                response = self._sealed_live(
+                    "/api/v1/discovery/ip/runs",
+                    {
+                        "cidr": "127.0.0.1/32",
+                        "ports": [open_port],
+                        "scan_max_concurrency": 4,
+                        "scan_rate_limit_per_sec": 0,  # disable rate limiting for speed
+                        "scan_connect_timeout_s": 2,
+                    },
+                    "ip_discovery",
+                )
         finally:
             listener.close()
 
@@ -284,7 +378,12 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
 
         run = self._sealed_live(
             "/api/v1/discovery/ip/runs",
-            {"ports": [9], "scan_connect_timeout_s": 1, "scan_rate_limit_per_sec": 0},
+            {
+                "ports": [9],
+                "scan_connect_timeout_s": 1,
+                "scan_rate_limit_per_sec": 0,
+                "use_register_addresses": True,
+            },
             "ip_discovery",
         )
         self.assertEqual(run.status_code, 200, run.text)
@@ -307,7 +406,7 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
                   "parameters": {"dry_run": True}},
         )
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("scan target", response.json()["detail"].lower())
+        self.assertIn("use_register_addresses=true", response.json()["detail"].lower())
 
 
 class BacnetDiscoveryApiTests(_EngineApiTestCase):
@@ -377,8 +476,14 @@ class BacnetDiscoveryApiTests(_EngineApiTestCase):
         # simulated devices/points — never the "Acme Controls"/"Globex BMS" fakes.
         # local_address is explicit so this reaches the missing-dependency failure
         # instead of stopping first at the Source Interface guard.
-        with patch(
-            "app.api.routes.discovery.interface_service.ensure_source_ip_available"
+        with (
+            patch(
+                "app.services.engine_dispatch.interface_service.resolve_source_interface_identity",
+                return_value=_test_source_identity("192.0.2.10", 24),
+            ),
+            patch(
+                "app.api.routes.discovery.interface_service.guard_frozen_source_interface"
+            ),
         ):
             response = self._sealed_live(
                 "/api/v1/discovery/bacnet/runs",

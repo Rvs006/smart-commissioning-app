@@ -19,6 +19,8 @@ from smart_commissioning_core.db.engine import (
 from smart_commissioning_core.db.models import (
     Run,
     RunExecutionContext,
+    RunResult,
+    RunSeal,
     User,
     UserScopeGrant,
 )
@@ -321,6 +323,64 @@ class ActiveControlRepositoryTests(unittest.TestCase):
     def test_authorization_window_expiry_denies_mid_run(self) -> None:
         with self.assertRaisesRegex(ActiveControlDeniedError, "window has ended"):
             self.owned.require_active_control(now=self.now + timedelta(seconds=11))
+
+    def test_successful_discovery_seal_fails_after_authorization_revocation(self) -> None:
+        """A last in-flight probe cannot turn a revoked run into success."""
+
+        # This is the deterministic SQLite race seam: the engine's post-drain
+        # read succeeds, then the approval is revoked before its success seal.
+        self.owned.require_active_control(now=self.now + timedelta(seconds=4))
+        self.repository.revoke_scan_authorization(
+            self.authorization_id,
+            revoked_by="admin-one",
+            reason="Window withdrawn while the final probe was in flight",
+            now=self.now + timedelta(seconds=5),
+        )
+
+        outcome = self.repository.finalize_discovery_run(
+            self.live_run_id,
+            self.owned.lease.owner_token,
+            self.owned.lease.attempt,
+            TerminalResultV1(status="succeeded", stage="engine_complete"),
+            now=self.now + timedelta(seconds=6),
+        )
+
+        self.assertTrue(outcome.applied)
+        with session_factory(self.engine)() as session:
+            result = session.get(RunResult, self.live_run_id)
+            seal = session.get(RunSeal, self.live_run_id)
+        self.assertEqual((result.terminal_status, seal.terminal_status), ("failed", "failed"))
+        self.assertEqual(result.terminal_stage, "active_control_lost")
+        self.assertEqual(result.summary["control_reason"], "authorization_revoked")
+        self.assertIs(result.summary["provider_drained"], True)
+        self.assertIs(result.summary["acceptance_eligible"], False)
+
+    def test_successful_discovery_seal_fails_after_initiator_grant_revocation(self) -> None:
+        """The terminal success fence locks and rechecks the active scope grant."""
+
+        with session_factory(self.engine).begin() as session:
+            grant = session.scalar(
+                select(UserScopeGrant).where(UserScopeGrant.user_id == _USER_ID)
+            )
+            grant.active_marker = None
+            grant.revoked_by = "admin-one"
+            grant.revoke_reason = "Scope withdrawn while the final probe was in flight"
+            grant.revoked_at = self.now + timedelta(seconds=5)
+
+        outcome = self.repository.finalize_discovery_run(
+            self.live_run_id,
+            self.owned.lease.owner_token,
+            self.owned.lease.attempt,
+            TerminalResultV1(status="succeeded", stage="engine_complete"),
+            now=self.now + timedelta(seconds=6),
+        )
+
+        self.assertTrue(outcome.applied)
+        with session_factory(self.engine)() as session:
+            result = session.get(RunResult, self.live_run_id)
+        self.assertEqual(result.terminal_status, "failed")
+        self.assertEqual(result.summary["control_reason"], "grant_revoked")
+        self.assertIs(result.summary["acceptance_eligible"], False)
 
     def test_deactivated_user_or_revoked_grant_denies_mid_run(self) -> None:
         with session_factory(self.engine).begin() as session:

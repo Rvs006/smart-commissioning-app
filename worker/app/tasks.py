@@ -60,6 +60,7 @@ from smart_commissioning_core.owned_run_heartbeat import (
 )
 from smart_commissioning_core.owned_run_store import OwnedRunStore, OwnershipLostError
 from smart_commissioning_core.run_context import RunContextV1
+from smart_commissioning_core.source_interface import guard_frozen_source_interface
 from smart_commissioning_core.udmi_run_processor import process_udmi_validation_run
 
 from app.config import get_settings
@@ -75,6 +76,12 @@ from app.mqtt_config_provider import (
 # carries the run it belongs to.
 configure_logging()
 logger = logging.getLogger("smart_commissioning.worker")
+
+_QUEUED_NETWORK_EXECUTOR_MISMATCH = (
+    "The queued network executor does not match the source interface frozen by "
+    "the preview. No network traffic was sent; create a new preview on the "
+    "intended executor."
+)
 
 settings = get_settings()
 broker = RedisBroker(url=settings.redis_url)
@@ -262,6 +269,17 @@ def _is_dry_run(parameters: dict) -> bool:
     return bool(value)
 
 
+def _guard_live_source_interface(parameters: dict[str, Any]) -> None:
+    if _is_dry_run(parameters):
+        return
+    if not settings.network_executor_id:
+        raise ValueError(_QUEUED_NETWORK_EXECUTOR_MISMATCH)
+    guard_frozen_source_interface(
+        parameters,
+        expected_executor_scope=settings.network_executor_id,
+    )
+
+
 def _effective_parameters(
     context: RunContextV1,
     store: OwnedRunStore,
@@ -369,6 +387,7 @@ def discover_ip_range(
         parameters = _effective_parameters(context, store, channel="ip_discovery")
         logger.info("Starting IP discovery", extra={"actor": "discover_ip_range"})
         try:
+            _guard_live_source_interface(parameters)
             process_ip_discovery_run(
                 run_id,
                 parameters,
@@ -377,6 +396,7 @@ def discover_ip_range(
                 throttle=_build_throttle(parameters),
                 dry_run=_is_dry_run(parameters),
                 persist_records=store.replace_devices,
+                import_loader=_import_loader(context),
             )
         except Interrupt as interrupt:
             # Stage mirrors run_engine's failure stage (_STAGE_FAILED).
@@ -397,6 +417,7 @@ def discover_bacnet(
         # is dry-run/test-only. The engine stamps result_summary['backend'] so a
         # preview can never be mistaken for a real scan.
         try:
+            _guard_live_source_interface(parameters)
             process_bacnet_discovery_run(
                 run_id,
                 parameters,
@@ -426,6 +447,7 @@ def discover_mqtt(
         # Broker settings and secret references came from the frozen context. If
         # no broker is reachable the engine records 'broker_unreachable'.
         try:
+            _guard_live_source_interface(parameters)
             process_mqtt_discovery_run(
                 run_id,
                 parameters,

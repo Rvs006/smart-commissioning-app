@@ -211,6 +211,26 @@ export type RunRecord = {
   error_message: string | null;
 };
 
+export type ScanAuthorizationV1 = {
+  authorization_id: string;
+  preview_run_id: string;
+  project_id: string;
+  site_id: string;
+  packet_plan_sha256: string;
+  approved_by: string;
+  ticket: string;
+  purpose: string;
+  not_before: string;
+  not_after: string;
+  max_uses: number;
+  use_count: number;
+  consumed_run_id: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  revoke_reason: string | null;
+  created_at: string;
+};
+
 export type ValidationIssueRecord = {
   issue_id: string;
   asset_id: string | null;
@@ -450,6 +470,169 @@ export type ValidationIssuesResponse = {
 };
 
 export type DiscoveryRunKind = "ip" | "bacnet" | "mqtt";
+export type NmapProfileName =
+  | "tcp_connect_inventory"
+  | "host_discovery"
+  | "tcp_syn_inventory"
+  | "selected_udp"
+  | "service_version_inventory"
+  | "os_inventory"
+  | "traceroute_inventory"
+  | "reviewed_script_inventory";
+
+export type NmapCapabilityResponse = {
+  schema_version: "1.0";
+  provider: "nmap";
+  state: "disabled" | "xml_import_only" | "confirmation_required" | "unavailable" | "available";
+  reason: string;
+  provider_mode: "disabled" | "operator_xml_import" | "internal_operator_managed";
+  policy_id: string | null;
+  policy_revision: number | null;
+  publisher: string | null;
+  version: string | null;
+  fingerprint_sha256: string | null;
+  npcap_version: string | null;
+  npcap_state: "not_checked" | "missing" | "admin_only" | "connect_only" | "raw_capable";
+  raw_capable: boolean;
+  process_selection_allowed: boolean;
+  xml_import_allowed: boolean;
+  permitted_profiles: NmapProfileName[];
+};
+
+export type NmapDeploymentLane = "internal_same_organization" | "external_customer";
+export type NmapProviderMode = "disabled" | "operator_xml_import" | "internal_operator_managed";
+export type NmapNpcapState =
+  | "not_checked"
+  | "missing"
+  | "admin_only"
+  | "connect_only"
+  | "raw_capable";
+
+export type NmapProjectSiteScope = {
+  project_id: string;
+  site_id: string;
+};
+
+export type NmapReviewedScript = {
+  schema_version: "1.0";
+  name: string;
+  sha256: string;
+};
+
+export type NmapDeploymentPolicyCreateRequest = {
+  deployment_lane: NmapDeploymentLane;
+  provider_mode: NmapProviderMode;
+  deployment_owner: string;
+  operator_install_responsibility: string;
+  permitted_project_sites: readonly NmapProjectSiteScope[];
+  update_owner: string;
+  reviewed_version_policy: string;
+  permitted_publishers: readonly string[];
+  permitted_versions: readonly string[];
+  permitted_signer_sha256: readonly string[];
+  permitted_executable_sha256: readonly string[];
+  permitted_data_manifest_sha256: readonly string[];
+  permitted_licence_sha256: readonly string[];
+  permitted_npsl_versions: readonly string[];
+  reviewed_scripts: readonly NmapReviewedScript[];
+  max_data_files: number;
+  max_file_bytes: number;
+  max_manifest_bytes: number;
+  profile_policy: {
+    schema_version: "1.0";
+    permitted_profiles: readonly NmapProfileName[];
+  };
+  acknowledged_no_redistribution: boolean;
+  reason: string;
+};
+
+export type NmapDeploymentPolicyResponse = {
+  schema_version: "1.0";
+  policy_id: string;
+  deployment_id: string;
+  network_executor_id: string;
+  revision: number;
+  deployment_lane: NmapDeploymentLane;
+  provider_mode: NmapProviderMode;
+  organization_internal: boolean;
+  deployment_owner: string;
+  operator_install_responsibility: string;
+  permitted_project_sites: NmapProjectSiteScope[];
+  update_owner: string;
+  reviewed_version_policy: string;
+  permitted_publishers: string[];
+  permitted_versions: string[];
+  permitted_signer_sha256: string[];
+  permitted_executable_sha256: string[];
+  permitted_data_manifest_sha256: string[];
+  permitted_licence_sha256: string[];
+  permitted_npsl_versions: string[];
+  reviewed_scripts: NmapReviewedScript[];
+  max_data_files: number;
+  max_file_bytes: number;
+  max_manifest_bytes: number;
+  profile_policy: {
+    schema_version: "1.0";
+    permitted_profiles: NmapProfileName[];
+  };
+  reviewed_at: string;
+  acknowledged_no_redistribution: boolean;
+  created_by: string;
+  reason: string;
+  created_at: string;
+  supersedes_policy_id: string | null;
+};
+
+export type NmapDetectedInstallationResponse = {
+  schema_version: "1.0";
+  provider: "nmap";
+  state: "disabled" | "xml_import_only" | "confirmation_required" | "unavailable" | "available";
+  reason: string;
+  publisher: string | null;
+  version: string | null;
+  registry_view: "32" | "64" | null;
+  display_name: string | null;
+  fingerprint_sha256: string | null;
+  signer_sha256: string | null;
+  executable_sha256: string | null;
+  data_manifest_sha256: string | null;
+  data_file_count: number | null;
+  data_total_bytes: number | null;
+  licence_sha256: string | null;
+  npsl_version: string | null;
+  reviewed_scripts: NmapReviewedScript[];
+  npcap_version: string | null;
+  npcap_state: NmapNpcapState;
+  raw_capable: boolean;
+};
+
+export type NmapInstallationConfirmationResponse = {
+  schema_version: "1.0";
+  confirmation_id: string;
+  policy_id: string;
+  deployment_id: string;
+  network_executor_id: string;
+  policy_revision: number;
+  provider: "nmap";
+  state: "disabled" | "xml_import_only" | "confirmation_required" | "unavailable" | "available";
+  reason: string;
+  publisher: string;
+  version: string;
+  fingerprint_sha256: string;
+  signer_sha256: string;
+  executable_sha256: string;
+  data_manifest_sha256: string;
+  data_file_count: number;
+  data_total_bytes: number;
+  licence_sha256: string;
+  npsl_version: string;
+  reviewed_scripts: NmapReviewedScript[];
+  npcap_version: string | null;
+  npcap_state: NmapNpcapState;
+  raw_capable: boolean;
+  confirmed_by: string;
+  confirmed_at: string;
+};
 export type ValidationRunKind = "udmi" | "bacnet" | "mapping";
 export type ImportTemplateFormat = "csv" | "xlsx";
 export type ReportFormat = "zip" | "xlsx" | "docx" | "pdf";
@@ -574,12 +757,33 @@ export type DiscoveryResultsResponse = {
   register_comparison?: RegisterComparison | null;
 };
 
+export type DiscoveryComparisonResponse = {
+  baseline_run_id: string;
+  candidate_run_id: string;
+  job_type: JobType | null;
+  compatible: boolean;
+  reason: string | null;
+  additions: Array<Record<string, unknown>>;
+  removals: Array<Record<string, unknown>>;
+  changes: Array<Record<string, unknown>>;
+};
+
 export type DiscoveryTopicsResponse = {
   run_id: string;
   job_type: JobType;
   status: JobStatus;
   topics: DiscoveryRowRecord[];
   register_comparison?: RegisterComparison | null;
+};
+
+export type DiscoveryPointsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  points: DiscoveryRowRecord[];
+  total: number;
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 export type DiscoveryObservationProtocol = "ip" | "bacnet";
@@ -959,6 +1163,68 @@ export function getSystemInterfaces(context?: ApiRequestContext): Promise<System
   return request<SystemInterface[]>("/system/interfaces", undefined, context);
 }
 
+export function getNmapCapability(input: {
+  projectId: string;
+  siteId: string;
+  context?: ApiRequestContext;
+}): Promise<NmapCapabilityResponse> {
+  const query = new URLSearchParams({
+    project_id: input.projectId,
+    site_id: input.siteId,
+  });
+  return request<NmapCapabilityResponse>(`/nmap/capability?${query}`, undefined, input.context);
+}
+
+export function listNmapDeploymentPolicies(
+  context?: ApiRequestContext,
+): Promise<NmapDeploymentPolicyResponse[]> {
+  return request<NmapDeploymentPolicyResponse[]>("/nmap/policies", undefined, context);
+}
+
+export function createNmapDeploymentPolicy(
+  policy: NmapDeploymentPolicyCreateRequest,
+  context?: ApiRequestContext,
+): Promise<NmapDeploymentPolicyResponse> {
+  return request<NmapDeploymentPolicyResponse>(
+    "/nmap/policies",
+    {
+      body: JSON.stringify(policy),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    context,
+  );
+}
+
+export function detectNmapInstallations(
+  context?: ApiRequestContext,
+): Promise<NmapDetectedInstallationResponse[]> {
+  return request<NmapDetectedInstallationResponse[]>(
+    "/nmap/installations/detected",
+    undefined,
+    context,
+  );
+}
+
+export function confirmNmapInstallation(input: {
+  fingerprintSha256: string;
+  reason: string;
+  context?: ApiRequestContext;
+}): Promise<NmapInstallationConfirmationResponse> {
+  return request<NmapInstallationConfirmationResponse>(
+    "/nmap/installations/confirm",
+    {
+      body: JSON.stringify({
+        fingerprint_sha256: input.fingerprintSha256,
+        reason: input.reason,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Identity + RBAC (Phase 4b).
 //
@@ -983,9 +1249,9 @@ export function createUser(input: {
   return request<CreateUserResponse>(
     "/users",
     {
-    body: JSON.stringify({ role: input.role, username: input.username }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({ role: input.role, username: input.username }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -995,7 +1261,7 @@ export function deactivateUser(userId: string, context?: ApiRequestContext): Pro
   return request<UserRecord>(
     `/users/${encodeURIComponent(userId)}/deactivate`,
     {
-    method: "POST",
+      method: "POST",
     },
     context,
   );
@@ -1011,7 +1277,7 @@ export function reissueUserKey(
   return request<CreateUserResponse>(
     `/users/${encodeURIComponent(userId)}/key`,
     {
-    method: "POST",
+      method: "POST",
     },
     context,
   );
@@ -1025,9 +1291,9 @@ export function updateUserRole(
   return request<UserRecord>(
     `/users/${encodeURIComponent(userId)}/role`,
     {
-    body: JSON.stringify({ role }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({ role }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     context,
   );
@@ -1101,9 +1367,9 @@ export function validateConfiguration(
   return request<ConfigurationValidationResult>(
     "/configuration/validate",
     {
-    body: JSON.stringify(configuration),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify(configuration),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     context,
   );
@@ -1116,9 +1382,9 @@ export function updateConfiguration(
   return request<ConfigurationSnapshot>(
     "/configuration",
     {
-    body: JSON.stringify(configuration),
-    headers: { "Content-Type": "application/json" },
-    method: "PUT",
+      body: JSON.stringify(configuration),
+      headers: { "Content-Type": "application/json" },
+      method: "PUT",
     },
     context,
   );
@@ -1288,14 +1554,14 @@ export function storeSecretMaterial(input: {
   return request<SecretMaterialResponse>(
     "/configuration/secrets",
     {
-    body: JSON.stringify({
-      content: input.content,
-      field: input.field,
-      file_name: input.fileName ?? null,
-      section: "certificates",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({
+        content: input.content,
+        field: input.field,
+        file_name: input.fileName ?? null,
+        section: "certificates",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -1321,8 +1587,8 @@ export function createImport(input: {
   return request<ImportBatchSummary>(
     "/imports",
     {
-    body,
-    method: "POST",
+      body,
+      method: "POST",
     },
     input.context,
   );
@@ -1366,10 +1632,10 @@ export function getLatestImport(
     undefined,
     context,
   ).catch((error: unknown) => {
-      if (error instanceof ApiError && error.status === 404) {
-        return null;
-      }
-      throw error;
+    if (error instanceof ApiError && error.status === 404) {
+      return null;
+    }
+    throw error;
   });
 }
 
@@ -1402,8 +1668,8 @@ export function uploadUdmiSchemaSet(input: {
   return request<UdmiSchemaSet>(
     "/udmi/schemas",
     {
-    body,
-    method: "POST",
+      body,
+      method: "POST",
     },
     input.context,
   );
@@ -1416,7 +1682,7 @@ export function deleteUdmiSchemaSet(
   return request<void>(
     `/udmi/schemas/${encodeURIComponent(versionLabel)}`,
     {
-    method: "DELETE",
+      method: "DELETE",
     },
     context,
   );
@@ -1460,14 +1726,182 @@ export function startDiscoveryRun(input: {
   return request<JobAcceptedResponse>(
     `/discovery/${input.runKind}/runs`,
     {
-    body: JSON.stringify({
-      job_type: input.jobType,
-      parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
-      project_id: input.workspace?.projectId ?? "demo-project",
-      site_id: input.workspace?.siteId ?? "demo-site",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({
+        job_type: input.jobType,
+        parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
+        project_id: input.workspace?.projectId ?? "demo-project",
+        site_id: input.workspace?.siteId ?? "demo-site",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+type NetworkDiscoveryRunKind = Exclude<DiscoveryRunKind, "mqtt">;
+type NetworkDiscoveryJobType = Extract<JobType, "ip_discovery" | "bacnet_discovery">;
+
+export function startDiscoveryPreview(input: {
+  runKind: NetworkDiscoveryRunKind;
+  jobType: NetworkDiscoveryJobType;
+  parameters: Record<string, unknown> & { dry_run: true };
+  workspace: WorkspaceRef;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    `/discovery/${input.runKind}/runs`,
+    {
+      body: JSON.stringify({
+        job_type: input.jobType,
+        parameters: input.parameters,
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function startAuthorizedDiscoveryRun(input: {
+  runKind: NetworkDiscoveryRunKind;
+  jobType: NetworkDiscoveryJobType;
+  previewRunId: string;
+  scanAuthorizationId: string;
+  workspace: WorkspaceRef;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    `/discovery/${input.runKind}/runs`,
+    {
+      body: JSON.stringify({
+        job_type: input.jobType,
+        preview_run_id: input.previewRunId,
+        scan_authorization_id: input.scanAuthorizationId,
+        parameters: {},
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export type BacnetPropertyName =
+  | "object_name"
+  | "present_value"
+  | "units"
+  | "status_flags"
+  | "reliability"
+  | "out_of_service"
+  | "description";
+
+export function startBacnetPropertyRun(input: {
+  parentRunId: string;
+  deviceInstance: number;
+  destination?: string;
+  requestedReadSet: BacnetPropertyName[];
+  previewRunId?: string;
+  scanAuthorizationId?: string;
+  workspace: WorkspaceRef;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  const live = Boolean(input.previewRunId || input.scanAuthorizationId);
+  return request<JobAcceptedResponse>(
+    "/discovery/bacnet/property-runs",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        parent_run_id: input.parentRunId,
+        device_instance: input.deviceInstance,
+        destination: input.destination,
+        requested_read_set: input.requestedReadSet,
+        ...(live
+          ? {
+              preview_run_id: input.previewRunId,
+              scan_authorization_id: input.scanAuthorizationId,
+              parameters: {},
+            }
+          : { parameters: { dry_run: true } }),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function createScanAuthorization(input: {
+  previewRunId: string;
+  ticket: string;
+  purpose: string;
+  notBefore: string;
+  notAfter: string;
+  context?: ApiRequestContext;
+}): Promise<ScanAuthorizationV1> {
+  return request<ScanAuthorizationV1>(
+    "/discovery/scan-authorizations",
+    {
+      body: JSON.stringify({
+        preview_run_id: input.previewRunId,
+        ticket: input.ticket,
+        purpose: input.purpose,
+        not_before: input.notBefore,
+        not_after: input.notAfter,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function listScanAuthorizations(input: {
+  workspace: WorkspaceRef;
+  previewRunId?: string;
+  context?: ApiRequestContext;
+}): Promise<ScanAuthorizationV1[]> {
+  const query = new URLSearchParams({
+    project_id: input.workspace.projectId,
+    site_id: input.workspace.siteId,
+  });
+  if (input.previewRunId) {
+    query.set("preview_run_id", input.previewRunId);
+  }
+  return request<ScanAuthorizationV1[]>(
+    `/discovery/scan-authorizations?${query.toString()}`,
+    undefined,
+    input.context,
+  );
+}
+
+export function getScanAuthorization(
+  authorizationId: string,
+  context?: ApiRequestContext,
+): Promise<ScanAuthorizationV1> {
+  return request<ScanAuthorizationV1>(
+    `/discovery/scan-authorizations/${encodeURIComponent(authorizationId)}`,
+    undefined,
+    context,
+  );
+}
+
+export function revokeScanAuthorization(input: {
+  authorizationId: string;
+  reason: string;
+  context?: ApiRequestContext;
+}): Promise<ScanAuthorizationV1> {
+  return request<ScanAuthorizationV1>(
+    `/discovery/scan-authorizations/${encodeURIComponent(input.authorizationId)}/revoke`,
+    {
+      body: JSON.stringify({ reason: input.reason }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -1483,14 +1917,14 @@ export function startValidationRun(input: {
   return request<JobAcceptedResponse>(
     `/validation/${input.runKind}/runs`,
     {
-    body: JSON.stringify({
-      job_type: input.jobType,
-      parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
-      project_id: input.workspace?.projectId ?? "demo-project",
-      site_id: input.workspace?.siteId ?? "demo-site",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({
+        job_type: input.jobType,
+        parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
+        project_id: input.workspace?.projectId ?? "demo-project",
+        site_id: input.workspace?.siteId ?? "demo-site",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -1532,40 +1966,40 @@ export function startMqttConfigPublishRun(input: {
   return request<JobAcceptedResponse>(
     "/validation/mqtt-config/runs",
     {
-    body: JSON.stringify({
-      job_type: "mqtt_config_publish",
-      parameters: {
-        // A live-broker publish is a real network write, so the backend gates it
-        // behind the authorization contract (403 without it). The operator's
-        // explicit "publish through the broker" choice plus the confirm checkbox
-        // IS that authorization; the backend still stamps the real principal.
-        // Boolean shorthand only — the frontend never fabricates a
-        // scan_authorization block. Validate-only (no broker) needs none.
-        authorized: Boolean(input.useLiveBroker),
-        confirmed: input.confirmed,
-        expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
-        expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",
+      body: JSON.stringify({
+        job_type: "mqtt_config_publish",
+        parameters: {
+          // A live-broker publish is a real network write, so the backend gates it
+          // behind the authorization contract (403 without it). The operator's
+          // explicit "publish through the broker" choice plus the confirm checkbox
+          // IS that authorization; the backend still stamps the real principal.
+          // Boolean shorthand only — the frontend never fabricates a
+          // scan_authorization block. Validate-only (no broker) needs none.
+          authorized: Boolean(input.useLiveBroker),
+          confirmed: input.confirmed,
+          expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
+          expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",
           expected_points: allExpected.map((pair) => ({
             point: pair.point.trim(),
             value: pair.value,
           })),
-        pointset_topic: input.pointsetTopic ?? "",
-        next_pointset_payload: {
-          pointset: {
-            points,
+          pointset_topic: input.pointsetTopic ?? "",
+          next_pointset_payload: {
+            pointset: {
+              points,
+            },
           },
+          payload: input.payload,
+          requested_from: "frontend-review",
+          topic: input.topic,
+          use_live_broker: Boolean(input.useLiveBroker),
+          wait_seconds: input.waitSeconds ?? 5,
         },
-        payload: input.payload,
-        requested_from: "frontend-review",
-        topic: input.topic,
-        use_live_broker: Boolean(input.useLiveBroker),
-        wait_seconds: input.waitSeconds ?? 5,
-      },
-      project_id: input.workspace?.projectId ?? "demo-project",
-      site_id: input.workspace?.siteId ?? "demo-site",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+        project_id: input.workspace?.projectId ?? "demo-project",
+        site_id: input.workspace?.siteId ?? "demo-site",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -1595,18 +2029,18 @@ export function createReport(input: {
   return request<ReportSummary>(
     "/reports",
     {
-    body: JSON.stringify({
-      output_format: input.format ?? "zip",
-      project_id: input.workspace?.projectId ?? "demo-project",
-      report_type: input.reportType,
-      site_id: input.workspace?.siteId ?? "demo-site",
-      source_run_ids: input.sourceRunIds ?? [],
-      ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
-      ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
-      ...(input.udmiReportVariant ? { udmi_report_variant: input.udmiReportVariant } : {}),
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({
+        output_format: input.format ?? "zip",
+        project_id: input.workspace?.projectId ?? "demo-project",
+        report_type: input.reportType,
+        site_id: input.workspace?.siteId ?? "demo-site",
+        source_run_ids: input.sourceRunIds ?? [],
+        ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
+        ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
+        ...(input.udmiReportVariant ? { udmi_report_variant: input.udmiReportVariant } : {}),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -1634,9 +2068,9 @@ export function deleteReports(input: {
   return request<DeleteReportsResponse>(
     "/reports/delete",
     {
-    body: JSON.stringify({ report_ids: input.reportIds }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
+      body: JSON.stringify({ report_ids: input.reportIds }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
     },
     input.context,
   );
@@ -1692,7 +2126,7 @@ export function cancelRun(runId: string, context?: ApiRequestContext): Promise<R
   return request<RunRecord>(
     `/runs/${encodeURIComponent(runId)}/cancel`,
     {
-    method: "POST",
+      method: "POST",
     },
     context,
   );
@@ -1708,6 +2142,19 @@ export function getDiscoveryResults(
 ): Promise<DiscoveryResultsResponse> {
   return request<DiscoveryResultsResponse>(
     `/discovery/runs/${encodeURIComponent(runId)}/results`,
+    undefined,
+    context,
+  );
+}
+
+export function getDiscoveryComparison(
+  candidateRunId: string,
+  baselineRunId: string,
+  context?: ApiRequestContext,
+): Promise<DiscoveryComparisonResponse> {
+  const query = new URLSearchParams({ against: baselineRunId });
+  return request<DiscoveryComparisonResponse>(
+    `/discovery/runs/${encodeURIComponent(candidateRunId)}/comparison?${query.toString()}`,
     undefined,
     context,
   );
@@ -1738,6 +2185,27 @@ export function getDiscoveryTopics(
     `/discovery/runs/${encodeURIComponent(runId)}/topics`,
     undefined,
     context,
+  );
+}
+
+export function getDiscoveryPoints(
+  runId: string,
+  input: {
+    after?: string | null;
+    limit?: number;
+    search?: string | null;
+    context?: ApiRequestContext;
+  } = {},
+): Promise<DiscoveryPointsResponse> {
+  const query = new URLSearchParams();
+  if (input.after) query.set("after", input.after);
+  if (typeof input.limit === "number") query.set("limit", String(input.limit));
+  if (input.search) query.set("search", input.search);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<DiscoveryPointsResponse>(
+    `/discovery/runs/${encodeURIComponent(runId)}/points${suffix}`,
+    undefined,
+    input.context,
   );
 }
 

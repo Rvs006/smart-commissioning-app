@@ -11,6 +11,8 @@ from app.api.routes import (
     hub_sync_v2,
     imports,
     logs,
+    nmap,
+    raw_evidence,
     reports,
     runs,
     system,
@@ -19,6 +21,21 @@ from app.api.routes import (
     validation,
 )
 from app.core.auth import require_auth, require_role
+from app.core.config import get_settings
+
+
+def include_internal_nmap_routes(target: APIRouter, *, enabled: bool) -> None:
+    """Mount parser/execution-specific routes only in the internal build lane."""
+
+    if not enabled:
+        return
+    from app.api.routes import nmap_xml_import
+
+    target.include_router(
+        nmap_xml_import.router,
+        prefix="/nmap",
+        tags=["nmap", "xml-import"],
+    )
 
 api_router = APIRouter()
 
@@ -50,9 +67,7 @@ api_router.include_router(imports.public_router, prefix="/imports", tags=["impor
 # button never 401s in hosted api_key mode. The protected /udmi/schemas router
 # has no GET path-param route, so /template cannot be shadowed; registered here
 # before the protected includes anyway, matching the imports precedent.
-api_router.include_router(
-    udmi_schemas.public_router, prefix="/udmi/schemas", tags=["udmi-schemas"]
-)
+api_router.include_router(udmi_schemas.public_router, prefix="/udmi/schemas", tags=["udmi-schemas"])
 
 # Every other /api/v1 route requires authentication (app.core.auth). RBAC is
 # then layered per-route inside each router (require_role on the data/mutation
@@ -70,6 +85,11 @@ protected_router.include_router(
     events.router, prefix="/runs", tags=["runs", "events"], dependencies=[Depends(require_role(Role.VIEWER))]
 )
 protected_router.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
+protected_router.include_router(
+    raw_evidence.router,
+    prefix="/discovery",
+    tags=["discovery", "raw-evidence"],
+)
 protected_router.include_router(validation.router, prefix="/validation", tags=["validation"])
 # Operator-uploaded non-published UDMI schema sets (viewer reads, engineer
 # writes; gated per-route). UDMI run creation embeds the stored sets into run
@@ -81,6 +101,11 @@ protected_router.include_router(reports.router, prefix="/reports", tags=["report
 protected_router.include_router(evidence.router, prefix="/evidence", tags=["evidence"])
 # Engineer-gated log bundle download/upload; masked; local logs dir only.
 protected_router.include_router(logs.router, prefix="/logs", tags=["logs"])
+protected_router.include_router(nmap.router, prefix="/nmap", tags=["nmap"])
+include_internal_nmap_routes(
+    protected_router,
+    enabled=get_settings().nmap_internal_provider_enabled,
+)
 # Edge->hub sync: hub ingest endpoint (POST /hub/runs/ingest). The router is
 # always mounted but every route returns 404 unless deployment_role == 'hub'
 # (the role-guard lives in the route so toggling the setting needs no remount).

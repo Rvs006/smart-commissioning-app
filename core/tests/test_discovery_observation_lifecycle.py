@@ -1,3 +1,4 @@
+import copy
 import tempfile
 import threading
 import unittest
@@ -18,6 +19,7 @@ from smart_commissioning_core.db.models import (
     Run,
     RunDiscoveryObservation,
     RunDiscoveryObservationState,
+    RunExecutionContext,
     RunIssue,
     RunResult,
     RunSeal,
@@ -27,16 +29,43 @@ from smart_commissioning_core.db.run_lifecycle import (
     DiscoveryObservationFoldLimitError,
     RunLifecycleRepository,
 )
-from smart_commissioning_core.discovery_observations import DiscoveryObservationInputV1
+from smart_commissioning_core.discovery_observations import (
+    OBSERVATION_STREAM_EMPTY_SHA256,
+    DiscoveryObservationInputV1,
+    extend_observation_stream_sha256,
+    observation_payload,
+)
+from smart_commissioning_core.engines import ip_scan
+from smart_commissioning_core.engines.ip import ProviderIdentityEvidenceV1
 from smart_commissioning_core.owned_run_heartbeat import OwnedRunHeartbeat
 from smart_commissioning_core.owned_run_store import OwnedRunStore, RunFinalizingError
 from smart_commissioning_core.records import ValidationIssueRecord
-from smart_commissioning_core.run_context import RunContextV1, canonical_json_bytes
+from smart_commissioning_core.run_context import (
+    RunContextV1,
+    canonical_context_sha256,
+    canonical_json_bytes,
+)
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from sqlalchemy import select, update
 
 
-def _context(protocol: str) -> RunContextV1:
+def _context(
+    protocol: str,
+    *,
+    observation_rows: int | None = None,
+    observation_payload_bytes: int | None = None,
+) -> RunContextV1:
+    engine_parameters: dict = {"authorized": True, "dry_run": True}
+    if observation_rows is not None and observation_payload_bytes is not None:
+        engine_parameters["scan_contract_v1"] = {
+            "job_type": "ip_discovery",
+            "ip": {
+                "observation_budget": {
+                    "planned_observation_rows": observation_rows,
+                    "planned_observation_payload_bytes": observation_payload_bytes,
+                }
+            },
+        }
     return RunContextV1.model_validate(
         {
             "project_id": "project-north",
@@ -46,7 +75,7 @@ def _context(protocol: str) -> RunContextV1:
             "registers": [],
             "imports": [],
             "schema_versions": {},
-            "engine_parameters": {"authorized": True, "dry_run": True},
+            "engine_parameters": engine_parameters,
             "network_interface": "192.0.2.10/24",
             "connection_settings": {},
             "secret_references": {},
@@ -96,10 +125,16 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
         protocol: str = "ip",
         *,
         claimed_at: datetime | None = None,
+        observation_rows: int | None = None,
+        observation_payload_bytes: int | None = None,
     ):
         envelope = self.repository.create_run_with_context(
             job_type=f"{protocol}_discovery",
-            context=_context(protocol),
+            context=_context(
+                protocol,
+                observation_rows=observation_rows,
+                observation_payload_bytes=observation_payload_bytes,
+            ),
             execution_mode="inline",
         )
         lease = self.repository.claim_run(
@@ -111,6 +146,154 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
         )
         self.assertIsNotNone(lease)
         return envelope.run_id, lease
+
+    def test_real_sealed_ip_run_keeps_max_provider_identity_projections_within_preview(self) -> None:
+        """The runtime identity seam cannot exceed the immutable preview budget."""
+        from app.services.discovery_contract_service import (
+            resolve_ip_discovery_parameters,
+        )
+
+        source_identity = {
+            "schema_version": "1.0",
+            "selection": "explicit",
+            "executor_scope": "test-network-executor",
+            "interface_id": "test-if:loopback",
+            "interface_name": "Loopback",
+            "source_ip": "127.0.0.1",
+            "prefix_length": 8,
+            "local_address": "127.0.0.1/8",
+            "default_route_metric": None,
+        }
+        targets = ("192.0.2.90",)
+        rows = [
+            {
+                "Expected IP address": f"192.0.2.{10 + index}",
+                "Asset ID": f"AHU-{index}",
+            }
+            for index in range(1)
+        ]
+        repository_rows = {
+            "import_id": "identity-budget-register",
+            "import_type": "ip_register",
+            "project_id": "project-north",
+            "site_id": "site-17",
+            "original_filename": "identity-budget-register.csv",
+            "summary": {
+                "accepted_rows": len(rows),
+                "authority_schema_version": "1.0",
+                "file_sha256": "a" * 64,
+            },
+            "accepted_rows": rows,
+        }
+
+        class _ImportRepository:
+            def list(self, **_filters: object) -> list[dict[str, object]]:
+                return [repository_rows]
+
+            def get(self, import_id: str) -> dict[str, object]:
+                self_outer.assertEqual(import_id, "identity-budget-register")
+                return repository_rows
+
+        self_outer = self
+        parameters = resolve_ip_discovery_parameters(
+            {
+                "authorized": True,
+                "source_ip": "127.0.0.1",
+                "local_address": "127.0.0.1/8",
+                "source_interface_identity_v1": source_identity,
+                "target_expressions": [
+                    {"kind": "address", "address": target}
+                    for target in targets
+                ],
+                "ports": [443],
+                "ip_register_import_id": "identity-budget-register",
+            },
+            project_id="project-north",
+            site_id="site-17",
+            import_repository=_ImportRepository(),
+        )
+        context = RunContextV1.model_validate(
+            {
+                "project_id": "project-north",
+                "site_id": "site-17",
+                "configuration_snapshot": {},
+                "configuration_version": 7,
+                "registers": [],
+                "imports": [],
+                "schema_versions": {},
+                "engine_parameters": parameters,
+                "network_interface": "127.0.0.1/8",
+                "connection_settings": {},
+                "secret_references": {},
+                "requesting_principal": "user-42",
+                "application_version": "0.1.41",
+                "protocol_key": "ip:test-source",
+            }
+        )
+        envelope = self.repository.create_run_with_context(
+            job_type="ip_discovery", context=context, execution_mode="inline"
+        )
+        lease = self.repository.claim_run(
+            envelope.run_id,
+            envelope.dispatch_id,
+            lease_seconds=60,
+            now=datetime.now(UTC),
+            owner_token="owner-a",
+        )
+        self.assertIsNotNone(lease)
+        assert lease is not None
+        store = OwnedRunStore(self.repository, lease)
+        # This test exercises the sealed observation path; authorization-link
+        # enforcement has dedicated lifecycle coverage elsewhere.
+        store.require_active_control = lambda **_kwargs: None  # type: ignore[method-assign]
+
+        async def connected(_host: str, _port: int, _timeout: float) -> bool:
+            return True
+
+        async def identity(host: str) -> ProviderIdentityEvidenceV1:
+            return ProviderIdentityEvidenceV1(
+                evidence_kind="approved_provider",
+                confidence="high",
+                asset_id=f"AHU-{targets.index(host)}",
+                hostname=ip_scan.max_provider_identity_hostname_v1(),
+                mac_address=ip_scan.IP_PROVIDER_IDENTITY_MAX_MAC_ADDRESS,
+                corroborating_fields=("asset_id",),
+            )
+
+        terminal = ip_scan.process_ip_discovery_run(
+            envelope.run_id,
+            parameters,
+            run_store=store,
+            execution_mode="inline",
+            connect=connected,
+            import_loader=lambda _import_id: rows,
+            identity_observer=identity,
+        )
+
+        budget = parameters["scan_contract_v1"]["ip"]["observation_budget"]
+        self.assertEqual(terminal["status"], "succeeded", terminal)
+        with session_factory(self.engine)() as session:
+            state = session.get(RunDiscoveryObservationState, (envelope.run_id, lease.attempt))
+            seal = session.get(RunSeal, envelope.run_id)
+        self.assertIsNotNone(state)
+        self.assertIsNotNone(seal)
+        assert state is not None
+        final_reasons = [
+            item.payload["ip_v1"]["reason"]
+            for item in self.repository.list_discovery_observations(
+                envelope.run_id,
+                lease.attempt,
+            )
+            if item.phase == "finalize" and "ip_v1" in item.payload
+        ]
+        self.assertEqual(len(final_reasons), len(targets))
+        self.assertTrue(
+            all(
+                len(reason) <= ip_scan.IP_STATUS_DETAIL_MAX_CHARS
+                for reason in final_reasons
+            )
+        )
+        self.assertLessEqual(state.canonical_payload_bytes, budget["planned_observation_payload_bytes"])
 
     def test_append_replay_is_idempotent_and_does_not_renew_lease(self) -> None:
         run_id, lease = self.create_claimed_run()
@@ -153,6 +336,113 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
         self.assertIs(page[0].payload["reachable"], False)
         self.assertEqual(page[0].payload["response_ms"], 0)
 
+    def test_ip_append_enforces_the_frozen_row_budget_after_replay(self) -> None:
+        run_id, lease = self.create_claimed_run(
+            observation_rows=1,
+            observation_payload_bytes=1_000,
+        )
+        observation = _observation(event_key="sealed-row-budget-v1")
+
+        first = self.repository.append_discovery_observation(
+            run_id,
+            lease.owner_token,
+            lease.attempt,
+            observation,
+        )
+        replay = self.repository.append_discovery_observation(
+            run_id,
+            lease.owner_token,
+            lease.attempt,
+            observation,
+        )
+        with self.assertRaises(DiscoveryObservationConflictError) as rejected:
+            self.repository.append_discovery_observation(
+                run_id,
+                lease.owner_token,
+                lease.attempt,
+                _observation(
+                    event_key="sealed-row-budget-v2",
+                    entity_version=2,
+                ),
+            )
+
+        self.assertFalse(first.idempotent)
+        self.assertTrue(replay.idempotent)
+        self.assertEqual(replay.cursor, first.cursor)
+        self.assertEqual(rejected.exception.reason, "observation_row_budget_exhausted")
+        self.assertEqual(
+            self.repository.get_discovery_observation_cutoff(
+                run_id,
+                lease.attempt,
+            ).observation_count,
+            1,
+        )
+
+    def test_ip_append_enforces_the_frozen_payload_budget_at_one_byte_over(self) -> None:
+        first = _observation(
+            event_key="sealed-byte-budget-v1",
+            payload={"value": "a"},
+        )
+        second = _observation(
+            event_key="sealed-byte-budget-v2",
+            entity_version=2,
+            payload={"value": "b"},
+        )
+        self.assertEqual(len(canonical_json_bytes(first.payload)), 13)
+        self.assertEqual(len(canonical_json_bytes(second.payload)), 13)
+
+        exact_run_id, exact_lease = self.create_claimed_run(
+            observation_rows=2,
+            observation_payload_bytes=26,
+        )
+        self.repository.append_discovery_observation(
+            exact_run_id,
+            exact_lease.owner_token,
+            exact_lease.attempt,
+            first,
+        )
+        exact = self.repository.append_discovery_observation(
+            exact_run_id,
+            exact_lease.owner_token,
+            exact_lease.attempt,
+            second,
+        )
+
+        over_run_id, over_lease = self.create_claimed_run(
+            observation_rows=2,
+            observation_payload_bytes=25,
+        )
+        self.repository.append_discovery_observation(
+            over_run_id,
+            over_lease.owner_token,
+            over_lease.attempt,
+            first,
+        )
+        with self.assertRaises(DiscoveryObservationConflictError) as rejected:
+            self.repository.append_discovery_observation(
+                over_run_id,
+                over_lease.owner_token,
+                over_lease.attempt,
+                second,
+            )
+
+        self.assertFalse(exact.idempotent)
+        self.assertEqual(rejected.exception.reason, "observation_payload_budget_exhausted")
+        self.assertEqual(
+            self.repository.get_discovery_observation_cutoff(
+                exact_run_id,
+                exact_lease.attempt,
+            ).observation_count,
+            2,
+        )
+        self.assertEqual(
+            self.repository.get_discovery_observation_cutoff(
+                over_run_id,
+                over_lease.attempt,
+            ).observation_count,
+            1,
+        )
+
     def test_first_append_creates_the_attempt_lifecycle_state(self) -> None:
         run_id, lease = self.create_claimed_run()
         observation = _observation(event_key="state-first-append")
@@ -177,6 +467,66 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
         )
         self.assertEqual(state.terminal_cursor, appended.cursor)
         self.assertRegex(state.observation_stream_sha256, r"^[0-9a-f]{64}$")
+
+    def test_append_commits_the_validated_view_without_rehashing_its_payload(
+        self,
+    ) -> None:
+        run_id, lease = self.create_claimed_run()
+        observation = _observation(
+            event_key="canonical-append-view",
+            payload={"response_ms": 2.5, "reachable": True},
+        )
+        from smart_commissioning_core.db import run_lifecycle as lifecycle_module
+
+        real_payload = lifecycle_module.observation_payload
+        with mock.patch.object(
+            lifecycle_module,
+            "observation_payload",
+            wraps=real_payload,
+        ) as normalized:
+            appended = self.repository.append_discovery_observation(
+                run_id,
+                lease.owner_token,
+                lease.attempt,
+                observation,
+            )
+
+        self.assertEqual(normalized.call_count, 1)
+        expected_payload, _encoded_payload, expected_digest = observation_payload(
+            observation.payload
+        )
+        page = self.repository.list_discovery_observations(run_id, lease.attempt)
+        self.assertEqual(page[0].cursor, appended.cursor)
+        self.assertEqual(page[0].payload, expected_payload)
+        self.assertEqual(page[0].payload_sha256, expected_digest)
+        expected_commitment = extend_observation_stream_sha256(
+            OBSERVATION_STREAM_EMPTY_SHA256,
+            page[0],
+        )
+        with session_factory(self.engine)() as session:
+            state = session.get(
+                RunDiscoveryObservationState,
+                (run_id, lease.attempt),
+            )
+        self.assertEqual(state.observation_stream_sha256, expected_commitment)
+
+        finalized = self.repository.finalize_discovery_run(
+            run_id,
+            lease.owner_token,
+            lease.attempt,
+            TerminalResultV1(status="succeeded", stage="complete"),
+            now=datetime(2026, 8, 11, 9, 0, 20, tzinfo=UTC),
+        )
+
+        self.assertTrue(finalized.applied)
+        with session_factory(self.engine)() as session:
+            result = session.get(RunResult, run_id)
+        self.assertEqual(
+            result.summary["observation_evidence_v1"][
+                "observation_stream_sha256"
+            ],
+            expected_commitment,
+        )
 
     def test_append_uses_the_repository_clock_for_its_commit_time(self) -> None:
         committed_at = datetime(2026, 8, 11, 9, 0, 12, tzinfo=UTC)
@@ -980,6 +1330,85 @@ class DiscoveryObservationLifecycleTests(unittest.TestCase):
             )
         self.assertEqual(result.result_payload["devices"], [])
         self.assertEqual(devices, [])
+
+    def test_over_frozen_ip_budget_prefix_is_quarantined_during_recovery(self) -> None:
+        run_id, lease = self.create_claimed_run(
+            observation_rows=1,
+            observation_payload_bytes=1_000,
+        )
+        self.repository.append_discovery_observation(
+            run_id,
+            lease.owner_token,
+            lease.attempt,
+            _observation(event_key="sealed-tamper-v1"),
+        )
+        with session_factory(self.engine).begin() as session:
+            context_row = session.get(RunExecutionContext, run_id)
+            original_context_json = copy.deepcopy(context_row.context_json)
+            original_context_sha256 = context_row.context_sha256
+            widened_context_json = copy.deepcopy(original_context_json)
+            widened_context_json["engine_parameters"]["scan_contract_v1"]["ip"][
+                "observation_budget"
+            ]["planned_observation_rows"] = 2
+            widened_context = RunContextV1.model_validate(widened_context_json)
+            session.execute(
+                update(RunExecutionContext)
+                .where(RunExecutionContext.run_id == run_id)
+                .values(
+                    context_json=widened_context.model_dump(mode="json"),
+                    context_sha256=canonical_context_sha256(widened_context),
+                )
+            )
+        self.repository.append_discovery_observation(
+            run_id,
+            lease.owner_token,
+            lease.attempt,
+            _observation(event_key="sealed-tamper-v2", entity_version=2),
+        )
+        with session_factory(self.engine).begin() as session:
+            session.execute(
+                update(RunExecutionContext)
+                .where(RunExecutionContext.run_id == run_id)
+                .values(
+                    context_json=original_context_json,
+                    context_sha256=original_context_sha256,
+                )
+            )
+
+        with self.assertRaises(DiscoveryObservationFoldLimitError) as rejected:
+            self.repository.finalize_discovery_run(
+                run_id,
+                lease.owner_token,
+                lease.attempt,
+                TerminalResultV1(status="succeeded", stage="complete"),
+                now=datetime(2026, 8, 11, 9, 0, 20, tzinfo=UTC),
+            )
+
+        self.assertEqual(rejected.exception.reason, "sealed_row_limit")
+        with session_factory(self.engine)() as session:
+            run = session.get(Run, run_id)
+            self.assertEqual(run.status, "running")
+            self.assertIsNone(session.get(RunResult, run_id))
+            self.assertIsNone(session.get(RunSeal, run_id))
+
+        recovered = self.repository.recover_expired_leases(
+            now=datetime(2026, 8, 11, 9, 1, 1, tzinfo=UTC)
+        )
+
+        self.assertEqual(recovered, [run_id])
+        with session_factory(self.engine)() as session:
+            run = session.get(Run, run_id)
+            result = session.get(RunResult, run_id)
+            seal = session.get(RunSeal, run_id)
+        self.assertEqual(run.status, "failed")
+        self.assertEqual(result.terminal_status, "failed")
+        self.assertEqual(result.terminal_stage, "lease_expired_observation_quarantined")
+        self.assertIs(result.summary["observation_prefix_quarantined"], True)
+        self.assertEqual(
+            result.summary["observation_quarantine_v1"]["reason"],
+            "fold_sealed_row_limit",
+        )
+        self.assertEqual(seal.terminal_status, "failed")
 
     def test_fold_row_and_canonical_payload_budgets_fail_closed(self) -> None:
         run_id, lease = self.create_claimed_run()

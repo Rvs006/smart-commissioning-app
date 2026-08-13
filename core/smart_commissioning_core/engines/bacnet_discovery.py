@@ -1955,6 +1955,81 @@ def _new_summary_record(
     }
 
 
+def _bacnet_headline_metric(
+    *,
+    heading: str,
+    value: int | None,
+    denominator: int | None,
+    configured: bool,
+) -> dict[str, Any]:
+    """Build one frozen-count metric without turning unknown authority into zero."""
+
+    if not configured:
+        return {
+            "schema_version": "1.0",
+            "heading": heading,
+            "configured": False,
+            "value": None,
+            "denominator": None,
+            "percentage": None,
+            "pending_count": None,
+            "finalized_count": None,
+        }
+    safe_value = max(0, int(value or 0))
+    safe_denominator = max(0, int(denominator if denominator is not None else safe_value))
+    percentage = None if safe_denominator == 0 else round(min(100.0, safe_value * 100.0 / safe_denominator), 2)
+    return {
+        "schema_version": "1.0",
+        "heading": heading,
+        "configured": True,
+        "value": safe_value,
+        "denominator": safe_denominator,
+        "percentage": percentage,
+        "pending_count": 0,
+        "finalized_count": safe_value,
+    }
+
+
+def _bacnet_headline_metrics(record: Mapping[str, Any], parameters: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the four terminal BACnet metrics used by the result UI."""
+
+    expected = max(0, int(record.get("expected_device_count") or 0))
+    discovered = max(0, int(record.get("device_count") or 0))
+    points = max(0, int(record.get("point_count") or 0))
+    responding = max(0, int(record.get("expected_responding_count") or 0))
+    authority_configured = bool(str(parameters.get("bacnet_register_import_id") or "").strip())
+    unexpected = max(0, discovered - responding) if authority_configured else None
+    return {
+        "schema_version": "1.0",
+        "metrics": [
+            _bacnet_headline_metric(
+                heading="Expected Devices",
+                value=expected,
+                denominator=expected,
+                configured=authority_configured,
+            ),
+            _bacnet_headline_metric(
+                heading="Discovered Devices",
+                value=discovered,
+                denominator=expected if authority_configured else discovered,
+                configured=True,
+            ),
+            _bacnet_headline_metric(
+                heading="Objects Discovered",
+                value=points,
+                denominator=points,
+                configured=True,
+            ),
+            _bacnet_headline_metric(
+                heading="Unmatched / Unexpected",
+                value=unexpected,
+                denominator=expected if authority_configured else None,
+                configured=authority_configured,
+            ),
+        ],
+    }
+
+
 def _stamp_transport(
     record: dict[str, Any],
     backend: BacnetDiscoveryBackend,
@@ -2587,6 +2662,7 @@ async def _run_bacnet_discovery(
 
     record["device_count"] = len(discovered_assets)
     record["point_count"] = len(point_records)
+    record["bacnet_headline_metrics_v1"] = _bacnet_headline_metrics(record, parameters)
     if cancelled:
         record["partial"] = True
 

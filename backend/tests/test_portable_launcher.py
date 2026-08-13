@@ -5,7 +5,9 @@ local/inline/sqlite profile, which lets a stray pre-existing env var silently
 override the intended value. The launcher now routes those through
 ``_set_env_default``, which PRESERVES the override (the escape hatch) but PRINTS
 a warning naming the variable only — never its value, since ``DATABASE_URL`` may
-embed a password.
+embed a password. The external-distribution Nmap gate is the security exception:
+the portable launcher always forces it off instead of inheriting an internal
+deployment opt-in.
 
 Stable data dir (2026-07-14): frozen builds keep state in
 ``%LOCALAPPDATA%/SmartCommissioning`` (``data_root``) instead of the
@@ -35,12 +37,13 @@ LAUNCHER_PATH = (
     Path(__file__).resolve().parents[2] / "packaging" / "windows_portable" / "run_smart_commissioning_app.py"
 )
 
-# The five variables routed through the visible-override helper.
+# Environment variables reset between launcher tests.
 _MANAGED_VARS = (
     "DATABASE_URL",
     "ENVIRONMENT",
     "AUTH_MODE",
     "JOB_EXECUTION_MODE",
+    "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED",
     "SMART_COMMISSIONING_APP_VERSION",
 )
 
@@ -108,6 +111,34 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         self.assertEqual(os.environ["DATABASE_URL"], expected)
         # Nothing overridden, so nothing is printed.
         self.assertEqual(buffer.getvalue(), "")
+
+    def test_external_portable_default_keeps_internal_nmap_routes_disabled(self) -> None:
+        root = self._make_root()
+        for name in _MANAGED_VARS:
+            os.environ.pop(name, None)
+
+        self.launcher.configure_environment(root)
+
+        self.assertEqual(
+            os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
+            "0",
+        )
+
+    def test_external_portable_forces_inherited_nmap_gate_off(self) -> None:
+        root = self._make_root()
+        for name in _MANAGED_VARS:
+            os.environ.pop(name, None)
+        os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"] = "1"
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.launcher.configure_environment(root)
+
+        self.assertEqual(
+            os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
+            "0",
+        )
+        self.assertNotIn("SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED", output.getvalue())
 
     def test_explicit_runtime_root_rewires_db_secrets_and_runtime_env(self) -> None:
         root = self._make_root()

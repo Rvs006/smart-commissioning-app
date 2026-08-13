@@ -13,6 +13,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -50,15 +51,35 @@ OBSERVATION_RETENTION_JOB_SCOPE_MAX_LENGTH = 255
 OBSERVATION_RETENTION_JOB_ACTOR_MAX_LENGTH = 255
 OBSERVATION_RETENTION_JOB_ERROR_CODE_MAX_LENGTH = 128
 
+NMAP_AUTHORITY_ID_MAX_LENGTH = 64
+NMAP_DEPLOYMENT_ID_MAX_LENGTH = 255
+NMAP_AUDIT_ACTOR_MAX_LENGTH = 255
+NMAP_AUDIT_REASON_MAX_LENGTH = 4_096
+NMAP_POLICY_TEXT_MAX_LENGTH = 4_096
+NMAP_POLICY_JSON_MAX_LENGTH = 32_768
+NMAP_PROTECTED_PATH_MAX_LENGTH = 2_048
 
-def _lowercase_sha256_check(column_name: str) -> str:
+RAW_EVIDENCE_ARTIFACT_ID_MAX_LENGTH = 64
+RAW_EVIDENCE_SCOPE_MAX_LENGTH = 255
+RAW_EVIDENCE_TYPE_MAX_LENGTH = 64
+RAW_EVIDENCE_MEDIA_TYPE_MAX_LENGTH = 255
+RAW_EVIDENCE_STORAGE_KEY_MAX_LENGTH = 512
+RAW_EVIDENCE_EXECUTOR_ID_MAX_LENGTH = 255
+RAW_EVIDENCE_AUDIT_ID_MAX_LENGTH = 64
+
+
+def _lowercase_hex_check(column_name: str, length: int) -> str:
     remainder = column_name
     for character in "0123456789abcdef":
         remainder = f"replace({remainder}, '{character}', '')"
     return (
-        f"length({column_name}) = 64 AND "
+        f"length({column_name}) = {length} AND "
         f"{column_name} = lower({column_name}) AND length({remainder}) = 0"
     )
+
+
+def _lowercase_sha256_check(column_name: str) -> str:
+    return _lowercase_hex_check(column_name, 64)
 
 
 class User(Base):
@@ -337,6 +358,139 @@ class RunDiscoveryObservationState(Base):
         CheckConstraint(
             _lowercase_sha256_check("observation_stream_sha256"),
             name="stream_sha256",
+        ),
+    )
+
+
+class RawEvidenceArtifact(Base):
+    """Immutable run-owned metadata for exact protected evidence bytes.
+
+    Filesystem locations are private implementation data. Callers and reports
+    use ``artifact_id`` plus the immutable digest and never receive a path.
+    """
+
+    __tablename__ = "raw_evidence_artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(
+        String(RAW_EVIDENCE_ARTIFACT_ID_MAX_LENGTH), primary_key=True
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="RESTRICT"), index=True
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(RAW_EVIDENCE_SCOPE_MAX_LENGTH), index=True
+    )
+    site_id: Mapped[str] = mapped_column(String(RAW_EVIDENCE_SCOPE_MAX_LENGTH), index=True)
+    artifact_type: Mapped[str] = mapped_column(String(RAW_EVIDENCE_TYPE_MAX_LENGTH))
+    media_type: Mapped[str] = mapped_column(String(RAW_EVIDENCE_MEDIA_TYPE_MAX_LENGTH))
+    storage_relpath: Mapped[str] = mapped_column(
+        String(RAW_EVIDENCE_STORAGE_KEY_MAX_LENGTH), unique=True
+    )
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    capture_complete: Mapped[bool] = mapped_column(Boolean)
+    producer_executor_id: Mapped[str] = mapped_column(
+        String(RAW_EVIDENCE_EXECUTOR_ID_MAX_LENGTH), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    sealed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+    __table_args__ = (
+        CheckConstraint(
+            "substr(artifact_id, 1, 9) = 'artifact_' AND "
+            + _lowercase_hex_check("substr(artifact_id, 10)", 32),
+            name="ck_raw_evidence_artifacts_opaque_id",
+        ),
+        CheckConstraint(
+            f"length(project_id) BETWEEN 1 AND {RAW_EVIDENCE_SCOPE_MAX_LENGTH} AND "
+            f"length(site_id) BETWEEN 1 AND {RAW_EVIDENCE_SCOPE_MAX_LENGTH}",
+            name="ck_raw_evidence_artifacts_scope_length",
+        ),
+        CheckConstraint(
+            f"length(artifact_type) BETWEEN 1 AND {RAW_EVIDENCE_TYPE_MAX_LENGTH} AND "
+            f"length(media_type) BETWEEN 3 AND {RAW_EVIDENCE_MEDIA_TYPE_MAX_LENGTH}",
+            name="ck_raw_evidence_artifacts_type_media_length",
+        ),
+        CheckConstraint(
+            f"length(storage_relpath) BETWEEN 1 AND {RAW_EVIDENCE_STORAGE_KEY_MAX_LENGTH} AND "
+            "storage_relpath LIKE 'objects/%' AND "
+            "storage_relpath NOT LIKE '%..%'",
+            name="ck_raw_evidence_artifacts_private_storage_key",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("sha256"),
+            name="ck_raw_evidence_artifacts_sha256",
+        ),
+        CheckConstraint(
+            "size_bytes BETWEEN 0 AND 67108864",
+            name="ck_raw_evidence_artifacts_size",
+        ),
+        CheckConstraint(
+            "capture_complete IN (false, true)",
+            name="ck_raw_evidence_artifacts_capture_complete",
+        ),
+        CheckConstraint(
+            f"length(producer_executor_id) BETWEEN 1 AND {RAW_EVIDENCE_EXECUTOR_ID_MAX_LENGTH}",
+            name="ck_raw_evidence_artifacts_executor_id",
+        ),
+        CheckConstraint(
+            "sealed_at >= created_at",
+            name="ck_raw_evidence_artifacts_timestamps",
+        ),
+        UniqueConstraint(
+            "artifact_id",
+            "run_id",
+            "project_id",
+            "site_id",
+            name="uq_raw_evidence_artifacts_owner",
+        ),
+        Index(
+            "ix_raw_evidence_artifacts_scope_run",
+            "project_id",
+            "site_id",
+            "run_id",
+            "sealed_at",
+        ),
+    )
+
+
+class RawEvidenceDownloadAudit(Base):
+    """Append-only audit of one verified project/site-scoped raw download."""
+
+    __tablename__ = "raw_evidence_download_audits"
+
+    audit_id: Mapped[str] = mapped_column(
+        String(RAW_EVIDENCE_AUDIT_ID_MAX_LENGTH), primary_key=True
+    )
+    artifact_id: Mapped[str] = mapped_column(String(RAW_EVIDENCE_ARTIFACT_ID_MAX_LENGTH))
+    run_id: Mapped[str] = mapped_column(String(64), index=True)
+    project_id: Mapped[str] = mapped_column(String(RAW_EVIDENCE_SCOPE_MAX_LENGTH), index=True)
+    site_id: Mapped[str] = mapped_column(String(RAW_EVIDENCE_SCOPE_MAX_LENGTH), index=True)
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    downloaded_by: Mapped[str] = mapped_column(String(RAW_EVIDENCE_EXECUTOR_ID_MAX_LENGTH))
+    downloaded_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            f"length(audit_id) BETWEEN 1 AND {RAW_EVIDENCE_AUDIT_ID_MAX_LENGTH} AND "
+            f"length(downloaded_by) BETWEEN 1 AND {RAW_EVIDENCE_EXECUTOR_ID_MAX_LENGTH}",
+            name="ck_raw_evidence_download_audits_identifiers",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("artifact_sha256"),
+            name="ck_raw_evidence_download_audits_sha256",
+        ),
+        CheckConstraint(
+            "size_bytes BETWEEN 0 AND 67108864",
+            name="ck_raw_evidence_download_audits_size",
+        ),
+        Index(
+            "ix_raw_evidence_download_audits_scope",
+            "project_id",
+            "site_id",
+            "run_id",
+            "downloaded_at",
         ),
     )
 
@@ -1016,6 +1170,334 @@ class ScanAuthorization(Base):
             "project_id",
             "site_id",
             "not_after",
+        ),
+    )
+
+
+class NmapDeploymentPolicy(Base):
+    """One immutable revision of deployment-wide Nmap authority.
+
+    The current policy is the highest revision for ``deployment_id``. Creating
+    a replacement inserts a new row and links it to the previous revision, so
+    deployment and licence decisions remain auditable outside mutable job
+    configuration snapshots.
+    """
+
+    __tablename__ = "nmap_deployment_policies"
+
+    policy_id: Mapped[str] = mapped_column(String(NMAP_AUTHORITY_ID_MAX_LENGTH), primary_key=True)
+    deployment_id: Mapped[str] = mapped_column(
+        String(NMAP_DEPLOYMENT_ID_MAX_LENGTH), index=True
+    )
+    network_executor_id: Mapped[str] = mapped_column(
+        String(NMAP_DEPLOYMENT_ID_MAX_LENGTH), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    deployment_lane: Mapped[str] = mapped_column(String(32))
+    provider_mode: Mapped[str] = mapped_column(String(32))
+    organization_internal: Mapped[bool] = mapped_column(Boolean)
+    deployment_owner: Mapped[str] = mapped_column(String(NMAP_AUDIT_ACTOR_MAX_LENGTH))
+    operator_install_responsibility: Mapped[str] = mapped_column(Text)
+    permitted_project_sites_json: Mapped[str] = mapped_column(Text)
+    permitted_project_sites_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    update_owner: Mapped[str] = mapped_column(String(NMAP_AUDIT_ACTOR_MAX_LENGTH))
+    reviewed_version_policy: Mapped[str] = mapped_column(Text)
+    permitted_publishers_json: Mapped[str] = mapped_column(Text)
+    permitted_versions_json: Mapped[str] = mapped_column(Text)
+    permitted_signer_sha256_json: Mapped[str] = mapped_column(Text)
+    permitted_executable_sha256_json: Mapped[str] = mapped_column(Text)
+    permitted_data_manifest_sha256_json: Mapped[str] = mapped_column(Text)
+    permitted_licence_sha256_json: Mapped[str] = mapped_column(Text)
+    permitted_npsl_versions_json: Mapped[str] = mapped_column(Text)
+    reviewed_scripts_json: Mapped[str] = mapped_column(Text)
+    max_data_files: Mapped[int] = mapped_column(Integer)
+    max_file_bytes: Mapped[int] = mapped_column(BigInteger)
+    max_manifest_bytes: Mapped[int] = mapped_column(BigInteger)
+    profile_policy_json: Mapped[str] = mapped_column(Text)
+    profile_policy_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    reviewed_at: Mapped[datetime] = mapped_column(UTCDateTime())
+    acknowledged_no_redistribution: Mapped[bool] = mapped_column(Boolean)
+    created_by: Mapped[str] = mapped_column(String(NMAP_AUDIT_ACTOR_MAX_LENGTH))
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    supersedes_policy_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "nmap_deployment_policies.policy_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint("revision > 0", name="ck_nmap_deployment_policies_revision"),
+        CheckConstraint(
+            "deployment_lane IN ('internal_same_organization', 'external_customer')",
+            name="ck_nmap_deployment_policies_lane",
+        ),
+        CheckConstraint(
+            "provider_mode IN ('disabled', 'operator_xml_import', "
+            "'internal_operator_managed')",
+            name="ck_nmap_deployment_policies_mode",
+        ),
+        CheckConstraint(
+            "(deployment_lane = 'internal_same_organization' AND "
+            "organization_internal IS TRUE) OR "
+            "(deployment_lane = 'external_customer' AND "
+            "organization_internal IS FALSE AND provider_mode = 'disabled')",
+            name="ck_nmap_deployment_policies_lane_mode",
+        ),
+        CheckConstraint(
+            "provider_mode = 'disabled' OR acknowledged_no_redistribution IS TRUE",
+            name="ck_nmap_deployment_policies_acknowledgement",
+        ),
+        CheckConstraint(
+            f"length(policy_id) BETWEEN 1 AND {NMAP_AUTHORITY_ID_MAX_LENGTH} AND "
+            f"length(deployment_id) BETWEEN 1 AND {NMAP_DEPLOYMENT_ID_MAX_LENGTH} AND "
+            f"length(network_executor_id) BETWEEN 1 AND {NMAP_DEPLOYMENT_ID_MAX_LENGTH} AND "
+            f"length(deployment_owner) BETWEEN 1 AND {NMAP_AUDIT_ACTOR_MAX_LENGTH} AND "
+            f"length(update_owner) BETWEEN 1 AND {NMAP_AUDIT_ACTOR_MAX_LENGTH} AND "
+            f"length(created_by) BETWEEN 1 AND {NMAP_AUDIT_ACTOR_MAX_LENGTH}",
+            name="ck_nmap_deployment_policies_identifiers",
+        ),
+        CheckConstraint(
+            f"length(operator_install_responsibility) BETWEEN 1 AND {NMAP_POLICY_TEXT_MAX_LENGTH} "
+            f"AND length(reviewed_version_policy) BETWEEN 1 AND {NMAP_POLICY_TEXT_MAX_LENGTH} "
+            f"AND length(reason) BETWEEN 1 AND {NMAP_AUDIT_REASON_MAX_LENGTH}",
+            name="ck_nmap_deployment_policies_text",
+        ),
+        CheckConstraint(
+            f"length(permitted_project_sites_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_publishers_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_versions_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_signer_sha256_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_executable_sha256_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_data_manifest_sha256_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_licence_sha256_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(permitted_npsl_versions_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(reviewed_scripts_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH} "
+            f"AND length(profile_policy_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH}",
+            name="ck_nmap_deployment_policies_json_bounds",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("permitted_project_sites_sha256")
+            + " AND "
+            + _lowercase_sha256_check("profile_policy_sha256"),
+            name="ck_nmap_deployment_policies_policy_sha256",
+        ),
+        CheckConstraint(
+            "max_data_files BETWEEN 1 AND 65536 AND "
+            "max_file_bytes BETWEEN 1024 AND 536870912 AND "
+            "max_manifest_bytes BETWEEN 1024 AND 4294967296 AND "
+            "max_manifest_bytes >= max_file_bytes",
+            name="ck_nmap_deployment_policies_manifest_limits",
+        ),
+        CheckConstraint(
+            "supersedes_policy_id IS NULL OR supersedes_policy_id <> policy_id",
+            name="ck_nmap_deployment_policies_not_self_superseding",
+        ),
+        UniqueConstraint(
+            "deployment_id",
+            "network_executor_id",
+            "revision",
+            name="uq_nmap_deployment_policies_revision",
+        ),
+        UniqueConstraint(
+            "supersedes_policy_id",
+            name="uq_nmap_deployment_policies_linear_history",
+        ),
+        UniqueConstraint(
+            "policy_id",
+            "deployment_id",
+            "network_executor_id",
+            "revision",
+            "deployment_lane",
+            "provider_mode",
+            "permitted_project_sites_sha256",
+            name="uq_nmap_deployment_policies_confirmation_binding",
+        ),
+        Index(
+            "ix_nmap_deployment_policies_current",
+            "deployment_id",
+            "network_executor_id",
+            "revision",
+        ),
+    )
+
+
+class NmapInstallationConfirmation(Base):
+    """Append-only administrator confirmation of one exact trusted install."""
+
+    __tablename__ = "nmap_installation_confirmations"
+
+    confirmation_id: Mapped[str] = mapped_column(
+        String(NMAP_AUTHORITY_ID_MAX_LENGTH), primary_key=True
+    )
+    policy_id: Mapped[str] = mapped_column(String(NMAP_AUTHORITY_ID_MAX_LENGTH))
+    deployment_id: Mapped[str] = mapped_column(
+        String(NMAP_DEPLOYMENT_ID_MAX_LENGTH), index=True
+    )
+    network_executor_id: Mapped[str] = mapped_column(
+        String(NMAP_DEPLOYMENT_ID_MAX_LENGTH), index=True
+    )
+    policy_revision: Mapped[int] = mapped_column(Integer)
+    deployment_lane: Mapped[str] = mapped_column(String(32))
+    provider_mode: Mapped[str] = mapped_column(String(32))
+    permitted_project_sites_json: Mapped[str] = mapped_column(Text)
+    permitted_project_sites_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    detection_candidate_json: Mapped[str] = mapped_column(Text)
+    detection_candidate_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    machine_executor_identity: Mapped[str] = mapped_column(
+        String(NMAP_DEPLOYMENT_ID_MAX_LENGTH), index=True
+    )
+    publisher: Mapped[str] = mapped_column(String(512))
+    version: Mapped[str] = mapped_column(String(128))
+    # Protected persistence only. Public capability responses expose neither
+    # these paths nor the ACL/reparse evidence used to trust them.
+    install_root: Mapped[str] = mapped_column(Text)
+    executable_path: Mapped[str] = mapped_column(Text)
+    data_directory: Mapped[str] = mapped_column(Text)
+    executable_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    data_manifest_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    data_file_count: Mapped[int] = mapped_column(Integer)
+    data_total_bytes: Mapped[int] = mapped_column(BigInteger)
+    licence_relative_path: Mapped[str] = mapped_column(String(255))
+    licence_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    npsl_version: Mapped[str] = mapped_column(String(32))
+    reviewed_scripts_json: Mapped[str] = mapped_column(Text)
+    signer_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    fingerprint_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    npcap_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    npcap_state: Mapped[str] = mapped_column(String(32))
+    raw_capable: Mapped[bool] = mapped_column(Boolean)
+    confirmed_by: Mapped[str] = mapped_column(String(NMAP_AUDIT_ACTOR_MAX_LENGTH))
+    reason: Mapped[str] = mapped_column(Text)
+    confirmed_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "policy_id",
+                "deployment_id",
+                "network_executor_id",
+                "policy_revision",
+                "deployment_lane",
+                "provider_mode",
+                "permitted_project_sites_sha256",
+            ],
+            [
+                "nmap_deployment_policies.policy_id",
+                "nmap_deployment_policies.deployment_id",
+                "nmap_deployment_policies.network_executor_id",
+                "nmap_deployment_policies.revision",
+                "nmap_deployment_policies.deployment_lane",
+                "nmap_deployment_policies.provider_mode",
+                "nmap_deployment_policies.permitted_project_sites_sha256",
+            ],
+            ondelete="RESTRICT",
+            name="fk_nmap_confirmations_exact_policy",
+        ),
+        CheckConstraint(
+            "policy_revision > 0",
+            name="ck_nmap_installation_confirmations_policy_revision",
+        ),
+        CheckConstraint(
+            "deployment_lane = 'internal_same_organization' AND "
+            "provider_mode = 'internal_operator_managed'",
+            name="ck_nmap_installation_confirmations_internal_only",
+        ),
+        CheckConstraint(
+            f"length(confirmation_id) BETWEEN 1 AND {NMAP_AUTHORITY_ID_MAX_LENGTH} AND "
+            f"length(policy_id) BETWEEN 1 AND {NMAP_AUTHORITY_ID_MAX_LENGTH} AND "
+            f"length(deployment_id) BETWEEN 1 AND {NMAP_DEPLOYMENT_ID_MAX_LENGTH} AND "
+            f"length(network_executor_id) BETWEEN 1 AND {NMAP_DEPLOYMENT_ID_MAX_LENGTH} AND "
+            f"length(machine_executor_identity) BETWEEN 1 AND {NMAP_DEPLOYMENT_ID_MAX_LENGTH} AND "
+            f"length(confirmed_by) BETWEEN 1 AND {NMAP_AUDIT_ACTOR_MAX_LENGTH}",
+            name="ck_nmap_installation_confirmations_identifiers",
+        ),
+        CheckConstraint(
+            "length(machine_executor_identity) = 49 AND "
+            "substr(machine_executor_identity, 1, 13) = 'machine-guid:' AND "
+            "machine_executor_identity = lower(machine_executor_identity)",
+            name="ck_nmap_installation_confirmations_machine_identity",
+        ),
+        CheckConstraint(
+            f"length(permitted_project_sites_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH}",
+            name="ck_nmap_installation_confirmations_scope_json",
+        ),
+        CheckConstraint(
+            f"length(detection_candidate_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH}",
+            name="ck_nmap_installation_confirmations_candidate_json",
+        ),
+        CheckConstraint(
+            f"length(reviewed_scripts_json) BETWEEN 2 AND {NMAP_POLICY_JSON_MAX_LENGTH}",
+            name="ck_nmap_installation_confirmations_scripts_json",
+        ),
+        CheckConstraint(
+            "length(publisher) BETWEEN 1 AND 512 AND length(version) BETWEEN 1 AND 128 "
+            "AND length(npsl_version) BETWEEN 1 AND 32",
+            name="ck_nmap_installation_confirmations_identity_text",
+        ),
+        CheckConstraint(
+            f"length(install_root) BETWEEN 3 AND {NMAP_PROTECTED_PATH_MAX_LENGTH} AND "
+            f"length(executable_path) BETWEEN 3 AND {NMAP_PROTECTED_PATH_MAX_LENGTH} AND "
+            f"length(data_directory) BETWEEN 3 AND {NMAP_PROTECTED_PATH_MAX_LENGTH}",
+            name="ck_nmap_installation_confirmations_path_bounds",
+        ),
+        CheckConstraint(
+            "data_file_count BETWEEN 1 AND 65536",
+            name="ck_nmap_installation_confirmations_file_count",
+        ),
+        CheckConstraint(
+            "data_total_bytes BETWEEN 1 AND 4294967296",
+            name="ck_nmap_installation_confirmations_data_bytes",
+        ),
+        CheckConstraint(
+            "length(licence_relative_path) BETWEEN 1 AND 255 "
+            "AND licence_relative_path NOT IN ('.', '..')",
+            name="ck_nmap_installation_confirmations_licence_path",
+        ),
+        CheckConstraint(
+            "npcap_state IN ('not_checked', 'missing', 'admin_only', "
+            "'connect_only', 'raw_capable')",
+            name="ck_nmap_installation_confirmations_npcap_state",
+        ),
+        CheckConstraint(
+            "(raw_capable IS TRUE AND npcap_state = 'raw_capable') OR "
+            "(raw_capable IS FALSE AND npcap_state <> 'raw_capable')",
+            name="ck_nmap_installation_confirmations_raw_capability",
+        ),
+        CheckConstraint(
+            f"length(reason) BETWEEN 1 AND {NMAP_AUDIT_REASON_MAX_LENGTH}",
+            name="ck_nmap_installation_confirmations_reason",
+        ),
+        CheckConstraint(
+            "npcap_version IS NULL OR length(npcap_version) BETWEEN 1 AND 128",
+            name="ck_nmap_installation_confirmations_npcap_version",
+        ),
+        CheckConstraint(
+            " AND ".join(
+                _lowercase_sha256_check(column_name)
+                for column_name in (
+                    "executable_sha256",
+                    "data_manifest_sha256",
+                    "licence_sha256",
+                    "signer_sha256",
+                    "permitted_project_sites_sha256",
+                    "detection_candidate_sha256",
+                    "fingerprint_sha256",
+                )
+            ),
+            name="ck_nmap_installation_confirmations_sha256",
+        ),
+        Index(
+            "ix_nmap_installation_confirmations_policy_time",
+            "policy_id",
+            "confirmed_at",
+        ),
+        Index(
+            "ix_nmap_installation_confirmations_deployment_time",
+            "deployment_id",
+            "confirmed_at",
         ),
     )
 

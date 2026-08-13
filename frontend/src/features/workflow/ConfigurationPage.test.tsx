@@ -1422,4 +1422,43 @@ describe("ConfigurationPage", () => {
 
     expect(await screen.findByText(/Uploaded 1 file/i)).toBeInTheDocument();
   });
+
+  it("mounts Nmap deployment authority in configuration only for a global admin", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({
+            effective_scopes: [],
+            global_scope: true,
+            role: "admin",
+            source: "user_key",
+            username: "admin-1",
+          });
+        }
+        if (url.endsWith("/api/v1/system/interfaces")) {
+          return jsonResponse([]);
+        }
+        if (url.endsWith("/api/v1/configuration")) {
+          return jsonResponse(configurationPayload());
+        }
+        if (url.endsWith("/api/v1/nmap/policies")) {
+          return jsonResponse([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { name: "Nmap deployment authority" });
+    expect(heading).toBeVisible();
+    const authority = heading.closest("section");
+    expect(authority).not.toBeNull();
+    const policyForm = within(authority as HTMLElement).getByRole("form", {
+      name: "Create Nmap deployment policy",
+    });
+    expect(within(policyForm).queryByRole("button", { name: "Save Configuration" })).toBeNull();
+  });
 });

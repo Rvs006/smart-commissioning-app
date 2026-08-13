@@ -52,6 +52,23 @@ class WorkerHeartbeatConfigurationTests(unittest.TestCase):
             configured = config.get_settings()
         self.assertEqual(configured.deployment_id, "field-deployment-7")
 
+    def test_network_executor_identity_is_explicit_and_trimmed(self) -> None:
+        defaults = self._load(lease="60", heartbeat="15")
+        self.assertIsNone(defaults.network_executor_id)
+
+        config.get_settings.cache_clear()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RUN_LEASE_SECONDS": "60",
+                "RUN_HEARTBEAT_SECONDS": "15",
+                "SMART_COMMISSIONING_NETWORK_EXECUTOR_ID": "  field-netns-7  ",
+            },
+            clear=True,
+        ):
+            configured = config.get_settings()
+        self.assertEqual(configured.network_executor_id, "field-netns-7")
+
     def test_rejects_empty_or_oversized_deployment_identity(self) -> None:
         for deployment_id in ("   ", "x" * 256):
             config.get_settings.cache_clear()

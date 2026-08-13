@@ -5,16 +5,15 @@ database (harness.ApiTestCase: env overrides + cache clears BEFORE app.main is
 imported, TestClient entered as a context manager so the startup lifespan
 applies migrations).
 
-Covered: a real (non-dry-run) discovery run whose EFFECTIVE source_ip fails
-``interface_service.ensure_source_ip_available`` is rejected with HTTP 400 and
-the guard's exact actionable message, BEFORE any run record is persisted (no
-orphaned runs, no silent fallback to another NIC); a dry_run skips the guard
-(side-effect-free preview convention); and when the guard passes, the created
-run persists the injected source_ip / local_address for the worker path.
+Covered: every preview freezes a concrete NIC identity, while a real discovery
+run whose frozen identity disappears is rejected with HTTP 400 before any run
+record is persisted (no orphaned run and no fallback to another NIC). A dry
+preview skips only the bind proof. A passing live run repeats the guard before
+inline transport and persists the exact source identity for queued execution.
 
-The guard itself is patched at the module attribute the route looks up at call
-time (``app.services.interface_service.ensure_source_ip_available``), so no
-test depends on the CI host's real NICs. A DEDICATED project/site pair is used
+The resolver and shared runtime guard are patched at the module attributes the
+route calls, so no test depends on the CI host's real NICs. A DEDICATED
+project/site pair is used
 because the configuration snapshot is shared per (project, site) across the
 whole test process — writing a Source Interface into demo-project would leak
 into the other API test modules' runs.
@@ -46,7 +45,22 @@ _NOT_PRESENT_DETAIL = (
     "works; a BACnet scan requires a specific adapter)."
 )
 
-_GUARD_TARGET = "app.services.interface_service.ensure_source_ip_available"
+_GUARD_TARGET = "app.api.routes.discovery.interface_service.guard_frozen_source_interface"
+_RESOLVER_TARGET = "app.services.engine_dispatch.interface_service.resolve_source_interface_identity"
+
+
+def _frozen_identity() -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "selection": "explicit",
+        "executor_scope": "inline:smart-commissioning-local",
+        "interface_id": "test-if:77",
+        "interface_name": "Test field NIC",
+        "source_ip": "192.168.77.5",
+        "prefix_length": 24,
+        "local_address": "192.168.77.5/24",
+        "default_route_metric": None,
+    }
 
 
 class DiscoverySourceInterfaceGuardTests(ApiTestCase):
@@ -140,7 +154,8 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
         )
 
     def _authorized_live_payload(self, parameters: dict) -> tuple[str, str]:
-        preview = self._post_ip_run({**parameters, "dry_run": True})
+        with patch(_RESOLVER_TARGET, return_value=_frozen_identity()):
+            preview = self._post_ip_run({**parameters, "dry_run": True})
         self.assertEqual(preview.status_code, 200, preview.text)
         now = datetime.now(UTC)
         authorization = self.client.post(
@@ -175,15 +190,22 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
             )
         self.assertEqual(response.status_code, 400, response.text)
         self.assertEqual(response.json()["detail"], _NOT_PRESENT_DETAIL)
-        guard.assert_called_once_with("192.168.77.5")
+        self.assertEqual(guard.call_count, 1)
+        self.assertEqual(
+            guard.call_args.kwargs["expected_executor_scope"],
+            "inline:smart-commissioning-local",
+        )
         self.assertEqual(self._run_count(), runs_before, "a rejected request must not persist an orphaned run")
 
-    def test_dry_run_skips_the_guard(self) -> None:
-        # Previews are side-effect-free by convention: the guard must not run.
-        with patch(_GUARD_TARGET, side_effect=ValueError(_NOT_PRESENT_DETAIL)) as guard:
+    def test_dry_run_freezes_identity_but_skips_bind_guard(self) -> None:
+        with (
+            patch(_RESOLVER_TARGET, return_value=_frozen_identity()) as resolver,
+            patch(_GUARD_TARGET, side_effect=ValueError(_NOT_PRESENT_DETAIL)) as guard,
+        ):
             response = self._post_ip_run({"dry_run": True, "addresses": ["192.168.77.10"]})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["status"], "succeeded")
+        resolver.assert_called_once()
         guard.assert_not_called()
 
     def test_available_source_interface_creates_run_with_injected_parameters(self) -> None:
@@ -202,7 +224,12 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
                 scan_authorization_id=authorization_id,
             )
         self.assertEqual(response.status_code, 200, response.text)
-        guard.assert_called_once_with("192.168.77.5")
+        self.assertEqual(guard.call_count, 2)
+        for call in guard.call_args_list:
+            self.assertEqual(
+                call.kwargs["expected_executor_scope"],
+                "inline:smart-commissioning-local",
+            )
 
         # The injected source NIC is persisted into run.parameters (the worker
         # path reads run.parameters, not the inline dict). The run itself may
@@ -214,6 +241,76 @@ class DiscoverySourceInterfaceGuardTests(ApiTestCase):
         parameters = run.json()["parameters"]
         self.assertEqual(parameters["source_ip"], "192.168.77.5")
         self.assertEqual(parameters["local_address"], "192.168.77.5/24")
+        self.assertEqual(parameters["source_interface_identity_v1"], _frozen_identity())
+
+    def test_interface_disappearing_after_creation_fails_before_inline_transport(self) -> None:
+        preview_run_id, authorization_id = self._authorized_live_payload(
+            {"addresses": ["192.168.77.10"], "ports": [443]}
+        )
+        processor_target = "app.api.routes.discovery.process_ip_discovery_run"
+        with (
+            patch(
+                _GUARD_TARGET,
+                side_effect=[None, ValueError(_NOT_PRESENT_DETAIL)],
+            ) as guard,
+            patch(processor_target) as processor,
+        ):
+            response = self._post_ip_run(
+                {},
+                preview_run_id=preview_run_id,
+                scan_authorization_id=authorization_id,
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(guard.call_count, 2)
+        processor.assert_not_called()
+        run = self.client.get(
+            f"/api/v1/discovery/runs/{response.json()['run_id']}",
+            headers=self._engineer_headers(),
+        )
+        self.assertEqual(run.status_code, 200, run.text)
+        self.assertEqual(run.json()["status"], "failed")
+        self.assertEqual(run.json()["parameters"]["source_ip"], "192.168.77.5")
+        self.assertEqual(
+            run.json()["parameters"]["source_interface_identity_v1"],
+            _frozen_identity(),
+        )
+
+
+class QueuedNetworkExecutorPolicyTests(ApiTestCase):
+    env = {
+        "JOB_EXECUTION_MODE": "queue",
+        "SMART_COMMISSIONING_NETWORK_EXECUTOR_ID": None,
+        "AUTH_MODE": "api_key",
+        "API_KEY": _SHARED_KEY,
+    }
+
+    def test_queue_preview_requires_an_explicit_network_executor(self) -> None:
+        headers = {"X-API-Key": _SHARED_KEY}
+        before = self.client.get("/api/v1/discovery/runs", headers=headers)
+        self.assertEqual(before.status_code, 200, before.text)
+
+        response = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            headers=headers,
+            json={
+                "project_id": "queued-network-policy-project",
+                "site_id": "queued-network-policy-site",
+                "job_type": "ip_discovery",
+                "parameters": {
+                    "dry_run": True,
+                    "addresses": ["192.0.2.10"],
+                    "ports": [443],
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertIn("SMART_COMMISSIONING_NETWORK_EXECUTOR_ID", response.json()["detail"])
+        self.assertIn("same OS network namespace", response.json()["detail"])
+        after = self.client.get("/api/v1/discovery/runs", headers=headers)
+        self.assertEqual(after.status_code, 200, after.text)
+        self.assertEqual(after.json()["runs"], before.json()["runs"])
 
 
 if __name__ == "__main__":

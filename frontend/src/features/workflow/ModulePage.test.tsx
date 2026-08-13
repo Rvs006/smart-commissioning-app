@@ -32,6 +32,26 @@ const acceptedRun = {
   message: "IP discovery accepted.",
 };
 
+const previewAuthorization = {
+  authorization_id: "auth-ip-1",
+  preview_run_id: "run-ip-1",
+  project_id: "demo-project",
+  site_id: "demo-site",
+  packet_plan_sha256: "a".repeat(64),
+  approved_by: "admin-1",
+  ticket: "CHG-1001",
+  purpose: "ModulePage contract test",
+  not_before: "2026-06-11T08:00:00Z",
+  not_after: "2026-06-11T18:00:00Z",
+  max_uses: 1,
+  use_count: 0,
+  consumed_run_id: null,
+  revoked_at: null,
+  revoked_by: null,
+  revoke_reason: null,
+  created_at: "2026-06-11T08:00:00Z",
+};
+
 const terminalRun = {
   run_id: "run-ip-1",
   job_type: "ip_discovery",
@@ -43,7 +63,55 @@ const terminalRun = {
   project_id: "demo-project",
   site_id: "demo-site",
   parameters: {},
-  result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+  result_summary: {
+    hosts_responsive: 1,
+    hosts_scanned: 3,
+    ip_headline_metrics_v1: {
+      schema_version: "1.0",
+      metrics: [
+        {
+          schema_version: "1.0",
+          heading: "Expected Devices",
+          configured: true,
+          value: 2,
+          denominator: 2,
+          percentage: 100,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+        {
+          schema_version: "1.0",
+          heading: "Reachable Devices",
+          configured: true,
+          value: 1,
+          denominator: 3,
+          percentage: 33.33,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+        {
+          schema_version: "1.0",
+          heading: "Register Matches",
+          configured: true,
+          value: 1,
+          denominator: 2,
+          percentage: 50,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+        {
+          schema_version: "1.0",
+          heading: "Unexpected / Unregistered Hosts",
+          configured: true,
+          value: 0,
+          denominator: 3,
+          percentage: 0,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+      ],
+    },
+  },
   error_message: null,
 };
 
@@ -51,7 +119,11 @@ const resultsPayload = {
   run_id: "run-ip-1",
   job_type: "ip_discovery",
   status: "succeeded",
-  result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+  result_summary: {
+    ...terminalRun.result_summary,
+    hosts_responsive: 1,
+    hosts_scanned: 3,
+  },
   discovered_assets: [
     {
       asset_id: null,
@@ -134,6 +206,7 @@ function renderModule(route: string, initialEntry = "/") {
   // A key is set so the SessionProvider fetches /me; the stubs below return an
   // engineer role, matching the pre-RBAC behaviour these wiring tests assert.
   setApiKey("engineer-key");
+  stubScanAuthorizationFallback();
   return render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider>
@@ -144,6 +217,42 @@ function renderModule(route: string, initialEntry = "/") {
       </SessionProvider>
     </QueryClientProvider>,
   );
+}
+
+function stubScanAuthorizationFallback() {
+  const currentFetch = globalThis.fetch;
+  if (typeof currentFetch !== "function") return;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/discovery/scan-authorizations?")) {
+        return jsonResponse([previewAuthorization]);
+      }
+      return currentFetch(input, init);
+    }),
+  );
+}
+
+async function prepareAuthorizedIpRun(): Promise<HTMLElement> {
+  const dryRun = await screen.findByLabelText(/Dry run/i);
+  fireEvent.click(dryRun);
+  const previewButton = await screen.findByRole("button", { name: "Preview" });
+  await waitFor(() => expect(previewButton).toBeEnabled());
+  fireEvent.click(previewButton);
+  await waitFor(() => expect(screen.getByText(/Run ID: run-ip-1/i)).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText(/Dry run/i));
+  fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+  const authorization = await screen.findByRole("combobox", {
+    name: /Sealed preview authorization/i,
+  });
+  await waitFor(() => expect(authorization).toBeEnabled());
+  fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+
+  const runButton = await screen.findByRole("button", { name: "Run" });
+  await waitFor(() => expect(runButton).toBeEnabled());
+  return runButton;
 }
 
 async function submitReportDialog(opener: HTMLElement, title?: string) {
@@ -170,7 +279,7 @@ describe("ModulePage discovery wiring", () => {
     // a TCP-connect miss, never proof a host is absent.
     const liveResultsPayload = {
       ...resultsPayload,
-      result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+      result_summary: { ...resultsPayload.result_summary, hosts_responsive: 1, hosts_scanned: 3 },
       discovered_assets: [
         ...resultsPayload.discovered_assets,
         {
@@ -231,14 +340,15 @@ describe("ModulePage discovery wiring", () => {
     const queueButton = await screen.findByRole("button", { name: "Run" });
     expect(queueButton).toBeDisabled();
 
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    // Enabled once the engineer role resolves (/me) and auth is confirmed.
-    await waitFor(() => expect(queueButton).toBeEnabled());
-
-    fireEvent.click(queueButton);
+    const authorizedRunButton = await prepareAuthorizedIpRun();
+    fireEvent.click(authorizedRunButton);
 
     // Run monitor appears and live discovered hosts render from the results payload.
     expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+    await waitFor(
+      () => expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
+      { timeout: 5000 },
+    );
     // hostname is unique to the live results payload (not present in sample rows);
     // it now appears in both the results table and the selected-result detail aside.
     expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
@@ -258,6 +368,11 @@ describe("ModulePage discovery wiring", () => {
     // old hardcoded "118" sample.
     expect(await screen.findByText("responsive hosts")).toBeInTheDocument();
     expect(screen.queryByText("118")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "IP scan headline metrics" })).toBeInTheDocument();
+    expect(screen.getByText("Expected Devices")).toBeInTheDocument();
+    expect(screen.getByText("Reachable Devices")).toBeInTheDocument();
+    expect(screen.getByText("Register Matches")).toBeInTheDocument();
+    expect(screen.getByText("Unexpected / Unregistered Hosts")).toBeInTheDocument();
 
     // A run the operator started here auto-advances to Results on success. Only
     // a *restored* run is exempt (see the run retention suite below).
@@ -420,7 +535,8 @@ describe("ModulePage discovery wiring", () => {
   });
 
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
-    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    let previewBody: { parameters: Record<string, unknown> } | null = null;
+    let liveBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -437,7 +553,9 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(profilesPayload);
         }
         if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
-          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          const body = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          if (body.parameters.dry_run === true) previewBody = body;
+          else liveBody = body;
           return jsonResponse(acceptedRun);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
@@ -457,25 +575,97 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.change(screen.getByLabelText(/Target override/i), {
       target: { value: "10.20.0.0/24" },
     });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(queueButton).toBeEnabled());
+    const queueButton = await prepareAuthorizedIpRun();
     fireEvent.click(queueButton);
 
-    await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+    await waitFor(() => expect(previewBody).not.toBeNull());
+    const parameters = (previewBody as unknown as { parameters: Record<string, unknown> })
       .parameters;
-    // CIDR override flows through as parameters.cidr; the single-address branch
-    // is untouched, so no addresses key is sent.
+    // CIDR override belongs to the sealed preview. The authorized live request
+    // carries only the preview and authorization references.
     expect(parameters.cidr).toBe("10.20.0.0/24");
     expect(parameters).not.toHaveProperty("addresses");
     expect(parameters).not.toHaveProperty("start");
     expect(parameters).not.toHaveProperty("end");
-    // Fix 6: only the boolean shorthand is sent; the backend stamps the real
-    // authenticated principal, so no fabricated scan_authorization block.
-    expect(parameters.authorized).toBe(true);
-    expect(parameters).not.toHaveProperty("scan_authorization");
+    expect(parameters.dry_run).toBe(true);
+    expect(liveBody).toEqual({
+      job_type: "ip_discovery",
+      parameters: {},
+      preview_run_id: "run-ip-1",
+      scan_authorization_id: previewAuthorization.authorization_id,
+      project_id: "demo-project",
+      site_id: "demo-site",
+    });
+  });
+
+  it("shows only confirmed Nmap profiles and submits the exact fixed profile contract", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/imports/latest")) {
+          return new Response(JSON.stringify({ detail: "none" }), { status: 404 });
+        }
+        if (url.includes("/api/v1/nmap/capability?")) {
+          return jsonResponse({
+            schema_version: "1.0",
+            provider: "nmap",
+            state: "available",
+            reason: "available",
+            provider_mode: "internal_operator_managed",
+            policy_id: "policy-1",
+            policy_revision: 2,
+            publisher: "Insecure.Com LLC",
+            version: "7.98",
+            fingerprint_sha256: "a".repeat(64),
+            npcap_version: "1.83",
+            npcap_state: "raw_capable",
+            raw_capable: true,
+            process_selection_allowed: true,
+            xml_import_allowed: false,
+            permitted_profiles: ["selected_udp", "host_discovery"],
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    expect(await screen.findByText(/Nmap 7\.98 is confirmed for this site/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Discovery provider"), {
+      target: { value: "operator_managed_nmap" },
+    });
+    const profile = screen.getByLabelText("Fixed Nmap profile");
+    expect(within(profile).queryByRole("option", { name: "OS inventory" })).not.toBeInTheDocument();
+    expect((profile as HTMLSelectElement).value).toBe("selected_udp");
+    expect((screen.getAllByLabelText("Protocol")[0] as HTMLSelectElement).value).toBe("udp");
+    fireEvent.change(profile, { target: { value: "host_discovery" } });
+    expect(screen.queryByRole("button", { name: "Add port" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/Dry run/));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
+    expect(parameters.provider).toBe("operator_managed_nmap");
+    expect(parameters.nmap_profile).toBe("host_discovery");
+    expect(parameters).not.toHaveProperty("port_specification");
   });
 
   const mqttAccepted = {
@@ -1216,10 +1406,8 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("ip-scanner");
 
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    await waitFor(() => expect(queueButton).toBeEnabled());
-    fireEvent.click(queueButton);
+    const authorizedRunButton = await prepareAuthorizedIpRun();
+    fireEvent.click(authorizedRunButton);
 
     // The now-populated MAC column renders (header + the live cell value), proving
     // the engine's mac_address flows through to the table.
@@ -1347,9 +1535,7 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("ip-scanner");
 
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(queueButton).toBeEnabled());
+    const queueButton = await prepareAuthorizedIpRun();
     fireEvent.click(queueButton);
 
     expect(
@@ -4874,7 +5060,7 @@ describe("ModulePage UDMI workbench live results", () => {
     );
     expect(screen.getByRole("button", { name: "Execute capture" })).toHaveAttribute(
       "title",
-      "A run is already in progress — stop it before starting another.",
+      "A run is already in progress. Stop it before starting another.",
     );
 
     // Progress + elapsed (ITEM-6): the monitor shows an Elapsed entry, and an
@@ -5500,6 +5686,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
   it("clears a stale over-cap capture window when navigating to another module", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
+    stubScanAuthorizationFallback();
     const queryClient = new QueryClient({
       defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
     });
@@ -6222,9 +6409,7 @@ describe("ModulePage run retention", () => {
     renderModule("ip-scanner");
     expect(stepOf()).toBe("setup");
 
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
+    const runButton = await prepareAuthorizedIpRun();
     fireEvent.click(runButton);
 
     await waitFor(() => expect(stepOf()).toBe("run"));
@@ -6401,9 +6586,7 @@ describe("ModulePage progressive discovery observations", () => {
     );
 
     renderModule("ip-scanner", "/ip-scanner");
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
+    const runButton = await prepareAuthorizedIpRun();
     fireEvent.click(runButton);
 
     await waitFor(() =>
@@ -6530,7 +6713,7 @@ describe("ModulePage progressive discovery observations", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeDisabled());
     expect(screen.getByRole("button", { name: "Run" })).toHaveAttribute(
       "title",
-      "A run is already in progress — stop it before starting another.",
+      "A run is already in progress. Stop it before starting another.",
     );
   });
 
@@ -7259,9 +7442,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    expect((await screen.findAllByText("quarantined-sealed-controller")).length).toBeGreaterThan(
-      0,
-    );
+    expect((await screen.findAllByText("quarantined-sealed-controller")).length).toBeGreaterThan(0);
     expect(screen.queryByText("quarantined-provisional-controller")).not.toBeInTheDocument();
     const connectionStatus = screen.getByRole("status", { name: "Discovery connection" });
     expect(connectionStatus).toHaveTextContent(
@@ -7911,6 +8092,7 @@ describe("ModulePage reports visibility", () => {
     });
     setApiKey("engineer-key");
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    stubScanAuthorizationFallback();
     render(
       <QueryClientProvider client={queryClient}>
         <SessionProvider>
@@ -7921,9 +8103,7 @@ describe("ModulePage reports visibility", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
+    const runButton = await prepareAuthorizedIpRun();
     fireEvent.click(runButton);
 
     const generateButtons = await screen.findAllByRole("button", {
@@ -8375,9 +8555,7 @@ describe("ModulePage snap-to-top when results open", () => {
     stubIpScanner();
     renderModule("ip-scanner");
 
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    await waitFor(() => expect(queueButton).toBeEnabled());
+    const queueButton = await prepareAuthorizedIpRun();
 
     // Nothing has opened Results yet, so setting up must not move the page.
     expect(scrollSpy).not.toHaveBeenCalled();

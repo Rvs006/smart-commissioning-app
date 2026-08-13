@@ -18,6 +18,7 @@ import {
 } from "../../api/client";
 import { isSecretSentinel, maskSecretValue } from "./secretField";
 import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
+import { NmapAuthorityPanel } from "./NmapAuthorityPanel";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { mergeConfigurationRefresh } from "./configurationRefresh";
@@ -628,7 +629,8 @@ export function ConfigurationPage() {
   );
 
   return (
-    <form className="stack" onSubmit={handleSubmit}>
+    <div className="stack">
+      <form className="stack" onSubmit={handleSubmit}>
       <section className="hero">
         <div className="hero-banner">
           <h2>Configuration</h2>
@@ -939,7 +941,9 @@ export function ConfigurationPage() {
           );
         })}
       </section>
-    </form>
+      </form>
+      <NmapAuthorityPanel />
+    </div>
   );
 }
 

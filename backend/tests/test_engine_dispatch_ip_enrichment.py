@@ -1,49 +1,77 @@
-"""Unit tests for engine_dispatch.resolve_ip_enrichment (reverse-DNS default).
+"""Unit tests for the first-release IP enrichment boundary.
 
-HONESTY: no sockets, no DNS, no ARP. This exercises the pure parameter-defaulting
-helper that makes an authorized, non-dry-run IP sweep resolve hostnames (reverse
-DNS) best-effort, while leaving dry-run previews and an explicit operator opt-out
-untouched. A blank hostname (no PTR) / blank MAC (no ARP entry) is honest and is
-produced by the engine, not fabricated here.
+HONESTY: no sockets, DNS, cache reads, or processes are permitted by this helper.
+Hostname and MAC values must come from frozen register or scan-protocol evidence.
 """
 
 import unittest
 
-from app.services.engine_dispatch import resolve_ip_enrichment
+from app.services.engine_dispatch import build_throttle, resolve_ip_enrichment
+
+
+class IpProviderExecutionBoundaryTests(unittest.TestCase):
+    def test_operator_managed_provider_reaches_its_own_runtime_gate(self) -> None:
+        parameters = {
+            "scan_contract_v1": {
+                "job_type": "ip_discovery",
+                "ip": {
+                    "provider": "operator_managed_nmap",
+                    "provider_state": {"provider": "operator_managed_nmap"},
+                },
+            }
+        }
+        build_throttle(
+            parameters,
+            max_concurrency=8,
+            rate_limit_per_sec=10,
+            connect_timeout_s=3,
+        )
+
+    def test_disabled_builtin_provider_is_rejected_before_dispatch(self) -> None:
+        parameters = {
+            "scan_contract_v1": {
+                "job_type": "ip_discovery",
+                "ip": {
+                    "provider": "builtin_tcp_connect",
+                    "provider_state": {"provider": "builtin_tcp_connect"},
+                },
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "builtin_tcp_connect.*execution is disabled"):
+            build_throttle(
+                parameters,
+                max_concurrency=8,
+                rate_limit_per_sec=10,
+                connect_timeout_s=3,
+            )
 
 
 class ResolveIpEnrichmentTests(unittest.TestCase):
-    def test_authorized_real_run_defaults_reverse_dns_on(self) -> None:
-        # A real (non-dry-run) sweep resolves hostnames best-effort by default.
+    def test_authorized_real_run_disables_reverse_dns(self) -> None:
         parameters: dict = {"authorized": True}
         resolve_ip_enrichment(parameters)
-        self.assertTrue(parameters["reverse_dns"])
+        self.assertFalse(parameters["reverse_dns"])
 
-    def test_dry_run_is_left_untouched(self) -> None:
-        # Dry-run previews stay side-effect-free: no reverse_dns key is injected,
-        # so the plan only advertises 'reverse-dns' if the operator opted in.
+    def test_dry_run_freezes_reverse_dns_off(self) -> None:
         for value in (True, "true", "1", "yes", "on"):
             parameters: dict = {"dry_run": value}
             resolve_ip_enrichment(parameters)
-            self.assertNotIn("reverse_dns", parameters)
+            self.assertFalse(parameters["reverse_dns"])
 
     def test_explicit_reverse_dns_false_override_is_preserved(self) -> None:
-        # An operator opt-out wins (setdefault no-op).
         parameters: dict = {"authorized": True, "reverse_dns": False}
         resolve_ip_enrichment(parameters)
         self.assertFalse(parameters["reverse_dns"])
 
-    def test_explicit_reverse_dns_true_is_preserved(self) -> None:
+    def test_explicit_reverse_dns_true_is_overridden(self) -> None:
         parameters: dict = {"authorized": True, "reverse_dns": True}
         resolve_ip_enrichment(parameters)
-        self.assertTrue(parameters["reverse_dns"])
+        self.assertFalse(parameters["reverse_dns"])
 
     def test_no_other_parameters_are_added(self) -> None:
-        # The helper only defaults reverse_dns; MAC enrichment needs no parameter
-        # (the engine reads the OS ARP cache unconditionally per responsive host).
         parameters: dict = {"authorized": True}
         resolve_ip_enrichment(parameters)
-        self.assertEqual(parameters, {"authorized": True, "reverse_dns": True})
+        self.assertEqual(parameters, {"authorized": True, "reverse_dns": False})
 
 
 if __name__ == "__main__":

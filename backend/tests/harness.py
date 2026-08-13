@@ -48,7 +48,12 @@ class ApiTestCase(unittest.TestCase):
     # assert its terminal status/results synchronously — so the suite forces the
     # synchronous path. A subclass that needs the async behaviour sets
     # env = {"INLINE_RUN_ASYNC": "1", ...} and the merge below lets it win.
-    _BASE_ENV: dict[str, str | None] = {"INLINE_RUN_ASYNC": "0"}
+    _BASE_ENV: dict[str, str | None] = {
+        "INLINE_RUN_ASYNC": "0",
+        # The release default keeps the operator-managed Nmap lane absent.
+        # U4 API tests opt into the internal same-organization lane explicitly.
+        "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED": "1",
+    }
     # Subclasses override; a None value means "ensure the variable is unset".
     env: dict[str, str | None] = {}
     # Default headers for every request (e.g. {"X-API-Key": ...}); None = none.

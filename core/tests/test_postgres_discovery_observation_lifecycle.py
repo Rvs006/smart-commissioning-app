@@ -22,6 +22,8 @@ from smart_commissioning_core.db.models import (
     RunLifecycleConflict,
     RunResult,
     RunSeal,
+    User,
+    UserScopeGrant,
 )
 from smart_commissioning_core.db.run_lifecycle import (
     DiscoveryObservationConflictError,
@@ -30,13 +32,14 @@ from smart_commissioning_core.db.run_lifecycle import (
 from smart_commissioning_core.discovery_observations import (
     DiscoveryObservationInputV1,
 )
-from smart_commissioning_core.run_context import RunContextV1
+from smart_commissioning_core.run_context import RunContextV1, canonical_json_bytes
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from sqlalchemy import func, make_url, select, text
 from sqlalchemy.schema import CreateSchema, DropSchema
 
 POSTGRES_URL = os.environ.get("SCT_TEST_POSTGRES_URL", "").strip()
 BASE_TIME = datetime(2026, 8, 11, 9, 0, tzinfo=UTC)
+PACKET_PLAN_SHA256 = "c" * 64
 
 
 def _schema_url(database_url: str, schema: str) -> str:
@@ -55,7 +58,40 @@ def _schema_url(database_url: str, schema: str) -> str:
     return isolated.render_as_string(hide_password=False)
 
 
-def _context() -> RunContextV1:
+def _context(
+    *,
+    dry_run: bool = True,
+    initiating_user_id: str | None = None,
+    resource_key: str | None = None,
+    observation_rows: int | None = None,
+    observation_payload_bytes: int | None = None,
+) -> RunContextV1:
+    if (observation_rows is None) != (observation_payload_bytes is None):
+        raise ValueError("observation row and payload budgets must be supplied together")
+    engine_parameters: dict = {"authorized": True, "dry_run": dry_run}
+    scan_contract: dict = {}
+    if initiating_user_id is not None:
+        scan_contract.update(
+            {
+                "scan_contract_version": "1.0",
+                "job_type": "ip_discovery",
+                "packet_plan_sha256": PACKET_PLAN_SHA256,
+                "resource_keys": [resource_key or "nic:192.0.2.10"],
+                "initiating_user_id": initiating_user_id,
+                "principal_source": "user_key",
+                "deployment_role": "hub",
+            }
+        )
+    if observation_rows is not None and observation_payload_bytes is not None:
+        scan_contract["job_type"] = "ip_discovery"
+        scan_contract["ip"] = {
+            "observation_budget": {
+                "planned_observation_rows": observation_rows,
+                "planned_observation_payload_bytes": observation_payload_bytes,
+            }
+        }
+    if scan_contract:
+        engine_parameters["scan_contract_v1"] = scan_contract
     return RunContextV1.model_validate(
         {
             "project_id": "postgres-project",
@@ -65,7 +101,7 @@ def _context() -> RunContextV1:
             "registers": [],
             "imports": [],
             "schema_versions": {},
-            "engine_parameters": {"authorized": True, "dry_run": True},
+            "engine_parameters": engine_parameters,
             "network_interface": "192.0.2.10/24",
             "connection_settings": {},
             "secret_references": {},
@@ -149,10 +185,18 @@ class PostgreSQLDiscoveryObservationLifecycleTests(unittest.TestCase):
             clock=lambda: self.clock_now,
         )
 
-    def create_claimed_run(self):
+    def create_claimed_run(
+        self,
+        *,
+        observation_rows: int | None = None,
+        observation_payload_bytes: int | None = None,
+    ):
         envelope = self.repository.create_run_with_context(
             job_type="ip_discovery",
-            context=_context(),
+            context=_context(
+                observation_rows=observation_rows,
+                observation_payload_bytes=observation_payload_bytes,
+            ),
             execution_mode="inline",
         )
         lease = self.repository.claim_run(
@@ -164,6 +208,115 @@ class PostgreSQLDiscoveryObservationLifecycleTests(unittest.TestCase):
         )
         self.assertIsNotNone(lease)
         return envelope.run_id, lease
+
+    def _create_claimed_live_run(self):
+        suffix = uuid4().hex
+        user_id = f"pg-user-{suffix[:28]}"
+        grant_id = f"pg-grant-{suffix[:27]}"
+        resource_key = f"nic:postgres-{suffix}"
+        preview_context = _context(
+            dry_run=True,
+            initiating_user_id=user_id,
+            resource_key=resource_key,
+        )
+        preview = self.repository.create_run_with_context(
+            job_type="ip_discovery",
+            context=preview_context,
+            execution_mode="inline",
+            now=BASE_TIME,
+        )
+        preview_lease = self.repository.claim_run(
+            preview.run_id,
+            preview.dispatch_id,
+            lease_seconds=60,
+            now=BASE_TIME,
+            owner_token=f"preview-owner-{suffix}",
+        )
+        self.assertIsNotNone(preview_lease)
+        preview_outcome = self.repository.finalize_run(
+            preview.run_id,
+            preview_lease.owner_token,
+            TerminalResultV1(
+                status="succeeded",
+                stage="postgres_preview_complete",
+                summary={"preview": True},
+            ),
+            now=BASE_TIME + timedelta(seconds=1),
+        )
+        self.assertTrue(preview_outcome.applied)
+
+        with session_factory(self.engine).begin() as session:
+            session.add(
+                User(
+                    id=user_id,
+                    username=f"postgres-engineer-{suffix}",
+                    role="engineer",
+                    api_key_hash=suffix * 2,
+                    is_active=True,
+                    created_at=BASE_TIME,
+                )
+            )
+            session.add(
+                UserScopeGrant(
+                    grant_id=grant_id,
+                    user_id=user_id,
+                    project_id="postgres-project",
+                    site_id="postgres-site",
+                    active_marker=True,
+                    granted_by="postgres-admin",
+                    reason="PostgreSQL finalization fence test",
+                    granted_at=BASE_TIME,
+                )
+            )
+
+        authorization = self.repository.create_scan_authorization(
+            preview_run_id=preview.run_id,
+            approved_by="postgres-admin",
+            ticket=f"PG-{suffix[:12]}",
+            purpose="PostgreSQL finalization fence test",
+            not_before=BASE_TIME,
+            not_after=BASE_TIME + timedelta(seconds=50),
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        live = self.repository.create_run_with_context(
+            job_type="ip_discovery",
+            context=_context(
+                dry_run=False,
+                initiating_user_id=user_id,
+                resource_key=resource_key,
+            ),
+            execution_mode="inline",
+            authorization_id=authorization.authorization_id,
+            preview_run_id=preview.run_id,
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        lease = self.repository.claim_run(
+            live.run_id,
+            live.dispatch_id,
+            lease_seconds=60,
+            now=BASE_TIME + timedelta(seconds=3),
+            owner_token=f"live-owner-{suffix}",
+        )
+        self.assertIsNotNone(lease)
+        return live.run_id, lease, authorization.authorization_id, grant_id
+
+    def _assert_failed_partial_evidence(self, run_id, lease, appended, outcome) -> None:
+        self.assertTrue(outcome.applied)
+        with session_factory(self.engine)() as session:
+            run = session.get(Run, run_id)
+            result = session.get(RunResult, run_id)
+            seal = session.get(RunSeal, run_id)
+        self.assertEqual((run.status, result.terminal_status, seal.terminal_status), ("failed",) * 3)
+        self.assertEqual((run.stage, result.terminal_stage), ("active_control_lost",) * 2)
+        self.assertIs(result.summary["provider_drained"], True)
+        self.assertIs(result.summary["validation_incomplete"], True)
+        self.assertIs(result.summary["acceptance_eligible"], False)
+        evidence = result.summary["observation_evidence_v1"]
+        self.assertEqual(evidence["attempt"], lease.attempt)
+        self.assertEqual(evidence["observation_count"], 1)
+        self.assertEqual(evidence["terminal_cursor"], appended.cursor)
+        self.assertEqual(outcome.result_sha256, result.result_sha256)
+        self.assertEqual(seal.result_sha256, result.result_sha256)
 
     def test_fresh_schema_migrates_to_the_current_alembic_heads(self) -> None:
         self.assertEqual(self.tables_before_upgrade, 0)
@@ -396,6 +549,142 @@ class PostgreSQLDiscoveryObservationLifecycleTests(unittest.TestCase):
                 run_id,
                 lease.attempt,
             ).observation_count,
+            2,
+        )
+
+    def test_success_finalize_rechecks_active_control_after_cutoff(self) -> None:
+        from smart_commissioning_core.db import run_lifecycle as lifecycle_module
+
+        real_fold = lifecycle_module.fold_discovery_observations
+        for expected_reason in ("authorization_revoked", "grant_revoked"):
+            with self.subTest(control_reason=expected_reason):
+                run_id, lease, authorization_id, grant_id = (
+                    self._create_claimed_live_run()
+                )
+                appended = self.repository.append_discovery_observation(
+                    run_id,
+                    lease.owner_token,
+                    lease.attempt,
+                    _observation(f"postgres-before-{expected_reason}"),
+                )
+
+                # Folding starts after the cutoff transaction has committed.
+                def revoke_after_cutoff(
+                    *args,
+                    expected=expected_reason,
+                    authorization=authorization_id,
+                    grant_key=grant_id,
+                    **kwargs,
+                ):
+                    if expected == "authorization_revoked":
+                        self.repository.revoke_scan_authorization(
+                            authorization,
+                            revoked_by="postgres-admin",
+                            reason="Approval withdrawn after final observation",
+                            now=BASE_TIME + timedelta(seconds=11),
+                        )
+                    else:
+                        with session_factory(self.engine).begin() as session:
+                            grant = session.get(UserScopeGrant, grant_key)
+                            grant.active_marker = None
+                            grant.revoked_by = "postgres-admin"
+                            grant.revoke_reason = "Scope withdrawn after final observation"
+                            grant.revoked_at = BASE_TIME + timedelta(seconds=11)
+                    return real_fold(*args, **kwargs)
+
+                with mock.patch.object(
+                    lifecycle_module,
+                    "fold_discovery_observations",
+                    side_effect=revoke_after_cutoff,
+                ):
+                    outcome = self.repository.finalize_discovery_run(
+                        run_id,
+                        lease.owner_token,
+                        lease.attempt,
+                        TerminalResultV1(
+                            status="succeeded",
+                            stage="postgres_discovery_complete",
+                            summary={"acceptance_eligible": True},
+                        ),
+                        now=BASE_TIME + timedelta(seconds=20),
+                    )
+
+                self._assert_failed_partial_evidence(
+                    run_id,
+                    lease,
+                    appended,
+                    outcome,
+                )
+                with session_factory(self.engine)() as session:
+                    result = session.get(RunResult, run_id)
+                self.assertEqual(result.summary["control_reason"], expected_reason)
+
+    def test_exact_sealed_plan_observation_budgets_are_hard_boundaries(self) -> None:
+        observations = (
+            _observation("postgres-budget-v1", payload={"value": "a"}),
+            _observation(
+                "postgres-budget-v2",
+                entity_version=2,
+                payload={"value": "b"},
+            ),
+            _observation(
+                "postgres-budget-v3",
+                entity_version=3,
+                payload={"value": "c"},
+            ),
+        )
+        self.assertEqual(
+            [len(canonical_json_bytes(item.payload)) for item in observations],
+            [13, 13, 13],
+        )
+
+        exact_run_id = None
+        exact_lease = None
+        for rows, expected_reason in (
+            (2, "observation_row_budget_exhausted"),
+            (3, "observation_payload_budget_exhausted"),
+        ):
+            with self.subTest(expected_reason=expected_reason):
+                run_id, lease = self.create_claimed_run(
+                    observation_rows=rows,
+                    observation_payload_bytes=26,
+                )
+                for observation in observations[:2]:
+                    accepted = self.repository.append_discovery_observation(
+                        run_id,
+                        lease.owner_token,
+                        lease.attempt,
+                        observation,
+                    )
+                    self.assertFalse(accepted.idempotent)
+                with self.assertRaises(
+                    DiscoveryObservationConflictError
+                ) as rejected:
+                    self.repository.append_discovery_observation(
+                        run_id,
+                        lease.owner_token,
+                        lease.attempt,
+                        observations[2],
+                    )
+                self.assertEqual(rejected.exception.reason, expected_reason)
+                if rows == 2:
+                    exact_run_id, exact_lease = run_id, lease
+
+        self.assertIsNotNone(exact_run_id)
+        self.assertIsNotNone(exact_lease)
+        outcome = self.repository.finalize_discovery_run(
+            exact_run_id,
+            exact_lease.owner_token,
+            exact_lease.attempt,
+            TerminalResultV1(status="succeeded", stage="postgres_budget_complete"),
+            now=BASE_TIME + timedelta(seconds=20),
+        )
+        self.assertTrue(outcome.applied)
+        with session_factory(self.engine)() as session:
+            result = session.get(RunResult, exact_run_id)
+        self.assertEqual(result.terminal_status, "succeeded")
+        self.assertEqual(
+            result.summary["observation_evidence_v1"]["observation_count"],
             2,
         )
 

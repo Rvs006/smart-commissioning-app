@@ -3,19 +3,28 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import math
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from smart_commissioning_core.run_context import (
     canonical_json_bytes,
     canonical_sha256,
     json_safe_value,
 )
+from smart_commissioning_core.scan_contract import MAX_PROTOCOL_PORTS
 
 ObservationProtocol = Literal["ip", "bacnet"]
 ObservationEntityKind = Literal[
@@ -35,11 +44,57 @@ ObservationPhase = Literal[
     "finalize",
 ]
 ProjectionCollection = Literal["summary", "issues", "devices", "points", "topics"]
+IPCoverageStateV1 = Literal["pending", "attempted", "not_attempted", "cancelled"]
+IPReachabilityStateV1 = Literal[
+    "pending",
+    "reachable",
+    "unconfirmed",
+    "not_applicable",
+]
+IPProbeOutcomeV1 = Literal[
+    "connected",
+    "connection_refused",
+    "timed_out",
+    "network_unreachable",
+    "host_unreachable",
+    "permission_denied",
+    "cancelled",
+    "provider_error",
+]
+IPRegisterMatchV1 = Literal[
+    "not_configured",
+    "expected_match",
+    "wrong_ip_review",
+    "ambiguous_review",
+    "unregistered",
+]
+IPPolicyVerdictV1 = Literal[
+    "pending",
+    "pass",
+    "forbidden_open",
+    "unexpected_open_review",
+    "expected_closed",
+    "unconfirmed",
+    "not_attempted",
+    "not_applicable",
+]
+IPTransportV1 = Literal["tcp", "udp"]
+IPControlReasonV1 = Literal[
+    "stop_requested",
+    "authorization_expired",
+    "authorization_revoked",
+    "grant_revoked",
+    "ownership_lost",
+    "control_store_error",
+    "dispatch_deadline_elapsed",
+]
+IPCapabilityActionV1 = Literal["use_bacnet_discovery"]
 
 PUBLIC_PAYLOAD_V1_MAX_DEPTH = 8
 PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS = 4_096
 PUBLIC_PAYLOAD_V1_MAX_VALUE_STRING_CHARS = 60_000
 PUBLIC_PAYLOAD_V1_MAX_SEQUENCE_ITEMS = 512
+OBSERVATION_PAYLOAD_MAX_CANONICAL_BYTES = 65_536
 
 OBSERVATION_STREAM_EMPTY_SHA256 = hashlib.sha256().hexdigest()
 _OBSERVATION_STREAM_CHAIN_DOMAIN = (
@@ -93,6 +148,7 @@ _PUBLIC_PAYLOAD_V1_FIELDS = frozenset(
         "diagnostic_text",
         "duplicate",
         "elapsed_ms",
+        "ip_v1",
         "lane",
         "late",
         "object_identifier",
@@ -112,6 +168,219 @@ _PUBLIC_PAYLOAD_V1_FIELDS = frozenset(
         "xml_artifact_id",
     }
 )
+
+
+class IPObservationProvenanceV1(BaseModel):
+    """Immutable public references that explain how one IP fact was produced."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+        validate_default=True,
+    )
+
+    profile: Literal["gentle", "planned_extended", "operator_xml_import"]
+    source_ip: str | None = None
+    source_interface: str | None = None
+    packet_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    register_import_id: str | None = Field(default=None, max_length=255)
+    register_rows_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @field_validator("source_ip")
+    @classmethod
+    def _numeric_ipv4_source(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _normalize_ipv4(value, path="payload.ip_v1.provenance.source_ip")
+
+    @field_validator("source_interface")
+    @classmethod
+    def _viewer_safe_interface(cls, value: str | None) -> str | None:
+        return _normalize_optional_public_string(
+            value,
+            path="payload.ip_v1.provenance.source_interface",
+            max_chars=255,
+        )
+
+    @field_validator("register_import_id")
+    @classmethod
+    def _opaque_register_reference(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = _normalize_public_string(
+            value,
+            path="payload.ip_v1.provenance.register_import_id",
+            max_chars=255,
+        ).strip()
+        if _OPAQUE_OBSERVATION_IDENTITY.fullmatch(normalized) is None:
+            raise ValueError("register_import_id must use opaque normalized syntax")
+        return normalized
+
+    @model_validator(mode="after")
+    def _complete_register_reference(self) -> IPObservationProvenanceV1:
+        has_import = self.register_import_id is not None
+        has_digest = self.register_rows_sha256 is not None
+        if has_import != has_digest:
+            raise ValueError(
+                "register_import_id and register_rows_sha256 must be supplied together"
+            )
+        return self
+
+
+class IPObservationPayloadV1(BaseModel):
+    """Strict, viewer-safe evidence for one staged IP discovery observation."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+        validate_default=True,
+    )
+
+    schema_version: Literal["1.0"] = "1.0"
+    coverage_state: IPCoverageStateV1
+    reachability_state: IPReachabilityStateV1
+    probe_outcome: IPProbeOutcomeV1 | None
+    register_match: IPRegisterMatchV1
+    policy_verdict: IPPolicyVerdictV1
+    target: str
+    port: int | None = Field(default=None, ge=1, le=65_535)
+    transport: IPTransportV1 | None = None
+    provider: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    provider_version: str = Field(min_length=1, max_length=64)
+    provider_contract_version: Literal["1.0"] = "1.0"
+    provenance: IPObservationProvenanceV1
+    reason: str | None = Field(default=None, max_length=PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS)
+    attempts: int = Field(ge=0)
+    elapsed_ms: float = Field(ge=0, allow_inf_nan=False)
+    port_hint: str | None = Field(default=None, max_length=255)
+    detected_service: str | None = Field(default=None, max_length=255)
+    detected_version: str | None = Field(default=None, max_length=255)
+    capability_action: IPCapabilityActionV1 | None = None
+    control_reason: IPControlReasonV1 | None = None
+    last_packet_dispatched_at: datetime | None = None
+
+    @field_validator("target")
+    @classmethod
+    def _numeric_ipv4_target(cls, value: str) -> str:
+        return _normalize_ipv4(value, path="payload.ip_v1.target")
+
+    @field_validator("port", mode="before")
+    @classmethod
+    def _strict_port(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        return _normalize_int(value, path="payload.ip_v1.port", minimum=1)
+
+    @field_validator("attempts", mode="before")
+    @classmethod
+    def _strict_attempts(cls, value: Any) -> int:
+        return _normalize_int(value, path="payload.ip_v1.attempts", minimum=0)
+
+    @field_validator("elapsed_ms", mode="before")
+    @classmethod
+    def _strict_elapsed_ms(cls, value: Any) -> int | float:
+        return _normalize_number(value, path="payload.ip_v1.elapsed_ms", minimum=0)
+
+    @field_validator(
+        "provider_version",
+        "reason",
+        "port_hint",
+        "detected_service",
+        "detected_version",
+    )
+    @classmethod
+    def _viewer_safe_text(cls, value: str | None, info: ValidationInfo) -> str | None:
+        return _normalize_optional_public_string(
+            value,
+            path=f"payload.ip_v1.{info.field_name}",
+            max_chars=(
+                PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS
+                if info.field_name == "reason"
+                else 255
+            ),
+        )
+
+    @field_validator("last_packet_dispatched_at")
+    @classmethod
+    def _aware_last_packet_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("last_packet_dispatched_at must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def _evidence_strength_matches_reachability(self) -> IPObservationPayloadV1:
+        has_register = self.provenance.register_import_id is not None
+        if (self.register_match == "not_configured" and has_register) or (
+            self.register_match != "not_configured" and not has_register
+        ):
+            raise ValueError(
+                "register_match must agree with frozen register provenance"
+            )
+        if self.provider == "builtin_tcp_connect" and (
+            self.detected_service is not None or self.detected_version is not None
+        ):
+            raise ValueError(
+                "the built-in TCP provider cannot claim detected service evidence"
+            )
+        if self.detected_version is not None and self.detected_service is None:
+            raise ValueError("detected_version requires detected_service")
+        if self.capability_action is not None and not (
+            self.capability_action == "use_bacnet_discovery"
+            and self.coverage_state == "not_attempted"
+            and self.probe_outcome is None
+            and self.attempts == 0
+            and self.port == 47808
+            and self.transport == "udp"
+        ):
+            raise ValueError(
+                "BACnet capability action requires an unattempted UDP/47808 port"
+            )
+        if self.provider == "builtin_tcp_connect" and self.transport == "udp":
+            if (
+                self.coverage_state != "not_attempted"
+                or self.probe_outcome is not None
+                or self.attempts != 0
+            ):
+                raise ValueError(
+                    "the built-in TCP provider cannot emit attempted UDP evidence"
+                )
+            if self.port == 47808 and self.capability_action != "use_bacnet_discovery":
+                raise ValueError(
+                    "built-in UDP/47808 omissions require use_bacnet_discovery"
+                )
+        if self.probe_outcome == "connected":
+            if self.reachability_state != "reachable":
+                raise ValueError("positive TCP evidence requires reachable state")
+        elif self.probe_outcome is not None and self.reachability_state != "unconfirmed":
+            raise ValueError("probe outcome requires unconfirmed reachability")
+        if self.port is not None:
+            if self.coverage_state == "not_attempted" and (
+                self.probe_outcome is not None
+                or self.attempts != 0
+                or self.policy_verdict != "not_attempted"
+                or self.detected_service is not None
+                or self.detected_version is not None
+            ):
+                raise ValueError(
+                    "not_attempted coverage cannot carry probe or policy evidence"
+                )
+            if (
+                self.policy_verdict
+                in {"forbidden_open", "unexpected_open_review"}
+                and self.probe_outcome != "connected"
+            ):
+                raise ValueError("an open-port verdict requires connected evidence")
+            if (
+                self.policy_verdict == "expected_closed"
+                and self.probe_outcome != "connection_refused"
+            ):
+                raise ValueError("expected_closed requires refusal evidence")
+        return self
 
 _DEVICE_RECORD_FIELDS = frozenset(
     {
@@ -227,6 +496,18 @@ _PUBLIC_ATTRIBUTE_FIELDS = frozenset(
         "vendor_id",
     }
 )
+_IP_PORT_SEQUENCE_ATTRIBUTE_FIELDS = frozenset(
+    {
+        "open_ports",
+        "scanned_ports",
+        "expected_ports",
+        "forbidden_ports",
+        "forbidden_open_ports",
+        "unexpected_open_ports",
+        "missing_expected_ports",
+        "register_ports_not_probed",
+    }
+)
 
 
 class DiscoveryProjectionV1(BaseModel):
@@ -303,6 +584,49 @@ class DiscoveryObservationInputV1(BaseModel):
     @classmethod
     def _viewer_safe_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _normalize_public_payload_v1(value)
+
+    @model_validator(mode="after")
+    def _stable_ip_projection(self) -> DiscoveryObservationInputV1:
+        raw_ip = self.payload.get("ip_v1")
+        if raw_ip is None:
+            return self
+        if self.protocol != "ip":
+            raise ValueError("payload.ip_v1 requires protocol ip")
+
+        ip_payload = IPObservationPayloadV1.model_validate(raw_ip)
+        projection = self.payload.get("projection_v1")
+        if self.entity_kind == "host":
+            if self.entity_key != f"host:{ip_payload.target}":
+                raise ValueError("IP host entity_key must be stable for its target")
+            if projection is None:
+                return self
+            normalized_projection = DiscoveryProjectionV1.model_validate(projection)
+            if normalized_projection.collection != "devices":
+                raise ValueError("an IP host can project only to devices")
+            if normalized_projection.present:
+                record = normalized_projection.record
+                if record is None or record.get("address") != ip_payload.target:
+                    raise ValueError(
+                        "an IP device projection address must match its target"
+                    )
+            return self
+
+        if self.entity_kind == "port":
+            if ip_payload.port is None or ip_payload.transport is None:
+                raise ValueError("an IP port entity requires port and transport")
+            expected_key = (
+                f"port:{ip_payload.target}:{ip_payload.port}:{ip_payload.transport}"
+            )
+            if self.entity_key != expected_key:
+                raise ValueError(
+                    "IP port entity_key must preserve target, port, and transport"
+                )
+
+        if projection is not None:
+            raise ValueError(
+                "IP port and diagnostic entities cannot carry a terminal projection"
+            )
+        return self
 
 
 class DiscoveryObservationViewV1(DiscoveryObservationInputV1):
@@ -381,6 +705,11 @@ def observation_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], bytes,
     if not isinstance(normalized, dict):
         raise ValueError("observation payload must normalize to an object")
     encoded = canonical_json_bytes(normalized)
+    if len(encoded) > OBSERVATION_PAYLOAD_MAX_CANONICAL_BYTES:
+        raise ValueError(
+            "discovery observation payload exceeds the 65,536-byte canonical "
+            "UTF-8 byte limit"
+        )
     return normalized, encoded, hashlib.sha256(encoded).hexdigest()
 
 
@@ -411,7 +740,11 @@ def _normalize_public_payload_v1(value: Mapping[str, Any]) -> dict[str, Any]:
         "units",
     }
     for key, item in value.items():
-        if key == "projection_v1":
+        if key == "ip_v1":
+            normalized[key] = IPObservationPayloadV1.model_validate(item).model_dump(
+                mode="json"
+            )
+        elif key == "projection_v1":
             projection = DiscoveryProjectionV1.model_validate(item)
             normalized[key] = projection.model_dump(
                 mode="python",
@@ -624,6 +957,8 @@ def _normalize_attributes(value: Any, *, path: str) -> dict[str, Any]:
                 path=item_path,
                 fields=frozenset({"points_not_attempted"}),
             )
+        elif key in _IP_PORT_SEQUENCE_ATTRIBUTE_FIELDS:
+            normalized[key] = _normalize_ip_port_sequence(item, path=item_path)
         else:
             normalized[key] = _normalize_public_value(
                 item,
@@ -631,6 +966,28 @@ def _normalize_attributes(value: Any, *, path: str) -> dict[str, Any]:
                 depth=2,
                 string_limit=PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS,
             )
+    return normalized
+
+
+def _normalize_ip_port_sequence(value: Any, *, path: str) -> list[int] | None:
+    if value is None:
+        return None
+    if isinstance(value, str | bytes | bytearray | memoryview) or not isinstance(
+        value, Sequence
+    ):
+        raise ValueError(f"{path} must be a sequence of numeric ports")
+    if len(value) > MAX_PROTOCOL_PORTS:
+        raise ValueError(
+            f"{path} exceeds the IP protocol-port sequence limit {MAX_PROTOCOL_PORTS}"
+        )
+    normalized = [
+        _normalize_int(item, path=f"{path}[{index}]", minimum=1)
+        for index, item in enumerate(value)
+    ]
+    if any(port > 65_535 for port in normalized):
+        raise ValueError(f"{path} contains a port outside 1..65535")
+    if normalized != sorted(set(normalized)):
+        raise ValueError(f"{path} ports must be unique and numerically sorted")
     return normalized
 
 
@@ -673,6 +1030,24 @@ def _normalize_optional_public_string(
     if value is None:
         return None
     return _normalize_public_string(value, path=path, max_chars=max_chars)
+
+
+def normalize_public_string_v1(value: Any, *, path: str, max_chars: int) -> str:
+    """Validate one viewer-visible string with the public observation rules."""
+
+    return _normalize_public_string(value, path=path, max_chars=max_chars)
+
+
+def _normalize_ipv4(value: Any, *, path: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{path} must be a numeric IPv4 address")
+    try:
+        parsed = ipaddress.ip_address(value.strip())
+    except ValueError as error:
+        raise ValueError(f"{path} must be a numeric IPv4 address") from error
+    if not isinstance(parsed, ipaddress.IPv4Address):
+        raise ValueError(f"{path} must be a numeric IPv4 address")
+    return str(parsed)
 
 
 def _normalize_public_string(value: Any, *, path: str, max_chars: int) -> str:
@@ -894,12 +1269,22 @@ __all__ = [
     "DiscoveryObservationInputV1",
     "DiscoveryObservationViewV1",
     "DiscoveryProjectionV1",
+    "IPControlReasonV1",
+    "IPCoverageStateV1",
+    "IPObservationPayloadV1",
+    "IPObservationProvenanceV1",
+    "IPPolicyVerdictV1",
+    "IPProbeOutcomeV1",
+    "IPReachabilityStateV1",
+    "IPRegisterMatchV1",
+    "IPTransportV1",
     "ObservationAppendOutcomeV1",
     "ObservationCutoffV1",
     "ObservationEvidenceV1",
     "OBSERVATION_STREAM_EMPTY_SHA256",
     "extend_observation_stream_sha256",
     "fold_discovery_observations",
+    "normalize_public_string_v1",
     "observation_payload",
     "observation_stream_sha256",
 ]

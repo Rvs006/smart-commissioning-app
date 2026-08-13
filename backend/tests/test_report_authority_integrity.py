@@ -47,7 +47,11 @@ class ReportAuthorityIntegrityTests(ApiTestCase):
                 "project_id": _PROJECT,
                 "site_id": _SITE,
                 "job_type": "ip_discovery",
-                "parameters": {"dry_run": True, "ports": [80]},
+                "parameters": {
+                    "dry_run": True,
+                    "ports": [80],
+                    "use_register_addresses": True,
+                },
             },
         )
         self.assertEqual(preview.status_code, 200, preview.text)
@@ -102,9 +106,7 @@ class ReportAuthorityIntegrityTests(ApiTestCase):
             {
                 "project_id": _PROJECT,
                 "site_id": _SITE,
-                "address": (
-                    f"{documentation_prefixes[index // 256]}.{index % 256}"
-                ),
+                "address": (f"{documentation_prefixes[index // 256]}.{index % 256}"),
                 "device_type": "ip_host",
                 "name": f"controller-{index:04d}.example.test",
                 "attributes": {"open_ports": [80, 443]},

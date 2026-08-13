@@ -23,6 +23,9 @@ _MAX_PREVIEW_SAMPLE = 32
 
 TargetKind = Literal["cidr", "range", "address"]
 PortProtocol = Literal["tcp", "udp"]
+IPRegisterPortSource = Literal["forbidden", "expected"]
+IPNotAttemptedReason = Literal["profile_port_cap", "unsupported_protocol"]
+IPNotAttemptedCapability = Literal["use_bacnet_discovery"]
 IPProvider = Literal["builtin_tcp_connect", "operator_managed_nmap"]
 IPProfile = Literal["gentle", "planned_extended"]
 DiscoveryPolicyProfile = Literal["gentle", "planned_extended", "bacnet_conservative"]
@@ -136,6 +139,73 @@ class ProtocolPortV1(BaseModel):
 
     port: int = Field(ge=1, le=65535)
     protocol: PortProtocol = "tcp"
+
+
+class IPNotAttemptedPortV1(BaseModel):
+    """One frozen register port that the selected IP provider will not dispatch."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    port: int = Field(ge=1, le=65535)
+    protocol: PortProtocol
+    source: IPRegisterPortSource
+    reason: IPNotAttemptedReason
+    capability: IPNotAttemptedCapability | None = None
+
+    @model_validator(mode="after")
+    def validate_reason_and_capability(self) -> IPNotAttemptedPortV1:
+        if self.protocol == "tcp":
+            if self.reason != "profile_port_cap":
+                raise ValueError("TCP omissions require reason=profile_port_cap")
+            if self.capability is not None:
+                raise ValueError("TCP omissions cannot carry a UDP capability")
+            return self
+        if self.reason != "unsupported_protocol":
+            raise ValueError("UDP omissions require reason=unsupported_protocol")
+        if self.port == 47808 and self.capability != "use_bacnet_discovery":
+            raise ValueError(
+                "UDP/47808 omissions require capability=use_bacnet_discovery"
+            )
+        if self.port != 47808 and self.capability is not None:
+            raise ValueError("only UDP/47808 can use the BACnet discovery capability")
+        return self
+
+
+class IPObservationBudgetV1(BaseModel):
+    """Frozen upper bound for the U3 progressive IP observation stream."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["1.0"] = "1.0"
+    estimator: Literal["ip_u3_v1"] = "ip_u3_v1"
+    planned_observation_rows: int = Field(ge=1)
+    planned_observation_payload_bytes: int = Field(ge=1)
+    row_ceiling: int = Field(ge=1)
+    canonical_payload_byte_ceiling: int = Field(ge=1)
+    host_state_rows: int = Field(ge=4)
+    # Host-only profiles (for example Nmap host discovery) perform packet work
+    # without producing a normalized port observation.
+    port_attempt_rows: int = Field(ge=0)
+    not_attempted_port_rows: int = Field(ge=0)
+    control_diagnostic_rows: Literal[1] = 1
+
+    @model_validator(mode="after")
+    def validate_row_breakdown(self) -> IPObservationBudgetV1:
+        expected = (
+            self.host_state_rows
+            + self.port_attempt_rows
+            + self.not_attempted_port_rows
+            + self.control_diagnostic_rows
+        )
+        if self.planned_observation_rows != expected:
+            raise ValueError("planned observation rows do not match their frozen breakdown")
+        if self.planned_observation_rows > self.row_ceiling:
+            raise ValueError("planned observation rows exceed the frozen row ceiling")
+        if self.planned_observation_payload_bytes > self.canonical_payload_byte_ceiling:
+            raise ValueError(
+                "planned observation payload bytes exceed the frozen byte ceiling"
+            )
+        return self
 
 
 class EffectiveThrottleV1(BaseModel):
@@ -388,11 +458,16 @@ class IPScanParametersV1(BaseModel):
 
     @model_validator(mode="after")
     def validate_provider_capability(self) -> IPScanParametersV1:
+        if self.provider == "operator_managed_nmap" and not self.ports:
+            return self
         normalized = normalize_protocol_ports(self.ports, max_ports=MAX_PROTOCOL_PORTS)
         if self.provider == "builtin_tcp_connect" and any(
             item.protocol == "udp" for item in normalized
         ):
-            raise ValueError("builtin_tcp_connect does not support UDP probes")
+            raise ValueError(
+                "builtin_tcp_connect does not support UDP probes; use the BACnet "
+                "discovery workflow for BACnet/IP UDP/47808"
+            )
         object.__setattr__(self, "ports", normalized)
         return self
 

@@ -19,6 +19,7 @@ class WorkerSettings:
     redis_url: str
     database_url: str
     deployment_id: str
+    network_executor_id: str | None
     lease_seconds: int
     heartbeat_seconds: float
 
@@ -34,12 +35,16 @@ def get_settings() -> WorkerSettings:
     ).strip()
     if not deployment_id or len(deployment_id) > 255:
         raise ValueError("deployment_id must contain between 1 and 255 characters")
+    network_executor_id = os.getenv("SMART_COMMISSIONING_NETWORK_EXECUTOR_ID", "").strip()
+    if len(network_executor_id) > 255:
+        raise ValueError("network_executor_id must contain between 1 and 255 characters")
     return WorkerSettings(
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
         database_url=os.getenv(
             "DATABASE_URL", default_sqlite_url(_REPOSITORY_ROOT / "backend" / "runtime")
         ),
         deployment_id=deployment_id,
+        network_executor_id=network_executor_id or None,
         lease_seconds=heartbeat_policy.lease_seconds,
         heartbeat_seconds=heartbeat_policy.interval_seconds,
     )

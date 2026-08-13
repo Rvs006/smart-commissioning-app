@@ -20,12 +20,16 @@ import {
   deleteUdmiSchemaSet,
   downloadFile,
   getDiscoveryResults,
+  getDiscoveryComparison,
   getDiscoveryObservations,
+  getDiscoveryPoints,
   getDiscoveryRun,
   getDiscoveryTopics,
   getDiscoveryTopicsXlsxPath,
   getImportErrors,
   getLatestImport,
+  getNmapCapability,
+  listScanAuthorizations,
   getValidationIssues,
   getValidationJsonExportPath,
   getValidationRun,
@@ -41,6 +45,9 @@ import {
   listUdmiSchemaSets,
   rollbackMqttConfigPublish,
   startMqttConfigPublishRun,
+  startAuthorizedDiscoveryRun,
+  startBacnetPropertyRun,
+  startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
   uploadUdmiSchemaSet,
@@ -62,6 +69,9 @@ import {
   UdmiValidationSummaryV1,
   ValidationIssueRecord,
   type SessionBoundApiClient,
+  type NmapProfileName,
+  type BacnetPropertyName,
+  type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import {
@@ -109,6 +119,16 @@ import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext"
 import type { RunRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { isPlainObject } from "../../utils/isPlainObject";
+
+const BACNET_PROPERTY_OPTIONS: readonly BacnetPropertyName[] = [
+  "object_name",
+  "present_value",
+  "units",
+  "status_flags",
+  "reliability",
+  "out_of_service",
+  "description",
+];
 import {
   createReportIntent,
   createObservationFoldState,
@@ -122,6 +142,14 @@ import {
   type ReportIntent,
   type ObservationFoldState,
 } from "./runIsolation";
+import {
+  formatIpHeadlineMetrics,
+  formatBacnetHeadlineMetrics,
+  serializeIpTargetRows,
+  type IpTargetRow,
+  type IpHeadlineMetricDisplay,
+  type BacnetHeadlineMetricDisplay,
+} from "./ipDiscoveryModel";
 
 type ModulePageProps = {
   moduleRoute: string;
@@ -148,6 +176,19 @@ type DetailItem = {
 type ScanPort = {
   port: string;
   protocol: "tcp" | "udp";
+};
+
+type IPDiscoveryProvider = "builtin_tcp_connect" | "operator_managed_nmap";
+
+const NMAP_PROFILE_LABELS: Record<NmapProfileName, string> = {
+  tcp_connect_inventory: "TCP connect inventory",
+  host_discovery: "Host discovery",
+  tcp_syn_inventory: "TCP SYN inventory",
+  selected_udp: "Selected UDP ports",
+  service_version_inventory: "Service and version inventory",
+  os_inventory: "OS inventory",
+  traceroute_inventory: "Traceroute inventory",
+  reviewed_script_inventory: "Reviewed script inventory",
 };
 
 // One extra point/value pair for a multi-write MQTT config publish (mq9n11wi).
@@ -405,6 +446,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const requestedRunId = searchParams.get("run")?.trim() || null;
+  const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
     (runId: string | null) => {
       setSearchParams(
@@ -452,6 +494,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [scanAuthorized, setScanAuthorized] = useState(false);
   const [scanDryRun, setScanDryRun] = useState(false);
   const [scanTarget, setScanTarget] = useState("");
+  const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
+  const [scanExclusionRows, setScanExclusionRows] = useState<IpTargetRow[]>([]);
+  const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
+  const [scanPreviewActive, setScanPreviewActive] = useState(false);
+  const [scanAuthorizationId, setScanAuthorizationId] = useState<string | null>(null);
+  const [scanProvider, setScanProvider] = useState<IPDiscoveryProvider>("builtin_tcp_connect");
+  const [nmapProfile, setNmapProfile] = useState<NmapProfileName>("tcp_connect_inventory");
   // Register-driven mode: Run sends NO pasted schedule/payloads, so the backend
   // fans out one expected asset per imported mqtt_register row (topics + points
   // + units + schema version from the register). Auto-enabled when an
@@ -507,6 +556,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Workbench uses the persistent Inspector instead, so this state is never set
   // for UDMI rows.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
+  const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
+  const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
+  const [propertyPreviewRunId, setPropertyPreviewRunId] = useState<string | null>(null);
+  const [propertyAuthorizationId, setPropertyAuthorizationId] = useState<string | null>(null);
+  const [propertyRequestedReadSet, setPropertyRequestedReadSet] = useState<BacnetPropertyName[]>(
+    [],
+  );
+  const [propertyRequest, setPropertyRequest] = useState<{
+    parentRunId: string;
+    deviceInstance: number;
+    destination?: string;
+    requestedReadSet: BacnetPropertyName[];
+  } | null>(null);
+  const [propertyCancelling, setPropertyCancelling] = useState(false);
+  const [bacnetPointsCursor, setBacnetPointsCursor] = useState<string | null>(null);
+  const [bacnetPointsSearch, setBacnetPointsSearch] = useState("");
   const detailDialogRef = useRef<HTMLDialogElement | null>(null);
   const detailDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
   // Per-asset expansion in the UDMI per-payload-type results view (mq9m4bnv),
@@ -605,6 +670,29 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       runAccessClosed || isTerminalStatus(query.state.data?.status) ? false : 1500,
   });
 
+  const nmapCapabilityQuery = useQuery({
+    enabled: module.route === "ip-scanner",
+    queryFn: ({ signal }) =>
+      getNmapCapability({
+        projectId: workspaceRef.projectId,
+        siteId: workspaceRef.siteId,
+        context: { client: apiClient, signal },
+      }),
+    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "nmap-capability"],
+    staleTime: 15_000,
+  });
+
+  const scanAuthorizationsQuery = useQuery<ScanAuthorizationV1[]>({
+    queryKey: ["scan-authorizations", sessionScopeId, workspaceRef, scanPreviewRunId],
+    queryFn: () =>
+      listScanAuthorizations({
+        workspace: workspaceRef,
+        previewRunId: scanPreviewRunId ?? undefined,
+        context: { client: apiClient },
+      }),
+    enabled: isDiscoveryModule && !scanDryRun && Boolean(scanPreviewRunId),
+  });
+
   // Discovery run monitor — same polling contract, against the discovery
   // status endpoint, so queued/running discovery runs update live.
   const discoveryRunQuery = useQuery({
@@ -625,6 +713,35 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
+  const propertyRunQuery = useQuery({
+    enabled: Boolean(propertyRunId),
+    queryKey: [
+      "bacnet-property-run",
+      sessionScopeId,
+      workspaceRef.projectId,
+      workspaceRef.siteId,
+      propertyRunId,
+    ],
+    queryFn: ({ signal }) => getDiscoveryRun(propertyRunId ?? "", { client: apiClient, signal }),
+    refetchInterval: (query) => (isTerminalStatus(query.state.data?.status) ? false : 1500),
+  });
+
+  const propertyAuthorizationsQuery = useQuery<ScanAuthorizationV1[]>({
+    enabled: Boolean(propertyPreviewRunId),
+    queryKey: [
+      "bacnet-property-authorizations",
+      sessionScopeId,
+      workspaceRef,
+      propertyPreviewRunId,
+    ],
+    queryFn: () =>
+      listScanAuthorizations({
+        workspace: workspaceRef,
+        previewRunId: propertyPreviewRunId ?? undefined,
+        context: { client: apiClient },
+      }),
+  });
+
   const activeRunRecord = runAccessClosed
     ? undefined
     : activeRun?.kind === "discovery"
@@ -639,6 +756,36 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const activeRunError =
     (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
   const activeRunTerminal = isTerminalStatus(activeRunStatus);
+  const propertyCeiling = useMemo<BacnetPropertyName[]>(() => {
+    const contract = activeRunRecord?.parameters?.scan_contract_v1;
+    if (!isPlainObject(contract) || !isPlainObject(contract.bacnet)) {
+      return [];
+    }
+    const values = contract.bacnet.authorized_property_ceiling;
+    if (!Array.isArray(values)) {
+      return [];
+    }
+    return BACNET_PROPERTY_OPTIONS.filter((property) => values.includes(property));
+  }, [activeRunRecord?.parameters]);
+  const propertyRunState = useMemo(() => {
+    const record = propertyRunQuery.data;
+    if (!record) {
+      return propertyRunId ? "queued" : null;
+    }
+    if (record.status === "succeeded") {
+      return "sealed";
+    }
+    if (
+      record.status === "failed" &&
+      /authorization|expired|revoked/i.test(record.error_message ?? "")
+    ) {
+      return "authorization-expired";
+    }
+    if (propertyCancelling) {
+      return "cancelling";
+    }
+    return record.status;
+  }, [propertyCancelling, propertyRunId, propertyRunQuery.data]);
 
   // IP and BACnet rows are reconstructed from durable observation pages while
   // the run is active. MQTT retains its established topic-snapshot path. A
@@ -692,9 +839,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           "none",
         ],
     refetchInterval: () =>
-      observationTerminalSynchronized || runAccessClosed || sseDriving
-        ? false
-        : 1500,
+      observationTerminalSynchronized || runAccessClosed || sseDriving ? false : 1500,
   });
 
   // Every page is fenced to one run+attempt before its cursor can advance. The
@@ -728,7 +873,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   useEffect(() => {
     setObservationFold(null);
-  }, [activeRun?.runId]);
+  }, [activeRun?.runId, detailRow?.Instance]);
 
   useEffect(() => {
     if (
@@ -867,7 +1012,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Any confirmed nonterminal run owns this head's monitor and Stop control.
   // Restored runs block a second start too, so reloading cannot create parallel
   // work while the original run is still live.
-  const startedRunActive = runIsActive;
+  const startedRunActive = runIsActive && !scanPreviewActive;
 
   // Validation issues are replaced alongside each progressive result snapshot.
   // Poll during an active validation and stop when the polled run is terminal.
@@ -890,6 +1035,67 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryFn: ({ signal }) =>
       getDiscoveryResults(activeRun?.runId ?? "", { client: apiClient, signal }),
     queryKey: queryKeys.results(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
+  });
+
+  const bacnetPointsQuery = useQuery({
+    enabled:
+      !runAccessClosed &&
+      module.route === "bacnet-discovery" &&
+      Boolean(activeRun) &&
+      activeRun?.kind === "discovery" &&
+      activeRunTerminal,
+    queryKey: [
+      "bacnet-points",
+      sessionScopeId,
+      workspaceRef.projectId,
+      workspaceRef.siteId,
+      activeRun?.runId,
+      bacnetPointsCursor,
+      bacnetPointsSearch,
+    ],
+    queryFn: ({ signal }) =>
+      getDiscoveryPoints(activeRun?.runId ?? "", {
+        after: bacnetPointsCursor,
+        context: { client: apiClient, signal },
+        limit: 100,
+        search: bacnetPointsSearch || undefined,
+      }),
+  });
+
+  useEffect(() => {
+    setBacnetPointsCursor(null);
+    setBacnetPointsSearch("");
+  }, [activeRun?.runId]);
+
+  useEffect(() => {
+    setPropertyRunId(null);
+    setPropertyPreviewRunId(null);
+    setPropertyAuthorizationId(null);
+    setPropertyRequestedReadSet([]);
+    setPropertyRequest(null);
+    setPropertyExpansionNotice(null);
+    setPropertyCancelling(false);
+  }, [activeRun?.runId, detailRow?.Instance]);
+
+  const discoveryComparisonQuery = useQuery({
+    enabled:
+      Boolean(comparisonRunId) &&
+      Boolean(activeRun) &&
+      activeRun?.kind === "discovery" &&
+      isTerminalStatus(discoveryRunQuery.data?.status),
+    queryKey: [
+      "discovery-comparison",
+      sessionScopeId,
+      workspaceRef.projectId,
+      workspaceRef.siteId,
+      activeRun?.runId,
+      comparisonRunId,
+    ],
+    queryFn: ({ signal }) =>
+      getDiscoveryComparison(activeRun?.runId ?? "", comparisonRunId ?? "", {
+        client: apiClient,
+        signal,
+      }),
   });
 
   // Live MQTT topic snapshot for the Explorer-like capture panel (mq9nhbzu).
@@ -1144,7 +1350,6 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     runController.phase === "settled" &&
     runController.runRef?.runId === activeRun?.runId &&
     (!observationBarrierRequired || observationTerminalSynchronized);
-
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
@@ -1159,6 +1364,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setRunAttachmentNotice(null);
     setLastReport(null);
     setActiveRun(null);
+    setScanPreviewActive(false);
     setObservationFold(null);
     setCopyFeedback(null);
     setSelectedResultId(null);
@@ -1356,11 +1562,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       finalEvidenceReady &&
       activeRunStatus === "succeeded" &&
       activeRun &&
-      !activeRun.restored
+      !activeRun.restored &&
+      !scanPreviewActive
     ) {
       setStep("results");
     }
-  }, [activeRunTerminal, activeRunStatus, activeRun, finalEvidenceReady]);
+  }, [activeRunTerminal, activeRunStatus, activeRun, finalEvidenceReady, scanPreviewActive]);
 
   // field engineer's walkthrough ask (2026-07-15): when Results opens, snap to the top of
   // the page so the operator sees the headline results first, not whatever
@@ -1432,28 +1639,61 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const runMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.run`),
-    mutationFn: async (actionId: string) => {
+    mutationFn: async ({ actionId, dryRun }: { actionId: string; dryRun: boolean }) => {
       const action = module.runActions.find((candidate) => candidate.id === actionId);
       if (!action) {
         throw new Error("Unknown run action.");
       }
 
       if (action.kind === "discovery") {
-        // Real (non-dry-run) scans must carry the authorization contract or the
-        // backend returns 403. The operator confirms via the checkbox; a dry-run
-        // previews the plan with no I/O and needs no authorization.
-        return startDiscoveryRun({
+        if (action.runKind !== "ip" || module.route !== "ip-scanner") {
+          return startDiscoveryRun({
+            context: { client: apiClient },
+            jobType: action.jobType,
+            parameters: buildDiscoveryParameters(action, {
+              authorized: scanAuthorized,
+              captureSeconds: captureSecondsEffective,
+              captureTopicFilter,
+              dryRun,
+              scanPorts,
+              provider: scanProvider,
+              nmapProfile,
+              target: scanTarget,
+            }),
+            runKind: action.runKind,
+            workspace: workspaceRef,
+          });
+        }
+        const parameters = buildDiscoveryParameters(action, {
+          authorized: scanAuthorized,
+          captureSeconds: captureSecondsEffective,
+          captureTopicFilter,
+          dryRun,
+          scanPorts,
+          targetRows: scanTargetRows,
+          exclusionRows: scanExclusionRows,
+          provider: scanProvider,
+          nmapProfile,
+          target: scanTarget,
+        });
+        if (dryRun) {
+          return startDiscoveryPreview({
+            context: { client: apiClient },
+            jobType: action.jobType as "ip_discovery" | "bacnet_discovery",
+            parameters: { ...parameters, dry_run: true },
+            runKind: action.runKind as "ip" | "bacnet",
+            workspace: workspaceRef,
+          });
+        }
+        if (!scanPreviewRunId || !scanAuthorizationId) {
+          throw new Error("Select a valid preview and scan authorization before starting.");
+        }
+        return startAuthorizedDiscoveryRun({
           context: { client: apiClient },
-          jobType: action.jobType,
-          parameters: buildDiscoveryParameters(action, {
-            authorized: scanAuthorized,
-            captureSeconds: captureSecondsEffective,
-            captureTopicFilter,
-            dryRun: scanDryRun,
-            scanPorts,
-            target: scanTarget,
-          }),
-          runKind: action.runKind,
+          jobType: action.jobType as "ip_discovery" | "bacnet_discovery",
+          previewRunId: scanPreviewRunId,
+          scanAuthorizationId,
+          runKind: action.runKind as "ip" | "bacnet",
           workspace: workspaceRef,
         });
       }
@@ -1492,7 +1732,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         workspace: workspaceRef,
       });
     },
-    onMutate: () => {
+    onMutate: (variables) => {
+      // A preview and its authorized live run can share an id in local/test
+      // adapters. Treat each submission as a fresh evidence barrier even when
+      // the backend reuses that identifier.
+      evidenceSyncRef.current = null;
+      if (variables.actionId === "ip-discovery" || variables.actionId === "ip-discovery.run") {
+        setScanPreviewActive(variables.dryRun);
+      }
       dispatchRun({ type: "submitting" });
     },
     onError: () => {
@@ -1502,9 +1749,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         dispatchRun({ type: "reset" });
       }
     },
-    onSuccess: (result, actionId) => {
-      const action = module.runActions.find((candidate) => candidate.id === actionId);
+    onSuccess: (result, variables) => {
+      const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
       if ("run_id" in result) {
+        if (action?.kind === "discovery" && variables.dryRun) {
+          setScanPreviewRunId(result.run_id);
+          setScanAuthorizationId(null);
+          setScanPreviewActive(true);
+        } else if (action?.kind === "discovery" && action.runKind === "ip") {
+          setScanPreviewActive(false);
+        }
         setScopedRunUrl(result.run_id);
         setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
         setLastReport(null);
@@ -1530,6 +1784,92 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         void reportsQuery.refetch();
       }
     },
+  });
+
+  const propertyExpansionMutation = useMutation({
+    mutationFn: ({
+      row,
+      parentRunId,
+      requestedReadSet,
+    }: {
+      row: Record<string, string>;
+      parentRunId: string;
+      requestedReadSet: BacnetPropertyName[];
+    }) => {
+      const deviceInstance = Number(row.Instance);
+      if (!Number.isInteger(deviceInstance) || deviceInstance < 0) {
+        throw new Error("This BACnet row has no valid device instance.");
+      }
+      return startBacnetPropertyRun({
+        context: { client: apiClient },
+        parentRunId,
+        deviceInstance,
+        destination: row["IP Address"] || undefined,
+        requestedReadSet,
+        workspace: workspaceRef,
+      });
+    },
+    onMutate: ({ row, parentRunId, requestedReadSet }) => {
+      setPropertyRequest({
+        parentRunId,
+        deviceInstance: Number(row.Instance),
+        destination: row["IP Address"] || undefined,
+        requestedReadSet,
+      });
+      setPropertyExpansionNotice(null);
+      setPropertyAuthorizationId(null);
+    },
+    onSuccess: (result) => {
+      setPropertyPreviewRunId(result.run_id);
+      setPropertyRunId(result.run_id);
+      setPropertyExpansionNotice(`Property preview ${result.run_id} was created.`);
+    },
+    onError: (error) => {
+      setPropertyExpansionNotice(
+        error instanceof Error ? error.message : "Property preview failed.",
+      );
+    },
+  });
+
+  const propertyLiveMutation = useMutation({
+    mutationFn: () => {
+      if (!propertyRequest || !propertyPreviewRunId || !propertyAuthorizationId) {
+        throw new Error("Select a property preview and authorization before starting.");
+      }
+      return startBacnetPropertyRun({
+        ...propertyRequest,
+        previewRunId: propertyPreviewRunId,
+        scanAuthorizationId: propertyAuthorizationId,
+        workspace: workspaceRef,
+      });
+    },
+    onMutate: () => {
+      setPropertyExpansionNotice(null);
+      setPropertyCancelling(false);
+    },
+    onSuccess: (result) => {
+      setPropertyRunId(result.run_id);
+      setPropertyExpansionNotice(`Property child ${result.run_id} was accepted.`);
+    },
+    onError: (error) => {
+      setPropertyExpansionNotice(
+        error instanceof Error ? error.message : "Property child start failed.",
+      );
+    },
+  });
+
+  const propertyCancelMutation = useMutation({
+    mutationFn: () => {
+      if (!propertyRunId) {
+        throw new Error("No property child run is active.");
+      }
+      return cancelRun(propertyRunId, { client: apiClient });
+    },
+    onMutate: () => setPropertyCancelling(true),
+    onSuccess: () => {
+      void propertyRunQuery.refetch();
+    },
+    onError: () => setPropertyCancelling(false),
   });
 
   const publishMutation = useMutation({
@@ -2195,9 +2535,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // versions in place, so clearing on every view object would throw away the
   // operator's row selection during normal progressive updates.
   useEffect(() => {
-      setSelectedResultId(null);
-      setResultsTextFilter("");
-      setResultsToneFilter("all");
+    setSelectedResultId(null);
+    setResultsTextFilter("");
+    setResultsToneFilter("all");
   }, [activeRun?.runId]);
 
   const liveMetrics = useMemo(() => {
@@ -2206,6 +2546,34 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return discoveryMetrics(module.route, discoveryResultsQuery.data);
   }, [finalEvidenceReady, isDiscoveryModule, discoveryResultsQuery.data, module.route]);
+
+  const ipHeadlineMetrics = useMemo<IpHeadlineMetricDisplay[] | null>(() => {
+    if (module.route !== "ip-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    try {
+      return formatIpHeadlineMetrics(
+        discoveryResultsQuery.data.result_summary.ip_headline_metrics_v1,
+      );
+    } catch {
+      // Older sealed runs do not carry the additive metric snapshot. Keep the
+      // legacy two-number headline for those runs instead of inventing values.
+      return null;
+    }
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
+  const bacnetHeadlineMetrics = useMemo<BacnetHeadlineMetricDisplay[] | null>(() => {
+    if (module.route !== "bacnet-discovery" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    try {
+      return formatBacnetHeadlineMetrics(
+        discoveryResultsQuery.data.result_summary.bacnet_headline_metrics_v1,
+      );
+    } catch {
+      return null;
+    }
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
@@ -2783,6 +3151,55 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setScanPorts((current) => current.filter((_entry, entryIndex) => entryIndex !== index));
   };
 
+  const addTargetRow = (exclusion: boolean) => {
+    const row: IpTargetRow = {
+      id: `${exclusion ? "exclude" : "target"}-${Date.now()}-${Math.random()}`,
+      kind: "address",
+      value: "",
+    };
+    (exclusion ? setScanExclusionRows : setScanTargetRows)((current) => [...current, row]);
+  };
+
+  const updateTargetRow = (
+    exclusion: boolean,
+    id: string,
+    field: "kind" | "value" | "end",
+    value: string,
+  ) => {
+    const setter = exclusion ? setScanExclusionRows : setScanTargetRows;
+    setter((current) => current.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
+  };
+
+  const removeTargetRow = (exclusion: boolean, id: string) => {
+    const setter = exclusion ? setScanExclusionRows : setScanTargetRows;
+    setter((current) => current.filter((row) => row.id !== id));
+  };
+
+  const changeNmapProfile = (profile: NmapProfileName) => {
+    setNmapProfile(profile);
+    setScanPorts((current) =>
+      current.map((entry) => ({
+        ...entry,
+        protocol: profile === "selected_udp" ? ("udp" as const) : ("tcp" as const),
+      })),
+    );
+  };
+
+  const changeScanProvider = (provider: IPDiscoveryProvider) => {
+    setScanProvider(provider);
+    if (provider === "builtin_tcp_connect") {
+      setScanPorts((current) => current.map((entry) => ({ ...entry, protocol: "tcp" as const })));
+      return;
+    }
+    const permittedProfiles = nmapCapabilityQuery.data?.permitted_profiles ?? [];
+    const permittedProfile = permittedProfiles.includes(nmapProfile)
+      ? nmapProfile
+      : permittedProfiles[0];
+    if (permittedProfile) {
+      changeNmapProfile(permittedProfile);
+    }
+  };
+
   const addExtraPublishPoint = () => {
     setPublishExtraPoints((current) => [...current, { point: "", value: "" }]);
   };
@@ -3081,7 +3498,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   };
 
   // For real (non-dry-run) discovery the operator must confirm authorization.
-  const discoveryBlocked = isDiscoveryModule && !scanDryRun && !scanAuthorized;
+  const nmapAvailable =
+    nmapCapabilityQuery.data?.state === "available" &&
+    nmapCapabilityQuery.data.process_selection_allowed;
+  const nmapSelectionBlocked =
+    module.route === "ip-scanner" && scanProvider === "operator_managed_nmap" && !nmapAvailable;
+  const discoveryBlocked =
+    (module.route === "ip-scanner" &&
+      !scanDryRun &&
+      (!scanAuthorized || !scanPreviewRunId || !scanAuthorizationId)) ||
+    nmapSelectionBlocked;
 
   // Import warnings are informational (their rows stay accepted), so they get
   // their own amber panel below the outcome — never the red error styling.
@@ -3276,7 +3702,81 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </article>
           )}
         </div>
+        {ipHeadlineMetrics && (
+          <section className="ip-headline-metrics" aria-label="IP scan headline metrics">
+            {ipHeadlineMetrics.map((metric) => (
+              <article key={metric.heading}>
+                <strong>{metric.value}</strong>
+                <span>{metric.heading}</span>
+                {metric.progress && <small>{metric.progress}</small>}
+              </article>
+            ))}
+          </section>
+        )}
+        {bacnetHeadlineMetrics && (
+          <section className="ip-headline-metrics" aria-label="BACnet discovery headline metrics">
+            {bacnetHeadlineMetrics.map((metric) => (
+              <article key={metric.heading}>
+                <strong>{metric.value}</strong>
+                <span>{metric.heading}</span>
+                {metric.progress && <small>{metric.progress}</small>}
+              </article>
+            ))}
+          </section>
+        )}
       </section>
+
+      {comparisonRunId && activeRun?.kind === "discovery" && (
+        <section className="surface run-comparison-panel" aria-label="Sealed run comparison">
+          <div className="surface-heading">
+            <div>
+              <span className="eyebrow">Comparison</span>
+              <h3>Sealed run against {comparisonRunId}</h3>
+            </div>
+            <button
+              className="secondary-button compact"
+              onClick={() =>
+                setSearchParams(
+                  (current) => {
+                    const next = new URLSearchParams(current);
+                    next.delete("compare");
+                    return next;
+                  },
+                  { replace: true },
+                )
+              }
+              type="button"
+            >
+              Return to current run
+            </button>
+          </div>
+          {discoveryComparisonQuery.isLoading ? (
+            <p>Loading sealed comparison.</p>
+          ) : discoveryComparisonQuery.isError ? (
+            <div className="state-panel error" role="alert">
+              <strong>Comparison unavailable</strong>
+              <span>
+                {discoveryComparisonQuery.error instanceof Error
+                  ? discoveryComparisonQuery.error.message
+                  : "The sealed comparison could not be loaded."}
+              </span>
+            </div>
+          ) : discoveryComparisonQuery.data?.compatible ? (
+            <div className="comparison-summary" aria-live="polite">
+              <span>{discoveryComparisonQuery.data.additions.length} additions</span>
+              <span>{discoveryComparisonQuery.data.removals.length} removals</span>
+              <span>{discoveryComparisonQuery.data.changes.length} changes</span>
+            </div>
+          ) : (
+            <div className="state-panel" role="status">
+              <strong>Runs cannot be compared</strong>
+              <span>
+                {discoveryComparisonQuery.data?.reason ?? "The sealed runs are incompatible."}
+              </span>
+            </div>
+          )}
+        </section>
+      )}
 
       {module.route !== "reports" && (
         <StepNav
@@ -3293,371 +3793,416 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       >
         {module.route !== "reports" && (
           <section className="app-grid two-col" data-stepgroup="setup run">
-          <article className="surface">
-            <div className="surface-heading">
-              <div>
-                <h3>Register Import</h3>
+            <article className="surface">
+              <div className="surface-heading">
+                <div>
+                  <h3>Register Import</h3>
+                </div>
               </div>
-            </div>
 
-            {module.importTypes.length > 0 ? (
-              <div className="form-stack">
-                <label>
-                  Import profile
-                  <select
-                    disabled={profilesQuery.isLoading}
-                    onChange={(event) => setSelectedImportType(event.target.value as ImportType)}
-                    value={selectedImportType}
-                  >
-                    {availableProfiles.map((profile) => (
-                      <option key={profile.import_type} value={profile.import_type}>
-                        {profile.import_type.replace(/_/g, " ")}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+              {module.importTypes.length > 0 ? (
+                <div className="form-stack">
+                  <label>
+                    Import profile
+                    <select
+                      disabled={profilesQuery.isLoading}
+                      onChange={(event) => setSelectedImportType(event.target.value as ImportType)}
+                      value={selectedImportType}
+                    >
+                      {availableProfiles.map((profile) => (
+                        <option key={profile.import_type} value={profile.import_type}>
+                          {profile.import_type.replace(/_/g, " ")}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
 
-                <label>
-                  CSV or XLSX file
-                  <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
-                </label>
-                {/* handleFileChange clears the input's value, so the native
+                  <label>
+                    CSV or XLSX file
+                    <input accept=".csv,.xlsx" onChange={handleFileChange} type="file" />
+                  </label>
+                  {/* handleFileChange clears the input's value, so the native
                   control always reads "No file chosen" — the staged file is
                   named here from state instead. */}
-                {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
-                {/* When nothing is staged in this session, surface the server's
+                  {selectedFile && <p className="field-note">Selected: {selectedFile.name}</p>}
+                  {/* When nothing is staged in this session, surface the server's
                   own record of the last import so the empty file input does not
                   imply nothing was ever uploaded (ISSUE-5). Only ever shown on a
                   real hit — a 404/error leaves data undefined. */}
-                {!selectedFile && latestImportQuery.data && (
-                  <div className="state-panel success import-on-file">
-                    <strong>Register already imported</strong>
-                    <span>
+                  {!selectedFile && latestImportQuery.data && (
+                    <div className="state-panel success import-on-file">
+                      <strong>Register already imported</strong>
+                      <span>
                         {latestImportQuery.data.file_name} — {latestImportQuery.data.accepted_rows}{" "}
                         of {latestImportQuery.data.total_rows} rows accepted,{" "}
-                      {formatRelativeTime(latestImportQuery.data.created_at)}. This register is
-                      stored and used by runs on this page; upload again only if the file changed.
-                    </span>
-                  </div>
-                )}
+                        {formatRelativeTime(latestImportQuery.data.created_at)}. This register is
+                        stored and used by runs on this page; upload again only if the file changed.
+                      </span>
+                    </div>
+                  )}
 
-                <button
-                  className="primary-button"
-                  disabled={
+                  <button
+                    className="primary-button"
+                    disabled={
                       !selectedFile ||
                       !selectedImportType ||
                       importMutation.isPending ||
                       !canEngineer
-                  }
-                  onClick={handleImport}
-                  title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-                  type="button"
-                >
-                  {importMutation.isPending ? "Validating..." : "Upload and validate"}
-                </button>
+                    }
+                    onClick={handleImport}
+                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                    type="button"
+                  >
+                    {importMutation.isPending ? "Validating..." : "Upload and validate"}
+                  </button>
 
-                {selectedImportType && (
-                  <div className="schema-card template-card">
-                    <div>
-                      <strong>Default import template</strong>
-                      <p>
-                        Use this format as the normal project template. It includes the required
-                        columns and one realistic example row.
-                      </p>
+                  {selectedImportType && (
+                    <div className="schema-card template-card">
+                      <div>
+                        <strong>Default import template</strong>
+                        <p>
+                          Use this format as the normal project template. It includes the required
+                          columns and one realistic example row.
+                        </p>
+                      </div>
+                      <div className="inline-actions">
+                        <button
+                          className="secondary-button compact"
+                          disabled={templateDownload.pendingKey !== null}
+                          onClick={() =>
+                            void templateDownload.download(
+                              "template-xlsx",
+                              getImportTemplatePath(selectedImportType, "xlsx"),
+                              `${selectedImportType}_template.xlsx`,
+                            )
+                          }
+                          type="button"
+                        >
+                          {templateDownload.pendingKey === "template-xlsx"
+                            ? "Downloading..."
+                            : "Download XLSX"}
+                        </button>
+                        <button
+                          className="secondary-button compact"
+                          disabled={templateDownload.pendingKey !== null}
+                          onClick={() =>
+                            void templateDownload.download(
+                              "template-csv",
+                              getImportTemplatePath(selectedImportType, "csv"),
+                              `${selectedImportType}_template.csv`,
+                            )
+                          }
+                          type="button"
+                        >
+                          {templateDownload.pendingKey === "template-csv"
+                            ? "Downloading..."
+                            : "Download CSV"}
+                        </button>
+                      </div>
                     </div>
-                    <div className="inline-actions">
-                      <button
-                        className="secondary-button compact"
-                        disabled={templateDownload.pendingKey !== null}
-                        onClick={() =>
-                          void templateDownload.download(
-                            "template-xlsx",
-                            getImportTemplatePath(selectedImportType, "xlsx"),
-                            `${selectedImportType}_template.xlsx`,
-                          )
-                        }
-                        type="button"
-                      >
-                        {templateDownload.pendingKey === "template-xlsx"
-                          ? "Downloading..."
-                          : "Download XLSX"}
-                      </button>
-                      <button
-                        className="secondary-button compact"
-                        disabled={templateDownload.pendingKey !== null}
-                        onClick={() =>
-                          void templateDownload.download(
-                            "template-csv",
-                            getImportTemplatePath(selectedImportType, "csv"),
-                            `${selectedImportType}_template.csv`,
-                          )
-                        }
-                        type="button"
-                      >
-                        {templateDownload.pendingKey === "template-csv"
-                          ? "Downloading..."
-                          : "Download CSV"}
-                      </button>
+                  )}
+
+                  {templateDownload.error && (
+                    <div className="state-panel error">
+                      <strong>Template download failed</strong>
+                      <span>{templateDownload.error}</span>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {templateDownload.error && (
-                  <div className="state-panel error">
-                    <strong>Template download failed</strong>
-                    <span>{templateDownload.error}</span>
-                  </div>
-                )}
-
-                {selectedProfile && (
-                  <div className="schema-card">
-                    <strong>Required columns</strong>
-                    <div className="tag-cloud">
-                      {selectedProfile.required_columns.slice(0, 8).map((column) => (
-                        <span key={column}>{column}</span>
-                      ))}
-                    </div>
-                    {(selectedProfile.optional_columns ?? []).length > 0 && (
-                      <>
-                        <strong>Optional columns</strong>
-                        <div className="tag-cloud">
-                          {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
-                            <span key={column} className="optional">
-                              {column}
-                            </span>
-                          ))}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {importMutation.isError && (
-                  <div className="state-panel error">
-                    <strong>Import failed</strong>
-                    <span>{importMutation.error.message}</span>
-                  </div>
-                )}
-
-                {importOutcome && (
-                  <div className={`state-panel ${importOutcome.status}`}>
-                    <strong>{importOutcome.status.toUpperCase()}</strong>
-                    <span>
-                      {importOutcome.accepted_rows} accepted · {importOutcome.rejected_rows}{" "}
-                      rejected
-                    </span>
-                  </div>
-                )}
-
-                {importOutcome && importOutcome.status !== "accepted" && (
-                  <div className="state-panel error import-errors">
-                    <strong>
-                      {importOutcome.status === "rejected"
-                        ? "Import rejected — reasons below"
-                        : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
-                    </strong>
-                    {importOutcome.missing_columns.length > 0 && (
-                      <span>
-                        Missing required columns: {importOutcome.missing_columns.join(", ")}
-                      </span>
-                    )}
-                    {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
-                    {/* Never let a failed fetch look like "no reasons": say so. */}
-                    {importErrorsQuery.isError && (
-                      <span>
-                        Could not load rejection reasons: {importErrorsQuery.error.message}
-                      </span>
-                    )}
-                    {visibleImportErrors.length > 0 && (
-                      <ul>
-                        {visibleImportErrors.map((error, index) => (
-                          <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
-                            {error.row_number != null ? `Row ${error.row_number} — ` : ""}
-                            {error.field ? `${error.field}: ` : ""}
-                            {error.message} ({error.code})
-                          </li>
+                  {selectedProfile && (
+                    <div className="schema-card">
+                      <strong>Required columns</strong>
+                      <div className="tag-cloud">
+                        {selectedProfile.required_columns.slice(0, 8).map((column) => (
+                          <span key={column}>{column}</span>
                         ))}
-                      </ul>
-                    )}
-                    {hiddenImportErrorCount > 0 && (
+                      </div>
+                      {(selectedProfile.optional_columns ?? []).length > 0 && (
+                        <>
+                          <strong>Optional columns</strong>
+                          <div className="tag-cloud">
+                            {(selectedProfile.optional_columns ?? []).slice(0, 8).map((column) => (
+                              <span key={column} className="optional">
+                                {column}
+                              </span>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {importMutation.isError && (
+                    <div className="state-panel error">
+                      <strong>Import failed</strong>
+                      <span>{importMutation.error.message}</span>
+                    </div>
+                  )}
+
+                  {importOutcome && (
+                    <div className={`state-panel ${importOutcome.status}`}>
+                      <strong>{importOutcome.status.toUpperCase()}</strong>
                       <span>
+                        {importOutcome.accepted_rows} accepted · {importOutcome.rejected_rows}{" "}
+                        rejected
+                      </span>
+                    </div>
+                  )}
+
+                  {importOutcome && importOutcome.status !== "accepted" && (
+                    <div className="state-panel error import-errors">
+                      <strong>
+                        {importOutcome.status === "rejected"
+                          ? "Import rejected — reasons below"
+                          : `${importOutcome.rejected_rows} of ${importOutcome.total_rows} rows rejected — reasons below`}
+                      </strong>
+                      {importOutcome.missing_columns.length > 0 && (
+                        <span>
+                          Missing required columns: {importOutcome.missing_columns.join(", ")}
+                        </span>
+                      )}
+                      {importErrorsQuery.isLoading && <span>Loading rejection reasons...</span>}
+                      {/* Never let a failed fetch look like "no reasons": say so. */}
+                      {importErrorsQuery.isError && (
+                        <span>
+                          Could not load rejection reasons: {importErrorsQuery.error.message}
+                        </span>
+                      )}
+                      {visibleImportErrors.length > 0 && (
+                        <ul>
+                          {visibleImportErrors.map((error, index) => (
+                            <li key={`${error.row_number ?? "file"}-${error.field ?? ""}-${index}`}>
+                              {error.row_number != null ? `Row ${error.row_number} — ` : ""}
+                              {error.field ? `${error.field}: ` : ""}
+                              {error.message} ({error.code})
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {hiddenImportErrorCount > 0 && (
+                        <span>
                           ...and {hiddenImportErrorCount} more rejected rows not shown — fix the
                           rows listed above and re-upload to see the rest.
-                      </span>
-                    )}
-                  </div>
-                )}
+                        </span>
+                      )}
+                    </div>
+                  )}
 
-                {importWarnings.length > 0 && (
-                  <div className="state-panel warning">
-                    <strong>
-                      {importWarnings.length} warning(s) — affected rows are still accepted
-                    </strong>
-                    <ul>
-                      {importWarnings.map((warning, index) => (
+                  {importWarnings.length > 0 && (
+                    <div className="state-panel warning">
+                      <strong>
+                        {importWarnings.length} warning(s) — affected rows are still accepted
+                      </strong>
+                      <ul>
+                        {importWarnings.map((warning, index) => (
                           <li
                             key={`${warning.row_number ?? "file"}-${warning.field ?? ""}-${index}`}
                           >
-                          {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
-                          {warning.message}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="empty-workspace">
-                <strong>No direct import for this module</strong>
-                <span>Reports are built from completed discovery and validation runs.</span>
-              </div>
-            )}
-          </article>
+                            {warning.row_number != null ? `Row ${warning.row_number}: ` : ""}
+                            {warning.message}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="empty-workspace">
+                  <strong>No direct import for this module</strong>
+                  <span>Reports are built from completed discovery and validation runs.</span>
+                </div>
+              )}
+            </article>
 
-          <article className="surface">
-            <div className="surface-heading">
-              <div>
-                <h3>Run Controls</h3>
+            <article className="surface">
+              <div className="surface-heading">
+                <div>
+                  <h3>Run Controls</h3>
+                </div>
               </div>
-            </div>
 
-            {isDiscoveryModule && (
-              <div className="form-stack scan-authorization">
-                <label className="confirm-row">
-                  <input
-                    checked={scanDryRun}
-                    onChange={(event) => setScanDryRun(event.target.checked)}
-                    type="checkbox"
-                  />
-                  Dry run — preview the scan plan with no network I/O (no authorization needed).
-                </label>
-                {!scanDryRun && (
+              {isDiscoveryModule && (
+                <div className="form-stack scan-authorization">
                   <label className="confirm-row">
                     <input
-                      checked={scanAuthorized}
-                      onChange={(event) => setScanAuthorized(event.target.checked)}
+                      checked={scanDryRun}
+                      onChange={(event) => setScanDryRun(event.target.checked)}
                       type="checkbox"
                     />
-                    I am authorized to scan this network. Real scans without this are rejected
-                    (403).
+                    Dry run — preview the scan plan with no network I/O (no authorization needed).
                   </label>
-                )}
-              </div>
-            )}
+                  {!scanDryRun && (
+                    <>
+                      <label className="confirm-row">
+                        <input
+                          checked={scanAuthorized}
+                          onChange={(event) => setScanAuthorized(event.target.checked)}
+                          type="checkbox"
+                        />
+                        I am authorized to scan this network. A sealed preview and approved
+                        authorization are also required.
+                      </label>
+                      <label>
+                        Sealed preview authorization
+                        <select
+                          aria-describedby="scan-authorization-help"
+                          disabled={!scanPreviewRunId || scanAuthorizationsQuery.isLoading}
+                          onChange={(event) => setScanAuthorizationId(event.target.value || null)}
+                          value={scanAuthorizationId ?? ""}
+                        >
+                          <option value="">
+                            {scanPreviewRunId
+                              ? "Select an approved authorization"
+                              : "Run a dry preview first"}
+                          </option>
+                          {(scanAuthorizationsQuery.data ?? []).map((authorization) => (
+                            <option
+                              disabled={Boolean(
+                                authorization.revoked_at ||
+                                authorization.consumed_run_id ||
+                                authorization.use_count >= authorization.max_uses,
+                              )}
+                              key={authorization.authorization_id}
+                              value={authorization.authorization_id}
+                            >
+                              {authorization.authorization_id} · {authorization.use_count}/
+                              {authorization.max_uses}
+                            </option>
+                          ))}
+                        </select>
+                        <span id="scan-authorization-help" className="field-note">
+                          Preview {scanPreviewRunId ?? "not created"}; start sends only this preview
+                          and authorization reference.
+                        </span>
+                      </label>
+                    </>
+                  )}
+                </div>
+              )}
 
-            <div className="run-list">
-              {visibleRunActions.length > 0 ? (
-                // Mapped over the FULL list and skipped in place, never
-                // filter-then-map: `index` must stay the action's real index in
-                // module.runActions or mutate(index) dispatches the wrong action.
-                module.runActions.map((action) => {
-                  if (action.hiddenFromRunControls) {
-                    return null;
-                  }
-                  const scanBlocked = action.kind === "discovery" && discoveryBlocked;
-                  const mqttOverCapBlocked =
+              <div className="run-list">
+                {visibleRunActions.length > 0 ? (
+                  // Mapped over the FULL list and skipped in place, never
+                  // filter-then-map: `index` must stay the action's real index in
+                  // module.runActions or mutate(index) dispatches the wrong action.
+                  module.runActions.map((action) => {
+                    if (action.hiddenFromRunControls) {
+                      return null;
+                    }
+                    const scanBlocked = action.kind === "discovery" && discoveryBlocked;
+                    const mqttOverCapBlocked =
                       mqttCaptureOverCap &&
                       action.kind === "discovery" &&
                       action.runKind === "mqtt";
-                  const overCapBlocked =
-                    (udmiCaptureOverCap &&
-                      action.kind === "validation" &&
-                      action.runKind === "udmi") ||
-                    mqttOverCapBlocked;
+                    const overCapBlocked =
+                      (udmiCaptureOverCap &&
+                        action.kind === "validation" &&
+                        action.runKind === "udmi") ||
+                      mqttOverCapBlocked;
                     // One confirmed live run owns the monitor and Stop action. A
                     // restored run blocks another start exactly like one submitted
                     // in this session.
                     const blocked =
                       scanBlocked || !canEngineer || overCapBlocked || startedRunActive;
-                  // Role gate takes priority in the tooltip; otherwise the existing
-                  // scan-authorization hint is shown for a blocked real scan.
-                  const blockedTooltip = !canEngineer
-                    ? ENGINEER_REQUIRED_TOOLTIP
-                    : scanBlocked
-                      ? "Confirm scan authorization (or enable dry run) before starting a real scan."
-                      : mqttOverCapBlocked
-                        ? "Run time exceeds the 48-hour capture limit."
-                        : overCapBlocked
-                          ? "Run time exceeds the 48-hour capture limit."
-                          : startedRunActive
-                            ? "A run is already in progress — stop it before starting another."
-                            : undefined;
-                  return (
-                    <div className="run-card" key={action.id}>
-                      <div>
-                        <strong>{action.label}</strong>
-                        <span>{action.helper}</span>
+                    // Role gate takes priority in the tooltip; otherwise the existing
+                    // scan-authorization hint is shown for a blocked real scan.
+                    const blockedTooltip = !canEngineer
+                      ? ENGINEER_REQUIRED_TOOLTIP
+                      : nmapSelectionBlocked
+                        ? "Operator-managed Nmap is not confirmed and available for this site."
+                        : startedRunActive
+                          ? "A run is already in progress. Stop it before starting another."
+                          : scanBlocked
+                            ? "Confirm scan authorization (or enable dry run) before starting a real scan."
+                            : mqttOverCapBlocked
+                              ? "Run time exceeds the 48-hour capture limit."
+                              : overCapBlocked
+                                ? "Run time exceeds the 48-hour capture limit."
+                                : undefined;
+                    return (
+                      <div className="run-card" key={action.id}>
+                        <div>
+                          <strong>{action.label}</strong>
+                          <span>{action.helper}</span>
+                        </div>
+                        <button
+                          className="secondary-button compact"
+                          disabled={runMutation.isPending || blocked}
+                          onClick={() =>
+                            runMutation.mutate({
+                              actionId: action.id,
+                              dryRun:
+                                action.kind === "discovery" &&
+                                action.runKind === "ip" &&
+                                scanDryRun,
+                            })
+                          }
+                          title={blockedTooltip}
+                          type="button"
+                        >
+                          {runMutation.isPending
+                            ? "Working..."
+                            : scanDryRun && action.kind === "discovery"
+                              ? "Preview"
+                              : module.route === "reports"
+                                ? "Generate"
+                                : "Run"}
+                        </button>
                       </div>
-                      <button
-                        className="secondary-button compact"
-                        disabled={runMutation.isPending || blocked}
-                        onClick={() => runMutation.mutate(action.id)}
-                        title={blockedTooltip}
-                        type="button"
-                      >
-                        {runMutation.isPending
-                          ? "Working..."
-                          : scanDryRun && action.kind === "discovery"
-                            ? "Preview"
-                            : module.route === "reports"
-                              ? "Generate"
-                              : "Run"}
-                      </button>
-                    </div>
-                  );
-                })
-              ) : module.runActions.length > 0 ? (
-                // This head HAS a run action, it is just started from elsewhere.
-                // Without this pointer the Run step is a dead end: StepNav never
-                // disables steps, so an operator can land here before any run and
-                // find no start control at all.
-                <div className="empty-workspace">
-                  <strong>Run controls are at the bottom of Setup</strong>
-                  <span>
-                    Work through the options below, then start the run with Execute capture under
-                    Schedule and Payload Evidence.
-                  </span>
-                </div>
-              ) : (
-                <div className="empty-workspace">
-                  <strong>Saved synchronously</strong>
-                  <span>This workflow does not need a background worker.</span>
-                </div>
-              )}
-            </div>
-
-            {runMutation.isError && (
-              <div className="state-panel error">
-                <strong>Run request failed</strong>
-                <span>{runMutation.error.message}</span>
-              </div>
-            )}
-
-            {runOutcome && (
-              <div className="state-panel success">
-                <strong>Accepted by API</strong>
-                <span>{runOutcome}</span>
-                {lastReport && (
-                  <button
-                    className="secondary-button compact inline-link-button"
-                    disabled={reportDownload.pendingKey !== null}
-                    onClick={() =>
-                      void reportDownload.download(
-                        "report",
-                        getReportDownloadPath(lastReport.report_id),
-                        lastReport.file_name ||
-                          `${lastReport.report_id}.${lastReport.output_format}`,
-                      )
-                    }
-                    type="button"
-                  >
-                    {reportDownload.pendingKey === "report"
-                      ? "Downloading..."
-                      : `Download ${lastReport.output_format.toUpperCase()}`}
-                  </button>
+                    );
+                  })
+                ) : module.runActions.length > 0 ? (
+                  // This head HAS a run action, it is just started from elsewhere.
+                  // Without this pointer the Run step is a dead end: StepNav never
+                  // disables steps, so an operator can land here before any run and
+                  // find no start control at all.
+                  <div className="empty-workspace">
+                    <strong>Run controls are at the bottom of Setup</strong>
+                    <span>
+                      Work through the options below, then start the run with Execute capture under
+                      Schedule and Payload Evidence.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="empty-workspace">
+                    <strong>Saved synchronously</strong>
+                    <span>This workflow does not need a background worker.</span>
+                  </div>
                 )}
               </div>
-            )}
+
+              {runMutation.isError && (
+                <div className="state-panel error">
+                  <strong>Run request failed</strong>
+                  <span>{runMutation.error.message}</span>
+                </div>
+              )}
+
+              {runOutcome && (
+                <div className="state-panel success">
+                  <strong>Accepted by API</strong>
+                  <span>{runOutcome}</span>
+                  {lastReport && (
+                    <button
+                      className="secondary-button compact inline-link-button"
+                      disabled={reportDownload.pendingKey !== null}
+                      onClick={() =>
+                        void reportDownload.download(
+                          "report",
+                          getReportDownloadPath(lastReport.report_id),
+                          lastReport.file_name ||
+                            `${lastReport.report_id}.${lastReport.output_format}`,
+                        )
+                      }
+                      type="button"
+                    >
+                      {reportDownload.pendingKey === "report"
+                        ? "Downloading..."
+                        : `Download ${lastReport.output_format.toUpperCase()}`}
+                    </button>
+                  )}
+                </div>
+              )}
 
               {runAttachmentNotice && (
                 <div className="state-panel" role="note">
@@ -3666,36 +4211,36 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
               )}
 
-            {reportDownload.error && (
-              <div className="state-panel error">
-                <strong>Report download failed</strong>
-                <span>{reportDownload.error}</span>
-              </div>
-            )}
-
-            {copyFeedback && (
-              <div className={`state-panel ${copyFeedback.severity}`}>
-                <strong>Payload copy</strong>
-                <span>{copyFeedback.message}</span>
-              </div>
-            )}
-
-            {activeRun && (
-              <div className="state-panel run-monitor">
-                <div className="run-monitor-heading">
-                  <div>
-                    <strong>
-                      {activeRun.kind === "discovery" ? "Discovery" : "Validation"} run monitor
-                    </strong>
-                    <span>{activeRun.runId}</span>
-                    <Link className="link-button" to="/run-history">
-                      Run history
-                    </Link>
-                  </div>
-                  <span className={`status-token ${activeStatusClass}`}>
-                    {activeRunStatus ?? "queued"}
-                  </span>
+              {reportDownload.error && (
+                <div className="state-panel error">
+                  <strong>Report download failed</strong>
+                  <span>{reportDownload.error}</span>
                 </div>
+              )}
+
+              {copyFeedback && (
+                <div className={`state-panel ${copyFeedback.severity}`}>
+                  <strong>Payload copy</strong>
+                  <span>{copyFeedback.message}</span>
+                </div>
+              )}
+
+              {activeRun && (
+                <div className="state-panel run-monitor">
+                  <div className="run-monitor-heading">
+                    <div>
+                      <strong>
+                        {activeRun.kind === "discovery" ? "Discovery" : "Validation"} run monitor
+                      </strong>
+                      <span>{activeRun.runId}</span>
+                      <Link className="link-button" to="/run-history">
+                        Run history
+                      </Link>
+                    </div>
+                    <span className={`status-token ${activeStatusClass}`}>
+                      {activeRunStatus ?? "queued"}
+                    </span>
+                  </div>
 
                   {discoveryConnectionMessage && (
                     <p
@@ -3708,193 +4253,193 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </p>
                   )}
 
-                <div className={`progress-track${progressIndeterminate ? " indeterminate" : ""}`}>
+                  <div className={`progress-track${progressIndeterminate ? " indeterminate" : ""}`}>
                     <div
                       style={progressIndeterminate ? undefined : { width: `${progressWidth}%` }}
                     />
-                </div>
+                  </div>
 
-                {activeRunRecord && (
-                  <LiveRunConsole
-                    key={activeRunRecord.run_id}
-                    assetTopicDiscovery={assetTopicDiscovery}
-                    elapsed={formatElapsed(activeRunElapsedSeconds)}
-                    issueCount={
-                      typeof activeRunRecord.result_summary.issue_count === "number"
-                        ? activeRunRecord.result_summary.issue_count
+                  {activeRunRecord && (
+                    <LiveRunConsole
+                      key={activeRunRecord.run_id}
+                      assetTopicDiscovery={assetTopicDiscovery}
+                      elapsed={formatElapsed(activeRunElapsedSeconds)}
+                      issueCount={
+                        typeof activeRunRecord.result_summary.issue_count === "number"
+                          ? activeRunRecord.result_summary.issue_count
                           : (validationIssuesQuery.data?.issues.length ?? 0)
-                    }
-                    progress={activeRunProgress}
-                    run={activeRunRecord}
-                    stage={activeRunStage ?? ""}
-                    status={activeRunStatus ?? "queued"}
-                    validationSummary={validationSummary}
-                  />
-                )}
+                      }
+                      progress={activeRunProgress}
+                      run={activeRunRecord}
+                      stage={activeRunStage ?? ""}
+                      status={activeRunStatus ?? "queued"}
+                      validationSummary={validationSummary}
+                    />
+                  )}
 
-                {runController.phase === "terminal-sync" && (
-                  <div className={`state-panel ${runController.evidenceError ? "error" : ""}`}>
-                    <strong>
-                      {runController.evidenceError
-                        ? "Final evidence unavailable"
-                        : "Final evidence is synchronising"}
-                    </strong>
-                    <span>
-                      {runController.evidenceError ??
-                        "Completed metrics and exports will appear after the final run data is confirmed."}
-                    </span>
-                  </div>
-                )}
-
-                <dl className="summary-grid">
-                  <div>
-                    <dt>Stage</dt>
-                    <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
-                  </div>
-                  <div>
-                    <dt>Elapsed</dt>
-                    <dd>{formatElapsed(activeRunElapsedSeconds)}</dd>
-                  </div>
-                  {runProgressText !== null && (
-                    <div>
-                      <dt>Progress</dt>
-                      <dd>{runProgressText}</dd>
+                  {runController.phase === "terminal-sync" && (
+                    <div className={`state-panel ${runController.evidenceError ? "error" : ""}`}>
+                      <strong>
+                        {runController.evidenceError
+                          ? "Final evidence unavailable"
+                          : "Final evidence is synchronising"}
+                      </strong>
+                      <span>
+                        {runController.evidenceError ??
+                          "Completed metrics and exports will appear after the final run data is confirmed."}
+                      </span>
                     </div>
                   )}
-                  <div>
-                    <dt>Expected</dt>
-                    <dd>
+
+                  <dl className="summary-grid">
+                    <div>
+                      <dt>Stage</dt>
+                      <dd>{activeRunStage?.replace(/_/g, " ") ?? "Waiting for first update"}</dd>
+                    </div>
+                    <div>
+                      <dt>Elapsed</dt>
+                      <dd>{formatElapsed(activeRunElapsedSeconds)}</dd>
+                    </div>
+                    {runProgressText !== null && (
+                      <div>
+                        <dt>Progress</dt>
+                        <dd>{runProgressText}</dd>
+                      </div>
+                    )}
+                    <div>
+                      <dt>Expected</dt>
+                      <dd>
                         {formatSummaryValue(
                           validationRunQuery.data?.result_summary.expected_devices,
                         )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Publishing</dt>
-                    <dd>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Publishing</dt>
+                      <dd>
                         {formatSummaryValue(
                           validationRunQuery.data?.result_summary.publishing_seen,
                         )}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>Issues</dt>
-                    <dd>
-                      {formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}
-                    </dd>
-                  </div>
-                  {captureWindow !== null && (
-                    <div>
-                      <dt>Capture window</dt>
-                      <dd>{captureWindow}</dd>
+                      </dd>
                     </div>
-                  )}
-                </dl>
+                    <div>
+                      <dt>Issues</dt>
+                      <dd>
+                        {formatSummaryValue(validationRunQuery.data?.result_summary.issue_count)}
+                      </dd>
+                    </div>
+                    {captureWindow !== null && (
+                      <div>
+                        <dt>Capture window</dt>
+                        <dd>{captureWindow}</dd>
+                      </div>
+                    )}
+                  </dl>
 
-                <div className="inline-actions">
-                  {canCancel && (
-                    <button
-                      className="secondary-button compact"
-                      disabled={cancelMutation.isPending}
-                      onClick={() => cancelMutation.mutate(activeRun.runId)}
-                      type="button"
-                    >
-                      {cancelMutation.isPending ? "Stopping..." : "Stop run"}
-                    </button>
-                  )}
-                  {canDownloadValidationJson && (
-                    <button
-                      className="secondary-button compact"
-                      disabled={validationJsonDownload.pendingKey !== null}
-                      onClick={handleValidationJsonDownload}
-                      type="button"
-                    >
-                      {validationJsonDownload.pendingKey === "validation-json"
-                        ? "Downloading JSON..."
-                        : "Download raw JSON"}
-                    </button>
-                  )}
-                  {canEngineer &&
-                    activeRun.kind === "validation" &&
-                    validationRunQuery.data?.job_type === "mqtt_config_publish" &&
-                    activeRunTerminal &&
-                    finalEvidenceReady && (
+                  <div className="inline-actions">
+                    {canCancel && (
                       <button
                         className="secondary-button compact"
-                        disabled={rollbackMutation.isPending}
-                        onClick={() => rollbackMutation.mutate(activeRun.runId)}
+                        disabled={cancelMutation.isPending}
+                        onClick={() => cancelMutation.mutate(activeRun.runId)}
                         type="button"
                       >
-                        {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
+                        {cancelMutation.isPending ? "Stopping..." : "Stop run"}
                       </button>
                     )}
-                  {canEngineer && activeRunTerminal && (
-                    <ReportFromRunControls
-                      format={reportExportFormat}
-                      isUdmiRun={
-                        activeRun.kind === "validation" &&
-                        validationRunQuery.data?.job_type === "udmi_validation"
-                      }
-                      udmiVariant={udmiReportVariant}
-                      onUdmiVariantChange={setUdmiReportVariant}
-                      onFormatChange={setReportExportFormat}
-                      onGenerate={handleGenerateReportFromRun}
-                      pending={reportFromRunMutation.isPending}
-                    />
-                  )}
-                </div>
+                    {canDownloadValidationJson && (
+                      <button
+                        className="secondary-button compact"
+                        disabled={validationJsonDownload.pendingKey !== null}
+                        onClick={handleValidationJsonDownload}
+                        type="button"
+                      >
+                        {validationJsonDownload.pendingKey === "validation-json"
+                          ? "Downloading JSON..."
+                          : "Download raw JSON"}
+                      </button>
+                    )}
+                    {canEngineer &&
+                      activeRun.kind === "validation" &&
+                      validationRunQuery.data?.job_type === "mqtt_config_publish" &&
+                      activeRunTerminal &&
+                      finalEvidenceReady && (
+                        <button
+                          className="secondary-button compact"
+                          disabled={rollbackMutation.isPending}
+                          onClick={() => rollbackMutation.mutate(activeRun.runId)}
+                          type="button"
+                        >
+                          {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
+                        </button>
+                      )}
+                    {canEngineer && activeRunTerminal && (
+                      <ReportFromRunControls
+                        format={reportExportFormat}
+                        isUdmiRun={
+                          activeRun.kind === "validation" &&
+                          validationRunQuery.data?.job_type === "udmi_validation"
+                        }
+                        udmiVariant={udmiReportVariant}
+                        onUdmiVariantChange={setUdmiReportVariant}
+                        onFormatChange={setReportExportFormat}
+                        onGenerate={handleGenerateReportFromRun}
+                        pending={reportFromRunMutation.isPending}
+                      />
+                    )}
+                  </div>
 
-                {canCancel && (
-                  <span className="run-monitor-note">
+                  {canCancel && (
+                    <span className="run-monitor-note">
                       Stop run keeps the data collected so far — the stopped run can still generate
                       a report.
-                  </span>
-                )}
+                    </span>
+                  )}
 
-                {reportToast && (
-                  <>
-                    <span className="run-monitor-note">{reportToast}</span>
-                    {renderGeneratedAllReportDownload()}
-                  </>
-                )}
-                {reportFromRunMutation.isError && (
-                  <span className="error-text">{reportFromRunMutation.error.message}</span>
-                )}
-                {validationJsonDownload.error && (
-                  <span className="error-text">
-                    Raw JSON download failed: {validationJsonDownload.error}
-                  </span>
-                )}
+                  {reportToast && (
+                    <>
+                      <span className="run-monitor-note">{reportToast}</span>
+                      {renderGeneratedAllReportDownload()}
+                    </>
+                  )}
+                  {reportFromRunMutation.isError && (
+                    <span className="error-text">{reportFromRunMutation.error.message}</span>
+                  )}
+                  {validationJsonDownload.error && (
+                    <span className="error-text">
+                      Raw JSON download failed: {validationJsonDownload.error}
+                    </span>
+                  )}
 
-                {cancelMutation.isError && (
-                  <span className="error-text">{cancelMutation.error.message}</span>
-                )}
-                {rollbackMutation.isError && (
-                  <span className="error-text">{rollbackMutation.error.message}</span>
-                )}
+                  {cancelMutation.isError && (
+                    <span className="error-text">{cancelMutation.error.message}</span>
+                  )}
+                  {rollbackMutation.isError && (
+                    <span className="error-text">{rollbackMutation.error.message}</span>
+                  )}
 
-                {activeRunError && <span className="error-text">{activeRunError}</span>}
+                  {activeRunError && <span className="error-text">{activeRunError}</span>}
 
-                {activeRun.kind === "discovery" && discoveryResultsQuery.isError && (
-                  <span className="error-text">
-                    Could not load discovery results:{" "}
-                    {discoveryResultsQuery.error instanceof Error
-                      ? discoveryResultsQuery.error.message
-                      : "request failed"}
-                  </span>
-                )}
+                  {activeRun.kind === "discovery" && discoveryResultsQuery.isError && (
+                    <span className="error-text">
+                      Could not load discovery results:{" "}
+                      {discoveryResultsQuery.error instanceof Error
+                        ? discoveryResultsQuery.error.message
+                        : "request failed"}
+                    </span>
+                  )}
 
-                {activeRun.kind === "validation" && validationIssuesQuery.isError && (
-                  <span className="error-text">
-                    Could not load validation issues — verdicts stay pending:{" "}
-                    {validationIssuesQuery.error instanceof Error
-                      ? validationIssuesQuery.error.message
-                      : "request failed"}
-                  </span>
-                )}
-              </div>
-            )}
-          </article>
+                  {activeRun.kind === "validation" && validationIssuesQuery.isError && (
+                    <span className="error-text">
+                      Could not load validation issues — verdicts stay pending:{" "}
+                      {validationIssuesQuery.error instanceof Error
+                        ? validationIssuesQuery.error.message
+                        : "request failed"}
+                    </span>
+                  )}
+                </div>
+              )}
+            </article>
           </section>
         )}
 
@@ -3924,70 +4469,209 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <div>
                 <h3>Port and Protocol Selection</h3>
               </div>
-              <button className="secondary-button compact" onClick={addScanPort} type="button">
-                Add port
-              </button>
+              {(scanProvider === "builtin_tcp_connect" || nmapProfile !== "host_discovery") && (
+                <button className="secondary-button compact" onClick={addScanPort} type="button">
+                  Add port
+                </button>
+              )}
             </div>
-            <p className="field-note">
-              The IP scanner runs a TCP connect test only. For BACnet/IP devices (UDP 47808), use
-              BACnet Discovery — it sends a real Who-Is broadcast; a TCP probe cannot detect BACnet.
-            </p>
-            <div className="port-editor">
-              {scanPorts.map((entry, index) => (
-                <div className="port-row" key={`${entry.protocol}-${index}`}>
-                  <label>
-                    Port
-                    <input
-                      inputMode="numeric"
-                      onChange={(event) => changeScanPort(index, "port", event.target.value)}
-                      placeholder="443"
-                      value={entry.port}
-                    />
-                  </label>
-                  <label>
-                    Protocol
-                    <select
-                      onChange={(event) =>
-                        changeScanPort(
-                          index,
-                          "protocol",
-                          event.target.value as ScanPort["protocol"],
-                        )
-                      }
-                      value={entry.protocol}
-                    >
-                      {/* TCP only: the sweep is a TCP connect test. UDP (e.g. BACnet
-                        47808) is handled by the dedicated BACnet Discovery module. */}
-                      <option value="tcp">TCP</option>
-                    </select>
-                  </label>
-                  <button
-                    className="secondary-button compact"
-                    disabled={scanPorts.length === 1}
-                    onClick={() => removeScanPort(index)}
-                    type="button"
+            <div className="publish-grid capture-controls">
+              <label>
+                Discovery provider
+                <select
+                  onChange={(event) =>
+                    changeScanProvider(event.target.value as IPDiscoveryProvider)
+                  }
+                  value={scanProvider}
+                >
+                  <option value="builtin_tcp_connect">Built-in TCP connect</option>
+                  <option disabled={!nmapAvailable} value="operator_managed_nmap">
+                    Operator-managed Nmap
+                  </option>
+                </select>
+              </label>
+              {scanProvider === "operator_managed_nmap" && (
+                <label>
+                  Fixed Nmap profile
+                  <select
+                    onChange={(event) => changeNmapProfile(event.target.value as NmapProfileName)}
+                    value={nmapProfile}
                   >
-                    Remove
-                  </button>
-                </div>
-              ))}
+                    {(nmapCapabilityQuery.data?.permitted_profiles ?? []).map((profile) => (
+                      <option key={profile} value={profile}>
+                        {NMAP_PROFILE_LABELS[profile]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
+            {nmapCapabilityQuery.isError && (
+              <p className="error-text">
+                Nmap capability could not be checked. Built-in TCP connect remains available.
+              </p>
+            )}
+            {nmapCapabilityQuery.data && (
+              <p className="field-note">
+                {nmapAvailable
+                  ? `Nmap ${nmapCapabilityQuery.data.version ?? "version unavailable"} is confirmed for this site${
+                      nmapCapabilityQuery.data.publisher
+                        ? ` (${nmapCapabilityQuery.data.publisher})`
+                        : ""
+                    }. Only administrator-approved profiles are shown.`
+                  : `Nmap process execution is unavailable: ${nmapCapabilityQuery.data.reason.replace(/_/g, " ")}.`}
+              </p>
+            )}
+            <p className="field-note">
+              {scanProvider === "builtin_tcp_connect"
+                ? "The built-in scanner runs TCP connect tests only. Use BACnet Discovery for BACnet/IP UDP 47808."
+                : "Nmap runs only the selected fixed profile. Raw flags, scripts, paths, and command text cannot be entered here."}
+            </p>
+            {nmapProfile !== "host_discovery" || scanProvider === "builtin_tcp_connect" ? (
+              <div className="port-editor">
+                {scanPorts.map((entry, index) => (
+                  <div className="port-row" key={`${entry.protocol}-${index}`}>
+                    <label>
+                      Port
+                      <input
+                        inputMode="numeric"
+                        onChange={(event) => changeScanPort(index, "port", event.target.value)}
+                        placeholder="443"
+                        value={entry.port}
+                      />
+                    </label>
+                    <label>
+                      Protocol
+                      <select
+                        onChange={(event) =>
+                          changeScanPort(
+                            index,
+                            "protocol",
+                            event.target.value as ScanPort["protocol"],
+                          )
+                        }
+                        value={entry.protocol}
+                      >
+                        {nmapProfile === "selected_udp" &&
+                        scanProvider === "operator_managed_nmap" ? (
+                          <option value="udp">UDP</option>
+                        ) : (
+                          <option value="tcp">TCP</option>
+                        )}
+                      </select>
+                    </label>
+                    <button
+                      className="secondary-button compact"
+                      disabled={scanPorts.length === 1}
+                      onClick={() => removeScanPort(index)}
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="section-copy">
+                Host discovery uses its fixed probe set. It does not accept a port list.
+              </p>
+            )}
             <p className="section-copy">
               Sent to the API as{" "}
-              <strong>{scanPortSpecification(scanPorts) || "common ports"}</strong>. Leave the list
-              empty to use the common TCP fallback (80, 443, 1883, 502). BACnet/IP (UDP 47808) is
-              not probed here — use BACnet Discovery.
+              <strong>
+                {scanProvider === "operator_managed_nmap" && nmapProfile === "host_discovery"
+                  ? "the fixed host-discovery profile"
+                  : scanPortSpecification(scanPorts) || "common ports"}
+              </strong>
+              . Built-in discovery uses the common TCP fallback when the list is empty.
             </p>
             <div className="publish-grid capture-controls">
               <label>
-                Target override (CIDR 10.0.0.0/24, range 10.0.0.1-10.0.0.50, or blank to use the
-                imported IP register)
+                Legacy single target override (optional)
                 <input
                   onChange={(event) => setScanTarget(event.target.value)}
-                  placeholder="Blank = imported IP register"
+                  placeholder="Use the repeatable editor below"
                   value={scanTarget}
                 />
               </label>
+            </div>
+            <div className="form-stack" aria-label="Repeatable IP target editor">
+              <div className="surface-heading">
+                <div>
+                  <strong>Targets and exclusions</strong>
+                  <span className="field-note">
+                    Add numeric IPv4 addresses, CIDRs, or inclusive ranges. The server deduplicates
+                    overlaps after exclusions.
+                  </span>
+                </div>
+                <div className="inline-actions">
+                  <button
+                    className="secondary-button compact"
+                    onClick={() => addTargetRow(false)}
+                    type="button"
+                  >
+                    Add target
+                  </button>
+                  <button
+                    className="secondary-button compact"
+                    onClick={() => addTargetRow(true)}
+                    type="button"
+                  >
+                    Add exclusion
+                  </button>
+                </div>
+              </div>
+              {[
+                { exclusion: false, rows: scanTargetRows, label: "Target" },
+                { exclusion: true, rows: scanExclusionRows, label: "Exclusion" },
+              ].map(({ exclusion, rows, label }) =>
+                rows.map((row) => (
+                  <div className="port-row" key={row.id}>
+                    <label>
+                      {label} type
+                      <select
+                        value={row.kind}
+                        onChange={(event) =>
+                          updateTargetRow(exclusion, row.id, "kind", event.target.value)
+                        }
+                      >
+                        <option value="address">Address</option>
+                        <option value="cidr">CIDR</option>
+                        <option value="range">Range</option>
+                      </select>
+                    </label>
+                    <label>
+                      {row.kind === "range" ? "Start" : "Value"}
+                      <input
+                        inputMode="numeric"
+                        value={row.value}
+                        onChange={(event) =>
+                          updateTargetRow(exclusion, row.id, "value", event.target.value)
+                        }
+                      />
+                    </label>
+                    {row.kind === "range" && (
+                      <label>
+                        End
+                        <input
+                          inputMode="numeric"
+                          value={row.end ?? ""}
+                          onChange={(event) =>
+                            updateTargetRow(exclusion, row.id, "end", event.target.value)
+                          }
+                        />
+                      </label>
+                    )}
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => removeTargetRow(exclusion, row.id)}
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )),
+              )}
             </div>
           </section>
         )}
@@ -4534,14 +5218,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 disabled={
                   runMutation.isPending || !canEngineer || udmiCaptureOverCap || startedRunActive
                 }
-                onClick={() => runMutation.mutate(udmiRunActionId)}
+                onClick={() => runMutation.mutate({ actionId: udmiRunActionId, dryRun: false })}
                 title={
                   !canEngineer
                     ? ENGINEER_REQUIRED_TOOLTIP
                     : udmiCaptureOverCap
                       ? "Run time exceeds the 48-hour capture limit."
                       : startedRunActive
-                        ? "A run is already in progress — stop it before starting another."
+                        ? "A run is already in progress. Stop it before starting another."
                         : undefined
                 }
                 type="button"
@@ -5031,603 +5715,819 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           column, and the selected evidence remains readable at normal zoom. */}
         {module.route !== "reports" && (
           <section className="app-grid" data-stepgroup="results">
-          <article className="surface">
-            <div className="surface-heading">
-              <div>
-                <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
+            <article className="surface">
+              <div className="surface-heading">
+                <div>
+                  <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
+                </div>
+                <button
+                  className="secondary-button compact"
+                  disabled={
+                    !exportEnabled ||
+                    exportDownload.pendingKey !== null ||
+                    validationJsonDownload.pendingKey !== null
+                  }
+                  onClick={handleExport}
+                  title={exportTooltip}
+                  type="button"
+                >
+                  {validationJsonDownload.pendingKey === "validation-json"
+                    ? "Downloading JSON..."
+                    : exportDownload.pendingKey === "export"
+                      ? "Exporting..."
+                      : canDownloadValidationJson
+                        ? "Download raw JSON"
+                        : "Export"}
+                </button>
               </div>
-              <button
-                className="secondary-button compact"
-                disabled={
-                  !exportEnabled ||
-                  exportDownload.pendingKey !== null ||
-                  validationJsonDownload.pendingKey !== null
-                }
-                onClick={handleExport}
-                title={exportTooltip}
-                type="button"
-              >
-                {validationJsonDownload.pendingKey === "validation-json"
-                  ? "Downloading JSON..."
-                  : exportDownload.pendingKey === "export"
-                    ? "Exporting..."
-                    : canDownloadValidationJson
-                      ? "Download raw JSON"
-                      : "Export"}
-              </button>
-            </div>
 
-            {usingLiveResults && (
-              <div className="sample-banner" role="note">
-                {isDiscoveryModule ? (
-                  module.route === "ip-scanner" ? (
-                    'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
-                  ) : module.route === "mqtt-discovery" &&
-                    discoveryResultsQuery.data?.register_comparison ? (
-                    discoveryResultsQuery.data.register_comparison.register_available ? (
-                      <>
-                        Green rows match a topic in the uploaded MQTT register; red rows were
-                        observed on the broker but are not in the register.
-                        {mqttRegisterCompareNote(discoveryResultsQuery.data) ? (
-                          <>
-                            <br />
-                            {mqttRegisterCompareNote(discoveryResultsQuery.data)}
-                          </>
-                        ) : null}
-                      </>
+              {usingLiveResults && (
+                <div className="sample-banner" role="note">
+                  {isDiscoveryModule ? (
+                    module.route === "ip-scanner" ? (
+                      'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
+                    ) : module.route === "mqtt-discovery" &&
+                      discoveryResultsQuery.data?.register_comparison ? (
+                      discoveryResultsQuery.data.register_comparison.register_available ? (
+                        <>
+                          Green rows match a topic in the uploaded MQTT register; red rows were
+                          observed on the broker but are not in the register.
+                          {mqttRegisterCompareNote(discoveryResultsQuery.data) ? (
+                            <>
+                              <br />
+                              {mqttRegisterCompareNote(discoveryResultsQuery.data)}
+                            </>
+                          ) : null}
+                        </>
+                      ) : (
+                        "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
+                      )
                     ) : (
-                      "No accepted MQTT register import for this project/site — upload one to compare observed topics against the template."
+                      // No register comparison available (non-MQTT discovery, or an
+                      // MQTT run that observed nothing / has no register): the
+                      // discovery table shows observations, and register verdicts are
+                      // otherwise produced by validation.
+                      'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
                     )
                   ) : (
-                    // No register comparison available (non-MQTT discovery, or an
-                    // MQTT run that observed nothing / has no register): the
-                    // discovery table shows observations, and register verdicts are
-                    // otherwise produced by validation.
-                    'Live discovery observations. Register-comparison verdicts (matched / rogue / missing) are produced by validation, not discovery, so no "Result" column is shown here.'
-                  )
-                ) : (
-                  `${activeRunStatus === "cancelled" || activeRunStatus === "failed" ? "Partial" : activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
-                    payloadViewSource === "live_capture"
-                      ? "captured from the MQTT broker"
-                      : "supplied directly (pasted), not captured from a broker"
-                  }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}${
+                    `${activeRunStatus === "cancelled" || activeRunStatus === "failed" ? "Partial" : activeRunTerminal ? "Live" : "Provisional live"} validation results — per-asset payload checks from the latest stored snapshot. Observed payloads were ${
+                      payloadViewSource === "live_capture"
+                        ? "captured from the MQTT broker"
+                        : "supplied directly (pasted), not captured from a broker"
+                    }.${captureWindow !== null ? ` Capture window: ${captureWindow}.` : ""}${
                       captureOutcome
                         ? ` ${captureOutcome}.`
                         : activeRunTerminal
                           ? ""
                           : " Verdicts remain pending until the run finishes."
-                  }`
-                )}
-              </div>
-            )}
-            {bacnetBackend &&
-              (bacnetBackend.kind === "simulated" ? (
-                <div className="sample-banner warning" role="alert">
-                  {bacnetBackend.text}
+                    }`
+                  )}
                 </div>
-              ) : (
-                <div className="sample-banner" role="note">
-                  {bacnetBackend.text}
-                </div>
-              ))}
+              )}
+              {bacnetBackend &&
+                (bacnetBackend.kind === "simulated" ? (
+                  <div className="sample-banner warning" role="alert">
+                    {bacnetBackend.text}
+                  </div>
+                ) : (
+                  <div className="sample-banner" role="note">
+                    {bacnetBackend.text}
+                  </div>
+                ))}
 
-            {validationJsonDownload.error && (
-              <div className="state-panel error" role="alert">
-                <strong>Raw JSON download failed</strong>
-                <span>{validationJsonDownload.error}</span>
-              </div>
-            )}
-
-            {resultRows.length > 0 && (
-              <div className="results-filter-bar">
-                <label className="results-filter-text">
-                  Filter results
-                  <input
-                    onChange={(event) => setResultsTextFilter(event.target.value)}
-                    placeholder={
-                      resultsTopicColumn
-                        ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
-                        : "Asset, host, status, or any visible value"
-                    }
-                    value={resultsTextFilter}
-                  />
-                </label>
-                <label className="results-filter-tone">
-                  Verdict
-                  <select
-                    onChange={(event) => setResultsToneFilter(event.target.value)}
-                    value={resultsToneFilter}
-                  >
-                    {resultsToneOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {/* System is register-backed; observation describes only this run. */}
-                {isUdmiValidation && (
-                  <>
-                    <label className="results-filter-text results-topic-filter">
-                      Topic contains
-                      <input
-                        onChange={(event) => setResultsTopicContainsFilter(event.target.value)}
-                        placeholder="HV/SEC or HV/SEC/02"
-                        value={resultsTopicContainsFilter}
-                      />
-                    </label>
-                    <label className="results-filter-facet">
-                      System
-                      <select
-                        onChange={(event) => setResultsSystemFilter(event.target.value)}
-                        value={resultsSystemFilter}
-                      >
-                        <option value="all">All systems</option>
-                        {systemOptions.map((system) => (
-                          <option key={system} value={system}>
-                            {system}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="results-filter-facet">
-                      Observation
-                      <select
-                        onChange={(event) => setResultsObservationFilter(event.target.value)}
-                        value={resultsObservationFilter}
-                      >
-                        <option value="all">Observed or not observed</option>
-                        <option value="observed">Observed this run</option>
-                        <option value="not-observed">Not observed this run</option>
-                      </select>
-                    </label>
-                    <label className="results-filter-facet">
-                      Category
-                      <select
-                        onChange={(event) =>
-                          setResultsCategoryFilter(
-                            event.target.value as UdmiReportScopeV1["filters"]["category"],
-                          )
-                        }
-                        value={resultsCategoryFilter}
-                      >
-                        <option value="all">Expected and unexpected</option>
-                        <option value="validation">Expected validation</option>
-                        <option value="unexpected-devices">Unexpected devices</option>
-                      </select>
-                    </label>
-                  </>
-                )}
-                <span className="results-filter-count">
-                  Showing {visibleResultRows.length} of {resultRows.length}{" "}
-                  {resultRows.length === 1 ? "row" : "rows"}
-                  {hasUdmiLiveResults
-                    ? ` across ${visibleUdmiCounts.expectedAssets} expected ${
-                        visibleUdmiCounts.expectedAssets === 1 ? "asset" : "assets"
-                      }${
-                        visibleUdmiCounts.unexpectedDevices > 0
-                          ? ` plus ${visibleUdmiCounts.unexpectedDevices} unexpected ${
-                              visibleUdmiCounts.unexpectedDevices === 1 ? "device" : "devices"
-                            }`
-                          : ""
-                      }`
-                    : ""}
-                </span>
-                {isResultsFilterActive && (
-                  <button
-                    className="secondary-button compact"
-                    onClick={() => {
-                      setResultsTextFilter("");
-                      setResultsTopicContainsFilter("");
-                      setResultsToneFilter("all");
-                      setResultsSystemFilter("all");
-                      setResultsObservationFilter("all");
-                      setResultsCategoryFilter("all");
-                    }}
-                    type="button"
-                  >
-                    Clear filters
-                  </button>
-                )}
-              </div>
-            )}
-
-            <div className="data-table-wrap results-scroll">
-              {resultRows.length === 0 ? (
-                <div className="empty-workspace">
-                  <strong>
-                    {validationEmptyState
-                      ? validationEmptyState.title
-                      : discoveryEmptyState
-                        ? discoveryEmptyState.title
-                        : isDiscoveryModule && activeRun && !activeRunTerminal
-                          ? "Run in progress..."
-                          : "No results yet"}
-                  </strong>
-                  <span>
-                    {validationEmptyState
-                      ? validationEmptyState.detail
-                      : discoveryEmptyState
-                        ? discoveryEmptyState.detail
-                        : isDiscoveryModule
-                          ? "Run a discovery; observed devices, points, or topics appear here once it completes."
-                          : "Run a job to populate results."}
-                  </span>
+              {validationJsonDownload.error && (
+                <div className="state-panel error" role="alert">
+                  <strong>Raw JSON download failed</strong>
+                  <span>{validationJsonDownload.error}</span>
                 </div>
-              ) : visibleResultRows.length === 0 ? (
-                // The filter matched nothing. This is a claim about the FILTER,
-                // never the scan — never fall through to the discovery empty state,
-                // whose copy asserts what the network did (ISSUE-4).
-                <div className="empty-workspace">
-                  <strong>No rows match the current filters</strong>
-                  <span>
-                    Adjust or clear the filters to see the {resultRows.length} captured{" "}
-                    {resultRows.length === 1 ? "row" : "rows"}.
-                  </span>
-                </div>
-              ) : (
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      {tableColumns.map((column) => (
-                        <th key={column}>{column}</th>
+              )}
+
+              {resultRows.length > 0 && (
+                <div className="results-filter-bar">
+                  <label className="results-filter-text">
+                    Filter results
+                    <input
+                      onChange={(event) => setResultsTextFilter(event.target.value)}
+                      placeholder={
+                        resultsTopicColumn
+                          ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
+                          : "Asset, host, status, or any visible value"
+                      }
+                      value={resultsTextFilter}
+                    />
+                  </label>
+                  <label className="results-filter-tone">
+                    Verdict
+                    <select
+                      onChange={(event) => setResultsToneFilter(event.target.value)}
+                      value={resultsToneFilter}
+                    >
+                      {resultsToneOptions.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
                       ))}
-                      <th>Details</th>
-                    </tr>
-                  </thead>
-                  {/* UDMI results group by asset (ITEM-7): one collapsible summary
+                    </select>
+                  </label>
+                  {/* System is register-backed; observation describes only this run. */}
+                  {isUdmiValidation && (
+                    <>
+                      <label className="results-filter-text results-topic-filter">
+                        Topic contains
+                        <input
+                          onChange={(event) => setResultsTopicContainsFilter(event.target.value)}
+                          placeholder="HV/SEC or HV/SEC/02"
+                          value={resultsTopicContainsFilter}
+                        />
+                      </label>
+                      <label className="results-filter-facet">
+                        System
+                        <select
+                          onChange={(event) => setResultsSystemFilter(event.target.value)}
+                          value={resultsSystemFilter}
+                        >
+                          <option value="all">All systems</option>
+                          {systemOptions.map((system) => (
+                            <option key={system} value={system}>
+                              {system}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="results-filter-facet">
+                        Observation
+                        <select
+                          onChange={(event) => setResultsObservationFilter(event.target.value)}
+                          value={resultsObservationFilter}
+                        >
+                          <option value="all">Observed or not observed</option>
+                          <option value="observed">Observed this run</option>
+                          <option value="not-observed">Not observed this run</option>
+                        </select>
+                      </label>
+                      <label className="results-filter-facet">
+                        Category
+                        <select
+                          onChange={(event) =>
+                            setResultsCategoryFilter(
+                              event.target.value as UdmiReportScopeV1["filters"]["category"],
+                            )
+                          }
+                          value={resultsCategoryFilter}
+                        >
+                          <option value="all">Expected and unexpected</option>
+                          <option value="validation">Expected validation</option>
+                          <option value="unexpected-devices">Unexpected devices</option>
+                        </select>
+                      </label>
+                    </>
+                  )}
+                  <span className="results-filter-count">
+                    Showing {visibleResultRows.length} of {resultRows.length}{" "}
+                    {resultRows.length === 1 ? "row" : "rows"}
+                    {hasUdmiLiveResults
+                      ? ` across ${visibleUdmiCounts.expectedAssets} expected ${
+                          visibleUdmiCounts.expectedAssets === 1 ? "asset" : "assets"
+                        }${
+                          visibleUdmiCounts.unexpectedDevices > 0
+                            ? ` plus ${visibleUdmiCounts.unexpectedDevices} unexpected ${
+                                visibleUdmiCounts.unexpectedDevices === 1 ? "device" : "devices"
+                              }`
+                            : ""
+                        }`
+                      : ""}
+                  </span>
+                  {isResultsFilterActive && (
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => {
+                        setResultsTextFilter("");
+                        setResultsTopicContainsFilter("");
+                        setResultsToneFilter("all");
+                        setResultsSystemFilter("all");
+                        setResultsObservationFilter("all");
+                        setResultsCategoryFilter("all");
+                      }}
+                      type="button"
+                    >
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              )}
+
+              <div className="data-table-wrap results-scroll">
+                {resultRows.length === 0 ? (
+                  <div className="empty-workspace">
+                    <strong>
+                      {validationEmptyState
+                        ? validationEmptyState.title
+                        : discoveryEmptyState
+                          ? discoveryEmptyState.title
+                          : isDiscoveryModule && activeRun && !activeRunTerminal
+                            ? "Run in progress..."
+                            : "No results yet"}
+                    </strong>
+                    <span>
+                      {validationEmptyState
+                        ? validationEmptyState.detail
+                        : discoveryEmptyState
+                          ? discoveryEmptyState.detail
+                          : isDiscoveryModule
+                            ? "Run a discovery; observed devices, points, or topics appear here once it completes."
+                            : "Run a job to populate results."}
+                    </span>
+                  </div>
+                ) : visibleResultRows.length === 0 ? (
+                  // The filter matched nothing. This is a claim about the FILTER,
+                  // never the scan — never fall through to the discovery empty state,
+                  // whose copy asserts what the network did (ISSUE-4).
+                  <div className="empty-workspace">
+                    <strong>No rows match the current filters</strong>
+                    <span>
+                      Adjust or clear the filters to see the {resultRows.length} captured{" "}
+                      {resultRows.length === 1 ? "row" : "rows"}.
+                    </span>
+                  </div>
+                ) : (
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        {tableColumns.map((column) => (
+                          <th key={column}>{column}</th>
+                        ))}
+                        <th>Details</th>
+                      </tr>
+                    </thead>
+                    {/* UDMI results group by asset (ITEM-7): one collapsible summary
                     row per asset that expands to its per-payload-type rows,
                     instead of 3-4 flat lines per asset. Row shading (row-tone)
                     is the live UDMI/discovery verdict set on __tone; the summary
                     row carries the asset's worst visible tone. Discovery routes
                     keep the flat render. Child rows are the shared renderResultRow
                     (selection + View unchanged, ISSUE-4). */}
-                  {hasUdmiLiveResults ? (
-                    <tbody>
-                      {udmiRowGroups.map((group) => {
-                        const isOpen = expandedResultAssets.has(group.asset);
-                        const isUnexpected = group.rows.every(
-                          ({ row }) => row.__category === "unexpected-devices",
-                        );
-                        return (
-                          <Fragment key={`group-${group.asset}`}>
-                            <tr
-                              className={`asset-summary-row${group.worstTone ? ` row-${group.worstTone}` : ""}`}
-                            >
-                              <td colSpan={tableColumns.length + 1}>
-                                <button
-                                  aria-expanded={isOpen}
-                                  className="asset-summary-toggle"
-                                  onClick={() => toggleResultAsset(group.asset)}
-                                  type="button"
-                                >
-                                  <span aria-hidden="true" className="asset-summary-caret">
-                                    {isOpen ? "▾" : "▸"}
-                                  </span>
-                                  <strong>{group.asset}</strong>
-                                  <span>
-                                    {isUnexpected
-                                      ? "Unexpected device · excluded from compliance"
-                                      : `${group.rows.length} payload type${
-                                          group.rows.length === 1 ? "" : "s"
-                                        } · ${group.issueTotal} issue${
-                                          group.issueTotal === 1 ? "" : "s"
-                                        }`}
-                                  </span>
-                                </button>
-                              </td>
-                            </tr>
-                            {isOpen && group.rows.map(renderResultRow)}
-                          </Fragment>
-                        );
-                      })}
-                    </tbody>
-                  ) : (
-                    <tbody>{visibleResultRows.map(renderResultRow)}</tbody>
-                  )}
-                </table>
-              )}
-            </div>
-          </article>
-
-          {detailRow && !isUdmiValidation && (
-            <dialog
-              aria-labelledby="result-detail-heading"
-              className="result-detail-dialog surface"
-              onCancel={(event) => {
-                event.preventDefault();
-                closeResultDetailDialog();
-              }}
-              onClick={(event) => {
-                if (event.target !== event.currentTarget) {
-                  return;
-                }
-                const bounds = event.currentTarget.getBoundingClientRect();
-                const clickedBackdrop =
-                  event.clientX < bounds.left ||
-                  event.clientX > bounds.right ||
-                  event.clientY < bounds.top ||
-                  event.clientY > bounds.bottom;
-                if (clickedBackdrop) {
-                  closeResultDetailDialog();
-                }
-              }}
-              ref={detailDialogRef}
-              tabIndex={-1}
-            >
-              <div className="surface-heading">
-                <div>
-                  <h3 id="result-detail-heading">Result detail</h3>
-                </div>
-                <button
-                  className="secondary-button compact"
-                  onClick={closeResultDetailDialog}
-                  type="button"
-                >
-                  Close
-                </button>
+                    {hasUdmiLiveResults ? (
+                      <tbody>
+                        {udmiRowGroups.map((group) => {
+                          const isOpen = expandedResultAssets.has(group.asset);
+                          const isUnexpected = group.rows.every(
+                            ({ row }) => row.__category === "unexpected-devices",
+                          );
+                          return (
+                            <Fragment key={`group-${group.asset}`}>
+                              <tr
+                                className={`asset-summary-row${group.worstTone ? ` row-${group.worstTone}` : ""}`}
+                              >
+                                <td colSpan={tableColumns.length + 1}>
+                                  <button
+                                    aria-expanded={isOpen}
+                                    className="asset-summary-toggle"
+                                    onClick={() => toggleResultAsset(group.asset)}
+                                    type="button"
+                                  >
+                                    <span aria-hidden="true" className="asset-summary-caret">
+                                      {isOpen ? "▾" : "▸"}
+                                    </span>
+                                    <strong>{group.asset}</strong>
+                                    <span>
+                                      {isUnexpected
+                                        ? "Unexpected device · excluded from compliance"
+                                        : `${group.rows.length} payload type${
+                                            group.rows.length === 1 ? "" : "s"
+                                          } · ${group.issueTotal} issue${
+                                            group.issueTotal === 1 ? "" : "s"
+                                          }`}
+                                    </span>
+                                  </button>
+                                </td>
+                              </tr>
+                              {isOpen && group.rows.map(renderResultRow)}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    ) : (
+                      <tbody>{visibleResultRows.map(renderResultRow)}</tbody>
+                    )}
+                  </table>
+                )}
               </div>
-              <div className="detail-list">
-                {buildResultDetailItems(
-                  module.route,
-                  detailRow,
-                  usingLiveResults,
-                  resultAssetGroups,
-                ).map((item) => (
-                  <div className="detail-row" key={item.label}>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
+            </article>
+
+            {module.route === "bacnet-discovery" && activeRunTerminal && (
+              <section className="surface" aria-labelledby="bacnet-points-heading">
+                <div className="surface-heading">
+                  <div>
+                    <h3 id="bacnet-points-heading">Points / Live Data</h3>
+                    <p className="section-copy">
+                      Seal-verified point rows. Search and paging stay bounded on the server.
+                    </p>
                   </div>
-                ))}
-              </div>
-            </dialog>
-          )}
-
-          <aside className="surface inspector">
-            <div className="surface-heading">
-              <h3>Inspector</h3>
-            </div>
-
-            <>
-              <div className="detail-list">
-                {resultDetails.map((item) => (
-                  <div className="detail-row" key={item.label}>
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                  </div>
-                ))}
-              </div>
-
-              {inspectorResult?.__category === "unexpected-devices" ? (
-                <div className="state-panel warning" role="note">
-                  <strong>Observed outside the expected register</strong>
-                  <span>
-                    This publisher is reported separately. It does not enter expected-asset,
-                    compliance, payload, fault, or validation-result totals.
+                  <span className="results-filter-count">
+                    {bacnetPointsQuery.data
+                      ? `${bacnetPointsQuery.data.total} total`
+                      : "Loading point count"}
                   </span>
                 </div>
-              ) : resultAssetGroups ? (
-                <div className="asset-group-list">
-                  {payloadViewSource && (
-                    <p className="section-copy">
-                      {payloadViewSource === "live_capture"
-                        ? "Live-captured payloads — expand an asset, then a payload type, to compare expected vs observed."
-                        : payloadViewSource === "direct_inputs"
-                          ? "Pasted payloads — expand an asset, then a payload type, to compare expected vs observed."
-                          : "No payload content for this run (fixture summary only); expand an asset for issue detail per payload type."}
-                    </p>
-                  )}
-                  {!selectedInspectorAssetGroup && (
-                    <div className="empty-workspace">
-                      <strong>
-                        {visibleResultRows.length === 0 && isResultsFilterActive
-                          ? "No asset selected in the filtered results"
-                          : "No asset selected"}
-                      </strong>
-                      <span>
-                        {visibleResultRows.length === 0 && isResultsFilterActive
-                          ? "Adjust or clear the filters, then select a result row to inspect its evidence."
-                          : "Select an expanded result row above to inspect that asset's payload evidence."}
-                      </span>
+                <label className="field-label" htmlFor="bacnet-points-search">
+                  Search points
+                  <input
+                    id="bacnet-points-search"
+                    onChange={(event) => {
+                      setBacnetPointsSearch(event.target.value);
+                      setBacnetPointsCursor(null);
+                    }}
+                    value={bacnetPointsSearch}
+                  />
+                </label>
+                {bacnetPointsQuery.isError ? (
+                  <div className="state-panel error" role="alert">
+                    <strong>Point view unavailable</strong>
+                    <span>
+                      {bacnetPointsQuery.error instanceof Error
+                        ? bacnetPointsQuery.error.message
+                        : "The sealed point page could not be read."}
+                    </span>
+                  </div>
+                ) : bacnetPointsQuery.isLoading ? (
+                  <div className="state-panel" role="status">
+                    <strong>Loading point page</strong>
+                    <span>The first bounded page is being verified.</span>
+                  </div>
+                ) : bacnetPointsQuery.data?.points.length === 0 ? (
+                  <div className="empty-workspace">
+                    <strong>{bacnetPointsSearch ? "No points match" : "No point rows"}</strong>
+                    <span>
+                      {bacnetPointsSearch
+                        ? "Clear the search to inspect the complete sealed page."
+                        : "This run did not produce point evidence."}
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    <div className="data-table-wrap results-scroll">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <th scope="col">Position</th>
+                            <th scope="col">Device</th>
+                            <th scope="col">Object</th>
+                            <th scope="col">Property</th>
+                            <th scope="col">Value</th>
+                            <th scope="col">Outcome</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {bacnetPointsQuery.data?.points.map((point, index) => (
+                            <tr key={String(point.id ?? point.position ?? index)}>
+                              <td>{String(point.position ?? "—")}</td>
+                              <td>{String(point.device_instance ?? point.instance ?? "—")}</td>
+                              <td>{String(point.object_key ?? point.object_name ?? "—")}</td>
+                              <td>{String(point.property ?? point.property_name ?? "—")}</td>
+                              <td>{String(point.value ?? point.present_value ?? "—")}</td>
+                              <td>{String(point.outcome ?? point.status ?? "Not recorded")}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     </div>
-                  )}
-                  {selectedInspectorAssetGroup &&
-                    [selectedInspectorAssetGroup].map((group) => {
-                      const isOpen = expandedAsset === group.assetId;
-                      const typeSummary = group.payloadTypes
-                        .map((entry) => {
-                          const parts: string[] = [];
-                          if (entry.issues.length > 0) {
-                            parts.push(
-                              `${entry.issues.length} issue${entry.issues.length === 1 ? "" : "s"}`,
-                            );
+                    {bacnetPointsQuery.data?.has_more && bacnetPointsQuery.data.next_cursor && (
+                      <div className="detail-actions">
+                        <button
+                          className="secondary-button compact"
+                          onClick={() =>
+                            setBacnetPointsCursor(bacnetPointsQuery.data?.next_cursor ?? null)
                           }
-                          if (entry.hasPayloadView) {
-                            parts.push("payload");
+                          type="button"
+                        >
+                          Next point page
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </section>
+            )}
+
+            {detailRow && !isUdmiValidation && (
+              <dialog
+                aria-labelledby="result-detail-heading"
+                className="result-detail-dialog surface"
+                onCancel={(event) => {
+                  event.preventDefault();
+                  closeResultDetailDialog();
+                }}
+                onClick={(event) => {
+                  if (event.target !== event.currentTarget) {
+                    return;
+                  }
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  const clickedBackdrop =
+                    event.clientX < bounds.left ||
+                    event.clientX > bounds.right ||
+                    event.clientY < bounds.top ||
+                    event.clientY > bounds.bottom;
+                  if (clickedBackdrop) {
+                    closeResultDetailDialog();
+                  }
+                }}
+                ref={detailDialogRef}
+                tabIndex={-1}
+              >
+                <div className="surface-heading">
+                  <div>
+                    <h3 id="result-detail-heading">Result detail</h3>
+                  </div>
+                  <button
+                    className="secondary-button compact"
+                    onClick={closeResultDetailDialog}
+                    type="button"
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="detail-list">
+                  {buildResultDetailItems(
+                    module.route,
+                    detailRow,
+                    usingLiveResults,
+                    resultAssetGroups,
+                  ).map((item) => (
+                    <div className="detail-row" key={item.label}>
+                      <span>{item.label}</span>
+                      <strong>{item.value}</strong>
+                    </div>
+                  ))}
+                </div>
+                {module.route === "bacnet-discovery" && activeRun && activeRunTerminal && (
+                  <div className="detail-actions" aria-live="polite">
+                    <div className="property-expansion-panel">
+                      <strong>Bounded property read</strong>
+                      <span>
+                        Select only properties present in the sealed parent ceiling. The parent
+                        result remains unchanged.
+                      </span>
+                      <span>
+                        Destination: {detailRow["IP Address"] || "sealed parent destination"}. Caps:{" "}
+                        {JSON.stringify(activeRunRecord?.parameters?.effective_throttle ?? {})}.
+                      </span>
+                      {propertyCeiling.length > 0 ? (
+                        <fieldset>
+                          <legend>Allowed properties</legend>
+                          {propertyCeiling.map((property) => (
+                            <label key={property}>
+                              <input
+                                checked={propertyRequestedReadSet.includes(property)}
+                                onChange={(event) => {
+                                  setPropertyRequestedReadSet((current) =>
+                                    event.target.checked
+                                      ? [...current, property]
+                                      : current.filter((item) => item !== property),
+                                  );
+                                }}
+                                type="checkbox"
+                              />
+                              {property}
+                            </label>
+                          ))}
+                        </fieldset>
+                      ) : (
+                        <span>No property ceiling was published by this parent run.</span>
+                      )}
+                    </div>
+                    <button
+                      className="secondary-button compact"
+                      disabled={propertyExpansionMutation.isPending || propertyCeiling.length === 0}
+                      onClick={() => {
+                        const requestedReadSet = propertyRequestedReadSet.filter((property) =>
+                          propertyCeiling.includes(property),
+                        );
+                        if (requestedReadSet.length === 0) {
+                          setPropertyExpansionNotice("Select at least one allowed property.");
+                          return;
+                        }
+                        setPropertyPreviewRunId(null);
+                        setPropertyRunId(null);
+                        propertyExpansionMutation.mutate({
+                          parentRunId: activeRun.runId,
+                          requestedReadSet,
+                          row: detailRow,
+                        });
+                      }}
+                      type="button"
+                    >
+                      {propertyExpansionMutation.isPending
+                        ? "Creating property preview..."
+                        : "Read more properties"}
+                    </button>
+                    {propertyExpansionNotice && <span>{propertyExpansionNotice}</span>}
+                    {propertyPreviewRunId && propertyRequest && (
+                      <div className="property-child-controls">
+                        <span>
+                          Preview: {propertyPreviewRunId}; state {propertyRunState ?? "queued"}.
+                        </span>
+                        <label htmlFor="property-authorization">Authorization</label>
+                        <select
+                          id="property-authorization"
+                          value={propertyAuthorizationId ?? ""}
+                          onChange={(event) =>
+                            setPropertyAuthorizationId(event.target.value || null)
                           }
-                          return `${entry.payloadType} (${parts.join(", ") || "ok"})`;
-                        })
-                        .join(", ");
-                      return (
+                        >
+                          <option value="">Select authorization</option>
+                          {(propertyAuthorizationsQuery.data ?? []).map((authorization) => (
+                            <option
+                              key={authorization.authorization_id}
+                              value={authorization.authorization_id}
+                            >
+                              {authorization.authorization_id} (uses {authorization.use_count}/
+                              {authorization.max_uses})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="secondary-button compact"
+                          disabled={
+                            propertyLiveMutation.isPending ||
+                            !propertyAuthorizationId ||
+                            propertyRunState !== "sealed"
+                          }
+                          onClick={() => propertyLiveMutation.mutate()}
+                          type="button"
+                        >
+                          {propertyLiveMutation.isPending
+                            ? "Starting child..."
+                            : "Start child read"}
+                        </button>
+                        {propertyRunId &&
+                          propertyRunId !== propertyPreviewRunId &&
+                          !isTerminalStatus(propertyRunQuery.data?.status) && (
+                            <button
+                              className="secondary-button compact"
+                              disabled={propertyCancelling || propertyCancelMutation.isPending}
+                              onClick={() => propertyCancelMutation.mutate()}
+                              type="button"
+                            >
+                              {propertyCancelling ? "Cancelling..." : "Stop child read"}
+                            </button>
+                          )}
+                        {propertyRunId && propertyRunId !== propertyPreviewRunId && (
+                          <span>
+                            Child {propertyRunId}: {propertyRunState ?? "queued"}.
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </dialog>
+            )}
+
+            <aside className="surface inspector">
+              <div className="surface-heading">
+                <h3>Inspector</h3>
+              </div>
+
+              <>
+                <div className="detail-list">
+                  {resultDetails.map((item) => (
+                    <div className="detail-row" key={item.label}>
+                      <span>{item.label}</span>
+                      <strong>{item.value}</strong>
+                    </div>
+                  ))}
+                </div>
+
+                {inspectorResult?.__category === "unexpected-devices" ? (
+                  <div className="state-panel warning" role="note">
+                    <strong>Observed outside the expected register</strong>
+                    <span>
+                      This publisher is reported separately. It does not enter expected-asset,
+                      compliance, payload, fault, or validation-result totals.
+                    </span>
+                  </div>
+                ) : resultAssetGroups ? (
+                  <div className="asset-group-list">
+                    {payloadViewSource && (
+                      <p className="section-copy">
+                        {payloadViewSource === "live_capture"
+                          ? "Live-captured payloads — expand an asset, then a payload type, to compare expected vs observed."
+                          : payloadViewSource === "direct_inputs"
+                            ? "Pasted payloads — expand an asset, then a payload type, to compare expected vs observed."
+                            : "No payload content for this run (fixture summary only); expand an asset for issue detail per payload type."}
+                      </p>
+                    )}
+                    {!selectedInspectorAssetGroup && (
+                      <div className="empty-workspace">
+                        <strong>
+                          {visibleResultRows.length === 0 && isResultsFilterActive
+                            ? "No asset selected in the filtered results"
+                            : "No asset selected"}
+                        </strong>
+                        <span>
+                          {visibleResultRows.length === 0 && isResultsFilterActive
+                            ? "Adjust or clear the filters, then select a result row to inspect its evidence."
+                            : "Select an expanded result row above to inspect that asset's payload evidence."}
+                        </span>
+                      </div>
+                    )}
+                    {selectedInspectorAssetGroup &&
+                      [selectedInspectorAssetGroup].map((group) => {
+                        const isOpen = expandedAsset === group.assetId;
+                        const typeSummary = group.payloadTypes
+                          .map((entry) => {
+                            const parts: string[] = [];
+                            if (entry.issues.length > 0) {
+                              parts.push(
+                                `${entry.issues.length} issue${entry.issues.length === 1 ? "" : "s"}`,
+                              );
+                            }
+                            if (entry.hasPayloadView) {
+                              parts.push("payload");
+                            }
+                            return `${entry.payloadType} (${parts.join(", ") || "ok"})`;
+                          })
+                          .join(", ");
+                        return (
                           <div
                             className={`asset-group${isOpen ? " open" : ""}`}
                             key={group.assetId}
                           >
-                          <button
-                            aria-expanded={isOpen}
-                            className="asset-group-toggle"
-                            onClick={() => setExpandedAsset(isOpen ? null : group.assetId)}
-                            type="button"
-                          >
-                            <strong>{group.assetId}</strong>
-                            <span>
-                              {group.issues.length} issue{group.issues.length === 1 ? "" : "s"} ·{" "}
-                              {typeSummary}
-                            </span>
-                          </button>
-                          {isOpen && (
-                            <div className="asset-group-detail">
-                              {group.payloadTypes.map((entry) => {
-                                const payloadKey = `${group.assetId}:${entry.payloadType}`;
-                                const payloadOpen = expandedPayloadKey === payloadKey;
-                                // Same shared (issues-gated) verdict as the
-                                // results-table row for this asset x payload type,
-                                // so scrolling the sections draws the eye to red
-                                // without re-reading the table. "Not received"
-                                // and a pending/failed issues fetch stay neutral.
-                                const sectionVerdict = gatedUdmiVerdict(
-                                  entry.issues,
-                                  entry.observedPresent,
-                                  notObservedAssets.has(group.assetId),
-                                );
-                                const sectionTone = udmiVerdictTone(sectionVerdict.verdict);
-                                return (
-                                  <div
-                                    className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
-                                    key={entry.payloadType}
-                                    ref={(el) => {
-                                      // Register/deregister this payload group so a
-                                      // row control can scroll straight to it (ITEM-D).
-                                      if (el) {
-                                        payloadGroupRefs.current.set(payloadKey, el);
-                                      } else {
-                                        payloadGroupRefs.current.delete(payloadKey);
-                                      }
-                                    }}
-                                    tabIndex={-1}
-                                  >
-                                    <div className="payload-type-heading">
-                                      <h5>{entry.payloadType}</h5>
-                                      {entry.hasPayloadView &&
-                                        entry.issues.length >= LONG_PAYLOAD_ISSUE_THRESHOLD && (
+                            <button
+                              aria-expanded={isOpen}
+                              className="asset-group-toggle"
+                              onClick={() => setExpandedAsset(isOpen ? null : group.assetId)}
+                              type="button"
+                            >
+                              <strong>{group.assetId}</strong>
+                              <span>
+                                {group.issues.length} issue{group.issues.length === 1 ? "" : "s"} ·{" "}
+                                {typeSummary}
+                              </span>
+                            </button>
+                            {isOpen && (
+                              <div className="asset-group-detail">
+                                {group.payloadTypes.map((entry) => {
+                                  const payloadKey = `${group.assetId}:${entry.payloadType}`;
+                                  const payloadOpen = expandedPayloadKey === payloadKey;
+                                  // Same shared (issues-gated) verdict as the
+                                  // results-table row for this asset x payload type,
+                                  // so scrolling the sections draws the eye to red
+                                  // without re-reading the table. "Not received"
+                                  // and a pending/failed issues fetch stay neutral.
+                                  const sectionVerdict = gatedUdmiVerdict(
+                                    entry.issues,
+                                    entry.observedPresent,
+                                    notObservedAssets.has(group.assetId),
+                                  );
+                                  const sectionTone = udmiVerdictTone(sectionVerdict.verdict);
+                                  return (
+                                    <div
+                                      className={`payload-type-group${sectionTone ? ` section-${sectionTone}` : ""}`}
+                                      key={entry.payloadType}
+                                      ref={(el) => {
+                                        // Register/deregister this payload group so a
+                                        // row control can scroll straight to it (ITEM-D).
+                                        if (el) {
+                                          payloadGroupRefs.current.set(payloadKey, el);
+                                        } else {
+                                          payloadGroupRefs.current.delete(payloadKey);
+                                        }
+                                      }}
+                                      tabIndex={-1}
+                                    >
+                                      <div className="payload-type-heading">
+                                        <h5>{entry.payloadType}</h5>
+                                        {entry.hasPayloadView &&
+                                          entry.issues.length >= LONG_PAYLOAD_ISSUE_THRESHOLD && (
+                                            <button
+                                              aria-label={`Jump to ${entry.payloadType} expected versus observed comparison`}
+                                              className="secondary-button compact"
+                                              onClick={() => jumpToPayloadComparison(payloadKey)}
+                                              type="button"
+                                            >
+                                              Jump to payload comparison
+                                            </button>
+                                          )}
+                                      </div>
+                                      <p className={`payload-verdict ${sectionTone ?? "neutral"}`}>
+                                        {sectionVerdict.verdict === "pass"
+                                          ? "PASS: UDMI Compliant"
+                                          : sectionVerdict.verdict === "pass-notes"
+                                            ? "PASS WITH NOTES: minor issues below"
+                                            : sectionVerdict.verdict === "offline"
+                                              ? "NOT OBSERVED THIS RUN: no payload arrived during the capture window"
+                                              : sectionVerdict.verdict === "fail"
+                                                ? "NON-COMPLIANT: please see details below"
+                                                : sectionVerdict.label === "Not received"
+                                                  ? "NOT RECEIVED: no payload arrived for this payload type"
+                                                  : sectionVerdict.label}
+                                      </p>
+                                      {entry.issues.map((issue) => (
+                                        <IssueCard
+                                          key={issue.id}
+                                          context={issue.area}
+                                          issue={issue}
+                                        />
+                                      ))}
+                                      {entry.hasPayloadView && (
+                                        <div className="payload-evidence">
                                           <button
-                                            aria-label={`Jump to ${entry.payloadType} expected versus observed comparison`}
+                                            aria-expanded={payloadOpen}
                                             className="secondary-button compact"
-                                            onClick={() => jumpToPayloadComparison(payloadKey)}
+                                            onClick={() =>
+                                              setExpandedPayloadKey(payloadOpen ? null : payloadKey)
+                                            }
+                                            ref={(el) => {
+                                              if (el) {
+                                                payloadComparisonControlRefs.current.set(
+                                                  payloadKey,
+                                                  el,
+                                                );
+                                              } else {
+                                                payloadComparisonControlRefs.current.delete(
+                                                  payloadKey,
+                                                );
+                                              }
+                                            }}
                                             type="button"
                                           >
-                                            Jump to payload comparison
+                                            {payloadOpen ? "Hide" : "Show"} expected vs observed
+                                            payload
                                           </button>
-                                        )}
+                                          {payloadOpen && (
+                                            <PayloadComparePanels
+                                              expected={entry.expected}
+                                              issues={entry.issues}
+                                              observed={entry.observed}
+                                              observedPresent={entry.observedPresent}
+                                            />
+                                          )}
+                                        </div>
+                                      )}
                                     </div>
-                                    <p className={`payload-verdict ${sectionTone ?? "neutral"}`}>
-                                      {sectionVerdict.verdict === "pass"
-                                        ? "PASS: UDMI Compliant"
-                                        : sectionVerdict.verdict === "pass-notes"
-                                          ? "PASS WITH NOTES: minor issues below"
-                                          : sectionVerdict.verdict === "offline"
-                                            ? "NOT OBSERVED THIS RUN: no payload arrived during the capture window"
-                                            : sectionVerdict.verdict === "fail"
-                                              ? "NON-COMPLIANT: please see details below"
-                                              : sectionVerdict.label === "Not received"
-                                                ? "NOT RECEIVED: no payload arrived for this payload type"
-                                                : sectionVerdict.label}
-                                    </p>
-                                    {entry.issues.map((issue) => (
-                                      <IssueCard
-                                        key={issue.id}
-                                        context={issue.area}
-                                        issue={issue}
-                                      />
-                                    ))}
-                                    {entry.hasPayloadView && (
-                                      <div className="payload-evidence">
-                                        <button
-                                          aria-expanded={payloadOpen}
-                                          className="secondary-button compact"
-                                          onClick={() =>
-                                            setExpandedPayloadKey(payloadOpen ? null : payloadKey)
-                                          }
-                                          ref={(el) => {
-                                            if (el) {
-                                              payloadComparisonControlRefs.current.set(
-                                                payloadKey,
-                                                el,
-                                              );
-                                            } else {
-                                              payloadComparisonControlRefs.current.delete(
-                                                payloadKey,
-                                              );
-                                            }
-                                          }}
-                                          type="button"
-                                        >
-                                          {payloadOpen ? "Hide" : "Show"} expected vs observed
-                                          payload
-                                        </button>
-                                        {payloadOpen && (
-                                          <PayloadComparePanels
-                                            expected={entry.expected}
-                                            issues={entry.issues}
-                                            observed={entry.observed}
-                                            observedPresent={entry.observedPresent}
-                                          />
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                </div>
-              ) : module.route === "mqtt-discovery" ? (
-                // Real captured payload for the selected topic, replacing the old
-                // fabricated sample issue-cards on this discovery route.
-                selectedMqttTopic ? (
-                  <MqttPayloadPanel topic={selectedMqttTopic} />
-                ) : (
-                  <div className="empty-workspace">
-                    <strong>No topic selected</strong>
-                    <span>Select a captured topic to inspect its last payload.</span>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                   </div>
-                )
-              ) : isDiscoveryModule ? (
-                // Other discovery routes (ip/bacnet): a neutral note in place of
-                // the old sample issue-cards — discovery observes, it does not
-                // produce register-comparison findings.
-                <div className="empty-workspace">
-                  <strong>No findings here</strong>
-                  <span>Findings are produced by validation runs, not discovery.</span>
-                </div>
-              ) : (
-                <div className="issue-list compact-list">
-                  {visibleIssues.length > 0 ? (
-                    visibleIssues.map((issue) => (
-                      <IssueCard key={issue.id} context={issue.assetId} issue={issue} />
-                    ))
+                ) : module.route === "mqtt-discovery" ? (
+                  // Real captured payload for the selected topic, replacing the old
+                  // fabricated sample issue-cards on this discovery route.
+                  selectedMqttTopic ? (
+                    <MqttPayloadPanel topic={selectedMqttTopic} />
                   ) : (
                     <div className="empty-workspace">
-                      <strong>No active findings</strong>
-                      <span>
-                        {liveIssues
-                          ? "This validation run reported no issues."
-                          : "Run a validation to surface live findings here."}
-                      </span>
+                      <strong>No topic selected</strong>
+                      <span>Select a captured topic to inspect its last payload.</span>
                     </div>
-                  )}
-                </div>
-              )}
-            </>
-          </aside>
-          {isUdmiValidation && displayedValidationSummary ? (
-            <div className="udmi-result-supplementary">
-              {displayedAssetTopicDiscovery ? (
-                <AssetTopicDiscoveryPanel
-                  discovery={displayedAssetTopicDiscovery}
-                  filtered={summaryFiltersActive}
-                />
-              ) : null}
-              {(displayedValidationSummary.wrong_topic_assets ?? []).length > 0 ? (
+                  )
+                ) : isDiscoveryModule ? (
+                  // Other discovery routes (ip/bacnet): a neutral note in place of
+                  // the old sample issue-cards — discovery observes, it does not
+                  // produce register-comparison findings.
+                  <div className="empty-workspace">
+                    <strong>No findings here</strong>
+                    <span>Findings are produced by validation runs, not discovery.</span>
+                  </div>
+                ) : (
+                  <div className="issue-list compact-list">
+                    {visibleIssues.length > 0 ? (
+                      visibleIssues.map((issue) => (
+                        <IssueCard key={issue.id} context={issue.assetId} issue={issue} />
+                      ))
+                    ) : (
+                      <div className="empty-workspace">
+                        <strong>No active findings</strong>
+                        <span>
+                          {liveIssues
+                            ? "This validation run reported no issues."
+                            : "Run a validation to surface live findings here."}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            </aside>
+            {isUdmiValidation && displayedValidationSummary ? (
+              <div className="udmi-result-supplementary">
+                {displayedAssetTopicDiscovery ? (
+                  <AssetTopicDiscoveryPanel
+                    discovery={displayedAssetTopicDiscovery}
+                    filtered={summaryFiltersActive}
+                  />
+                ) : null}
+                {(displayedValidationSummary.wrong_topic_assets ?? []).length > 0 ? (
                   <WrongTopicAssetsPanel
                     assets={displayedValidationSummary.wrong_topic_assets ?? []}
                   />
-              ) : null}
-            </div>
-          ) : null}
+                ) : null}
+              </div>
+            ) : null}
           </section>
         )}
 
@@ -7050,6 +7950,10 @@ function buildDiscoveryParameters(
     authorized: boolean;
     dryRun: boolean;
     scanPorts: ScanPort[];
+    targetRows?: IpTargetRow[];
+    exclusionRows?: IpTargetRow[];
+    provider?: IPDiscoveryProvider;
+    nmapProfile?: NmapProfileName;
     captureTopicFilter?: string;
     captureSeconds?: string;
     target?: string;
@@ -7064,11 +7968,26 @@ function buildDiscoveryParameters(
     parameters.authorized = options.authorized;
   }
   if (action.runKind === "ip") {
-    parameters.port_specification = scanPortSpecification(options.scanPorts);
-    // Optional ad-hoc target override. Blank sends nothing so the backend falls
-    // back to the imported IP register exactly as before. "/" => CIDR; "-" =>
-    // start/end range; otherwise a single address. No UI validation — the
-    // backend returns a clear 400/failed run for malformed input.
+    parameters.provider = options.provider ?? "builtin_tcp_connect";
+    if (parameters.provider === "operator_managed_nmap") {
+      parameters.nmap_profile = options.nmapProfile ?? "tcp_connect_inventory";
+    }
+    if (
+      parameters.provider !== "operator_managed_nmap" ||
+      options.nmapProfile !== "host_discovery"
+    ) {
+      parameters.port_specification = scanPortSpecification(options.scanPorts);
+    }
+    const targetRows = options.targetRows ?? [];
+    const exclusionRows = options.exclusionRows ?? [];
+    if (targetRows.length > 0 || exclusionRows.length > 0) {
+      const expressions = serializeIpTargetRows(targetRows, exclusionRows);
+      parameters.target_expressions = expressions.target_expressions;
+      parameters.exclusions = expressions.exclusions;
+      return parameters;
+    }
+    // Compatibility fallback for existing deep links and saved drafts. Blank
+    // sends nothing so the backend falls back to the imported IP register.
     const target = options.target?.trim();
     if (target) {
       if (target.includes("/")) {

@@ -3,6 +3,7 @@ import {
   AUTH_REQUIRED_MESSAGE,
   cancelRun,
   clearApiKey,
+  createScanAuthorization,
   createSessionBoundApiClient,
   createReport,
   deleteReports,
@@ -16,15 +17,21 @@ import {
   getHealth,
   getLatestImport,
   getMe,
+  getNmapCapability,
+  getScanAuthorization,
   getValidationJsonExportPath,
   isRunAccessClosedError,
   isRunProgressEvent,
   listReports,
   listRuns,
+  listScanAuthorizations,
   parseSseBuffer,
   roleAtLeast,
   rollbackMqttConfigPublish,
+  revokeScanAuthorization,
   setApiKey,
+  startAuthorizedDiscoveryRun,
+  startDiscoveryPreview,
   startMqttConfigPublishRun,
   streamRunEvents,
   validateConfiguration,
@@ -57,6 +64,44 @@ describe("formatApiDetail", () => {
   it("falls back to a generic message for null or undefined details", () => {
     expect(formatApiDetail(null)).toBe("Unknown API error.");
     expect(formatApiDetail(undefined)).toBe("Unknown API error.");
+  });
+});
+
+describe("Nmap capability", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("requests the exact scoped, path-free capability endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          schema_version: "1.0",
+          provider: "nmap",
+          state: "available",
+          reason: "available",
+          provider_mode: "internal_operator_managed",
+          policy_id: "policy-1",
+          policy_revision: 2,
+          publisher: "Insecure.Com LLC",
+          version: "7.98",
+          fingerprint_sha256: "a".repeat(64),
+          npcap_version: "1.83",
+          npcap_state: "raw_capable",
+          raw_capable: true,
+          process_selection_allowed: true,
+          xml_import_allowed: false,
+          permitted_profiles: ["tcp_connect_inventory"],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getNmapCapability({ projectId: "project a", siteId: "site/1" });
+
+    expect(result.permitted_profiles).toEqual(["tcp_connect_inventory"]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/v1/nmap/capability?project_id=project+a&site_id=site%2F1",
+    );
   });
 });
 
@@ -137,6 +182,117 @@ function stubFetch(response: Response) {
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
+
+describe("scan authorization client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const authorization = {
+    authorization_id: "auth/1",
+    preview_run_id: "preview/1",
+    project_id: "project a",
+    site_id: "site/1",
+    packet_plan_sha256: "a".repeat(64),
+    approved_by: "admin",
+    ticket: "CHG-1042",
+    purpose: "Controlled field scan",
+    not_before: "2026-08-12T10:00:00Z",
+    not_after: "2026-08-12T11:00:00Z",
+    max_uses: 1,
+    use_count: 0,
+    consumed_run_id: null,
+    revoked_at: null,
+    revoked_by: null,
+    revoke_reason: null,
+    created_at: "2026-08-12T09:59:00Z",
+  };
+
+  it("uses the admin mutation and exact scoped read endpoints", async () => {
+    const fetchMock = vi
+      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse(authorization))
+      .mockResolvedValueOnce(jsonResponse([authorization]))
+      .mockResolvedValueOnce(jsonResponse(authorization))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...authorization, revoked_at: "2026-08-12T10:05:00Z" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createScanAuthorization({
+      previewRunId: "preview/1",
+      ticket: "CHG-1042",
+      purpose: "Controlled field scan",
+      notBefore: "2026-08-12T10:00:00Z",
+      notAfter: "2026-08-12T11:00:00Z",
+    });
+    await listScanAuthorizations({
+      workspace: { projectId: "project a", siteId: "site/1" },
+      previewRunId: "preview/1",
+    });
+    await getScanAuthorization("auth/1");
+    await revokeScanAuthorization({ authorizationId: "auth/1", reason: "Window closed" });
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/v1/discovery/scan-authorizations",
+      "/api/v1/discovery/scan-authorizations?project_id=project+a&site_id=site%2F1&preview_run_id=preview%2F1",
+      "/api/v1/discovery/scan-authorizations/auth%2F1",
+      "/api/v1/discovery/scan-authorizations/auth%2F1/revoke",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      preview_run_id: "preview/1",
+      ticket: "CHG-1042",
+      purpose: "Controlled field scan",
+      not_before: "2026-08-12T10:00:00Z",
+      not_after: "2026-08-12T11:00:00Z",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({
+      reason: "Window closed",
+    });
+  });
+
+  it("keeps preview parameters separate from the sealed live envelope", async () => {
+    const fetchMock = vi
+      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
+      .mockResolvedValue(
+        jsonResponse({
+          run_id: "run-1",
+          job_type: "ip_discovery",
+          status: "queued",
+          message: "accepted",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const common = {
+      runKind: "ip" as const,
+      jobType: "ip_discovery" as const,
+      workspace: { projectId: "project a", siteId: "site/1" },
+    };
+
+    await startDiscoveryPreview({
+      ...common,
+      parameters: { dry_run: true, cidr: "10.20.0.0/24" },
+    });
+    await startAuthorizedDiscoveryRun({
+      ...common,
+      previewRunId: "preview/1",
+      scanAuthorizationId: "auth/1",
+    });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      job_type: "ip_discovery",
+      parameters: { dry_run: true, cidr: "10.20.0.0/24" },
+      project_id: "project a",
+      site_id: "site/1",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      job_type: "ip_discovery",
+      preview_run_id: "preview/1",
+      scan_authorization_id: "auth/1",
+      parameters: {},
+      project_id: "project a",
+      site_id: "site/1",
+    });
+  });
+});
 
 describe("API key helpers", () => {
   afterEach(() => {
@@ -856,9 +1012,12 @@ describe("isRunProgressEvent", () => {
 });
 
 describe("isRunAccessClosedError", () => {
-  it.each([401, 403, 404])("classifies a concealed run response with status %s as closed", (status) => {
-    expect(isRunAccessClosedError(new ApiError("Run is unavailable.", status))).toBe(true);
-  });
+  it.each([401, 403, 404])(
+    "classifies a concealed run response with status %s as closed",
+    (status) => {
+      expect(isRunAccessClosedError(new ApiError("Run is unavailable.", status))).toBe(true);
+    },
+  );
 
   it("keeps transport and server failures retryable", () => {
     expect(isRunAccessClosedError(new ApiError("Try again.", 503))).toBe(false);

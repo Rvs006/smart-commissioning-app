@@ -342,6 +342,8 @@ class RunService:
         *,
         expected_job_type: JobType,
         requesting_principal: str = "system",
+        parent_run_id: str | None = None,
+        relation: str | None = None,
     ) -> RunRecord:
         if request.job_type != expected_job_type:
             raise ValueError(f"Endpoint expects job_type '{expected_job_type}'.")
@@ -361,6 +363,8 @@ class RunService:
             edge_id=edge_identity().edge_id,
             authorization_id=request.scan_authorization_id,
             preview_run_id=request.preview_run_id,
+            parent_run_id=parent_run_id,
+            relation=relation,
         )
         logger.info("run created run_id=%s job_type=%s", envelope.run_id, expected_job_type)
         return self.get_run(envelope.run_id)

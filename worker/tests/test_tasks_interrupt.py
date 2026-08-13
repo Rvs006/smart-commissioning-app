@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -64,9 +65,14 @@ class WorkerDeliveryTestCase(unittest.TestCase):
         self.repository_patcher.start()
         self.addCleanup(self.repository_patcher.stop)
 
-    def create_run(self, context: RunContextV1 | None = None) -> tuple[str, str]:
+    def create_run(
+        self,
+        context: RunContextV1 | None = None,
+        *,
+        job_type: str = "ip_discovery",
+    ) -> tuple[str, str]:
         envelope = self.repository.create_run_with_context(
-            job_type="ip_discovery",
+            job_type=job_type,
             context=context or _context(),
             execution_mode="dramatiq_worker",
         )
@@ -155,6 +161,153 @@ class DuplicateDeliveryTests(WorkerDeliveryTestCase):
 
 
 class FrozenContextAndSecretTests(WorkerDeliveryTestCase):
+    def test_ip_actor_passes_the_context_bound_import_loader(self) -> None:
+        run_id, dispatch_id = self.create_run()
+        captured: dict[str, object] = {}
+
+        def processor(
+            run_id,
+            _parameters,
+            *,
+            run_store,
+            import_loader,
+            **_kwargs,
+        ):
+            captured["import_loader"] = import_loader
+            return run_store.update_run_status(
+                run_id,
+                status="succeeded",
+                stage="engine_complete",
+                progress_percent=100,
+            )
+
+        with mock.patch.object(
+            tasks,
+            "process_ip_discovery_run",
+            side_effect=processor,
+        ):
+            tasks.discover_ip_range(run_id, dispatch_id)
+
+        self.assertTrue(callable(captured["import_loader"]))
+
+    def test_live_ip_actor_rechecks_frozen_source_interface_before_processor(self) -> None:
+        worker_scope = "worker-field-9"
+        worker_settings = replace(tasks.settings, network_executor_id=worker_scope)
+        parameters = {
+            "authorized": True,
+            "dry_run": False,
+            "source_ip": "192.0.2.10",
+            "local_address": "192.0.2.10/24",
+            "source_interface_identity_v1": {
+                "schema_version": "1.0",
+                "selection": "explicit",
+                "executor_scope": worker_scope,
+                "interface_id": "if-field-9",
+                "interface_name": "Field NIC",
+                "source_ip": "192.0.2.10",
+                "prefix_length": 24,
+                "local_address": "192.0.2.10/24",
+                "default_route_metric": None,
+            },
+        }
+        run_id, dispatch_id = self.create_run(_context(engine_parameters=parameters))
+        order: list[str] = []
+
+        def processor(run_id, _parameters, *, run_store, **_kwargs):
+            order.append("processor")
+            return run_store.update_run_status(
+                run_id,
+                status="succeeded",
+                stage="engine_complete",
+                progress_percent=100,
+            )
+
+        def guard(_parameters, *, expected_executor_scope):
+            self.assertEqual(expected_executor_scope, worker_scope)
+            order.append("guard")
+
+        with (
+            mock.patch.object(tasks, "settings", worker_settings),
+            mock.patch.object(tasks, "guard_frozen_source_interface", side_effect=guard),
+            mock.patch.object(tasks, "process_ip_discovery_run", side_effect=processor),
+        ):
+            tasks.discover_ip_range(run_id, dispatch_id)
+
+        self.assertEqual(order, ["guard", "processor"])
+
+    def test_source_interface_drift_fails_before_worker_ip_processor(self) -> None:
+        worker_scope = "worker-field-9"
+        worker_settings = replace(tasks.settings, network_executor_id=worker_scope)
+        parameters = {
+            "authorized": True,
+            "dry_run": False,
+            "source_ip": "192.0.2.10",
+            "local_address": "192.0.2.10/24",
+            "source_interface_identity_v1": {
+                "schema_version": "1.0",
+                "selection": "explicit",
+                "executor_scope": worker_scope,
+                "interface_id": "if-field-9",
+                "interface_name": "Field NIC",
+                "source_ip": "192.0.2.10",
+                "prefix_length": 24,
+                "local_address": "192.0.2.10/24",
+                "default_route_metric": None,
+            },
+        }
+        run_id, dispatch_id = self.create_run(_context(engine_parameters=parameters))
+        processor = mock.Mock()
+
+        with (
+            mock.patch.object(tasks, "settings", worker_settings),
+            mock.patch.object(
+                tasks,
+                "guard_frozen_source_interface",
+                side_effect=ValueError("frozen source interface is unavailable"),
+            ),
+            mock.patch.object(tasks, "process_ip_discovery_run", processor),
+        ):
+            with self.assertRaisesRegex(ValueError, "source interface is unavailable"):
+                tasks.discover_ip_range(run_id, dispatch_id)
+
+        processor.assert_not_called()
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "failed")
+
+    def test_live_network_actor_without_executor_scope_fails_before_processor(self) -> None:
+        parameters = {
+            "authorized": True,
+            "dry_run": False,
+            "source_ip": "192.0.2.10",
+            "local_address": "192.0.2.10/24",
+            "source_interface_identity_v1": {
+                "schema_version": "1.0",
+                "selection": "explicit",
+                "executor_scope": "worker-field-9",
+                "interface_id": "if-field-9",
+                "interface_name": "Field NIC",
+                "source_ip": "192.0.2.10",
+                "prefix_length": 24,
+                "local_address": "192.0.2.10/24",
+                "default_route_metric": None,
+            },
+        }
+        run_id, dispatch_id = self.create_run(_context(engine_parameters=parameters))
+        processor = mock.Mock()
+
+        with (
+            mock.patch.object(
+                tasks,
+                "settings",
+                replace(tasks.settings, network_executor_id=None),
+            ),
+            mock.patch.object(tasks, "process_ip_discovery_run", processor),
+            self.assertRaisesRegex(ValueError, "queued network executor does not match"),
+        ):
+            tasks.discover_ip_range(run_id, dispatch_id)
+
+        processor.assert_not_called()
+        self.assertEqual(self.repository.get_seal(run_id).terminal_status, "failed")
+
     def test_actor_receives_parameters_only_from_non_default_stored_context(self) -> None:
         context = _context(engine_parameters={"authorized": True, "dry_run": True, "marker": "stored"})
         run_id, dispatch_id = self.create_run(context)
@@ -263,7 +416,8 @@ class FrozenContextAndSecretTests(WorkerDeliveryTestCase):
                 },
                 connection_settings={},
                 protocol_key=None,
-            )
+            ),
+            job_type="mqtt_config_publish",
         )
         channels: list[str] = []
         deployment_ids: list[str] = []

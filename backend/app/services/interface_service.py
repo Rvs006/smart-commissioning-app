@@ -50,6 +50,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from smart_commissioning_core.source_interface import (
+    guard_frozen_source_interface as guard_frozen_source_interface,
+)
+from smart_commissioning_core.source_interface import (
+    resolve_source_interface_identity as resolve_source_interface_identity,
+)
+
 from app.schemas.system import AdapterType, SystemInterface
 
 try:

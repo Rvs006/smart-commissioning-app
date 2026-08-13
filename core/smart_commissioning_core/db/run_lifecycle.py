@@ -92,6 +92,9 @@ class _DiscoveryObservationStateSnapshot:
     canonical_payload_bytes: int
     terminal_cursor: int
     observation_stream_sha256: str
+    observation_row_limit: int
+    observation_payload_byte_limit: int
+    sealed_observation_budget: bool
 
     def cutoff(self) -> ObservationCutoffV1:
         return ObservationCutoffV1(
@@ -157,6 +160,23 @@ class ActiveControlDeniedError(RuntimeError):
         super().__init__(f"active control denied: {reason}")
 
 
+def _active_control_loss_reason(error: ActiveControlDeniedError) -> str:
+    """Translate the shared control policy's stable denials into evidence."""
+
+    text = str(error).casefold()
+    if "authorization" in text and "revok" in text:
+        return "authorization_revoked"
+    if "authorization" in text and ("ended" in text or "expir" in text):
+        return "authorization_expired"
+    if "grant" in text or "initiating user" in text or "engineer or admin" in text:
+        return "grant_revoked"
+    if "cancel" in text:
+        return "stop_requested"
+    if "owner" in text or "attempt" in text or "lease" in text:
+        return "ownership_lost"
+    return "control_store_error"
+
+
 class DiscoveryObservationConflictError(RuntimeError):
     """A provisional observation failed its lifecycle or identity fence."""
 
@@ -202,6 +222,43 @@ def _is_dry_context(context: RunContextV1) -> bool:
     return bool(value)
 
 
+def _sealed_ip_observation_budget(
+    context: RunContextV1,
+    *,
+    job_type: str,
+) -> tuple[int, int] | None:
+    """Return one modern IP plan's immutable row and payload limits.
+
+    Historical discovery contexts and non-IP jobs retain the lifecycle-wide
+    fold ceilings. Once an IP context carries an observation budget, malformed
+    values fail closed instead of silently widening back to those global caps.
+    """
+
+    if job_type != "ip_discovery":
+        return None
+    contract = context.engine_parameters.get("scan_contract_v1")
+    if not isinstance(contract, Mapping) or contract.get("job_type") != "ip_discovery":
+        return None
+    ip_contract = contract.get("ip")
+    if not isinstance(ip_contract, Mapping):
+        return None
+    raw_budget = ip_contract.get("observation_budget")
+    if raw_budget is None:
+        return None
+    if not isinstance(raw_budget, Mapping):
+        raise ValueError("sealed IP observation budget is invalid")
+    row_limit = raw_budget.get("planned_observation_rows")
+    payload_limit = raw_budget.get("planned_observation_payload_bytes")
+    if (
+        type(row_limit) is not int
+        or row_limit <= 0
+        or type(payload_limit) is not int
+        or payload_limit <= 0
+    ):
+        raise ValueError("sealed IP observation budget is invalid")
+    return row_limit, payload_limit
+
+
 def _required_authorization_window_seconds(context: RunContextV1) -> float:
     """Read the conservative profile bound from a versioned discovery contract."""
     contract = _scan_contract(context)
@@ -241,6 +298,23 @@ def _retry_parent_run_id(context: RunContextV1) -> str | None:
         raise ScanAuthorizationError("scan contract has an invalid retry parent")
     if set(snapshot) != {"relation", "parent_run_id"}:
         raise ScanAuthorizationError("scan contract has an invalid relation snapshot")
+    return parent_run_id
+
+
+def _property_parent_run_id(context: RunContextV1) -> str | None:
+    """Read the parent id for a sealed BACnet property-expansion child."""
+
+    contract = context.engine_parameters.get("scan_contract_v1")
+    if contract is None:
+        return None
+    if not isinstance(contract, Mapping):
+        raise ScanAuthorizationError("scan contract has an invalid relation snapshot")
+    snapshot = contract.get("relation_snapshot")
+    if not isinstance(snapshot, Mapping) or snapshot.get("relation") != "property_expansion":
+        return None
+    parent_run_id = str(snapshot.get("parent_run_id") or "").strip()
+    if not parent_run_id or len(parent_run_id) > 64 or set(snapshot) != {"relation", "parent_run_id"}:
+        raise ScanAuthorizationError("scan contract has an invalid property parent")
     return parent_run_id
 
 
@@ -442,6 +516,8 @@ class RunLifecycleRepository:
         dispatch_id: str | None = None,
         authorization_id: str | None = None,
         preview_run_id: str | None = None,
+        parent_run_id: str | None = None,
+        relation: str | None = None,
         now: datetime | None = None,
     ) -> DispatchEnvelopeV1:
         captured = context if isinstance(context, RunContextV1) else RunContextV1.model_validate(context)
@@ -451,6 +527,19 @@ class RunLifecycleRepository:
         context_sha256 = canonical_context_sha256(captured)
         resource_keys = _resource_keys(captured)
         retry_parent_run_id = _retry_parent_run_id(captured)
+        property_parent_run_id = _property_parent_run_id(captured)
+        if parent_run_id is not None:
+            parent_run_id = str(parent_run_id).strip()
+            if relation not in {"property_expansion", "retry"}:
+                raise ScanAuthorizationError("run parent relation is invalid")
+            expected_parent = (
+                property_parent_run_id if relation == "property_expansion" else retry_parent_run_id
+            )
+            if expected_parent != parent_run_id:
+                raise ScanAuthorizationError("run parent relation does not match its frozen context")
+        elif property_parent_run_id is not None:
+            parent_run_id = property_parent_run_id
+            relation = "property_expansion"
         if (authorization_id is None) != (preview_run_id is None):
             raise ScanAuthorizationError("live creation requires both authorization_id and preview_run_id")
         if authorization_id is not None and _is_dry_context(captured):
@@ -471,6 +560,13 @@ class RunLifecycleRepository:
                     self._validate_retry_parent(
                         session,
                         parent_run_id=retry_parent_run_id,
+                        context=captured,
+                        job_type=job_type,
+                    )
+                if property_parent_run_id is not None:
+                    self._validate_property_parent(
+                        session,
+                        parent_run_id=property_parent_run_id,
                         context=captured,
                         job_type=job_type,
                     )
@@ -542,6 +638,16 @@ class RunLifecycleRepository:
                         created_at=created_at,
                     )
                 )
+                if property_parent_run_id is not None:
+                    session.add(
+                        RunLink(
+                            parent_run_id=property_parent_run_id,
+                            child_run_id=actual_run_id,
+                            relation="property_expansion",
+                            authorization_id=(authorization.authorization_id if authorization is not None else None),
+                            created_at=created_at,
+                        )
+                    )
                 session.add(
                     RunDispatch(
                         dispatch_id=actual_dispatch_id,
@@ -606,6 +712,42 @@ class RunLifecycleRepository:
             or seal.result_sha256 != result.result_sha256
         ):
             raise ScanAuthorizationError("retry parent seal is invalid")
+
+    @staticmethod
+    def _validate_property_parent(
+        session: Session,
+        *,
+        parent_run_id: str,
+        context: RunContextV1,
+        job_type: str,
+    ) -> None:
+        """Require a succeeded, same-scope BACnet seal before child creation."""
+
+        parent = session.get(Run, parent_run_id)
+        parent_context_row = session.get(RunExecutionContext, parent_run_id)
+        result = session.get(RunResult, parent_run_id)
+        seal = session.get(RunSeal, parent_run_id)
+        if parent is None or parent_context_row is None or result is None or seal is None:
+            raise ScanAuthorizationError("property expansion parent must be a sealed BACnet run")
+        if (
+            job_type != "bacnet_discovery"
+            or parent.job_type != "bacnet_discovery"
+            or parent.project_id != context.project_id
+            or parent.site_id != context.site_id
+            or parent.status != "succeeded"
+            or result.terminal_status != "succeeded"
+            or seal.terminal_status != "succeeded"
+        ):
+            raise ScanAuthorizationError("property expansion parent must be a succeeded same-scope BACnet seal")
+        try:
+            parent_context = RunContextV1.model_validate(parent_context_row.context_json)
+        except Exception as error:
+            raise ScanAuthorizationError("property expansion parent context is invalid") from error
+        if canonical_context_sha256(parent_context) != parent_context_row.context_sha256:
+            raise ScanAuthorizationError("property expansion parent context seal is invalid")
+        parent_contract = _scan_contract(parent_context).get("bacnet")
+        if not isinstance(parent_contract, Mapping):
+            raise ScanAuthorizationError("property expansion parent has no frozen BACnet contract")
 
     def list_run_links(
         self,
@@ -1008,60 +1150,103 @@ class RunLifecycleRepository:
             if control is None:
                 raise ActiveControlDeniedError("run owner, attempt, status, cancellation, or lease is no longer active")
             run, context_row = control
-            context = RunContextV1.model_validate(context_row.context_json)
-            if canonical_context_sha256(context) != context_row.context_sha256:
-                raise ActiveControlDeniedError("frozen run context integrity check failed")
-            if run.project_id != context.project_id or run.site_id != context.site_id:
-                raise ActiveControlDeniedError("frozen run scope no longer matches")
+            self._require_active_control_in_session(
+                session,
+                run,
+                context_row,
+                owner_token=owner_token,
+                attempt=attempt,
+                observed_at=observed_at,
+            )
 
-            if _is_dry_context(context):
-                return
+    def _require_active_control_in_session(
+        self,
+        session: Session,
+        run: Run,
+        context_row: RunExecutionContext,
+        *,
+        owner_token: str,
+        attempt: int,
+        observed_at: datetime,
+        lock_related: bool = False,
+    ) -> None:
+        """Apply the one active-control policy inside a caller's transaction.
 
-            authorization_row = session.execute(
-                select(ScanAuthorization, RunLink)
-                .join(
-                    RunLink,
-                    RunLink.authorization_id == ScanAuthorization.authorization_id,
-                )
-                .where(
-                    ScanAuthorization.consumed_run_id == run_id,
-                    RunLink.child_run_id == run_id,
-                    RunLink.relation == "preview",
-                )
-            ).one_or_none()
-            if authorization_row is None:
-                raise ActiveControlDeniedError("live scan authorization linkage is missing")
-            authorization, link = authorization_row
-            if (
-                authorization.preview_run_id != link.parent_run_id
-                or link.authorization_id != authorization.authorization_id
-                or authorization.project_id != run.project_id
-                or authorization.site_id != run.site_id
-                or authorization.consumed_run_id != run_id
-                or authorization.use_count != 1
-                or authorization.max_uses != 1
-            ):
-                raise ActiveControlDeniedError("live scan authorization linkage is invalid")
-            if authorization.revoked_at is not None:
-                raise ActiveControlDeniedError("scan authorization was revoked")
-            if observed_at < authorization.not_before:
-                raise ActiveControlDeniedError("scan authorization window has not started")
-            if observed_at >= authorization.not_after:
-                raise ActiveControlDeniedError("scan authorization window has ended")
-            try:
-                packet_plan_sha256 = _packet_plan_sha256(context)
-            except ScanAuthorizationError as error:
-                raise ActiveControlDeniedError("frozen scan authorization contract is invalid") from error
-            if authorization.packet_plan_sha256 != packet_plan_sha256:
-                raise ActiveControlDeniedError("frozen packet plan no longer matches its authorization")
+        Finalization calls this with the lifecycle row already locked.  The
+        related approval and initiator rows are then locked before success is
+        allowed, closing the gap between a last packet and its terminal seal.
+        Query-only dispatch checks deliberately keep ``lock_related`` false.
+        """
 
-            self._require_active_initiator(session, run, context)
+        if (
+            run.status != "running"
+            or run.owner_token != owner_token
+            or run.attempt != attempt
+            or run.cancel_requested
+            or run.terminal_at is not None
+            or run.lease_expires_at is None
+            or run.lease_expires_at <= observed_at
+        ):
+            raise ActiveControlDeniedError("run owner, attempt, status, cancellation, or lease is no longer active")
+        context = RunContextV1.model_validate(context_row.context_json)
+        if canonical_context_sha256(context) != context_row.context_sha256:
+            raise ActiveControlDeniedError("frozen run context integrity check failed")
+        if run.project_id != context.project_id or run.site_id != context.site_id:
+            raise ActiveControlDeniedError("frozen run scope no longer matches")
+
+        if _is_dry_context(context):
+            return
+
+        authorization_statement = (
+            select(ScanAuthorization, RunLink)
+            .join(
+                RunLink,
+                RunLink.authorization_id == ScanAuthorization.authorization_id,
+            )
+            .where(
+                ScanAuthorization.consumed_run_id == run.id,
+                RunLink.child_run_id == run.id,
+                RunLink.relation == "preview",
+            )
+        )
+        if lock_related:
+            authorization_statement = authorization_statement.with_for_update()
+        authorization_row = session.execute(authorization_statement).one_or_none()
+        if authorization_row is None:
+            raise ActiveControlDeniedError("live scan authorization linkage is missing")
+        authorization, link = authorization_row
+        if (
+            authorization.preview_run_id != link.parent_run_id
+            or link.authorization_id != authorization.authorization_id
+            or authorization.project_id != run.project_id
+            or authorization.site_id != run.site_id
+            or authorization.consumed_run_id != run.id
+            or authorization.use_count != 1
+            or authorization.max_uses != 1
+        ):
+            raise ActiveControlDeniedError("live scan authorization linkage is invalid")
+        if authorization.revoked_at is not None:
+            raise ActiveControlDeniedError("scan authorization was revoked")
+        if observed_at < authorization.not_before:
+            raise ActiveControlDeniedError("scan authorization window has not started")
+        if observed_at >= authorization.not_after:
+            raise ActiveControlDeniedError("scan authorization window has ended")
+        try:
+            packet_plan_sha256 = _packet_plan_sha256(context)
+        except ScanAuthorizationError as error:
+            raise ActiveControlDeniedError("frozen scan authorization contract is invalid") from error
+        if authorization.packet_plan_sha256 != packet_plan_sha256:
+            raise ActiveControlDeniedError("frozen packet plan no longer matches its authorization")
+
+        self._require_active_initiator(session, run, context, lock_related=lock_related)
 
     @staticmethod
     def _require_active_initiator(
         session: Session,
         run: Run,
         context: RunContextV1,
+        *,
+        lock_related: bool = False,
     ) -> None:
         try:
             contract = _scan_contract(context)
@@ -1074,7 +1259,10 @@ class RunLifecycleRepository:
         if source == "user_key":
             if not isinstance(user_id, str) or not user_id.strip():
                 raise ActiveControlDeniedError("stable initiating user identity is missing")
-            user = session.get(User, user_id.strip())
+            user_statement = select(User).where(User.id == user_id.strip())
+            if lock_related:
+                user_statement = user_statement.with_for_update()
+            user = session.scalar(user_statement)
             if user is None or not user.is_active:
                 raise ActiveControlDeniedError("initiating user is not active")
             current_role = user.role
@@ -1082,7 +1270,7 @@ class RunLifecycleRepository:
                 raise ActiveControlDeniedError("initiating user is no longer an engineer or admin")
             if current_role == "admin":
                 return
-            active_grant = session.scalar(
+            grant_statement = (
                 select(UserScopeGrant.grant_id)
                 .where(
                     UserScopeGrant.user_id == user.id,
@@ -1092,6 +1280,9 @@ class RunLifecycleRepository:
                 )
                 .limit(1)
             )
+            if lock_related:
+                grant_statement = grant_statement.with_for_update()
+            active_grant = session.scalar(grant_statement)
             if active_grant is None:
                 raise ActiveControlDeniedError("initiating user's project/site scope grant is not active")
             return
@@ -1178,7 +1369,7 @@ class RunLifecycleRepository:
                 elif (
                     prefix_denial_reason := self._discovery_prefix_append_denial_reason(
                         session,
-                        run_id,
+                        run,
                         attempt,
                         candidate_payload_bytes=len(encoded_payload),
                     )
@@ -1279,7 +1470,13 @@ class RunLifecycleRepository:
                             )
                             commitment = extend_observation_stream_sha256(
                                 previous_commitment,
-                                self._discovery_observation_view(row),
+                                self._accepted_discovery_observation_view(
+                                    row,
+                                    observation=captured,
+                                    normalized_payload=normalized_payload,
+                                    payload_sha256=payload_sha256,
+                                    created_at=committed_at,
+                                ),
                             )
                             if state is None:
                                 state = RunDiscoveryObservationState(
@@ -1346,6 +1543,36 @@ class RunLifecycleRepository:
         run_id: str,
         attempt: int,
     ) -> _DiscoveryObservationStateSnapshot:
+        run = session.get(Run, run_id)
+        context_row = session.get(RunExecutionContext, run_id)
+        if run is None or context_row is None:
+            raise DiscoveryObservationIntegrityError("run_scope_authority_missing")
+        try:
+            context = RunContextV1.model_validate(context_row.context_json)
+            sealed_budget = _sealed_ip_observation_budget(
+                context,
+                job_type=run.job_type,
+            )
+        except (TypeError, ValueError) as error:
+            raise DiscoveryObservationIntegrityError(
+                "observation_budget_invalid"
+            ) from error
+        if (
+            canonical_context_sha256(context) != context_row.context_sha256
+            or run.project_id != context.project_id
+            or run.site_id != context.site_id
+        ):
+            raise DiscoveryObservationIntegrityError("run_scope_authority_invalid")
+        observation_row_limit = (
+            sealed_budget[0]
+            if sealed_budget is not None
+            else DISCOVERY_OBSERVATION_FOLD_MAX_ROWS
+        )
+        observation_payload_byte_limit = (
+            sealed_budget[1]
+            if sealed_budget is not None
+            else DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES
+        )
         state = session.get(
             RunDiscoveryObservationState,
             (run_id, attempt),
@@ -1373,6 +1600,9 @@ class RunLifecycleRepository:
                 canonical_payload_bytes=0,
                 terminal_cursor=0,
                 observation_stream_sha256=OBSERVATION_STREAM_EMPTY_SHA256,
+                observation_row_limit=observation_row_limit,
+                observation_payload_byte_limit=observation_payload_byte_limit,
+                sealed_observation_budget=sealed_budget is not None,
             )
         snapshot = _DiscoveryObservationStateSnapshot(
             run_id=run_id,
@@ -1381,6 +1611,9 @@ class RunLifecycleRepository:
             canonical_payload_bytes=int(state.canonical_payload_bytes),
             terminal_cursor=int(state.terminal_cursor),
             observation_stream_sha256=state.observation_stream_sha256,
+            observation_row_limit=observation_row_limit,
+            observation_payload_byte_limit=observation_payload_byte_limit,
+            sealed_observation_budget=sealed_budget is not None,
         )
         if (
             snapshot.observation_count != actual_count
@@ -1460,6 +1693,35 @@ class RunLifecycleRepository:
             statement = statement.where(Run.site_id == site_id)
         if session.scalar(statement) is None:
             raise FileNotFoundError(run_id)
+
+    @staticmethod
+    def _accepted_discovery_observation_view(
+        row: RunDiscoveryObservation,
+        *,
+        observation: DiscoveryObservationInputV1,
+        normalized_payload: dict[str, Any],
+        payload_sha256: str,
+        created_at: datetime,
+    ) -> DiscoveryObservationViewV1:
+        """Build the just-accepted view from its canonical append boundary."""
+
+        return DiscoveryObservationViewV1(
+            cursor=row.id,
+            run_id=row.run_id,
+            attempt=row.attempt,
+            protocol=observation.protocol,
+            entity_kind=observation.entity_kind,
+            entity_key=observation.entity_key,
+            entity_version=observation.entity_version,
+            event_key=observation.event_key,
+            phase=observation.phase,
+            outcome=observation.outcome,
+            payload_schema_version=observation.payload_schema_version,
+            payload=normalized_payload,
+            payload_sha256=payload_sha256,
+            observed_at=observation.observed_at,
+            created_at=created_at,
+        )
 
     @staticmethod
     def _discovery_observation_view(
@@ -1560,7 +1822,7 @@ class RunLifecycleRepository:
     @staticmethod
     def _discovery_prefix_append_denial_reason(
         session: Session,
-        run_id: str,
+        run: Run,
         attempt: int,
         *,
         candidate_payload_bytes: int,
@@ -1569,6 +1831,21 @@ class RunLifecycleRepository:
 
         if DISCOVERY_OBSERVATION_FOLD_MAX_ROWS <= 0:
             return "observation_row_budget_exhausted"
+        run_id = run.id
+        context_row = session.get(RunExecutionContext, run_id)
+        try:
+            context = (
+                RunContextV1.model_validate(context_row.context_json)
+                if context_row is not None
+                else None
+            )
+            sealed_budget = (
+                _sealed_ip_observation_budget(context, job_type=run.job_type)
+                if context is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            return "observation_budget_invalid"
         state = session.get(
             RunDiscoveryObservationState,
             (run_id, attempt),
@@ -1604,9 +1881,16 @@ class RunLifecycleRepository:
                 return "observation_prefix_invalid"
         if row_count >= DISCOVERY_OBSERVATION_FOLD_MAX_ROWS:
             return "observation_row_budget_exhausted"
+        if sealed_budget is not None and row_count >= sealed_budget[0]:
+            return "observation_row_budget_exhausted"
         if (
             payload_bytes + candidate_payload_bytes
             > DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES
+        ):
+            return "observation_payload_budget_exhausted"
+        if (
+            sealed_budget is not None
+            and payload_bytes + candidate_payload_bytes > sealed_budget[1]
         ):
             return "observation_payload_budget_exhausted"
         return None
@@ -1849,6 +2133,17 @@ class RunLifecycleRepository:
             raise DiscoveryObservationFoldLimitError("row_limit")
         if state.canonical_payload_bytes > DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES:
             raise DiscoveryObservationFoldLimitError("payload_byte_limit")
+        if (
+            state.sealed_observation_budget
+            and cutoff.observation_count > state.observation_row_limit
+        ):
+            raise DiscoveryObservationFoldLimitError("sealed_row_limit")
+        if (
+            state.sealed_observation_budget
+            and state.canonical_payload_bytes
+            > state.observation_payload_byte_limit
+        ):
+            raise DiscoveryObservationFoldLimitError("sealed_payload_byte_limit")
         observations: list[DiscoveryObservationViewV1] = []
         after_cursor = 0
         payload_bytes = 0
@@ -1911,6 +2206,14 @@ class RunLifecycleRepository:
                 return None
 
             terminal = self._discovery_terminal_result(run, requested, fold)
+            terminal = self._fence_success_terminal(
+                session,
+                run,
+                owner_token=owner_token,
+                attempt=attempt,
+                terminal=terminal,
+                observed_at=terminal_at,
+            )
             result_sha256 = terminal.sha256()
             existing = session.get(RunResult, run_id)
             if existing is not None:
@@ -2130,6 +2433,15 @@ class RunLifecycleRepository:
                 )
                 result_sha256 = terminal.sha256()
             terminal_at = now or _utcnow()
+            terminal = self._fence_success_terminal(
+                session,
+                run,
+                owner_token=owner_token,
+                attempt=run.attempt,
+                terminal=terminal,
+                observed_at=terminal_at,
+            )
+            result_sha256 = terminal.sha256()
             existing = session.get(RunResult, run_id)
             if existing is None:
                 guard = [
@@ -2201,6 +2513,71 @@ class RunLifecycleRepository:
                 reason="stale_owner",
                 result_sha256=None,
             )
+
+    def _fence_success_terminal(
+        self,
+        session: Session,
+        run: Run,
+        *,
+        owner_token: str,
+        attempt: int,
+        terminal: TerminalResultV1,
+        observed_at: datetime,
+    ) -> TerminalResultV1:
+        """Turn a stale successful completion into auditable failed evidence.
+
+        The caller holds ``Run`` first, samples trusted time after that lock,
+        then this routine locks the linked authorization and active initiator
+        state.  Cancellation and prior engine failures deliberately bypass the
+        check so Stop and recovery retain their existing terminal paths.
+        """
+
+        if (
+            terminal.status != "succeeded"
+            or run.job_type not in {"ip_discovery", "bacnet_discovery"}
+        ):
+            return terminal
+        context_row = session.get(RunExecutionContext, run.id)
+        if context_row is None:
+            return terminal
+        # Historical V1 discovery fixtures predate the sealed scan contract and
+        # have no authorization linkage to fence. Keep their terminal bytes
+        # readable; every modern preview-bound run carries this contract.
+        raw_parameters = context_row.context_json.get("engine_parameters")
+        if not isinstance(raw_parameters, Mapping) or not isinstance(
+            raw_parameters.get("scan_contract_v1"), Mapping
+        ):
+            return terminal
+        try:
+            self._require_active_control_in_session(
+                session,
+                run,
+                context_row,
+                owner_token=owner_token,
+                attempt=attempt,
+                observed_at=observed_at,
+                lock_related=True,
+            )
+        except ActiveControlDeniedError as error:
+            control_reason = _active_control_loss_reason(error)
+            summary = dict(terminal.summary)
+            summary.update(
+                {
+                    "control_reason": control_reason,
+                    "provider_drained": True,
+                    "validation_incomplete": True,
+                    "acceptance_eligible": False,
+                }
+            )
+            return terminal.model_copy(
+                update={
+                    "status": "failed",
+                    "stage": "active_control_lost",
+                    "summary": summary,
+                    "error_message": "Discovery stopped because active control was lost.",
+                }
+            )
+        return terminal
 
     # -- recovery/protocol/audit -------------------------------------------
 
