@@ -485,6 +485,34 @@ class EngineContext:
             raise _SealedRuntimeDeadlineExceeded("sealed scan run deadline elapsed")
 
     @property
+    def supports_progressive_observations(self) -> bool:
+        """Whether this executor owns a durable discovery-observation sink."""
+
+        return callable(getattr(self.run_store, "append_observation", None))
+
+    async def append_observation(self, observation: Any) -> Any | None:
+        """Append one provider observation without blocking the engine loop.
+
+        The run store remains the only persistence authority. Providers receive
+        this executor-owned method, never a repository or database session.
+        Legacy in-memory stores without the U2 sink keep working and simply do
+        not publish progressive rows.
+        """
+
+        sink = getattr(self.run_store, "append_observation", None)
+        if not callable(sink):
+            return None
+        pending = asyncio.create_task(asyncio.to_thread(sink, observation))
+        try:
+            return await asyncio.shield(pending)
+        except asyncio.CancelledError:
+            # A running thread cannot be cancelled. Drain it before the engine
+            # can enter terminal finalization, otherwise OwnedRunStore still
+            # sees an active mutation and correctly rejects the terminal write.
+            await pending
+            raise
+
+    @property
     def has_cancel_path(self) -> bool:
         """True when a real cooperative-cancel checker is wired for this run.
 

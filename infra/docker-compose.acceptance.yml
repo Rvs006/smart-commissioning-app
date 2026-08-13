@@ -2,8 +2,48 @@
 # real capture can remain active across the ownership-lease boundary without
 # depending on a public network or storing field identifiers.
 services:
+  # Keep the shared executor namespace alive across API restarts. Binding API
+  # and worker directly to the API namespace would destroy the worker's
+  # heartbeat network whenever the API container is restarted.
+  network-executor:
+    image: "alpine:3.20"
+    restart: "no"
+    command: ["sh", "-c", "sleep infinity"]
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8080:80"
+
+  api:
+    environment:
+      SMART_COMMISSIONING_NETWORK_EXECUTOR_ID: "release-acceptance-network"
+    network_mode: "service:network-executor"
+    ports: !reset []
+    depends_on:
+      network-executor:
+        condition: service_started
+
   worker:
     restart: "no"
+    # API and worker intentionally share a persistent namespace. The sidecar
+    # survives an API restart, so the worker can keep its heartbeat connection
+    # while both processes retain one frozen NIC identity.
+    network_mode: "service:network-executor"
+    depends_on:
+      network-executor:
+        condition: service_started
+    environment:
+      SMART_COMMISSIONING_NETWORK_EXECUTOR_ID: "release-acceptance-network"
+
+  frontend:
+    network_mode: "service:network-executor"
+    ports: !reset []
+    volumes:
+      # The shared namespace has no Compose service alias for api. Nginx still
+      # proxies locally because api and frontend share network-executor.
+      - ../frontend/nginx.acceptance.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      network-executor:
+        condition: service_started
 
   mqtt-acceptance:
     image: "eclipse-mosquitto:2.0.22@sha256:212f89e1eaeb2c322d6441b64396e3346026674db8fa9c27beac293405c32b3c"

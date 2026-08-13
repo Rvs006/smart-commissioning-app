@@ -8,6 +8,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from pydantic import ValidationError
+from smart_commissioning_core.db.run_lifecycle import (
+    DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES,
+    DISCOVERY_OBSERVATION_FOLD_MAX_ROWS,
+)
+from smart_commissioning_core.discovery_observations import (
+    PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS,
+    normalize_public_string_v1,
+    observation_payload,
+)
 from smart_commissioning_core.engines.bacnet_params import (
     DEFAULT_BBMD_PORT,
     MODE_FOREIGN_DEVICE,
@@ -24,6 +33,18 @@ from smart_commissioning_core.engines.bacnet_params import (
     fd_ttl,
     parse_targets,
 )
+from smart_commissioning_core.engines.ip.nmap_profiles import (
+    NmapProfileName,
+    NmapReviewedScriptV1,
+    NmapScanPlanV1,
+    build_nmap_scan_plan,
+    nmap_profile_fingerprint,
+)
+from smart_commissioning_core.engines.ip_scan import (
+    IP_PROVIDER_IDENTITY_MAX_MAC_ADDRESS,
+    format_ip_status_detail,
+    max_provider_identity_hostname_v1,
+)
 from smart_commissioning_core.run_context import (
     canonical_bacnet_protocol_key,
     canonical_json_bytes,
@@ -37,6 +58,8 @@ from smart_commissioning_core.scan_contract import (
     DiscoveryPolicyV1,
     EffectiveThrottleV1,
     ImportAuthorityReferenceV1,
+    IPNotAttemptedPortV1,
+    IPObservationBudgetV1,
     IPScanParametersV1,
     IPv4TargetExpressionV1,
     ProtocolPortV1,
@@ -44,6 +67,11 @@ from smart_commissioning_core.scan_contract import (
     normalize_ipv4_targets,
     normalize_protocol_ports,
     parse_protocol_port_spec,
+)
+from smart_commissioning_core.source_interface import (
+    SOURCE_INTERFACE_IDENTITY_KEY,
+    FrozenSourceInterfaceV1,
+    source_interface_resource_key,
 )
 
 SCAN_CONTRACT_MAX_BYTES = 256 * 1024
@@ -112,6 +140,7 @@ def resolve_ip_discovery_parameters(
     effective_throttle: Mapping[str, object] | None = None,
     authorization_window_seconds: object | None = None,
     executor_limit_seconds: object = DEFAULT_EXECUTOR_LIMIT_SECONDS,
+    nmap_execution_authority: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Return a new parameter mapping backed by one selected IP authority.
 
@@ -121,7 +150,7 @@ def resolve_ip_discovery_parameters(
     """
 
     resolved = copy.deepcopy(dict(parameters))
-    authority_record, explicit_authority = _select_authority_record(
+    authority_record, _ = _select_authority_record(
         repository=import_repository,
         import_id=_optional_text(resolved.get("ip_register_import_id")),
         import_type="ip_register",
@@ -132,14 +161,16 @@ def resolve_ip_discovery_parameters(
     accepted_rows: list[dict[str, object]] = []
     if authority_record is not None:
         accepted_rows = _accepted_rows(authority_record)
-        if accepted_rows:
-            authority = _authority_reference(authority_record, accepted_rows)
-        elif explicit_authority:
-            raise ValueError("selected IP register has zero accepted rows")
+        authority = _authority_reference(authority_record, accepted_rows)
 
     expressions = _ip_target_expressions(resolved)
-    use_register_addresses = bool(resolved.get("use_register_addresses"))
-    if not expressions or use_register_addresses:
+    use_register_addresses = resolved.get("use_register_addresses") is True
+    if not expressions and not use_register_addresses:
+        raise ValueError(
+            "No explicit IP targets were provided. Set use_register_addresses=true "
+            "to authorize targets from the selected IP register."
+        )
+    if use_register_addresses:
         register_expressions = _register_address_expressions(accepted_rows)
         if not register_expressions and not expressions:
             if authority_record is not None:
@@ -177,11 +208,31 @@ def resolve_ip_discovery_parameters(
         label="max_ports",
     )
     max_ports = min(requested_max_ports, int(limits["max_ports"]))
-    ports = _request_ports(resolved, max_ports=max_ports)
+    selected_provider = str(resolved.get("provider") or "builtin_tcp_connect")
+    nmap_profile: NmapProfileName | None = None
+    nmap_authority: dict[str, object] | None = None
+    if selected_provider == "operator_managed_nmap":
+        if profile != "gentle":
+            raise ValueError(
+                "operator_managed_nmap uses its named fixed profile and cannot widen "
+                "the outer IP risk profile"
+            )
+        nmap_profile = NmapProfileName(
+            str(resolved.get("nmap_profile") or NmapProfileName.TCP_CONNECT_INVENTORY.value)
+        )
+        nmap_authority = _validated_nmap_execution_authority(
+            nmap_execution_authority,
+            profile=nmap_profile,
+        )
+    ports = (
+        ()
+        if nmap_profile is NmapProfileName.HOST_DISCOVERY
+        else _request_ports(resolved, max_ports=max_ports)
+    )
     request = IPScanParametersV1(
         target_expressions=tuple(expressions),
         exclusions=tuple(exclusions),
-        provider=str(resolved.get("provider") or "builtin_tcp_connect"),
+        provider=selected_provider,
         profile=profile,
         ports=ports,
         use_register_addresses=use_register_addresses,
@@ -191,7 +242,12 @@ def resolve_ip_discovery_parameters(
         exclusions=request.exclusions,
         max_hosts=max_hosts,
     )
-    normalized_ports = normalize_protocol_ports(request.ports, max_ports=max_ports)
+    target_addresses = target_plan.expanded_addresses
+    normalized_ports = (
+        ()
+        if nmap_profile is NmapProfileName.HOST_DISCOVERY
+        else normalize_protocol_ports(request.ports, max_ports=max_ports)
+    )
 
     source_interface = _source_interface_snapshot(resolved)
     policy = _ip_policy(
@@ -205,7 +261,7 @@ def resolve_ip_discovery_parameters(
         supplied=effective_throttle,
         policy=policy,
         source_interface=source_interface,
-        target_addresses=target_plan.expanded_addresses,
+        target_addresses=target_addresses,
     )
     _freeze_execution_policy_parameters(
         resolved,
@@ -214,12 +270,63 @@ def resolve_ip_discovery_parameters(
         attempt_ceiling_key="max_dispatch_attempts",
     )
     mappings = _ip_authority_mappings(accepted_rows)
-    work_counts, dispatch_payload, register_added = _ip_dispatch_work(
-        target_addresses=target_plan.expanded_addresses,
+    (
+        work_counts,
+        dispatch_payload,
+        register_added,
+        not_attempted_ports,
+    ) = _ip_dispatch_work(
+        target_addresses=target_addresses,
         selected_ports=normalized_ports,
         mappings=mappings,
         max_ports_per_target=max_ports,
     )
+    provisional_nmap_plan: NmapScanPlanV1 | None = None
+    if nmap_profile is not None:
+        assert nmap_authority is not None
+        global_protocol_ports = sorted(
+            {
+                str(protocol_port)
+                for target in dispatch_payload
+                for protocol_port in target.get("protocol_ports", ())
+            },
+            key=_protocol_port_sort_key,
+        )
+        for target in dispatch_payload:
+            target["protocol_ports"] = list(global_protocol_ports)
+        tcp_ports = tuple(
+            int(item.removesuffix("/tcp"))
+            for item in global_protocol_ports
+            if item.endswith("/tcp")
+        )
+        udp_ports = tuple(
+            int(item.removesuffix("/udp"))
+            for item in global_protocol_ports
+            if item.endswith("/udp")
+        )
+        reviewed_scripts = tuple(
+            NmapReviewedScriptV1.model_validate(item)
+            for item in nmap_authority["reviewed_scripts"]
+        )
+        if nmap_profile is not NmapProfileName.REVIEWED_SCRIPT_INVENTORY:
+            reviewed_scripts = ()
+        provisional_nmap_plan = build_nmap_scan_plan(
+            profile=nmap_profile,
+            targets=target_addresses,
+            tcp_ports=tcp_ports,
+            udp_ports=udp_ports,
+            source_ip=str(source_interface["source_ip"]),
+            interface_id=str(source_interface["interface_id"]),
+            interface_name=str(source_interface["interface_name"]),
+            packet_plan_sha256="0" * 64,
+            reviewed_scripts=reviewed_scripts,
+        )
+        _require_nmap_plan_runtime_capability(
+            provisional_nmap_plan,
+            authority=nmap_authority,
+        )
+        attempts_per_target = provisional_nmap_plan.planned_attempts // len(target_addresses)
+        work_counts = {address: attempts_per_target for address in target_addresses}
     work_estimate = estimate_discovery_work(
         base_dispatch_units_by_target=work_counts,
         policy=policy,
@@ -230,8 +337,25 @@ def resolve_ip_discovery_parameters(
         authorization_window_seconds=authorization_window_seconds,
         executor_limit_seconds=executor_limit_seconds,
     )
+    observation_budget = _ip_observation_budget(
+        dispatch_payload=dispatch_payload,
+        mappings=mappings,
+        authority=authority,
+        accepted_rows=accepted_rows,
+        profile=request.profile,
+        source_interface=source_interface,
+        retries=(
+            provisional_nmap_plan.retries
+            if provisional_nmap_plan is not None
+            else policy.retries
+        ),
+        planned_dispatch_attempts=work_estimate.planned_dispatch_attempts,
+        project_id=project_id,
+        site_id=site_id,
+        provider=request.provider,
+    )
     _remove_legacy_derived_fields(resolved)
-    resolved["addresses"] = list(target_plan.expanded_addresses)
+    resolved["addresses"] = list(target_addresses)
     resolved["ports"] = [
         item.port for item in normalized_ports if item.protocol == "tcp"
     ]
@@ -242,6 +366,7 @@ def resolve_ip_discovery_parameters(
     for key, value in mappings["engine"].items():
         if value:
             resolved[key] = copy.deepcopy(value)
+    resolved["not_attempted_ports_by_address"] = copy.deepcopy(not_attempted_ports)
 
     ip_contract = {
         "provider": request.provider,
@@ -251,15 +376,21 @@ def resolve_ip_discovery_parameters(
         "ports": [item.model_dump(mode="json") for item in normalized_ports],
         "authority": authority.model_dump(mode="json") if authority is not None else None,
         "unsupported_register_ports_by_address": mappings["unsupported"],
+        "not_attempted_ports_by_address": not_attempted_ports,
         "policy": policy.model_dump(mode="json"),
-        "provider_state": _ip_provider_state(request.provider),
+        "provider_state": _ip_provider_state(
+            request.provider,
+            nmap_authority=nmap_authority,
+            nmap_profile=nmap_profile,
+        ),
         "work_estimate": work_estimate.model_dump(mode="json"),
+        "observation_budget": observation_budget.model_dump(mode="json"),
     }
     packet_plan = {
         "scan_contract_version": "1.0",
         "job_type": "ip_discovery",
         "source_interface": source_interface,
-        "resource_keys": [_nic_resource_key(source_interface)],
+        "resource_keys": [source_interface_resource_key(source_interface)],
         "effective_throttle": throttle.model_dump(mode="json"),
         "ip": ip_contract,
     }
@@ -267,8 +398,13 @@ def resolve_ip_discovery_parameters(
         **packet_plan,
         "packet_plan_sha256": canonical_sha256(packet_plan),
     }
+    if provisional_nmap_plan is not None:
+        resolved["nmap_scan_plan_v1"] = provisional_nmap_plan.model_copy(
+            update={"packet_plan_sha256": contract["packet_plan_sha256"]}
+        ).model_dump(mode="json")
     _guard_contract_size(contract)
     resolved["scan_contract_v1"] = copy.deepcopy(contract)
+    _guard_resolved_ip_parameters_size(resolved)
     return resolved
 
 
@@ -594,10 +730,6 @@ def _bacnet_engine_target(
     return target
 
 
-def _nic_resource_key(source_interface: Mapping[str, str | None]) -> str:
-    return f"nic:{source_interface.get('source_ip') or 'auto-default-route'}"
-
-
 def _bacnet_resource_keys(
     request: BacnetScanParametersV1,
     source_interface: Mapping[str, str | None],
@@ -608,7 +740,6 @@ def _bacnet_resource_keys(
         or "0.0.0.0"
     )
     keys = {
-        _nic_resource_key(source_interface),
         canonical_bacnet_protocol_key(
             bind_address=bind_address,
             port=request.bacnet_port,
@@ -915,47 +1046,657 @@ def _ip_dispatch_work(
     *,
     target_addresses: Sequence[str],
     selected_ports: Sequence[ProtocolPortV1],
-    mappings: Mapping[str, Mapping[str, object]],
+    mappings: Mapping[str, object],
     max_ports_per_target: int,
-) -> tuple[dict[str, int], list[dict[str, object]], int]:
-    base_ports = {
-        f"{item.port}/{item.protocol}"
-        for item in selected_ports
-    }
-    engine = mappings.get("engine", {})
-    expected = engine.get("expected_ports_by_address")
-    forbidden = engine.get("forbidden_ports_by_address")
-    expected_map = expected if isinstance(expected, Mapping) else {}
-    forbidden_map = forbidden if isinstance(forbidden, Mapping) else {}
+) -> tuple[
+    dict[str, int],
+    list[dict[str, object]],
+    int,
+    dict[str, list[dict[str, object]]],
+]:
+    base_ports = [f"{item.port}/{item.protocol}" for item in selected_ports]
+    base_port_set = set(base_ports)
+    raw_register_ports = mappings.get("register_ports")
+    register_ports = raw_register_ports if isinstance(raw_register_ports, Mapping) else {}
     work_counts: dict[str, int] = {}
     digest_payload: list[dict[str, object]] = []
     register_added = 0
+    not_attempted_by_address: dict[str, list[dict[str, object]]] = {}
+    selected_register_tcp: dict[str, dict[str, set[int]]] = {
+        "forbidden": {},
+        "expected": {},
+    }
     for address in target_addresses:
-        protocol_ports = set(base_ports)
-        for values in (expected_map, forbidden_map):
-            specification = values.get(address)
-            if specification in (None, ""):
-                continue
-            protocol_ports.update(
-                f"{item.port}/{item.protocol}"
-                for item in parse_protocol_port_spec(str(specification))
+        selected = list(base_ports)
+        selected_set = set(base_port_set)
+        register_union = set(base_port_set)
+        omissions: list[dict[str, object]] = []
+        for source in ("forbidden", "expected"):
+            raw_source_ports = register_ports.get(source)
+            source_ports = (
+                raw_source_ports if isinstance(raw_source_ports, Mapping) else {}
             )
-        if len(protocol_ports) > max_ports_per_target:
+            raw_values = source_ports.get(address)
+            values = raw_values if isinstance(raw_values, Sequence) else ()
+            for protocol_port in values:
+                item = ProtocolPortV1.model_validate(protocol_port)
+                key = f"{item.port}/{item.protocol}"
+                register_union.add(key)
+                if item.protocol == "udp":
+                    omissions.append(
+                        IPNotAttemptedPortV1(
+                            port=item.port,
+                            protocol=item.protocol,
+                            source=source,
+                            reason="unsupported_protocol",
+                            capability=(
+                                "use_bacnet_discovery"
+                                if item.port == 47808
+                                else None
+                            ),
+                        ).model_dump(mode="json", exclude_none=True)
+                    )
+                    continue
+                if key in selected_set:
+                    selected_register_tcp[source].setdefault(address, set()).add(
+                        item.port
+                    )
+                    continue
+                if len(selected) < max_ports_per_target:
+                    selected.append(key)
+                    selected_set.add(key)
+                    selected_register_tcp[source].setdefault(address, set()).add(
+                        item.port
+                    )
+                    register_added += 1
+                    continue
+                omissions.append(
+                    IPNotAttemptedPortV1(
+                        port=item.port,
+                        protocol=item.protocol,
+                        source=source,
+                        reason="profile_port_cap",
+                    ).model_dump(mode="json", exclude_none=True)
+                )
+        if len(register_union) > MAX_PROTOCOL_PORTS:
             raise ValueError(
-                f"IP target {address} resolves to {len(protocol_ports):,} protocol ports "
-                f"after register additions, exceeding the profile maximum "
-                f"{max_ports_per_target:,}"
+                f"IP target {address} resolves to {len(register_union):,} protocol ports "
+                f"after register additions, exceeding the hard maximum "
+                f"{MAX_PROTOCOL_PORTS:,}"
             )
-        ordered = sorted(protocol_ports, key=_protocol_port_sort_key)
+        ordered = sorted(selected, key=_protocol_port_sort_key)
         work_counts[address] = len(ordered)
-        register_added += len(protocol_ports - base_ports)
+        if omissions:
+            not_attempted_by_address[address] = omissions
         digest_payload.append(
             {
                 "target": address,
                 "protocol_ports": ordered,
+                "not_attempted_ports": omissions,
             }
         )
-    return work_counts, digest_payload, register_added
+    raw_engine = mappings.get("engine")
+    if isinstance(raw_engine, dict):
+        bounded_expected = _tcp_specs(selected_register_tcp["expected"])
+        bounded_forbidden = _tcp_specs(selected_register_tcp["forbidden"])
+        raw_engine["expected_ports_by_address"] = bounded_expected
+        raw_engine["forbidden_ports_by_address"] = bounded_forbidden
+        forbidden_union = sorted(
+            {
+                port
+                for ports in selected_register_tcp["forbidden"].values()
+                for port in ports
+            }
+        )
+        if forbidden_union:
+            raw_engine["forbidden_ports"] = ",".join(
+                f"{port}/tcp" for port in forbidden_union
+            )
+        else:
+            raw_engine.pop("forbidden_ports", None)
+    return work_counts, digest_payload, register_added, not_attempted_by_address
+
+
+def _ip_observation_budget(
+    *,
+    dispatch_payload: Sequence[Mapping[str, object]],
+    mappings: Mapping[str, object],
+    authority: ImportAuthorityReferenceV1 | None,
+    accepted_rows: Sequence[Mapping[str, object]],
+    profile: str,
+    source_interface: Mapping[str, object],
+    retries: int,
+    planned_dispatch_attempts: int,
+    project_id: str,
+    site_id: str,
+    provider: str = "builtin_tcp_connect",
+) -> IPObservationBudgetV1:
+    """Project the complete U3 stream against the lifecycle fold ceilings.
+
+    Every target can emit four host states. Every frozen dispatch attempt can
+    emit one port state, every explicit omission emits one port state, and one
+    row is reserved for the only possible active-control diagnostic. Payload
+    bytes are a conservative canonical projection using the resolved target,
+    authority, port, omission, and device metadata that the engine can emit.
+    """
+
+    host_state_rows = 4 * len(dispatch_payload)
+    port_attempt_rows = sum(
+        len(_ip_budget_protocol_ports(item)) * (retries + 1)
+        for item in dispatch_payload
+    )
+    if provider == "builtin_tcp_connect" and port_attempt_rows != planned_dispatch_attempts:
+        raise ValueError(
+            "planned IP observation attempts do not match the frozen dispatch plan"
+        )
+    not_attempted_port_rows = sum(
+        len(_ip_budget_omissions(item)) for item in dispatch_payload
+    )
+    planned_rows = (
+        host_state_rows
+        + port_attempt_rows
+        + not_attempted_port_rows
+        + 1
+    )
+    if planned_rows > DISCOVERY_OBSERVATION_FOLD_MAX_ROWS:
+        raise ValueError(
+            f"planned IP observations require {planned_rows:,} rows, exceeding the "
+            f"{DISCOVERY_OBSERVATION_FOLD_MAX_ROWS:,}-row ceiling"
+        )
+
+    engine = mappings.get("engine")
+    engine = engine if isinstance(engine, Mapping) else {}
+    assets = _ip_budget_text_map(engine.get("asset_id_by_address"))
+    expected_by_address = _ip_budget_port_map(
+        engine.get("expected_ports_by_address")
+    )
+    forbidden_by_address = _ip_budget_port_map(
+        engine.get("forbidden_ports_by_address")
+    )
+    global_forbidden = _ip_budget_tcp_ports(engine.get("forbidden_ports"))
+    authority_candidates = _ip_budget_authority_candidates(accepted_rows)
+    widest_candidates = _ip_budget_widest_authority_candidates(authority_candidates)
+    provenance = {
+        "profile": profile,
+        "source_ip": source_interface.get("source_ip"),
+        "source_interface": source_interface.get("local_address"),
+        # The final digest has the same canonical byte length as this placeholder.
+        "packet_plan_sha256": "0" * 64,
+        "register_import_id": authority.import_id if authority is not None else None,
+        "register_rows_sha256": (
+            authority.accepted_rows_sha256 if authority is not None else None
+        ),
+    }
+    terminal_timestamp = "9999-12-31T23:59:59.999999+00:00"
+    # Runtime elapsed values are bounded by the run deadline, but their JSON
+    # float spelling can be wider than the largest integer. This finite value
+    # reserves Python's widest normal float representation without adding a
+    # blind per-row byte allowance.
+    canonical_elapsed_width = 1.7976931348623157e308
+    planned_payload_bytes = 0
+    largest_diagnostic_bytes = 0
+
+    for position, item in enumerate(dispatch_payload):
+        target = str(item.get("target") or "")
+        protocol_ports = _ip_budget_protocol_ports(item)
+        selected_ports = [port for _protocol, port in protocol_ports]
+        omissions = _ip_budget_omissions(item)
+        expected = expected_by_address.get(target)
+        forbidden = forbidden_by_address.get(target, global_forbidden)
+        asset_id = assets.get(target)
+        register_match = (
+            "not_configured"
+            if authority is None
+            else "expected_match"
+            if target in assets or target in expected_by_address
+            else "unregistered"
+        )
+        host_attempts = len(protocol_ports) * (retries + 1)
+        worst_status = _ip_budget_status_detail(
+            selected_ports=selected_ports,
+            expected=expected,
+            forbidden=forbidden,
+            has_register_identity=(asset_id is not None or expected is not None),
+        )
+        host_payload = _ip_budget_payload(
+            target=target,
+            provenance=provenance,
+            coverage_state="attempted",
+            reachability_state="reachable",
+            probe_outcome="connected",
+            register_match=register_match,
+            policy_verdict="unexpected_open_review",
+            attempts=host_attempts,
+            elapsed_ms=canonical_elapsed_width,
+            reason=worst_status,
+            control_reason="dispatch_deadline_elapsed",
+            last_packet_dispatched_at=terminal_timestamp,
+            provider=provider,
+        )
+        host_payload_bytes = _ip_budget_payload_bytes(host_payload)
+        planned_payload_bytes += host_payload_bytes * 3
+
+        omitted_ports = sorted(
+            int(omission.get("port") or 0)
+            for omission in omissions
+            if int(omission.get("port") or 0) > 0
+        )
+        final_payload_bytes: list[int] = []
+        for candidate in (None, *widest_candidates):
+            projection = _ip_budget_device_projection(
+                candidate=candidate,
+                fallback_asset_id=asset_id,
+                target=target,
+                project_id=project_id,
+                site_id=site_id,
+                position=position,
+                selected_ports=selected_ports,
+                expected=expected,
+                forbidden=forbidden,
+                omitted_ports=omitted_ports,
+                register_match=register_match,
+            )
+            final_payload = dict(host_payload)
+            final_payload["projection_v1"] = projection
+            final_payload_bytes.append(_ip_budget_payload_bytes(final_payload))
+        planned_payload_bytes += max(final_payload_bytes)
+
+        for protocol, port in protocol_ports:
+            port_hint = {80: "http", 443: "https", 502: "modbus", 1883: "mqtt"}.get(
+                port
+            )
+            for attempt in range(1, retries + 2):
+                planned_payload_bytes += _ip_budget_payload_bytes(
+                    _ip_budget_payload(
+                        target=target,
+                        provenance=provenance,
+                        coverage_state="attempted",
+                        reachability_state="unconfirmed",
+                        probe_outcome="timed_out",
+                        register_match=register_match,
+                        policy_verdict="unconfirmed",
+                        attempts=attempt,
+                        elapsed_ms=canonical_elapsed_width,
+                        reason=(
+                            "The TCP connection did not complete before the application "
+                            "deadline."
+                        ),
+                        transport=protocol,
+                        port=port,
+                        port_hint=port_hint,
+                        last_packet_dispatched_at=terminal_timestamp,
+                        provider=provider,
+                    )
+                )
+
+        for omission in omissions:
+            reason = str(omission.get("reason") or "not_attempted")
+            capability = omission.get("capability")
+            if isinstance(capability, str):
+                reason = f"{reason}: {capability}"
+            planned_payload_bytes += _ip_budget_payload_bytes(
+                _ip_budget_payload(
+                    target=target,
+                    provenance=provenance,
+                    coverage_state="not_attempted",
+                    reachability_state="not_applicable",
+                    register_match=register_match,
+                    policy_verdict="not_attempted",
+                    attempts=0,
+                    elapsed_ms=0,
+                    reason=reason,
+                    transport=str(omission.get("protocol") or ""),
+                    port=int(omission.get("port") or 0),
+                    capability_action=(
+                        capability
+                        if capability == "use_bacnet_discovery"
+                        else None
+                    ),
+                    provider=provider,
+                )
+            )
+
+        diagnostic_payload = _ip_budget_payload(
+            target=target,
+            provenance=provenance,
+            coverage_state="not_attempted",
+            reachability_state="not_applicable",
+            register_match=register_match,
+            policy_verdict="not_attempted",
+            attempts=host_attempts,
+            elapsed_ms=canonical_elapsed_width,
+            reason="Active control was lost before the packet plan completed.",
+            control_reason="dispatch_deadline_elapsed",
+            last_packet_dispatched_at=terminal_timestamp,
+            provider=provider,
+        )
+        largest_diagnostic_bytes = max(
+            largest_diagnostic_bytes,
+            _ip_budget_payload_bytes(diagnostic_payload),
+        )
+
+    planned_payload_bytes += largest_diagnostic_bytes
+    if planned_payload_bytes > DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES:
+        raise ValueError(
+            f"planned IP observation payload requires {planned_payload_bytes:,} canonical "
+            f"UTF-8 bytes, exceeding the "
+            f"{DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES:,}-byte ceiling"
+        )
+    return IPObservationBudgetV1(
+        planned_observation_rows=planned_rows,
+        planned_observation_payload_bytes=planned_payload_bytes,
+        row_ceiling=DISCOVERY_OBSERVATION_FOLD_MAX_ROWS,
+        canonical_payload_byte_ceiling=DISCOVERY_OBSERVATION_FOLD_MAX_PAYLOAD_BYTES,
+        host_state_rows=host_state_rows,
+        port_attempt_rows=port_attempt_rows,
+        not_attempted_port_rows=not_attempted_port_rows,
+    )
+
+
+def _ip_budget_protocol_ports(
+    item: Mapping[str, object],
+) -> list[tuple[str, int]]:
+    raw = item.get("protocol_ports")
+    values = raw if isinstance(raw, list | tuple) else ()
+    parsed: list[tuple[str, int]] = []
+    for value in values:
+        port, protocol = str(value).split("/", 1)
+        parsed.append((protocol, int(port)))
+    return parsed
+
+
+def _ip_budget_omissions(item: Mapping[str, object]) -> list[Mapping[str, object]]:
+    raw = item.get("not_attempted_ports")
+    values = raw if isinstance(raw, list | tuple) else ()
+    return [value for value in values if isinstance(value, Mapping)]
+
+
+def _ip_budget_text_map(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if str(key).strip() and str(item).strip()
+    }
+
+
+def _ip_budget_port_map(value: object) -> dict[str, set[int]]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): _ip_budget_tcp_ports(item)
+        for key, item in value.items()
+        if _ip_budget_tcp_ports(item)
+    }
+
+
+def _ip_budget_tcp_ports(value: object) -> set[int]:
+    if not isinstance(value, str):
+        return set()
+    ports: set[int] = set()
+    for token in value.split(","):
+        port, separator, protocol = token.strip().partition("/")
+        if separator and protocol == "tcp" and port.isdigit():
+            ports.add(int(port))
+    return ports
+
+
+def _ip_budget_authority_candidates(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, str | None]]:
+    """Return every authority row that could contribute to a device projection.
+
+    The observation fold only stores viewer-safe projections. Validate every
+    candidate before reducing the set so a smaller unsafe row cannot hide behind
+    a larger safe row during preview.
+    """
+
+    candidates: list[dict[str, str | None]] = []
+    for index, row in enumerate(rows):
+        expected_ip = _optional_text(row.get("Expected IP address"))
+        if expected_ip is None:
+            continue
+        try:
+            parsed_ip = ipaddress.ip_address(expected_ip)
+        except ValueError as error:
+            raise ValueError(
+                f"IP authority row {index + 1} has an invalid expected IPv4 address"
+            ) from error
+        if not isinstance(parsed_ip, ipaddress.IPv4Address):
+            raise ValueError(
+                f"IP authority row {index + 1} has an invalid expected IPv4 address"
+            )
+
+        candidate: dict[str, str | None] = {"expected_ip": str(parsed_ip)}
+        for source_key, target_key, max_chars in (
+            ("Asset ID", "asset_id", PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS),
+            ("Asset name", "asset_name", PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS),
+            ("Expected hostname", "hostname", 253),
+        ):
+            value = _optional_text(row.get(source_key))
+            candidate[target_key] = (
+                normalize_public_string_v1(
+                    value,
+                    path=(
+                        "payload.projection_v1.record.attributes."
+                        f"{target_key}[authority_row={index + 1}]"
+                    ),
+                    max_chars=max_chars,
+                )
+                if value is not None
+                else None
+            )
+        candidates.append(candidate)
+    return candidates
+
+
+def _ip_budget_widest_authority_candidates(
+    candidates: Sequence[Mapping[str, str | None]],
+) -> tuple[dict[str, str | None], ...]:
+    """Build one conservative projection candidate from the widest fields.
+
+    A terminal device projection can carry all four authority fields together.
+    Combining each field's widest canonical UTF-8 value gives a deterministic
+    upper bound without multiplying every target by every accepted register row.
+    """
+
+    if not candidates:
+        return ()
+
+    def widest(field: str) -> str | None:
+        values = [candidate.get(field) for candidate in candidates]
+        populated = [value for value in values if value is not None]
+        if not populated:
+            return None
+        return max(
+            populated,
+            key=lambda value: (len(canonical_json_bytes(value)), value),
+        )
+
+    return (
+        {
+            "expected_ip": widest("expected_ip"),
+            "asset_id": widest("asset_id"),
+            "asset_name": widest("asset_name"),
+            "hostname": widest("hostname"),
+        },
+    )
+
+
+def _ip_budget_device_projection(
+    *,
+    candidate: Mapping[str, str | None] | None,
+    fallback_asset_id: str | None,
+    target: str,
+    project_id: str,
+    site_id: str,
+    position: int,
+    selected_ports: Sequence[int],
+    expected: set[int] | None,
+    forbidden: set[int],
+    omitted_ports: Sequence[int],
+    register_match: str,
+) -> dict[str, object]:
+    """Project the widest terminal IP device row accepted by the public schema."""
+
+    authority = candidate or {}
+    expected_ip = authority.get("expected_ip")
+    register_asset_id = authority.get("asset_id")
+    register_asset_name = authority.get("asset_name")
+    expected_hostname = authority.get("hostname")
+    runtime_hostname = max_provider_identity_hostname_v1()
+    asset_id = register_asset_id or register_asset_name or fallback_asset_id
+    ports = sorted(set(selected_ports))
+    expected_ports = sorted(expected) if expected is not None else None
+    forbidden_ports = sorted(forbidden)
+    forbidden_open = [port for port in ports if port in forbidden]
+    unexpected_open = (
+        [port for port in ports if port not in expected]
+        if expected is not None
+        else ports
+    )
+    missing_expected = (
+        [port for port in expected_ports if port in ports]
+        if expected_ports is not None
+        else ports
+    )
+    attributes: dict[str, object] = {
+        "asset_id": asset_id,
+        "open_ports": ports,
+        "scanned_ports": ports,
+        "scanned_port_count": len(ports),
+        "expected_ports": expected_ports,
+        "forbidden_ports": forbidden_ports,
+        "forbidden_open_ports": forbidden_open,
+        "unexpected_open_ports": unexpected_open,
+        "missing_expected_ports": missing_expected,
+        "register_ports_not_probed": sorted(set(omitted_ports)),
+        "hostname": runtime_hostname,
+        "expected_hostname": expected_hostname,
+        "mac_address": IP_PROVIDER_IDENTITY_MAX_MAC_ADDRESS,
+        "register_match": register_match,
+        "reachable": True,
+        "position": position,
+    }
+    if expected_ip is not None:
+        attributes["register_address"] = expected_ip
+    if register_asset_id is not None:
+        attributes["register_asset_id"] = register_asset_id
+    if register_asset_name is not None:
+        attributes["register_asset_name"] = register_asset_name
+    return {
+        "collection": "devices",
+        "position": position,
+        "present": True,
+        "record": {
+            "project_id": project_id,
+            "site_id": site_id,
+            "address": target,
+            "device_type": "ip_host",
+            "name": runtime_hostname,
+            "attributes": attributes,
+        },
+    }
+
+
+def _ip_budget_status_detail(
+    *,
+    selected_ports: Sequence[int],
+    expected: set[int] | None,
+    forbidden: set[int],
+    has_register_identity: bool,
+) -> str:
+    flagged = sorted(port for port in selected_ports if port in forbidden)
+    unexpected = (
+        sorted(port for port in selected_ports if port not in expected)
+        if expected is not None
+        else []
+    )
+    missing = sorted(port for port in expected or set() if port in selected_ports)
+    silent = f"no response on scanned ports ({len(selected_ports)} probed)"
+    if has_register_identity:
+        silent += (
+            " | EXPECTED BY REGISTER: expected from the register import but did not "
+            "answer this scan - inconclusive, not proof the host is offline"
+        )
+    refused = "reachable: TCP connection refused on probed ports"
+    responsive = format_ip_status_detail(
+        "responsive",
+        responsive_ports=selected_ports,
+        forbidden_open_ports=flagged,
+        unexpected_open_ports=unexpected,
+        missing_expected_ports=missing,
+    )
+    refused = format_ip_status_detail(
+        refused,
+        missing_expected_ports=missing,
+    )
+    widest = max(
+        (responsive, silent, refused),
+        key=lambda item: len(item.encode("utf-8")),
+    )
+    return widest[:PUBLIC_PAYLOAD_V1_MAX_STRING_CHARS]
+
+
+def _ip_budget_payload(
+    *,
+    target: str,
+    provenance: Mapping[str, object],
+    coverage_state: str,
+    reachability_state: str,
+    register_match: str,
+    policy_verdict: str,
+    attempts: int,
+    elapsed_ms: int | float,
+    probe_outcome: str | None = None,
+    reason: str | None = None,
+    transport: str | None = None,
+    port: int | None = None,
+    port_hint: str | None = None,
+    capability_action: str | None = None,
+    control_reason: str | None = None,
+    last_packet_dispatched_at: str | None = None,
+    provider: str = "builtin_tcp_connect",
+) -> dict[str, object]:
+    return {
+        "ip_v1": {
+            "schema_version": "1.0",
+            "coverage_state": coverage_state,
+            "reachability_state": reachability_state,
+            "probe_outcome": probe_outcome,
+            "register_match": register_match,
+            "policy_verdict": policy_verdict,
+            "target": target,
+            "port": port,
+            "transport": transport,
+            "provider": provider,
+            "provider_version": "1.0",
+            "provider_contract_version": "1.0",
+            "provenance": dict(provenance),
+            "reason": reason,
+            "attempts": attempts,
+            "elapsed_ms": elapsed_ms,
+            "port_hint": port_hint,
+            "detected_service": None,
+            "detected_version": None,
+            "capability_action": capability_action,
+            "control_reason": control_reason,
+            "last_packet_dispatched_at": last_packet_dispatched_at,
+        }
+    }
+
+
+def _ip_budget_payload_bytes(payload: dict[str, object]) -> int:
+    try:
+        _normalized, encoded, _digest = observation_payload(payload)
+    except ValueError as error:
+        if "65,536-byte canonical UTF-8 byte limit" in str(error):
+            raise ValueError(
+                "planned IP observation row exceeds the 65,536-byte canonical limit"
+            ) from error
+        raise ValueError(f"planned IP observation payload is invalid: {error}") from error
+    return len(encoded)
 
 
 def _bacnet_initial_dispatch_work(
@@ -980,7 +1721,119 @@ def _bacnet_initial_dispatch_work(
     return work
 
 
-def _ip_provider_state(provider: str) -> dict[str, object]:
+def _validated_nmap_execution_authority(
+    authority: Mapping[str, object] | None,
+    *,
+    profile: NmapProfileName,
+) -> dict[str, object]:
+    if not isinstance(authority, Mapping):
+        raise ValueError("Nmap execution authority is required before provider selection")
+    capability = authority.get("capability")
+    machine_identity = authority.get("machine_executor_identity")
+    deployment_id = authority.get("deployment_id")
+    network_executor_id = authority.get("network_executor_id")
+    confirmation_id = authority.get("confirmation_id")
+    reviewed_scripts = authority.get("reviewed_scripts", ())
+    if (
+        not isinstance(capability, Mapping)
+        or capability.get("state") != "available"
+        or capability.get("provider_mode") != "internal_operator_managed"
+        or capability.get("process_selection_allowed") is not True
+        or not isinstance(machine_identity, str)
+        or not machine_identity.strip()
+        or not isinstance(deployment_id, str)
+        or not deployment_id.strip()
+        or not isinstance(network_executor_id, str)
+        or not network_executor_id.strip()
+        or not isinstance(confirmation_id, str)
+        or not confirmation_id.strip()
+        or not isinstance(reviewed_scripts, Sequence)
+        or isinstance(reviewed_scripts, (str, bytes))
+    ):
+        raise ValueError("Nmap execution authority is unavailable or incomplete")
+    permitted_profiles = capability.get("permitted_profiles")
+    if not isinstance(permitted_profiles, Sequence) or isinstance(
+        permitted_profiles, (str, bytes)
+    ):
+        raise ValueError("Nmap execution authority has no profile policy")
+    if profile.value not in {str(item) for item in permitted_profiles}:
+        raise ValueError(f"Nmap profile {profile.value} is not permitted by deployment policy")
+    fingerprints = {
+        "policy_id": capability.get("policy_id"),
+        "policy_revision": capability.get("policy_revision"),
+        "publisher": capability.get("publisher"),
+        "version": capability.get("version"),
+        "fingerprint_sha256": capability.get("fingerprint_sha256"),
+        "npcap_version": capability.get("npcap_version"),
+        "npcap_state": capability.get("npcap_state"),
+        "raw_capable": capability.get("raw_capable") is True,
+        "machine_executor_identity": machine_identity.strip(),
+        "deployment_id": deployment_id.strip(),
+        "network_executor_id": network_executor_id.strip(),
+        "confirmation_id": confirmation_id.strip(),
+        "reviewed_scripts": [
+            NmapReviewedScriptV1.model_validate(item).model_dump(mode="json")
+            for item in reviewed_scripts
+        ],
+    }
+    # This object is frozen into the packet plan and therefore may contain only
+    # public identifiers and digests. Executable/data paths stay in the protected
+    # execution-authority object held by the service.
+    return fingerprints
+
+
+def refresh_nmap_scan_plan_packet_digest(parameters: dict[str, object]) -> None:
+    """Keep the typed Nmap plan bound to the final control-identity digest."""
+
+    raw_plan = parameters.get("nmap_scan_plan_v1")
+    contract = parameters.get("scan_contract_v1")
+    if raw_plan is None:
+        return
+    if not isinstance(contract, Mapping):
+        raise ValueError("Nmap scan plan requires scan_contract_v1")
+    digest = contract.get("packet_plan_sha256")
+    if not isinstance(digest, str):
+        raise ValueError("Nmap scan plan requires a packet-plan digest")
+    plan = NmapScanPlanV1.model_validate(raw_plan)
+    parameters["nmap_scan_plan_v1"] = plan.model_copy(
+        update={"packet_plan_sha256": digest}
+    ).model_dump(mode="json")
+
+
+def validate_nmap_scan_plan_execution_authority(
+    parameters: Mapping[str, object],
+    authority: Mapping[str, object],
+) -> None:
+    """Reject a sealed Nmap plan that the current runtime cannot execute."""
+
+    raw_plan = parameters.get("nmap_scan_plan_v1")
+    if not isinstance(raw_plan, Mapping):
+        raise ValueError("Nmap scan plan is missing from the sealed preview")
+    plan = NmapScanPlanV1.model_validate(raw_plan)
+    validated = _validated_nmap_execution_authority(
+        authority,
+        profile=plan.profile,
+    )
+    _require_nmap_plan_runtime_capability(plan, authority=validated)
+
+
+def _require_nmap_plan_runtime_capability(
+    plan: NmapScanPlanV1,
+    *,
+    authority: Mapping[str, object],
+) -> None:
+    if plan.raw_capability_required and authority.get("raw_capable") is not True:
+        raise ValueError(
+            f"Nmap profile {plan.profile.value} requires raw packet capability"
+        )
+
+
+def _ip_provider_state(
+    provider: str,
+    *,
+    nmap_authority: Mapping[str, object] | None = None,
+    nmap_profile: NmapProfileName | None = None,
+) -> dict[str, object]:
     if provider == "builtin_tcp_connect":
         return {
             "provider": provider,
@@ -988,6 +1841,31 @@ def _ip_provider_state(provider: str) -> dict[str, object]:
             "execution_boundary": "application_owned",
             "execution_enabled": True,
             "supported_protocols": ["tcp"],
+        }
+    if provider == "operator_managed_nmap" and nmap_authority is not None:
+        return {
+            "provider": provider,
+            "provider_contract_version": "1.0",
+            "capability_state": "available",
+            "execution_boundary": "operator_managed_internal_only",
+            "execution_enabled": True,
+            "supported_protocols": ["tcp", "udp"],
+            "profile": None if nmap_profile is None else nmap_profile.value,
+            "profile_fingerprint": (
+                None if nmap_profile is None else nmap_profile_fingerprint(nmap_profile)
+            ),
+            "expected_executor_identity": nmap_authority["machine_executor_identity"],
+            "deployment_id": nmap_authority["deployment_id"],
+            "network_executor_id": nmap_authority["network_executor_id"],
+            "policy_id": nmap_authority["policy_id"],
+            "policy_revision": nmap_authority["policy_revision"],
+            "confirmation_id": nmap_authority["confirmation_id"],
+            "installation_fingerprint_sha256": nmap_authority["fingerprint_sha256"],
+            "publisher": nmap_authority["publisher"],
+            "version": nmap_authority["version"],
+            "npcap_version": nmap_authority["npcap_version"],
+            "npcap_state": nmap_authority["npcap_state"],
+            "raw_capable": nmap_authority["raw_capable"],
         }
     return {
         "provider": provider,
@@ -1240,10 +2118,12 @@ def _request_ports(
 
 def _ip_authority_mappings(
     rows: Sequence[Mapping[str, object]],
-) -> dict[str, dict[str, object]]:
+) -> dict[str, object]:
     expected: dict[str, set[int]] = {}
     forbidden: dict[str, set[int]] = {}
     unsupported: dict[str, set[str]] = {}
+    expected_register_ports: dict[str, set[str]] = {}
+    forbidden_register_ports: dict[str, set[str]] = {}
     hostnames: dict[str, str] = {}
     assets: dict[str, str] = {}
     for row in rows:
@@ -1253,12 +2133,14 @@ def _ip_authority_mappings(
         _merge_register_ports(
             expected,
             unsupported,
+            expected_register_ports,
             address,
             _optional_text(row.get("Expected services/ports")),
         )
         _merge_register_ports(
             forbidden,
             unsupported,
+            forbidden_register_ports,
             address,
             _optional_text(row.get("Ports that should not be enabled")),
         )
@@ -1287,12 +2169,17 @@ def _ip_authority_mappings(
             for address, values in sorted(unsupported.items())
             if values
         },
+        "register_ports": {
+            "forbidden": _protocol_specs_by_address(forbidden_register_ports),
+            "expected": _protocol_specs_by_address(expected_register_ports),
+        },
     }
 
 
 def _merge_register_ports(
     tcp_map: dict[str, set[int]],
     unsupported_map: dict[str, set[str]],
+    all_ports_map: dict[str, set[str]],
     address: str,
     specification: str | None,
 ) -> None:
@@ -1300,16 +2187,37 @@ def _merge_register_ports(
         return
     ports = parse_protocol_port_spec(specification)
     for item in ports:
+        protocol_port = f"{item.port}/{item.protocol}"
+        all_ports_map.setdefault(address, set()).add(protocol_port)
         if item.protocol == "tcp":
             tcp_map.setdefault(address, set()).add(item.port)
         else:
-            unsupported_map.setdefault(address, set()).add(f"{item.port}/{item.protocol}")
+            unsupported_map.setdefault(address, set()).add(protocol_port)
 
 
 def _tcp_specs(values: Mapping[str, set[int]]) -> dict[str, str]:
     return {
         address: ",".join(f"{port}/tcp" for port in sorted(ports))
         for address, ports in sorted(values.items())
+        if ports
+    }
+
+
+def _protocol_specs_by_address(
+    values: Mapping[str, set[str]],
+) -> dict[str, list[dict[str, object]]]:
+    return {
+        address: [
+            ProtocolPortV1(
+                port=int(value.split("/", 1)[0]),
+                protocol=value.split("/", 1)[1],
+            ).model_dump(mode="json")
+            for value in sorted(ports, key=_protocol_port_sort_key)
+        ]
+        for address, ports in sorted(
+            values.items(),
+            key=lambda item: int(ipaddress.IPv4Address(item[0])),
+        )
         if ports
     }
 
@@ -1347,7 +2255,16 @@ def _guard_contract_size(contract: Mapping[str, object]) -> None:
         )
 
 
-def _source_interface_snapshot(parameters: dict[str, Any]) -> dict[str, str | None]:
+def _guard_resolved_ip_parameters_size(parameters: Mapping[str, object]) -> None:
+    size = len(canonical_json_bytes(parameters))
+    if size > SCAN_CONTRACT_MAX_BYTES:
+        raise ValueError(
+            f"resolved IP engine parameters require {size:,} canonical UTF-8 bytes, "
+            f"exceeding the {SCAN_CONTRACT_MAX_BYTES:,}-byte ceiling"
+        )
+
+
+def _source_interface_snapshot(parameters: dict[str, Any]) -> dict[str, object]:
     raw_source = _optional_text(parameters.get("source_ip"))
     raw_local = _optional_text(parameters.get("local_address"))
     source: ipaddress.IPv4Address | None = None
@@ -1377,10 +2294,20 @@ def _source_interface_snapshot(parameters: dict[str, Any]) -> dict[str, str | No
             parameters["source_ip"] = str(source)
     if source is not None and local is not None and source != local.ip:
         raise ValueError("source_ip and local_address must identify the same interface")
-    return {
-        "source_ip": str(source) if source is not None else None,
-        "local_address": local.with_prefixlen if local is not None else None,
-    }
+    raw_identity = parameters.get(SOURCE_INTERFACE_IDENTITY_KEY)
+    if not isinstance(raw_identity, Mapping):
+        raise ValueError(
+            "source_interface_identity_v1 is required; resolve one concrete source "
+            "interface before building the scan contract"
+        )
+    identity = FrozenSourceInterfaceV1.model_validate(dict(raw_identity))
+    if source is None or local is None:
+        raise ValueError("source_ip and local_address must be frozen before the scan contract")
+    if identity.source_ip != str(source) or identity.local_address != local.with_prefixlen:
+        raise ValueError(
+            "source_interface_identity_v1 must match the frozen source_ip and local_address"
+        )
+    return identity.model_dump(mode="json")
 
 
 def _bounded_positive_int(

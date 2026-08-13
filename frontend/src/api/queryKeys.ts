@@ -3,11 +3,7 @@ import type { RunRef, SessionScopeId, WorkspaceRef } from "../app/sessionScope";
 const workspaceRoot = (scope: SessionScopeId, workspace: WorkspaceRef) =>
   ["session", scope, "workspace", workspace.projectId, workspace.siteId] as const;
 
-const runEvidenceRoot = (
-  scope: SessionScopeId,
-  workspace: WorkspaceRef,
-  run: RunRef | null,
-) =>
+const runEvidenceRoot = (scope: SessionScopeId, workspace: WorkspaceRef, run: RunRef | null) =>
   [
     ...workspaceRoot(scope, workspace),
     "run-evidence",
@@ -28,6 +24,11 @@ export const queryKeys = {
     [...workspaceRoot(scope, workspace), "configuration"] as const,
   interfaces: (scope: SessionScopeId, workspace: WorkspaceRef) =>
     [...workspaceRoot(scope, workspace), "interfaces"] as const,
+  scanAuthorizations: (scope: SessionScopeId, workspace: WorkspaceRef, previewRunId?: string) =>
+    [...workspaceRoot(scope, workspace), "scan-authorizations", previewRunId] as const,
+  scanAuthorization: (scope: SessionScopeId, workspace: WorkspaceRef, authorizationId: string) =>
+    [...workspaceRoot(scope, workspace), "scan-authorization", authorizationId] as const,
+  nmapPolicies: (scope: SessionScopeId) => ["session", scope, "nmap", "policies"] as const,
   importProfiles: (scope: SessionScopeId, workspace: WorkspaceRef) =>
     [...workspaceRoot(scope, workspace), "import-profiles"] as const,
   importErrors: (scope: SessionScopeId, workspace: WorkspaceRef, importId: string | undefined) =>

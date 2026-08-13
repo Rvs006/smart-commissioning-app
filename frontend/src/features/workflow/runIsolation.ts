@@ -1,4 +1,7 @@
 import type {
+  DiscoveryObservationPage,
+  DiscoveryObservationRecord,
+  DiscoveryObservationTerminal,
   JobStatus,
   JobSummary,
   JobType,
@@ -9,12 +12,7 @@ import type {
 } from "../../api/client";
 import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
 
-export type RunControllerPhase =
-  | "idle"
-  | "submitting"
-  | "active"
-  | "terminal-sync"
-  | "settled";
+export type RunControllerPhase = "idle" | "submitting" | "active" | "terminal-sync" | "settled";
 
 export type EvidenceRequirement = "run" | "issues" | "results" | "topics";
 
@@ -24,6 +22,8 @@ export type RunControllerState = Readonly<{
   requiredEvidence: readonly EvidenceRequirement[];
   completedEvidence: readonly EvidenceRequirement[];
   evidenceError: string | null;
+  acknowledgedObservationCursor: number;
+  terminalObservationCursor: number | null;
 }>;
 
 export const initialRunControllerState: RunControllerState = Object.freeze({
@@ -32,14 +32,215 @@ export const initialRunControllerState: RunControllerState = Object.freeze({
   requiredEvidence: [],
   completedEvidence: [],
   evidenceError: null,
+  acknowledgedObservationCursor: 0,
+  terminalObservationCursor: null,
 });
+
+export type ObservationResnapshotReason =
+  | "run_mismatch"
+  | "attempt_mismatch"
+  | "cursor_regression"
+  | "event_conflict";
+
+export type ObservationEventIdentity = Readonly<{
+  cursor: number;
+  payloadSha256: string;
+}>;
+
+export type ObservationFoldState = Readonly<{
+  runId: string;
+  attempt: number;
+  acknowledgedCursor: number;
+  latestCursor: number;
+  hasMore: boolean;
+  terminal: DiscoveryObservationTerminal | null;
+  observationsPruned: boolean;
+  observationsQuarantined: boolean;
+  events: ReadonlyMap<string, ObservationEventIdentity>;
+  entities: ReadonlyMap<string, DiscoveryObservationRecord>;
+  resnapshotRequired: boolean;
+  resnapshotReason: ObservationResnapshotReason | null;
+}>;
+
+export function createObservationFoldState(
+  runId: string,
+  attempt: number,
+  acknowledgedCursor = 0,
+): ObservationFoldState {
+  return {
+    runId,
+    attempt,
+    acknowledgedCursor,
+    latestCursor: acknowledgedCursor,
+    hasMore: false,
+    terminal: null,
+    observationsPruned: false,
+    observationsQuarantined: false,
+    events: new Map(),
+    entities: new Map(),
+    resnapshotRequired: false,
+    resnapshotReason: null,
+  };
+}
+
+export function isObservationTerminalSynchronized(state: ObservationFoldState): boolean {
+  return state.terminal !== null && state.acknowledgedCursor >= state.terminal.terminal_cursor;
+}
+
+const observationNamespace = (runId: string, attempt: number, key: string): string =>
+  `${runId}\u0000${attempt}\u0000${key}`;
+
+const observationEntityKey = (
+  runId: string,
+  attempt: number,
+  observation: DiscoveryObservationRecord,
+): string =>
+  observationNamespace(runId, attempt, `${observation.entity_kind}\u0000${observation.entity_key}`);
+
+const requireObservationResnapshot = (
+  state: ObservationFoldState,
+  reason: ObservationResnapshotReason,
+): ObservationFoldState => ({
+  ...state,
+  resnapshotRequired: true,
+  resnapshotReason: reason,
+});
+
+const sameObservationTerminal = (
+  first: DiscoveryObservationTerminal | null,
+  second: DiscoveryObservationTerminal | null,
+): boolean =>
+  first === second ||
+  (first !== null &&
+    second !== null &&
+    first.status === second.status &&
+    first.terminal_cursor === second.terminal_cursor);
+
+export function foldObservationPage(
+  state: ObservationFoldState,
+  page: DiscoveryObservationPage,
+): ObservationFoldState {
+  if (state.resnapshotRequired) {
+    return state;
+  }
+  if (page.run_id !== state.runId) {
+    return requireObservationResnapshot(state, "run_mismatch");
+  }
+  if (page.attempt !== state.attempt) {
+    return requireObservationResnapshot(state, "attempt_mismatch");
+  }
+  if ((page.observations_pruned || page.observations_quarantined) && page.terminal) {
+    const terminal = sameObservationTerminal(state.terminal, page.terminal)
+      ? state.terminal
+      : page.terminal;
+    const latestCursor = Math.max(
+      state.latestCursor,
+      page.latest_cursor,
+      page.terminal.terminal_cursor,
+    );
+    const events =
+      state.events.size === 0 ? state.events : new Map<string, ObservationEventIdentity>();
+    const entities =
+      state.entities.size === 0 ? state.entities : new Map<string, DiscoveryObservationRecord>();
+    if (
+      state.acknowledgedCursor === page.terminal.terminal_cursor &&
+      state.latestCursor === latestCursor &&
+      state.hasMore === false &&
+      terminal === state.terminal &&
+      state.observationsPruned === Boolean(page.observations_pruned) &&
+      state.observationsQuarantined === Boolean(page.observations_quarantined) &&
+      events === state.events &&
+      entities === state.entities
+    ) {
+      return state;
+    }
+    return {
+      ...state,
+      acknowledgedCursor: page.terminal.terminal_cursor,
+      latestCursor,
+      hasMore: false,
+      terminal,
+      observationsPruned: Boolean(page.observations_pruned),
+      observationsQuarantined: Boolean(page.observations_quarantined),
+      events,
+      entities,
+    };
+  }
+  if (page.next_cursor < state.acknowledgedCursor) {
+    return requireObservationResnapshot(state, "cursor_regression");
+  }
+
+  let events: Map<string, ObservationEventIdentity> | null = null;
+  let entities: Map<string, DiscoveryObservationRecord> | null = null;
+
+  for (const observation of page.observations) {
+    if (observation.run_id !== state.runId) {
+      return requireObservationResnapshot(state, "run_mismatch");
+    }
+    if (observation.attempt !== state.attempt) {
+      return requireObservationResnapshot(state, "attempt_mismatch");
+    }
+    const eventKey = observationNamespace(state.runId, state.attempt, observation.event_key);
+    const priorEvent = (events ?? state.events).get(eventKey);
+    if (
+      (observation.cursor < state.acknowledgedCursor && !priorEvent) ||
+      observation.cursor > page.next_cursor
+    ) {
+      return requireObservationResnapshot(state, "cursor_regression");
+    }
+    if (priorEvent && priorEvent.payloadSha256 !== observation.payload_sha256) {
+      return requireObservationResnapshot(state, "event_conflict");
+    }
+    if (priorEvent) {
+      continue;
+    }
+    events ??= new Map(state.events);
+    events.set(eventKey, {
+      cursor: observation.cursor,
+      payloadSha256: observation.payload_sha256,
+    });
+    const entityKey = observationEntityKey(state.runId, state.attempt, observation);
+    const current = (entities ?? state.entities).get(entityKey);
+    if (!current || observation.entity_version > current.entity_version) {
+      entities ??= new Map(state.entities);
+      entities.set(entityKey, observation);
+    }
+  }
+
+  const terminal = page.terminal
+    ? sameObservationTerminal(state.terminal, page.terminal)
+      ? state.terminal
+      : page.terminal
+    : state.terminal;
+  const latestCursor = Math.max(state.latestCursor, page.latest_cursor, page.next_cursor);
+  if (
+    state.acknowledgedCursor === page.next_cursor &&
+    state.latestCursor === latestCursor &&
+    state.hasMore === page.has_more &&
+    terminal === state.terminal &&
+    events === null &&
+    entities === null
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    acknowledgedCursor: page.next_cursor,
+    latestCursor,
+    hasMore: page.has_more,
+    terminal,
+    events: events ?? state.events,
+    entities: entities ?? state.entities,
+  };
+}
 
 export type RunControllerAction =
   | { type: "reset" }
   | { type: "submitting" }
   | { type: "accepted"; runRef: RunRef }
   | { type: "restored"; runRef: RunRef; status: JobStatus }
-  | { type: "terminal-observed"; runId: string }
+  | { type: "terminal-observed"; runId: string; terminalCursor?: number | null }
+  | { type: "observation-cursor-acknowledged"; runId: string; cursor: number }
   | {
       type: "evidence-succeeded";
       runId: string;
@@ -51,9 +252,20 @@ export function evidenceRequirementsFor(runRef: RunRef): readonly EvidenceRequir
   if (runRef.family === "validation") {
     return ["run", "issues"];
   }
-  return runRef.jobType === "mqtt_discovery"
-    ? ["run", "results", "topics"]
-    : ["run", "results"];
+  return runRef.jobType === "mqtt_discovery" ? ["run", "results", "topics"] : ["run", "results"];
+}
+
+function isTerminalSynchronizationComplete(
+  requiredEvidence: readonly EvidenceRequirement[],
+  completedEvidence: readonly EvidenceRequirement[],
+  acknowledgedObservationCursor: number,
+  terminalObservationCursor: number | null,
+): boolean {
+  return (
+    requiredEvidence.every((requirement) => completedEvidence.includes(requirement)) &&
+    (terminalObservationCursor === null ||
+      acknowledgedObservationCursor >= terminalObservationCursor)
+  );
 }
 
 export function runControllerReducer(
@@ -73,6 +285,8 @@ export function runControllerReducer(
       requiredEvidence: evidenceRequirementsFor(action.runRef),
       completedEvidence: [],
       evidenceError: null,
+      acknowledgedObservationCursor: 0,
+      terminalObservationCursor: null,
     };
   }
   if (action.type === "restored") {
@@ -83,6 +297,8 @@ export function runControllerReducer(
       requiredEvidence,
       completedEvidence: [],
       evidenceError: null,
+      acknowledgedObservationCursor: 0,
+      terminalObservationCursor: null,
     };
   }
   if (!state.runRef || action.runId !== state.runRef.runId) {
@@ -90,9 +306,56 @@ export function runControllerReducer(
   }
   if (action.type === "terminal-observed") {
     if (state.phase === "settled") {
+      if (
+        action.terminalCursor === undefined ||
+        action.terminalCursor === null ||
+        action.terminalCursor <= state.acknowledgedObservationCursor
+      ) {
+        return state;
+      }
+    }
+    const terminalObservationCursor =
+      action.terminalCursor === undefined ? state.terminalObservationCursor : action.terminalCursor;
+    return {
+      ...state,
+      phase: isTerminalSynchronizationComplete(
+        state.requiredEvidence,
+        state.completedEvidence,
+        state.acknowledgedObservationCursor,
+        terminalObservationCursor,
+      )
+        ? "settled"
+        : "terminal-sync",
+      evidenceError: null,
+      terminalObservationCursor,
+    };
+  }
+  if (action.type === "observation-cursor-acknowledged") {
+    const acknowledgedObservationCursor = Math.max(
+      state.acknowledgedObservationCursor,
+      action.cursor,
+    );
+    const phase =
+      state.phase === "terminal-sync" &&
+      isTerminalSynchronizationComplete(
+        state.requiredEvidence,
+        state.completedEvidence,
+        acknowledgedObservationCursor,
+        state.terminalObservationCursor,
+      )
+        ? "settled"
+        : state.phase;
+    if (
+      acknowledgedObservationCursor === state.acknowledgedObservationCursor &&
+      phase === state.phase
+    ) {
       return state;
     }
-    return { ...state, phase: "terminal-sync", evidenceError: null };
+    return {
+      ...state,
+      acknowledgedObservationCursor,
+      phase,
+    };
   }
   if (action.type === "evidence-failed") {
     return { ...state, phase: "terminal-sync", evidenceError: action.error };
@@ -104,11 +367,19 @@ export function runControllerReducer(
       completed.add(requirement);
     }
   }
-  const completedEvidence = state.requiredEvidence.filter((requirement) => completed.has(requirement));
-  const settled = state.requiredEvidence.every((requirement) => completed.has(requirement));
+  const completedEvidence = state.requiredEvidence.filter((requirement) =>
+    completed.has(requirement),
+  );
   return {
     ...state,
-    phase: settled ? "settled" : "terminal-sync",
+    phase: isTerminalSynchronizationComplete(
+      state.requiredEvidence,
+      completedEvidence,
+      state.acknowledgedObservationCursor,
+      state.terminalObservationCursor,
+    )
+      ? "settled"
+      : "terminal-sync",
     completedEvidence,
     evidenceError: null,
   };
@@ -156,9 +427,7 @@ export type ReportIntent = Readonly<{
 }>;
 
 export function createReportIntent(input: ReportIntent): ReportIntent {
-  const udmiScope = input.udmiScope
-    ? freezeUdmiScope(input.udmiScope)
-    : undefined;
+  const udmiScope = input.udmiScope ? freezeUdmiScope(input.udmiScope) : undefined;
   return Object.freeze({
     runId: input.runId,
     reportType: input.reportType,
@@ -173,7 +442,9 @@ function freezeUdmiScope(scope: UdmiReportScopeV1): UdmiReportScopeV1 {
   const filters = Object.freeze({ ...scope.filters });
   return Object.freeze({
     schema_version: scope.schema_version,
-    selected_payloads: Object.freeze(selectedPayloads) as unknown as UdmiReportScopeV1["selected_payloads"],
+    selected_payloads: Object.freeze(
+      selectedPayloads,
+    ) as unknown as UdmiReportScopeV1["selected_payloads"],
     unexpected_device_ids: Object.freeze([...scope.unexpected_device_ids]) as unknown as string[],
     filters,
   });
@@ -183,13 +454,29 @@ const evidenceIdentity = (kind: string, parts: readonly (string | undefined)[]):
   `${kind}\u0000${parts.map((part) => part ?? "").join("\u0000")}`;
 
 /** Stable asset identity, independent of array position and response ordering. */
-export function assetIdentity(
-  route: string,
-  row: Readonly<Record<string, string>>,
-): string {
+export function assetIdentity(route: string, row: Readonly<Record<string, string>>): string {
+  if (row.__entityKey) {
+    return evidenceIdentity("entity", [route, row.__entityKey]);
+  }
   return route === "bacnet-discovery"
-    ? evidenceIdentity("asset", [route, row.Asset, row.Device, row.Object, row["Object ID"], row.Address])
-    : evidenceIdentity("asset", [route, row.Asset, row["IP Address"], row.Host, row.Address]);
+    ? evidenceIdentity("asset", [
+        route,
+        row.Asset,
+        row.Device,
+        row.Instance,
+        row.Object,
+        row["Object ID"],
+        row.Address,
+      ])
+    : evidenceIdentity("asset", [
+        route,
+        row.Asset,
+        row["Observed IP"],
+        row["IP Address"],
+        row.Hostname,
+        row.Host,
+        row.Address,
+      ]);
 }
 
 /** Stable payload identity keeps a selected UDMI observation bound to its source evidence. */
@@ -216,7 +503,9 @@ export function resultIdentity(route: string, row: Readonly<Record<string, strin
 }
 
 function isDiscoveryJob(jobType: JobType | string): boolean {
-  return jobType === "ip_discovery" || jobType === "bacnet_discovery" || jobType === "mqtt_discovery";
+  return (
+    jobType === "ip_discovery" || jobType === "bacnet_discovery" || jobType === "mqtt_discovery"
+  );
 }
 
 function isTerminal(status: JobStatus): boolean {

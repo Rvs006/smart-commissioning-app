@@ -373,12 +373,22 @@ upgrading to a new release folder. Crash logs, if any, are
 written to %LOCALAPPDATA%\SmartCommissioning\logs\crash-*.log. On first launch
 this version migrates state from an older release's runtime\ folder if it
 finds one beside the exe.
+
+Operator-managed Nmap is disabled in the external portable profile. The XML
+parser route is absent unless a same-organization administrator explicitly
+enables the internal provider lane and completes the recorded policy and exact
+installation-confirmation workflow.
 "@ | Set-Content -LiteralPath $ReadmePath -Encoding UTF8
 
 # --- done ---
 $BundleExe = Join-Path $OutputDir "$AppName.exe"
 $BuildProvenance.portable_exe_sha256 = (Get-FileHash -LiteralPath $BundleExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $BuildProvenance | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDir "BUILD_PROVENANCE.json") -Encoding UTF8
+Write-Step "Verify operator-managed Nmap/Npcap components are absent"
+Invoke-Native -File $Python -Arguments @(
+    "scripts/check_nmap_distribution_absence.py",
+    "--bundle-dir", $OutputDir
+) -WorkingDirectory $RepoRoot
 Write-Step "DONE"
 Write-Host "  bundle : $OutputDir"
 Write-Host "  exe    : $BundleExe"

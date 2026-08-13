@@ -22,7 +22,9 @@ building.
 - Register imports (IP/BACnet/MQTT/asset/mapping/tolerances) from the downloadable
   CSV/XLSX templates.
 - **Fixture-based UDMI validation** (bundled fixture - no broker).
-- **Dry-run** discovery (IP/BACnet/MQTT) - returns a plan, sends **no packets**.
+- **Dry-run** discovery (IP/BACnet/MQTT) on the portable inline profile, or on a
+  queued executor whose API and worker share one explicitly configured network
+  namespace - returns a plan and sends **no packets**.
 - Reports & evidence (XLSX/DOCX/ZIP), backup/restore, retention.
 - RBAC (viewer/reviewer/engineer/admin), multi-project hub, edge→hub bundle
   export/ingest (file carry).
@@ -48,6 +50,13 @@ fires a live scan/publish by accident.
 
 For a **team** pilot, use **Hosted**. (Portable is for the single-user on-site
 laptop and binds `127.0.0.1` only - see [quickstart.md](quickstart.md) §B.)
+
+The stock hosted API and worker containers do not share one OS NIC inventory.
+Network discovery therefore stays unavailable by design until a deployment
+override co-locates their network namespace, pins the discovery queue to it and
+sets `SMART_COMMISSIONING_NETWORK_EXECUTOR_ID`. Use the portable inline profile
+for field-facing IP/BACnet/MQTT preview and execution until that topology is in
+place. Setting an ID without co-location does not bypass the runtime NIC guard.
 
 ---
 

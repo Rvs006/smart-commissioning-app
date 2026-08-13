@@ -5,6 +5,39 @@ All notable changes to the Smart Commissioning App are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.41] - 2026-08-13
+
+The v0.1.41 release makes discovery authority, progressive evidence, and
+operator-managed Nmap execution explicit, sealed, and reviewable.
+
+### Added
+
+- IP and BACnet previews freeze normalized targets, source-interface identity,
+  provider contracts, observation budgets, and one-use live authorizations.
+- Progressive observations now preserve typed reachability, register comparison,
+  cancellation, not-attempted work, and terminal metrics through cursor reloads.
+- Protected raw-evidence storage, append-only Nmap authority history, and the
+  global-admin authority surface support the internal operator provider while
+  the external portable bundle stays disabled by default.
+- BACnet property expansion uses a sealed parent run, bounded child reads, and
+  explicit Stop and cancellation states.
+
+### Changed
+
+- Active-control checks run before dispatch, after probe drain, and at
+  success-only finalization, so authorization or grant loss cannot seal success.
+- Per-plan observation row and byte budgets are enforced in the lifecycle and
+  recovery paths, not only during preview.
+- Windows portable and Docker release evidence bind runtime, package, image,
+  migration, and artifact identities to the same v0.1.41 commit.
+
+### Fixed
+
+- Viewer-facing identity and diagnostic fields reject paths, credentials, PEM
+  material, and unsafe embedded values without echoing the rejected input.
+- SQLite writer reservations are released before report-source verification,
+  retention folding, and ordinary read-only authentication work.
+
 ## [Unreleased]
 
 ### Added

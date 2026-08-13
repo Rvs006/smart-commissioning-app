@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-commissioning-core"
-version = "0.1.40"
+version = "0.1.41"
 description = "Shared UDMI validation and MQTT logic for the Smart Commissioning API and worker."
 requires-python = ">=3.12"
 license = "MIT"

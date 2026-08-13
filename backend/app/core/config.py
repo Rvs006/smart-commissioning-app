@@ -62,6 +62,30 @@ class Settings(BaseSettings):
             "deployment_id",
         ),
     )
+    # Stable identity for one OS network namespace and NIC inventory. Queued
+    # network discovery requires this explicitly because the API and worker may
+    # otherwise resolve the same deployment_id inside different containers.
+    network_executor_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SMART_COMMISSIONING_NETWORK_EXECUTOR_ID",
+            "NETWORK_EXECUTOR_ID",
+            "network_executor_id",
+        ),
+    )
+    # Build/deployment gate for the internal same-organization Nmap lane. The
+    # release default is off, so external bundles neither mount the XML parser
+    # endpoint nor admit operator-managed process selection. Enabling the lane
+    # still requires the persisted administrator policy and exact installation
+    # confirmation; this flag grants no authority by itself.
+    nmap_internal_provider_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED",
+            "NMAP_INTERNAL_PROVIDER_ENABLED",
+            "nmap_internal_provider_enabled",
+        ),
+    )
     # Edge->hub synchronization role (smart_commissioning_core.sync). Determines
     # which sync features are active for this instance:
     #   - "standalone" (default): today's single-instance behavior. No sync; the
@@ -128,6 +152,12 @@ class Settings(BaseSettings):
         self.deployment_id = self.deployment_id.strip()
         if not self.deployment_id or len(self.deployment_id) > 255:
             raise ValueError("deployment_id must contain between 1 and 255 characters")
+        if self.network_executor_id is not None:
+            self.network_executor_id = self.network_executor_id.strip() or None
+        if self.network_executor_id is not None and len(self.network_executor_id) > 255:
+            raise ValueError(
+                "network_executor_id must contain between 1 and 255 characters"
+            )
         one_mib = 1024 * 1024
         two_gib = 2 * 1024 * 1024 * 1024
         if self.max_sync_bundle_bytes < one_mib:

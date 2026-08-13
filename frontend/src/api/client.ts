@@ -1,4 +1,5 @@
 import type { SessionScopeId, WorkspaceRef } from "../app/sessionScope";
+import { isPlainObject } from "../utils/isPlainObject";
 
 export type HealthStatus = {
   status: string;
@@ -208,6 +209,26 @@ export type RunRecord = {
   parameters: Record<string, unknown>;
   result_summary: Record<string, unknown>;
   error_message: string | null;
+};
+
+export type ScanAuthorizationV1 = {
+  authorization_id: string;
+  preview_run_id: string;
+  project_id: string;
+  site_id: string;
+  packet_plan_sha256: string;
+  approved_by: string;
+  ticket: string;
+  purpose: string;
+  not_before: string;
+  not_after: string;
+  max_uses: number;
+  use_count: number;
+  consumed_run_id: string | null;
+  revoked_at: string | null;
+  revoked_by: string | null;
+  revoke_reason: string | null;
+  created_at: string;
 };
 
 export type ValidationIssueRecord = {
@@ -449,6 +470,169 @@ export type ValidationIssuesResponse = {
 };
 
 export type DiscoveryRunKind = "ip" | "bacnet" | "mqtt";
+export type NmapProfileName =
+  | "tcp_connect_inventory"
+  | "host_discovery"
+  | "tcp_syn_inventory"
+  | "selected_udp"
+  | "service_version_inventory"
+  | "os_inventory"
+  | "traceroute_inventory"
+  | "reviewed_script_inventory";
+
+export type NmapCapabilityResponse = {
+  schema_version: "1.0";
+  provider: "nmap";
+  state: "disabled" | "xml_import_only" | "confirmation_required" | "unavailable" | "available";
+  reason: string;
+  provider_mode: "disabled" | "operator_xml_import" | "internal_operator_managed";
+  policy_id: string | null;
+  policy_revision: number | null;
+  publisher: string | null;
+  version: string | null;
+  fingerprint_sha256: string | null;
+  npcap_version: string | null;
+  npcap_state: "not_checked" | "missing" | "admin_only" | "connect_only" | "raw_capable";
+  raw_capable: boolean;
+  process_selection_allowed: boolean;
+  xml_import_allowed: boolean;
+  permitted_profiles: NmapProfileName[];
+};
+
+export type NmapDeploymentLane = "internal_same_organization" | "external_customer";
+export type NmapProviderMode = "disabled" | "operator_xml_import" | "internal_operator_managed";
+export type NmapNpcapState =
+  | "not_checked"
+  | "missing"
+  | "admin_only"
+  | "connect_only"
+  | "raw_capable";
+
+export type NmapProjectSiteScope = {
+  project_id: string;
+  site_id: string;
+};
+
+export type NmapReviewedScript = {
+  schema_version: "1.0";
+  name: string;
+  sha256: string;
+};
+
+export type NmapDeploymentPolicyCreateRequest = {
+  deployment_lane: NmapDeploymentLane;
+  provider_mode: NmapProviderMode;
+  deployment_owner: string;
+  operator_install_responsibility: string;
+  permitted_project_sites: readonly NmapProjectSiteScope[];
+  update_owner: string;
+  reviewed_version_policy: string;
+  permitted_publishers: readonly string[];
+  permitted_versions: readonly string[];
+  permitted_signer_sha256: readonly string[];
+  permitted_executable_sha256: readonly string[];
+  permitted_data_manifest_sha256: readonly string[];
+  permitted_licence_sha256: readonly string[];
+  permitted_npsl_versions: readonly string[];
+  reviewed_scripts: readonly NmapReviewedScript[];
+  max_data_files: number;
+  max_file_bytes: number;
+  max_manifest_bytes: number;
+  profile_policy: {
+    schema_version: "1.0";
+    permitted_profiles: readonly NmapProfileName[];
+  };
+  acknowledged_no_redistribution: boolean;
+  reason: string;
+};
+
+export type NmapDeploymentPolicyResponse = {
+  schema_version: "1.0";
+  policy_id: string;
+  deployment_id: string;
+  network_executor_id: string;
+  revision: number;
+  deployment_lane: NmapDeploymentLane;
+  provider_mode: NmapProviderMode;
+  organization_internal: boolean;
+  deployment_owner: string;
+  operator_install_responsibility: string;
+  permitted_project_sites: NmapProjectSiteScope[];
+  update_owner: string;
+  reviewed_version_policy: string;
+  permitted_publishers: string[];
+  permitted_versions: string[];
+  permitted_signer_sha256: string[];
+  permitted_executable_sha256: string[];
+  permitted_data_manifest_sha256: string[];
+  permitted_licence_sha256: string[];
+  permitted_npsl_versions: string[];
+  reviewed_scripts: NmapReviewedScript[];
+  max_data_files: number;
+  max_file_bytes: number;
+  max_manifest_bytes: number;
+  profile_policy: {
+    schema_version: "1.0";
+    permitted_profiles: NmapProfileName[];
+  };
+  reviewed_at: string;
+  acknowledged_no_redistribution: boolean;
+  created_by: string;
+  reason: string;
+  created_at: string;
+  supersedes_policy_id: string | null;
+};
+
+export type NmapDetectedInstallationResponse = {
+  schema_version: "1.0";
+  provider: "nmap";
+  state: "disabled" | "xml_import_only" | "confirmation_required" | "unavailable" | "available";
+  reason: string;
+  publisher: string | null;
+  version: string | null;
+  registry_view: "32" | "64" | null;
+  display_name: string | null;
+  fingerprint_sha256: string | null;
+  signer_sha256: string | null;
+  executable_sha256: string | null;
+  data_manifest_sha256: string | null;
+  data_file_count: number | null;
+  data_total_bytes: number | null;
+  licence_sha256: string | null;
+  npsl_version: string | null;
+  reviewed_scripts: NmapReviewedScript[];
+  npcap_version: string | null;
+  npcap_state: NmapNpcapState;
+  raw_capable: boolean;
+};
+
+export type NmapInstallationConfirmationResponse = {
+  schema_version: "1.0";
+  confirmation_id: string;
+  policy_id: string;
+  deployment_id: string;
+  network_executor_id: string;
+  policy_revision: number;
+  provider: "nmap";
+  state: "disabled" | "xml_import_only" | "confirmation_required" | "unavailable" | "available";
+  reason: string;
+  publisher: string;
+  version: string;
+  fingerprint_sha256: string;
+  signer_sha256: string;
+  executable_sha256: string;
+  data_manifest_sha256: string;
+  data_file_count: number;
+  data_total_bytes: number;
+  licence_sha256: string;
+  npsl_version: string;
+  reviewed_scripts: NmapReviewedScript[];
+  npcap_version: string | null;
+  npcap_state: NmapNpcapState;
+  raw_capable: boolean;
+  confirmed_by: string;
+  confirmed_at: string;
+};
 export type ValidationRunKind = "udmi" | "bacnet" | "mapping";
 export type ImportTemplateFormat = "csv" | "xlsx";
 export type ReportFormat = "zip" | "xlsx" | "docx" | "pdf";
@@ -573,12 +757,92 @@ export type DiscoveryResultsResponse = {
   register_comparison?: RegisterComparison | null;
 };
 
+export type DiscoveryComparisonResponse = {
+  baseline_run_id: string;
+  candidate_run_id: string;
+  job_type: JobType | null;
+  compatible: boolean;
+  reason: string | null;
+  additions: Array<Record<string, unknown>>;
+  removals: Array<Record<string, unknown>>;
+  changes: Array<Record<string, unknown>>;
+};
+
 export type DiscoveryTopicsResponse = {
   run_id: string;
   job_type: JobType;
   status: JobStatus;
   topics: DiscoveryRowRecord[];
   register_comparison?: RegisterComparison | null;
+};
+
+export type DiscoveryPointsResponse = {
+  run_id: string;
+  job_type: JobType;
+  status: JobStatus;
+  points: DiscoveryRowRecord[];
+  total: number;
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
+export type DiscoveryObservationProtocol = "ip" | "bacnet";
+export type DiscoveryObservationEntityKind =
+  | "lane"
+  | "host"
+  | "port"
+  | "device"
+  | "object"
+  | "property"
+  | "diagnostic";
+export type DiscoveryObservationPhase =
+  | "planned"
+  | "reachability"
+  | "enrichment"
+  | "comparison"
+  | "finalize";
+
+export type DiscoveryObservationRecord = {
+  cursor: number;
+  run_id: string;
+  attempt: number;
+  protocol: DiscoveryObservationProtocol;
+  entity_kind: DiscoveryObservationEntityKind;
+  entity_key: string;
+  entity_version: number;
+  event_key: string;
+  phase: DiscoveryObservationPhase;
+  outcome: string;
+  payload_schema_version: string;
+  payload: Record<string, unknown>;
+  payload_sha256: string;
+  observed_at: string | null;
+  created_at: string;
+};
+
+export type DiscoveryObservationTerminal = {
+  status: Extract<JobStatus, "succeeded" | "failed" | "cancelled">;
+  terminal_cursor: number;
+};
+
+export type DiscoveryObservationPage = {
+  run_id: string;
+  attempt: number;
+  observations: DiscoveryObservationRecord[];
+  next_cursor: number;
+  // Informational high-water mark. A reducer must acknowledge next_cursor only
+  // after the complete page has folded successfully.
+  latest_cursor: number;
+  has_more: boolean;
+  terminal: DiscoveryObservationTerminal | null;
+  // A sealed run can outlive the 30-day provisional-event retention window.
+  // When true, the terminal result is authoritative and the missing cursor
+  // prefix must not be reconstructed or represented as observed in-browser.
+  observations_pruned?: boolean;
+  // Integrity quarantine is distinct from ordinary retention expiry. The
+  // provisional stream must be discarded, while sealed evidence still crosses
+  // the same terminal synchronization barrier before it is rendered.
+  observations_quarantined?: boolean;
 };
 
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
@@ -605,6 +869,16 @@ export class ApiError extends Error {
 // (e.g. by prompting the operator to clear a key that is shown only once).
 export function isAuthRejection(error: unknown): error is ApiError {
   return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+// Scoped run endpoints deliberately conceal revocation and cross-scope access
+// behind the same 404 used for a missing run. Consumers of those endpoints
+// must close the evidence surface for all three statuses instead of retrying.
+export function isRunAccessClosedError(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403 || error.status === 404)
+  );
 }
 
 function readStoredApiKey(): string | null {
@@ -658,7 +932,9 @@ export type ApiRequestContext = Readonly<{
   signal?: AbortSignal;
 }>;
 
-function combineSignals(...signals: Array<AbortSignal | null | undefined>): AbortSignal | undefined {
+function combineSignals(
+  ...signals: Array<AbortSignal | null | undefined>
+): AbortSignal | undefined {
   const present = signals.filter((signal): signal is AbortSignal => Boolean(signal));
   if (present.length === 0) {
     return undefined;
@@ -680,12 +956,14 @@ function combineSignals(...signals: Array<AbortSignal | null | undefined>): Abor
   return controller.signal;
 }
 
-function withSignal(init: RequestInit | undefined, signal: AbortSignal | undefined): RequestInit | undefined {
+function withSignal(
+  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
+): RequestInit | undefined {
   return signal ? { ...init, signal } : init;
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
-
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
   }
@@ -734,7 +1012,10 @@ async function request<T>(
   context?: ApiRequestContext,
 ): Promise<T> {
   if (context?.client) {
-    return context.client.request<T>(path, { ...init, signal: combineSignals(init?.signal, context.signal) });
+    return context.client.request<T>(path, {
+      ...init,
+      signal: combineSignals(init?.signal, context.signal),
+    });
   }
   const response = await fetch(
     `${apiBaseUrl}${path}`,
@@ -774,7 +1055,6 @@ export async function downloadFile(
 }
 
 async function parseDownloadResponse(response: Response): Promise<DownloadedFile> {
-
   if (response.status === 401) {
     throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
   }
@@ -883,6 +1163,68 @@ export function getSystemInterfaces(context?: ApiRequestContext): Promise<System
   return request<SystemInterface[]>("/system/interfaces", undefined, context);
 }
 
+export function getNmapCapability(input: {
+  projectId: string;
+  siteId: string;
+  context?: ApiRequestContext;
+}): Promise<NmapCapabilityResponse> {
+  const query = new URLSearchParams({
+    project_id: input.projectId,
+    site_id: input.siteId,
+  });
+  return request<NmapCapabilityResponse>(`/nmap/capability?${query}`, undefined, input.context);
+}
+
+export function listNmapDeploymentPolicies(
+  context?: ApiRequestContext,
+): Promise<NmapDeploymentPolicyResponse[]> {
+  return request<NmapDeploymentPolicyResponse[]>("/nmap/policies", undefined, context);
+}
+
+export function createNmapDeploymentPolicy(
+  policy: NmapDeploymentPolicyCreateRequest,
+  context?: ApiRequestContext,
+): Promise<NmapDeploymentPolicyResponse> {
+  return request<NmapDeploymentPolicyResponse>(
+    "/nmap/policies",
+    {
+      body: JSON.stringify(policy),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    context,
+  );
+}
+
+export function detectNmapInstallations(
+  context?: ApiRequestContext,
+): Promise<NmapDetectedInstallationResponse[]> {
+  return request<NmapDetectedInstallationResponse[]>(
+    "/nmap/installations/detected",
+    undefined,
+    context,
+  );
+}
+
+export function confirmNmapInstallation(input: {
+  fingerprintSha256: string;
+  reason: string;
+  context?: ApiRequestContext;
+}): Promise<NmapInstallationConfirmationResponse> {
+  return request<NmapInstallationConfirmationResponse>(
+    "/nmap/installations/confirm",
+    {
+      body: JSON.stringify({
+        fingerprint_sha256: input.fingerprintSha256,
+        reason: input.reason,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Identity + RBAC (Phase 4b).
 //
@@ -904,17 +1246,25 @@ export function createUser(input: {
   role: Role;
   context?: ApiRequestContext;
 }): Promise<CreateUserResponse> {
-  return request<CreateUserResponse>("/users", {
-    body: JSON.stringify({ role: input.role, username: input.username }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+  return request<CreateUserResponse>(
+    "/users",
+    {
+      body: JSON.stringify({ role: input.role, username: input.username }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function deactivateUser(userId: string, context?: ApiRequestContext): Promise<UserRecord> {
-  return request<UserRecord>(`/users/${encodeURIComponent(userId)}/deactivate`, {
-    method: "POST",
-  }, context);
+  return request<UserRecord>(
+    `/users/${encodeURIComponent(userId)}/deactivate`,
+    {
+      method: "POST",
+    },
+    context,
+  );
 }
 
 // Admin-only lost-key recovery: invalidates the user's current key immediately
@@ -924,9 +1274,13 @@ export function reissueUserKey(
   userId: string,
   context?: ApiRequestContext,
 ): Promise<CreateUserResponse> {
-  return request<CreateUserResponse>(`/users/${encodeURIComponent(userId)}/key`, {
-    method: "POST",
-  }, context);
+  return request<CreateUserResponse>(
+    `/users/${encodeURIComponent(userId)}/key`,
+    {
+      method: "POST",
+    },
+    context,
+  );
 }
 
 export function updateUserRole(
@@ -934,11 +1288,15 @@ export function updateUserRole(
   role: Role,
   context?: ApiRequestContext,
 ): Promise<UserRecord> {
-  return request<UserRecord>(`/users/${encodeURIComponent(userId)}/role`, {
-    body: JSON.stringify({ role }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, context);
+  return request<UserRecord>(
+    `/users/${encodeURIComponent(userId)}/role`,
+    {
+      body: JSON.stringify({ role }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    context,
+  );
 }
 
 export function getScopeActivationPreflight(
@@ -1006,22 +1364,30 @@ export function validateConfiguration(
   configuration: ConfigurationSnapshot,
   context?: ApiRequestContext,
 ): Promise<ConfigurationValidationResult> {
-  return request<ConfigurationValidationResult>("/configuration/validate", {
-    body: JSON.stringify(configuration),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, context);
+  return request<ConfigurationValidationResult>(
+    "/configuration/validate",
+    {
+      body: JSON.stringify(configuration),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    context,
+  );
 }
 
 export function updateConfiguration(
   configuration: ConfigurationSnapshot,
   context?: ApiRequestContext,
 ): Promise<ConfigurationSnapshot> {
-  return request<ConfigurationSnapshot>("/configuration", {
-    body: JSON.stringify(configuration),
-    headers: { "Content-Type": "application/json" },
-    method: "PUT",
-  }, context);
+  return request<ConfigurationSnapshot>(
+    "/configuration",
+    {
+      body: JSON.stringify(configuration),
+      headers: { "Content-Type": "application/json" },
+      method: "PUT",
+    },
+    context,
+  );
 }
 
 // Query string for the optional project/site scoping the configuration
@@ -1185,16 +1551,20 @@ export function storeSecretMaterial(input: {
   fileName?: string | null;
   context?: ApiRequestContext;
 }): Promise<SecretMaterialResponse> {
-  return request<SecretMaterialResponse>("/configuration/secrets", {
-    body: JSON.stringify({
-      content: input.content,
-      field: input.field,
-      file_name: input.fileName ?? null,
-      section: "certificates",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+  return request<SecretMaterialResponse>(
+    "/configuration/secrets",
+    {
+      body: JSON.stringify({
+        content: input.content,
+        field: input.field,
+        file_name: input.fileName ?? null,
+        section: "certificates",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function listImportProfiles(context?: ApiRequestContext): Promise<ImportProfileSummary[]> {
@@ -1214,10 +1584,14 @@ export function createImport(input: {
   body.append("site_id", input.siteId ?? "demo-site");
   body.append("file", input.file);
 
-  return request<ImportBatchSummary>("/imports", {
-    body,
-    method: "POST",
-  }, input.context);
+  return request<ImportBatchSummary>(
+    "/imports",
+    {
+      body,
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 // Per-row rejection reasons for one import. The POST above returns only the
@@ -1227,7 +1601,11 @@ export function getImportErrors(
   importId: string,
   context?: ApiRequestContext,
 ): Promise<ImportErrorReport> {
-  return request<ImportErrorReport>(`/imports/${encodeURIComponent(importId)}/errors`, undefined, context);
+  return request<ImportErrorReport>(
+    `/imports/${encodeURIComponent(importId)}/errors`,
+    undefined,
+    context,
+  );
 }
 
 // Newest usable (non-empty) import of a given type for the current project/site.
@@ -1249,14 +1627,16 @@ export function getLatestImport(
     project_id: projectId,
     site_id: siteId,
   });
-  return request<ImportBatchSummary>(`/imports/latest?${query.toString()}`, undefined, context).catch(
-    (error: unknown) => {
-      if (error instanceof ApiError && error.status === 404) {
-        return null;
-      }
-      throw error;
-    },
-  );
+  return request<ImportBatchSummary>(
+    `/imports/latest?${query.toString()}`,
+    undefined,
+    context,
+  ).catch((error: unknown) => {
+    if (error instanceof ApiError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  });
 }
 
 // One uploaded non-published UDMI schema set: payloads that declare this
@@ -1285,22 +1665,33 @@ export function uploadUdmiSchemaSet(input: {
   for (const file of input.files) {
     body.append("files", file);
   }
-  return request<UdmiSchemaSet>("/udmi/schemas", {
-    body,
-    method: "POST",
-  }, input.context);
+  return request<UdmiSchemaSet>(
+    "/udmi/schemas",
+    {
+      body,
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function deleteUdmiSchemaSet(
   versionLabel: string,
   context?: ApiRequestContext,
 ): Promise<void> {
-  return request<void>(`/udmi/schemas/${encodeURIComponent(versionLabel)}`, {
-    method: "DELETE",
-  }, context);
+  return request<void>(
+    `/udmi/schemas/${encodeURIComponent(versionLabel)}`,
+    {
+      method: "DELETE",
+    },
+    context,
+  );
 }
 
-export function getImportTemplatePath(importType: ImportType, format: ImportTemplateFormat): string {
+export function getImportTemplatePath(
+  importType: ImportType,
+  format: ImportTemplateFormat,
+): string {
   return `/imports/templates/${encodeURIComponent(importType)}.${format}`;
 }
 
@@ -1332,16 +1723,188 @@ export function startDiscoveryRun(input: {
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
-  return request<JobAcceptedResponse>(`/discovery/${input.runKind}/runs`, {
-    body: JSON.stringify({
-      job_type: input.jobType,
-      parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
-      project_id: input.workspace?.projectId ?? "demo-project",
-      site_id: input.workspace?.siteId ?? "demo-site",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+  return request<JobAcceptedResponse>(
+    `/discovery/${input.runKind}/runs`,
+    {
+      body: JSON.stringify({
+        job_type: input.jobType,
+        parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
+        project_id: input.workspace?.projectId ?? "demo-project",
+        site_id: input.workspace?.siteId ?? "demo-site",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+type NetworkDiscoveryRunKind = Exclude<DiscoveryRunKind, "mqtt">;
+type NetworkDiscoveryJobType = Extract<JobType, "ip_discovery" | "bacnet_discovery">;
+
+export function startDiscoveryPreview(input: {
+  runKind: NetworkDiscoveryRunKind;
+  jobType: NetworkDiscoveryJobType;
+  parameters: Record<string, unknown> & { dry_run: true };
+  workspace: WorkspaceRef;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    `/discovery/${input.runKind}/runs`,
+    {
+      body: JSON.stringify({
+        job_type: input.jobType,
+        parameters: input.parameters,
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function startAuthorizedDiscoveryRun(input: {
+  runKind: NetworkDiscoveryRunKind;
+  jobType: NetworkDiscoveryJobType;
+  previewRunId: string;
+  scanAuthorizationId: string;
+  workspace: WorkspaceRef;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    `/discovery/${input.runKind}/runs`,
+    {
+      body: JSON.stringify({
+        job_type: input.jobType,
+        preview_run_id: input.previewRunId,
+        scan_authorization_id: input.scanAuthorizationId,
+        parameters: {},
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export type BacnetPropertyName =
+  | "object_name"
+  | "present_value"
+  | "units"
+  | "status_flags"
+  | "reliability"
+  | "out_of_service"
+  | "description";
+
+export function startBacnetPropertyRun(input: {
+  parentRunId: string;
+  deviceInstance: number;
+  destination?: string;
+  requestedReadSet: BacnetPropertyName[];
+  previewRunId?: string;
+  scanAuthorizationId?: string;
+  workspace: WorkspaceRef;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  const live = Boolean(input.previewRunId || input.scanAuthorizationId);
+  return request<JobAcceptedResponse>(
+    "/discovery/bacnet/property-runs",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        parent_run_id: input.parentRunId,
+        device_instance: input.deviceInstance,
+        destination: input.destination,
+        requested_read_set: input.requestedReadSet,
+        ...(live
+          ? {
+              preview_run_id: input.previewRunId,
+              scan_authorization_id: input.scanAuthorizationId,
+              parameters: {},
+            }
+          : { parameters: { dry_run: true } }),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function createScanAuthorization(input: {
+  previewRunId: string;
+  ticket: string;
+  purpose: string;
+  notBefore: string;
+  notAfter: string;
+  context?: ApiRequestContext;
+}): Promise<ScanAuthorizationV1> {
+  return request<ScanAuthorizationV1>(
+    "/discovery/scan-authorizations",
+    {
+      body: JSON.stringify({
+        preview_run_id: input.previewRunId,
+        ticket: input.ticket,
+        purpose: input.purpose,
+        not_before: input.notBefore,
+        not_after: input.notAfter,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function listScanAuthorizations(input: {
+  workspace: WorkspaceRef;
+  previewRunId?: string;
+  context?: ApiRequestContext;
+}): Promise<ScanAuthorizationV1[]> {
+  const query = new URLSearchParams({
+    project_id: input.workspace.projectId,
+    site_id: input.workspace.siteId,
+  });
+  if (input.previewRunId) {
+    query.set("preview_run_id", input.previewRunId);
+  }
+  return request<ScanAuthorizationV1[]>(
+    `/discovery/scan-authorizations?${query.toString()}`,
+    undefined,
+    input.context,
+  );
+}
+
+export function getScanAuthorization(
+  authorizationId: string,
+  context?: ApiRequestContext,
+): Promise<ScanAuthorizationV1> {
+  return request<ScanAuthorizationV1>(
+    `/discovery/scan-authorizations/${encodeURIComponent(authorizationId)}`,
+    undefined,
+    context,
+  );
+}
+
+export function revokeScanAuthorization(input: {
+  authorizationId: string;
+  reason: string;
+  context?: ApiRequestContext;
+}): Promise<ScanAuthorizationV1> {
+  return request<ScanAuthorizationV1>(
+    `/discovery/scan-authorizations/${encodeURIComponent(input.authorizationId)}/revoke`,
+    {
+      body: JSON.stringify({ reason: input.reason }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function startValidationRun(input: {
@@ -1351,16 +1914,20 @@ export function startValidationRun(input: {
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
-  return request<JobAcceptedResponse>(`/validation/${input.runKind}/runs`, {
-    body: JSON.stringify({
-      job_type: input.jobType,
-      parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
-      project_id: input.workspace?.projectId ?? "demo-project",
-      site_id: input.workspace?.siteId ?? "demo-site",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+  return request<JobAcceptedResponse>(
+    `/validation/${input.runKind}/runs`,
+    {
+      body: JSON.stringify({
+        job_type: input.jobType,
+        parameters: { requested_from: "frontend-review", ...(input.parameters ?? {}) },
+        project_id: input.workspace?.projectId ?? "demo-project",
+        site_id: input.workspace?.siteId ?? "demo-site",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export type ConfigPublishPoint = { point: string; value: string | number | boolean };
@@ -1396,39 +1963,46 @@ export function startMqttConfigPublishRun(input: {
   for (const pair of allExpected) {
     points[pair.point.trim()] = { present_value: pair.value };
   }
-  return request<JobAcceptedResponse>("/validation/mqtt-config/runs", {
-    body: JSON.stringify({
-      job_type: "mqtt_config_publish",
-      parameters: {
-        // A live-broker publish is a real network write, so the backend gates it
-        // behind the authorization contract (403 without it). The operator's
-        // explicit "publish through the broker" choice plus the confirm checkbox
-        // IS that authorization; the backend still stamps the real principal.
-        // Boolean shorthand only — the frontend never fabricates a
-        // scan_authorization block. Validate-only (no broker) needs none.
-        authorized: Boolean(input.useLiveBroker),
-        confirmed: input.confirmed,
-        expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
-        expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",
-        expected_points: allExpected.map((pair) => ({ point: pair.point.trim(), value: pair.value })),
-        pointset_topic: input.pointsetTopic ?? "",
-        next_pointset_payload: {
-          pointset: {
-            points,
+  return request<JobAcceptedResponse>(
+    "/validation/mqtt-config/runs",
+    {
+      body: JSON.stringify({
+        job_type: "mqtt_config_publish",
+        parameters: {
+          // A live-broker publish is a real network write, so the backend gates it
+          // behind the authorization contract (403 without it). The operator's
+          // explicit "publish through the broker" choice plus the confirm checkbox
+          // IS that authorization; the backend still stamps the real principal.
+          // Boolean shorthand only — the frontend never fabricates a
+          // scan_authorization block. Validate-only (no broker) needs none.
+          authorized: Boolean(input.useLiveBroker),
+          confirmed: input.confirmed,
+          expected_point: input.expectedPoint ?? allExpected[0]?.point ?? "",
+          expected_value: input.expectedValue ?? allExpected[0]?.value ?? "",
+          expected_points: allExpected.map((pair) => ({
+            point: pair.point.trim(),
+            value: pair.value,
+          })),
+          pointset_topic: input.pointsetTopic ?? "",
+          next_pointset_payload: {
+            pointset: {
+              points,
+            },
           },
+          payload: input.payload,
+          requested_from: "frontend-review",
+          topic: input.topic,
+          use_live_broker: Boolean(input.useLiveBroker),
+          wait_seconds: input.waitSeconds ?? 5,
         },
-        payload: input.payload,
-        requested_from: "frontend-review",
-        topic: input.topic,
-        use_live_broker: Boolean(input.useLiveBroker),
-        wait_seconds: input.waitSeconds ?? 5,
-      },
-      project_id: input.workspace?.projectId ?? "demo-project",
-      site_id: input.workspace?.siteId ?? "demo-site",
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+        project_id: input.workspace?.projectId ?? "demo-project",
+        site_id: input.workspace?.siteId ?? "demo-site",
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function getValidationRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
@@ -1452,20 +2026,24 @@ export function createReport(input: {
   workspace?: WorkspaceRef;
   context?: ApiRequestContext;
 }): Promise<ReportSummary> {
-  return request<ReportSummary>("/reports", {
-    body: JSON.stringify({
-      output_format: input.format ?? "zip",
-      project_id: input.workspace?.projectId ?? "demo-project",
-      report_type: input.reportType,
-      site_id: input.workspace?.siteId ?? "demo-site",
-      source_run_ids: input.sourceRunIds ?? [],
-      ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
-      ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
-      ...(input.udmiReportVariant ? { udmi_report_variant: input.udmiReportVariant } : {}),
-    }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+  return request<ReportSummary>(
+    "/reports",
+    {
+      body: JSON.stringify({
+        output_format: input.format ?? "zip",
+        project_id: input.workspace?.projectId ?? "demo-project",
+        report_type: input.reportType,
+        site_id: input.workspace?.siteId ?? "demo-site",
+        source_run_ids: input.sourceRunIds ?? [],
+        ...(input.reportTitle ? { report_title: input.reportTitle } : {}),
+        ...(input.udmiScope ? { udmi_scope: input.udmiScope } : {}),
+        ...(input.udmiReportVariant ? { udmi_report_variant: input.udmiReportVariant } : {}),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export function listReports(
@@ -1487,11 +2065,15 @@ export function deleteReports(input: {
   reportIds: string[];
   context?: ApiRequestContext;
 }): Promise<DeleteReportsResponse> {
-  return request<DeleteReportsResponse>("/reports/delete", {
-    body: JSON.stringify({ report_ids: input.reportIds }),
-    headers: { "Content-Type": "application/json" },
-    method: "POST",
-  }, input.context);
+  return request<DeleteReportsResponse>(
+    "/reports/delete",
+    {
+      body: JSON.stringify({ report_ids: input.reportIds }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 export type ListRunsParams = {
@@ -1533,14 +2115,21 @@ function buildRunsQuery(params?: ListRunsParams): string {
   return query ? `?${query}` : "";
 }
 
-export function listRuns(params?: ListRunsParams, context?: ApiRequestContext): Promise<RunListResponse> {
+export function listRuns(
+  params?: ListRunsParams,
+  context?: ApiRequestContext,
+): Promise<RunListResponse> {
   return request<RunListResponse>(`/runs${buildRunsQuery(params)}`, undefined, context);
 }
 
 export function cancelRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
-  return request<RunRecord>(`/runs/${encodeURIComponent(runId)}/cancel`, {
-    method: "POST",
-  }, context);
+  return request<RunRecord>(
+    `/runs/${encodeURIComponent(runId)}/cancel`,
+    {
+      method: "POST",
+    },
+    context,
+  );
 }
 
 export function getDiscoveryRun(runId: string, context?: ApiRequestContext): Promise<RunRecord> {
@@ -1551,14 +2140,73 @@ export function getDiscoveryResults(
   runId: string,
   context?: ApiRequestContext,
 ): Promise<DiscoveryResultsResponse> {
-  return request<DiscoveryResultsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/results`, undefined, context);
+  return request<DiscoveryResultsResponse>(
+    `/discovery/runs/${encodeURIComponent(runId)}/results`,
+    undefined,
+    context,
+  );
+}
+
+export function getDiscoveryComparison(
+  candidateRunId: string,
+  baselineRunId: string,
+  context?: ApiRequestContext,
+): Promise<DiscoveryComparisonResponse> {
+  const query = new URLSearchParams({ against: baselineRunId });
+  return request<DiscoveryComparisonResponse>(
+    `/discovery/runs/${encodeURIComponent(candidateRunId)}/comparison?${query.toString()}`,
+    undefined,
+    context,
+  );
+}
+
+export function getDiscoveryObservations(
+  runId: string,
+  after: number,
+  limit = 100,
+  context?: ApiRequestContext,
+): Promise<DiscoveryObservationPage> {
+  const query = new URLSearchParams({
+    after: String(after),
+    limit: String(limit),
+  });
+  return request<DiscoveryObservationPage>(
+    `/discovery/runs/${encodeURIComponent(runId)}/observations?${query.toString()}`,
+    undefined,
+    context,
+  );
 }
 
 export function getDiscoveryTopics(
   runId: string,
   context?: ApiRequestContext,
 ): Promise<DiscoveryTopicsResponse> {
-  return request<DiscoveryTopicsResponse>(`/discovery/runs/${encodeURIComponent(runId)}/topics`, undefined, context);
+  return request<DiscoveryTopicsResponse>(
+    `/discovery/runs/${encodeURIComponent(runId)}/topics`,
+    undefined,
+    context,
+  );
+}
+
+export function getDiscoveryPoints(
+  runId: string,
+  input: {
+    after?: string | null;
+    limit?: number;
+    search?: string | null;
+    context?: ApiRequestContext;
+  } = {},
+): Promise<DiscoveryPointsResponse> {
+  const query = new URLSearchParams();
+  if (input.after) query.set("after", input.after);
+  if (typeof input.limit === "number") query.set("limit", String(input.limit));
+  if (input.search) query.set("search", input.search);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return request<DiscoveryPointsResponse>(
+    `/discovery/runs/${encodeURIComponent(runId)}/points${suffix}`,
+    undefined,
+    input.context,
+  );
 }
 
 // Path (display-only; download via downloadFile so the X-API-Key header rides)
@@ -1599,6 +2247,8 @@ export function rollbackMqttConfigPublish(
 
 // The status/stage/progress slice emitted per progress frame. Mirrors the
 // backend events._progress_payload shape.
+export type ProgressiveCounts = Record<string, number>;
+
 export type RunEvent = {
   run_id: string;
   job_type?: JobType;
@@ -1607,14 +2257,28 @@ export type RunEvent = {
   progress_percent?: number;
   updated_at?: string | null;
   error_message?: string | null;
+  observation_attempt?: number | null;
+  latest_observation_cursor?: number | null;
+  progressive_counts?: ProgressiveCounts;
 };
 
-export type RunEventName = "message" | "terminal" | "timeout" | "gone";
+export type RunControlEvent =
+  | { run_id: string; status: "closed" }
+  | { run_id: string; status: "unavailable" };
+
+export type RunEventPayload = RunEvent | RunControlEvent;
+
+export type RunEventName = "message" | "terminal" | "timeout" | "closed" | "unavailable";
+
+export type RunEventFrame =
+  | { name: "message" | "terminal" | "timeout"; data: RunEvent | null }
+  | { name: "closed"; data: Extract<RunControlEvent, { status: "closed" }> | null }
+  | { name: "unavailable"; data: Extract<RunControlEvent, { status: "unavailable" }> | null };
 
 export type RunEventCallbacks = {
   // Fired for every progress frame (the default "message" event) and for the
   // explicit "terminal" frame, so consumers always see the final state.
-  onEvent: (event: RunEvent, name: RunEventName) => void;
+  onEvent: (event: RunEventPayload, name: RunEventName) => void;
   // Fired once when the stream ends (terminal/timeout/closed) or errors. The
   // boolean reports whether the run reached a terminal status over the stream.
   onClose?: (reachedTerminal: boolean) => void;
@@ -1631,8 +2295,8 @@ const TERMINAL_EVENT_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>([
  * Parses accumulated SSE text into complete frames, returning the parsed
  * events and the unconsumed trailing buffer (a partial frame).
  */
-export function parseSseBuffer(buffer: string): { events: { name: RunEventName; data: RunEvent | null }[]; rest: string } {
-  const events: { name: RunEventName; data: RunEvent | null }[] = [];
+export function parseSseBuffer(buffer: string): { events: RunEventFrame[]; rest: string } {
+  const events: RunEventFrame[] = [];
   // SSE frames are separated by a blank line. Normalise CRLF first.
   const normalized = buffer.replace(/\r\n/g, "\n");
   const parts = normalized.split("\n\n");
@@ -1643,27 +2307,78 @@ export function parseSseBuffer(buffer: string): { events: { name: RunEventName; 
     if (!trimmed) {
       continue;
     }
-    let name: RunEventName = "message";
+    let rawName = "message";
     const dataLines: string[] = [];
     for (const line of trimmed.split("\n")) {
       if (line.startsWith("event:")) {
-        name = line.slice("event:".length).trim() as RunEventName;
+        rawName = line.slice("event:".length).trim();
       } else if (line.startsWith("data:")) {
         dataLines.push(line.slice("data:".length).trim());
       }
     }
-    let data: RunEvent | null = null;
+    const name = parseRunEventName(rawName);
+    if (name === null) {
+      continue;
+    }
+    let decoded: unknown = null;
     if (dataLines.length > 0) {
       try {
-        data = JSON.parse(dataLines.join("")) as RunEvent;
+        decoded = JSON.parse(dataLines.join(""));
       } catch {
         // A malformed data frame is skipped rather than aborting the stream.
-        data = null;
+        decoded = null;
       }
     }
-    events.push({ data, name });
+    if (name === "closed") {
+      events.push({ data: parseControlEvent(decoded, "closed"), name });
+    } else if (name === "unavailable") {
+      events.push({ data: parseControlEvent(decoded, "unavailable"), name });
+    } else {
+      events.push({ data: parseProgressEvent(decoded), name });
+    }
   }
   return { events, rest };
+}
+
+function parseRunEventName(value: string): RunEventName | null {
+  return value === "message" ||
+    value === "terminal" ||
+    value === "timeout" ||
+    value === "closed" ||
+    value === "unavailable"
+    ? value
+    : null;
+}
+
+function isJobStatus(value: unknown): value is JobStatus {
+  return (
+    value === "queued" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+export function isRunProgressEvent(value: RunEventPayload): value is RunEvent {
+  return isJobStatus(value.status);
+}
+
+function parseProgressEvent(value: unknown): RunEvent | null {
+  if (!isPlainObject(value) || typeof value.run_id !== "string" || !isJobStatus(value.status)) {
+    return null;
+  }
+  return value as RunEvent;
+}
+
+function parseControlEvent<TStatus extends RunControlEvent["status"]>(
+  value: unknown,
+  status: TStatus,
+): Extract<RunControlEvent, { status: TStatus }> | null {
+  if (!isPlainObject(value) || typeof value.run_id !== "string" || value.status !== status) {
+    return null;
+  }
+  return { run_id: value.run_id, status } as Extract<RunControlEvent, { status: TStatus }>;
 }
 
 /**
@@ -1732,7 +2447,10 @@ export function streamRunEvents(
         buffer = rest;
         for (const { name, data } of events) {
           if (data && data.run_id === runId) {
-            if (name === "terminal" || TERMINAL_EVENT_STATUSES.has(data.status)) {
+            if (
+              name === "terminal" ||
+              (isRunProgressEvent(data) && TERMINAL_EVENT_STATUSES.has(data.status))
+            ) {
               reachedTerminal = true;
             }
             callbacks.onEvent(data, name);

@@ -7,6 +7,26 @@ from pydantic import ValidationError
 
 
 class RunHeartbeatConfigurationTests(unittest.TestCase):
+    def test_operator_managed_nmap_is_an_explicit_deployment_opt_in(self) -> None:
+        defaults = Settings(_env_file=None)
+        self.assertFalse(defaults.nmap_internal_provider_enabled)
+
+        configured = Settings(
+            _env_file=None,
+            nmap_internal_provider_enabled=True,
+        )
+        self.assertTrue(configured.nmap_internal_provider_enabled)
+
+    def test_network_executor_identity_is_optional_but_normalized(self) -> None:
+        defaults = Settings(_env_file=None)
+        self.assertIsNone(defaults.network_executor_id)
+
+        configured = Settings(
+            _env_file=None,
+            network_executor_id="  field-netns-7  ",
+        )
+        self.assertEqual(configured.network_executor_id, "field-netns-7")
+
     def test_secure_defaults_match_release_policy(self) -> None:
         settings = Settings(
             _env_file=None,

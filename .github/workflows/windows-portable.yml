@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.40
+        default: v0.1.41
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -23,7 +23,7 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.40.md"
+      - "docs/migration-rollback-v0.1.41.md"
       - ".github/workflows/windows-portable.yml"
   push:
     branches: [main]
@@ -37,7 +37,7 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.40.md"
+      - "docs/migration-rollback-v0.1.41.md"
       - ".github/workflows/windows-portable.yml"
 
 permissions:
@@ -48,7 +48,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.40' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.41' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -73,8 +73,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.40') {
-            throw "This workflow is pinned to v0.1.40, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.41') {
+            throw "This workflow is pinned to v0.1.41, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -155,8 +155,11 @@ jobs:
               Set-Content -LiteralPath $npmSbom -Encoding utf8
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.40.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.41.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
+          python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
+            --sbom $pythonSbom --sbom $npmSbom
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Portable acceptance path with spaces, heartbeat, Stop, report, and logs
         shell: pwsh
@@ -173,6 +176,7 @@ jobs:
           $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
           $env:RUN_LEASE_SECONDS = '15'
           $env:RUN_HEARTBEAT_SECONDS = '2'
+          $env:SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED = '0'
           Set-Content -LiteralPath $stdin -Value '' -NoNewline
 
           $productVersion = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
@@ -206,6 +210,12 @@ jobs:
             if (-not $healthUrl) { throw 'Could not discover the portable API URL.' }
             $health = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 5
             if ($health.StatusCode -ne 200) { throw 'Portable health endpoint did not return HTTP 200.' }
+            $openApiUrl = $healthUrl -replace '/api/v1/health$', '/openapi.json'
+            $openApi = Invoke-RestMethod -Uri $openApiUrl -TimeoutSec 10
+            $routeNames = @($openApi.paths.PSObject.Properties.Name)
+            if ($routeNames -contains '/api/v1/nmap/xml-import') {
+              throw 'External portable route table exposed the Nmap XML parser endpoint.'
+            }
 
             $actualProcess = Get-Process -Id $proc.Id
             if ([IO.Path]::GetFullPath($actualProcess.Path) -cne [IO.Path]::GetFullPath($exe)) {
@@ -228,6 +238,29 @@ jobs:
               --stdout-log $out --stderr-log $err `
               --output (Join-Path $bundle 'windows-acceptance.json')
             if ($LASTEXITCODE -ne 0) { throw 'Portable release acceptance helper failed.' }
+            $nmapPreviewBody = @{
+              project_id = 'portable-release-project'
+              site_id = 'portable-release-site'
+              job_type = 'ip_discovery'
+              parameters = @{
+                dry_run = $true
+                provider = 'operator_managed_nmap'
+                nmap_profile = 'tcp_connect_inventory'
+                addresses = @('192.0.2.10')
+                ports = @(443)
+              }
+            } | ConvertTo-Json -Depth 6
+            $nmapPreview = Invoke-WebRequest `
+              -Uri "$apiBase/api/v1/discovery/ip/runs" `
+              -Method Post -ContentType 'application/json' -Body $nmapPreviewBody `
+              -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 15
+            if ($nmapPreview.StatusCode -ne 409) {
+              throw "External portable Nmap preview returned HTTP $($nmapPreview.StatusCode), not 409."
+            }
+            $nmapPreviewError = $nmapPreview.Content | ConvertFrom-Json
+            if ($nmapPreviewError.detail -cne 'Operator-managed Nmap is disabled in this deployment.') {
+              throw 'External portable Nmap preview did not return the deployment-gate error.'
+            }
             if (Test-Path -LiteralPath (Join-Path $launchRoot 'runtime\smart_commissioning.db')) {
               throw 'Portable state leaked beside the executable.'
             }
@@ -279,7 +312,7 @@ jobs:
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/validate_v0140_release_evidence.py `
+          python scripts/validate_v0141_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `
@@ -306,7 +339,21 @@ jobs:
       - name: Scan Windows portable evidence for credential material
         shell: pwsh
         run: |
-          python scripts/scan_v0140_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
+          python scripts/scan_v0141_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and scan the exact portable release ZIP
+        shell: pwsh
+        run: |
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable'
+          $temporaryZip = Join-Path $env:RUNNER_TEMP 'SmartCommissioningApp-windows-portable.zip'
+          $releaseZip = Join-Path $bundle 'SmartCommissioningApp-windows-portable.zip'
+          Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $bundle -Force).FullName `
+            -DestinationPath $temporaryZip -CompressionLevel Optimal
+          Move-Item -LiteralPath $temporaryZip -Destination $releaseZip
+          python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
+            --sbom (Join-Path $bundle 'SBOM.python.cdx.json') `
+            --sbom (Join-Path $bundle 'SBOM.npm.cdx.json')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload bundle artifact

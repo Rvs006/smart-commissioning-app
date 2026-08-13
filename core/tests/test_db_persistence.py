@@ -2,7 +2,7 @@ import json
 import runpy
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -534,6 +534,35 @@ class ImportRepositoryTests(SqliteTestCase):
 
         with self.assertRaises(FileNotFoundError):
             self.repository.get("imp_missing")
+
+    def test_monotonic_scope_created_at_makes_second_equal_timestamp_import_newest(self) -> None:
+        created_at = datetime(2026, 8, 11, 12, 0, tzinfo=UTC)
+
+        def create(import_id: str) -> dict[str, object]:
+            return self.repository.create(
+                import_id=import_id,
+                import_type="mqtt_register",
+                project_id="demo-project",
+                site_id="demo-site",
+                original_filename=f"{import_id}.csv",
+                stored_file_path=f"runtime/imports/files/{import_id}.csv",
+                summary={"import_id": import_id, "created_at": created_at.isoformat()},
+                created_at=created_at,
+                monotonic_scope_created_at=True,
+            )
+
+        first = create("imp_z_first")
+        second = create("imp_a_second")
+
+        listed = self.repository.list(
+            project_id="demo-project",
+            site_id="demo-site",
+            import_type="mqtt_register",
+        )
+        self.assertEqual([record["import_id"] for record in listed], ["imp_a_second", "imp_z_first"])
+        self.assertEqual(first["created_at"], created_at.isoformat())
+        self.assertEqual(second["created_at"], (created_at + timedelta(microseconds=1)).isoformat())
+        self.assertEqual(second["summary"]["created_at"], second["created_at"])
 
 
 class MigrationTests(unittest.TestCase):

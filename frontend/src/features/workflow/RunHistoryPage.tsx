@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate, useSearchParams } from "react-router";
 import {
   downloadFile,
+  getDiscoveryComparison,
   getValidationJsonExportPath,
   listRuns,
   type JobStatus,
@@ -99,11 +101,15 @@ function saveBlob(blob: Blob, filename: string): void {
 
 export function RunHistoryPage() {
   const { apiClient, sessionScopeId, workspace } = useSession();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [jobType, setJobType] = useState<JobType | "">("");
   const [status, setStatus] = useState<JobStatus | "">("");
   const [sortDir, setSortDir] = useState<SortDirection>("desc");
   const [jsonPendingRunId, setJsonPendingRunId] = useState<string | null>(null);
   const [jsonDownloadError, setJsonDownloadError] = useState<string | null>(null);
+  const [baselineRunId, setBaselineRunId] = useState(searchParams.get("baseline") ?? "");
+  const [candidateRunId, setCandidateRunId] = useState(searchParams.get("candidate") ?? "");
 
   // One fetch of the full history; filter + sort + export happen client-side over
   // that array, so the exported rows are exactly what the table shows. Reuse the
@@ -131,18 +137,74 @@ export function RunHistoryPage() {
     );
     const dir = sortDir === "desc" ? -1 : 1;
     // Sort by Started (created_at); default newest-first.
-    return [...filtered].sort((a, b) => dir * (Date.parse(a.created_at) - Date.parse(b.created_at)));
+    return [...filtered].sort(
+      (a, b) => dir * (Date.parse(a.created_at) - Date.parse(b.created_at)),
+    );
   }, [runsQuery.data, jobType, status, sortDir]);
+
+  const comparableRuns = useMemo(
+    () =>
+      visibleRuns.filter(
+        (run) =>
+          isTerminalStatus(run.status) &&
+          run.status === "succeeded" &&
+          ["ip_discovery", "bacnet_discovery", "mqtt_discovery"].includes(run.job_type),
+      ),
+    [visibleRuns],
+  );
+
+  const compareQuery = useQuery({
+    enabled: Boolean(baselineRunId && candidateRunId && baselineRunId !== candidateRunId),
+    queryKey: [
+      "discovery-comparison",
+      sessionScopeId,
+      workspace.projectId,
+      workspace.siteId,
+      baselineRunId,
+      candidateRunId,
+    ],
+    queryFn: ({ signal }) =>
+      getDiscoveryComparison(candidateRunId, baselineRunId, {
+        client: apiClient,
+        signal,
+      }),
+  });
+
+  const updateComparisonPair = (baseline: string, candidate: string) => {
+    setBaselineRunId(baseline);
+    setCandidateRunId(candidate);
+    const next = new URLSearchParams(searchParams);
+    if (baseline) next.set("baseline", baseline);
+    else next.delete("baseline");
+    if (candidate) next.set("candidate", candidate);
+    else next.delete("candidate");
+    setSearchParams(next);
+  };
+
+  const comparisonModulePath = (jobTypeValue: JobType | undefined): string =>
+    jobTypeValue === "ip_discovery"
+      ? "/ip-scanner"
+      : jobTypeValue === "bacnet_discovery"
+        ? "/bacnet-discovery"
+        : "/mqtt-discovery";
+
+  const openComparison = () => {
+    if (!compareQuery.data?.compatible) return;
+    const modulePath = comparisonModulePath(
+      comparableRuns.find((run) => run.run_id === candidateRunId)?.job_type,
+    );
+    navigate(
+      `${modulePath}?run=${encodeURIComponent(candidateRunId)}&compare=${encodeURIComponent(baselineRunId)}`,
+    );
+  };
 
   const downloadValidationJson = async (runId: string) => {
     setJsonPendingRunId(runId);
     setJsonDownloadError(null);
     try {
-      const { blob, filename } = await downloadFile(
-        getValidationJsonExportPath(runId),
-        undefined,
-        { client: apiClient },
-      );
+      const { blob, filename } = await downloadFile(getValidationJsonExportPath(runId), undefined, {
+        client: apiClient,
+      });
       saveBlob(blob, filename ?? `udmi-validation-${runId}.json`);
     } catch (cause) {
       setJsonDownloadError(cause instanceof Error ? cause.message : "Raw JSON download failed.");
@@ -241,6 +303,80 @@ export function RunHistoryPage() {
         </div>
       </section>
 
+      <section className="surface" aria-label="Sealed run comparison">
+        <div className="surface-heading">
+          <div>
+            <span className="eyebrow">Compare</span>
+            <h3>Pair two sealed runs</h3>
+          </div>
+          <button
+            className="secondary-button compact"
+            disabled={!compareQuery.data?.compatible}
+            onClick={openComparison}
+            type="button"
+          >
+            Open in module
+          </button>
+        </div>
+        <div className="hub-filter-grid">
+          <label>
+            Baseline
+            <select
+              aria-label="Comparison baseline"
+              onChange={(event) => updateComparisonPair(event.target.value, candidateRunId)}
+              value={baselineRunId}
+            >
+              <option value="">Select baseline</option>
+              {comparableRuns.map((run) => (
+                <option
+                  disabled={run.run_id === candidateRunId}
+                  key={run.run_id}
+                  value={run.run_id}
+                >
+                  {run.run_id} · {humanizeJobType(run.job_type)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Candidate
+            <select
+              aria-label="Comparison candidate"
+              onChange={(event) => updateComparisonPair(baselineRunId, event.target.value)}
+              value={candidateRunId}
+            >
+              <option value="">Select candidate</option>
+              {comparableRuns.map((run) => (
+                <option disabled={run.run_id === baselineRunId} key={run.run_id} value={run.run_id}>
+                  {run.run_id} · {humanizeJobType(run.job_type)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {compareQuery.isError && (
+          <div className="state-panel error" role="alert">
+            <strong>Comparison unavailable</strong>
+            <span>
+              {compareQuery.error instanceof Error ? compareQuery.error.message : "Request failed."}
+            </span>
+          </div>
+        )}
+        {compareQuery.data && !compareQuery.data.compatible && (
+          <div className="state-panel" role="status">
+            <strong>Runs cannot be compared</strong>
+            <span>{compareQuery.data.reason ?? "The sealed runs are incompatible."}</span>
+          </div>
+        )}
+        {compareQuery.data?.compatible && (
+          <div className="comparison-summary" aria-live="polite">
+            <span>{compareQuery.data.additions.length} additions</span>
+            <span>{compareQuery.data.removals.length} removals</span>
+            <span>{compareQuery.data.changes.length} changes</span>
+          </div>
+        )}
+      </section>
+
       <section className="surface">
         <div className="surface-heading">
           <div>
@@ -322,7 +458,9 @@ export function RunHistoryPage() {
                               <small>Cadence: eligible</small>
                             ) : null}
                             {run.termination_reason ? (
-                              <small>Ended: {humanizeStage(run.termination_reason ?? undefined)}</small>
+                              <small>
+                                Ended: {humanizeStage(run.termination_reason ?? undefined)}
+                              </small>
                             ) : null}
                           </div>
                         ) : (

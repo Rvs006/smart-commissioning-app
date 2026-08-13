@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   alignPayloadDiff,
   diffPayloadLines,
-  isPlainObject,
   tokenizeJsonLine,
   type AlignedRow,
   type DiffLine,
@@ -15,7 +14,9 @@ function assertStringifyInvariant(value: unknown, other: unknown): void {
   const diff = diffPayloadLines(value, other);
   expect(diff.expected.map((line) => line.text).join("\n")).toBe(JSON.stringify(value, null, 2));
   const reversed = diffPayloadLines(other, value);
-  expect(reversed.observed.map((line) => line.text).join("\n")).toBe(JSON.stringify(value, null, 2));
+  expect(reversed.observed.map((line) => line.text).join("\n")).toBe(
+    JSON.stringify(value, null, 2),
+  );
 }
 
 function markedText(lines: DiffLine[], mark: DiffLine["mark"]): string[] {
@@ -89,7 +90,10 @@ describe("diffPayloadLines — presence marking", () => {
     // version 1.5.2 vs 1.4.0 and unit spelling differences are NOT highlighted:
     // expected values are template sentinels, so only presence is compared.
     const expected = { version: "1.5.2", pointset: { points: { sensor: { units: "kwh" } } } };
-    const observed = { version: "1.4.0", pointset: { points: { sensor: { units: "kilowatt_hours" } } } };
+    const observed = {
+      version: "1.4.0",
+      pointset: { points: { sensor: { units: "kilowatt_hours" } } },
+    };
 
     const diff = diffPayloadLines(expected, observed);
     expect(markedText(diff.expected, "only-expected")).toEqual([]);
@@ -119,17 +123,6 @@ describe("diffPayloadLines — presence marking", () => {
   });
 });
 
-describe("isPlainObject", () => {
-  it("accepts plain objects and rejects arrays, null, and primitives", () => {
-    expect(isPlainObject({})).toBe(true);
-    expect(isPlainObject({ a: 1 })).toBe(true);
-    expect(isPlainObject([])).toBe(false);
-    expect(isPlainObject(null)).toBe(false);
-    expect(isPlainObject("x")).toBe(false);
-    expect(isPlainObject(3)).toBe(false);
-  });
-});
-
 function joinSide(rows: AlignedRow[], side: "expected" | "observed"): string {
   return rows
     .map((row) => row[side])
@@ -144,11 +137,20 @@ describe("alignPayloadDiff — parse-back invariant (ITEM-8)", () => {
   // that replaces diffPayloadLines' byte-for-byte invariant).
   it("each side's non-filler lines parse back deep-equal to the input", () => {
     const cases: Array<[unknown, unknown]> = [
-      [{ a: 1, b: { c: 2 } }, { b: { c: 9 }, a: 5 }], // reordered keys
-      [{ version: "1.5.2", points: { x: { v: 1 } } }, { points: { y: { v: 2 } }, version: "1.4.0" }],
+      [
+        { a: 1, b: { c: 2 } },
+        { b: { c: 9 }, a: 5 },
+      ], // reordered keys
+      [
+        { version: "1.5.2", points: { x: { v: 1 } } },
+        { points: { y: { v: 2 } }, version: "1.4.0" },
+      ],
       [{ only_e: 1 }, { only_o: 2 }],
       [{}, { a: 1 }],
-      [{ a: [1, 2], b: 3 }, { a: [3], b: 4 }], // arrays are leaves
+      [
+        { a: [1, 2], b: 3 },
+        { a: [3], b: 4 },
+      ], // arrays are leaves
       [{ meta: { a: 1 } }, { meta: "n/a" }], // type mismatch
     ];
     for (const [expected, observed] of cases) {
@@ -221,9 +223,7 @@ describe("alignPayloadDiff — parse-back invariant (ITEM-8)", () => {
     expect(flagged).toHaveLength(1);
     expect(flagged[0].expected?.text).toContain('"units"');
     expect(flagged[0].observed?.text).toContain('"units"');
-    expect(
-      rows.find((row) => row.expected?.text.includes('"supply"'))?.flagged,
-    ).toBe(false);
+    expect(rows.find((row) => row.expected?.text.includes('"supply"'))?.flagged).toBe(false);
   });
 });
 
@@ -242,21 +242,27 @@ describe("tokenizeJsonLine (ITEM-8)", () => {
   });
 
   it("classifies numbers and literals", () => {
-    expect(tokenizeJsonLine("    22").some((t) => t.kind === "number" && t.text === "22")).toBe(true);
-    expect(tokenizeJsonLine("    -3.5,").some((t) => t.kind === "number" && t.text === "-3.5")).toBe(
+    expect(tokenizeJsonLine("    22").some((t) => t.kind === "number" && t.text === "22")).toBe(
       true,
     );
-    expect(tokenizeJsonLine("    true").some((t) => t.kind === "literal" && t.text === "true")).toBe(
-      true,
-    );
-    expect(tokenizeJsonLine("    null").some((t) => t.kind === "literal" && t.text === "null")).toBe(
-      true,
-    );
+    expect(
+      tokenizeJsonLine("    -3.5,").some((t) => t.kind === "number" && t.text === "-3.5"),
+    ).toBe(true);
+    expect(
+      tokenizeJsonLine("    true").some((t) => t.kind === "literal" && t.text === "true"),
+    ).toBe(true);
+    expect(
+      tokenizeJsonLine("    null").some((t) => t.kind === "literal" && t.text === "null"),
+    ).toBe(true);
   });
 
   it("round-trips every line shape this module emits", () => {
     for (const line of ["{", "  }", '  "a": {', "    -3.5,", "  []", '    "café"']) {
-      expect(tokenizeJsonLine(line).map((token) => token.text).join("")).toBe(line);
+      expect(
+        tokenizeJsonLine(line)
+          .map((token) => token.text)
+          .join(""),
+      ).toBe(line);
     }
   });
 });

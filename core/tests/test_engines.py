@@ -8,6 +8,7 @@ counter so we can assert the concurrency bound is never exceeded.
 """
 
 import asyncio
+import threading
 import unittest
 from typing import Any
 
@@ -127,6 +128,41 @@ def _scan_contract(
             },
         }
     }
+
+
+class ProgressiveObservationSinkTests(unittest.TestCase):
+    def test_cancelled_append_drains_the_executor_owned_sink(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        class BlockingStore(FakeRunStore):
+            def append_observation(self, _observation: object) -> object:
+                started.set()
+                release.wait(timeout=2.0)
+                completed.set()
+                return {"cursor": 1}
+
+        async def scenario() -> None:
+            context = _ctx(BlockingStore())
+            task = asyncio.create_task(context.append_observation({"event": 1}))
+            for _ in range(100):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(started.is_set())
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(
+                task.done(),
+                "cancellation must wait for the synchronous append to drain",
+            )
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(completed.is_set())
+
+        asyncio.run(scenario())
 
 
 class ThrottleConcurrencyTests(unittest.TestCase):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 import unittest
 
 from app.services.discovery_contract_service import (
@@ -11,6 +12,64 @@ from app.services.discovery_contract_service import (
     resolve_ip_discovery_parameters,
 )
 from smart_commissioning_core.run_context import canonical_json_bytes
+
+_TEST_SOURCE_INTERFACE_IDENTITY = {
+    "schema_version": "1.0",
+    "selection": "explicit",
+    "executor_scope": "test-network-executor",
+    "interface_id": "test-if:1",
+    "interface_name": "Test field NIC",
+    "source_ip": "192.0.2.10",
+    "prefix_length": 24,
+    "local_address": "192.0.2.10/24",
+    "default_route_metric": None,
+}
+
+
+def _source_parameters(**values: object) -> dict[str, object]:
+    parameters: dict[str, object] = {
+        "source_ip": "192.0.2.10",
+        "local_address": "192.0.2.10/24",
+    }
+    parameters.update(values)
+    if "source_interface_identity_v1" not in values:
+        if "local_address" in values and "source_ip" not in values:
+            local = ipaddress.ip_interface(str(parameters["local_address"]))
+            parameters["source_ip"] = str(local.ip)
+        elif "source_ip" in values and "local_address" not in values:
+            parameters["local_address"] = f'{parameters["source_ip"]}/32'
+        local = ipaddress.ip_interface(str(parameters["local_address"]))
+        parameters["source_interface_identity_v1"] = {
+            **_TEST_SOURCE_INTERFACE_IDENTITY,
+            "source_ip": str(parameters["source_ip"]),
+            "prefix_length": local.network.prefixlen,
+            "local_address": local.with_prefixlen,
+        }
+    return parameters
+
+
+_IP_PARAMETER_RESOLVER = resolve_ip_discovery_parameters
+_BACNET_PARAMETER_RESOLVER = resolve_bacnet_discovery_parameters
+
+
+def resolve_ip_discovery_parameters(
+    parameters: dict[str, object],
+    **options: object,
+) -> dict[str, object]:
+    return _IP_PARAMETER_RESOLVER(
+        _source_parameters(**parameters),
+        **options,
+    )
+
+
+def resolve_bacnet_discovery_parameters(
+    parameters: dict[str, object],
+    **options: object,
+) -> dict[str, object]:
+    return _BACNET_PARAMETER_RESOLVER(
+        _source_parameters(**parameters),
+        **options,
+    )
 
 
 def _record(
@@ -104,8 +163,28 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
         )
         self.repository = _ImportRepository([self.newer, self.older])
 
+    def test_register_targets_require_an_explicit_opt_in(self) -> None:
+        for parameters in (
+            {"dry_run": True},
+            {"dry_run": True, "use_register_addresses": False},
+            {"dry_run": True, "use_register_addresses": "false"},
+        ):
+            with self.subTest(parameters=parameters), self.assertRaisesRegex(
+                ValueError, "use_register_addresses=true"
+            ):
+                resolve_ip_discovery_parameters(
+                    parameters,
+                    project_id="project-a",
+                    site_id="site-a",
+                    import_repository=self.repository,
+                )
+
     def test_one_newest_record_supplies_targets_and_every_optional_map(self) -> None:
-        source_parameters = {"dry_run": True, "ports": [80]}
+        source_parameters = {
+            "dry_run": True,
+            "ports": [80],
+            "use_register_addresses": True,
+        }
         result = resolve_ip_discovery_parameters(
             source_parameters,
             project_id="project-a",
@@ -113,7 +192,10 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
             import_repository=self.repository,
         )
 
-        self.assertEqual(source_parameters, {"dry_run": True, "ports": [80]})
+        self.assertEqual(
+            source_parameters,
+            {"dry_run": True, "ports": [80], "use_register_addresses": True},
+        )
         self.assertEqual(result["addresses"], ["10.0.0.2"])
         self.assertEqual(result["ip_register_import_id"], "imp_new")
         self.assertNotIn("expected_hostname_by_address", result)
@@ -154,7 +236,71 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
         self.assertEqual(result["addresses"], ["10.0.0.9"])
         self.assertEqual(result["expected_hostname_by_address"], {"10.0.0.5": "old-host"})
         self.assertEqual(result["ip_register_import_id"], "imp_old")
-        self.assertNotIn("10.0.0.2", result["expected_ports_by_address"])
+        self.assertNotIn("expected_ports_by_address", result)
+
+    def test_implicit_newest_zero_row_register_remains_the_selected_authority(
+        self,
+    ) -> None:
+        newest_empty = _record("imp_empty_newest", [])
+        result = resolve_ip_discovery_parameters(
+            {
+                "dry_run": True,
+                "target_expressions": [
+                    {"kind": "address", "address": "192.0.2.10"},
+                ],
+                "ports": [80],
+            },
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([newest_empty, self.older]),
+        )
+
+        authority = result["scan_contract_v1"]["ip"]["authority"]
+        self.assertEqual(authority["import_id"], "imp_empty_newest")
+        self.assertEqual(authority["accepted_count"], 0)
+        self.assertEqual(
+            authority["accepted_rows_sha256"],
+            "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        )
+        self.assertEqual(result["ip_register_import_id"], "imp_empty_newest")
+        self.assertNotIn("expected_ports_by_address", result)
+
+    def test_explicit_zero_row_register_can_authorize_an_explicit_target_scan(self) -> None:
+        selected_empty = _record("imp_empty_selected", [])
+        result = resolve_ip_discovery_parameters(
+            {
+                "dry_run": True,
+                "ip_register_import_id": "imp_empty_selected",
+                "target_expressions": [
+                    {"kind": "address", "address": "192.0.2.11"},
+                ],
+                "ports": [443],
+            },
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([self.newer, selected_empty]),
+        )
+
+        authority = result["scan_contract_v1"]["ip"]["authority"]
+        self.assertEqual(authority["import_id"], "imp_empty_selected")
+        self.assertEqual(authority["accepted_count"], 0)
+        self.assertEqual(result["addresses"], ["192.0.2.11"])
+
+    def test_zero_row_register_cannot_be_the_only_target_source(self) -> None:
+        selected_empty = _record("imp_empty_selected", [])
+
+        with self.assertRaisesRegex(ValueError, "no accepted scan targets"):
+            resolve_ip_discovery_parameters(
+                {
+                    "dry_run": True,
+                    "ip_register_import_id": "imp_empty_selected",
+                    "use_register_addresses": True,
+                    "ports": [80],
+                },
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([selected_empty]),
+            )
 
     def test_multiple_explicit_targets_and_exclusions_are_normalized(self) -> None:
         result = resolve_ip_discovery_parameters(
@@ -183,7 +329,10 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
         self.assertEqual(len(target["expanded_target_sha256"]), 64)
 
     def test_builtin_request_udp_is_rejected_before_run_creation(self) -> None:
-        with self.assertRaisesRegex(ValueError, "does not support UDP"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "use the BACnet discovery workflow for BACnet/IP UDP/47808",
+        ):
             resolve_ip_discovery_parameters(
                 {
                     "dry_run": True,
@@ -197,6 +346,126 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
                 import_repository=self.repository,
             )
 
+    def test_profile_port_omissions_are_frozen_in_priority_and_numeric_order(self) -> None:
+        register = _record(
+            "imp_cap",
+            [
+                {
+                    "Expected IP address": "10.0.0.10",
+                    "Expected services/ports": "47808/udp",
+                },
+                {
+                    "Expected IP address": "10.0.0.2",
+                    "Expected services/ports": "21/tcp,24/tcp,47808/udp",
+                    "Ports that should not be enabled": "22/tcp,23/tcp,161/udp",
+                },
+            ],
+        )
+        result = resolve_ip_discovery_parameters(
+            {
+                "dry_run": True,
+                "target_expressions": [
+                    {"kind": "address", "address": "10.0.0.10"},
+                    {"kind": "address", "address": "10.0.0.2"},
+                ],
+                "ports": list(range(1_000, 1_063)),
+            },
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([register]),
+        )
+
+        expected = {
+            "10.0.0.2": [
+                {
+                    "port": 23,
+                    "protocol": "tcp",
+                    "source": "forbidden",
+                    "reason": "profile_port_cap",
+                },
+                {
+                    "port": 161,
+                    "protocol": "udp",
+                    "source": "forbidden",
+                    "reason": "unsupported_protocol",
+                },
+                {
+                    "port": 21,
+                    "protocol": "tcp",
+                    "source": "expected",
+                    "reason": "profile_port_cap",
+                },
+                {
+                    "port": 24,
+                    "protocol": "tcp",
+                    "source": "expected",
+                    "reason": "profile_port_cap",
+                },
+                {
+                    "port": 47808,
+                    "protocol": "udp",
+                    "source": "expected",
+                    "reason": "unsupported_protocol",
+                    "capability": "use_bacnet_discovery",
+                },
+            ],
+            "10.0.0.10": [
+                {
+                    "port": 47808,
+                    "protocol": "udp",
+                    "source": "expected",
+                    "reason": "unsupported_protocol",
+                    "capability": "use_bacnet_discovery",
+                }
+            ],
+        }
+        self.assertEqual(result["not_attempted_ports_by_address"], expected)
+        self.assertEqual(
+            result["forbidden_ports_by_address"],
+            {"10.0.0.2": "22/tcp"},
+        )
+        self.assertEqual(result["forbidden_ports"], "22/tcp")
+        self.assertNotIn("expected_ports_by_address", result)
+        contract = result["scan_contract_v1"]["ip"]
+        self.assertEqual(contract["not_attempted_ports_by_address"], expected)
+        self.assertEqual(
+            contract["work_estimate"]["known_initial_dispatch_units"],
+            127,
+        )
+        self.assertEqual(
+            contract["work_estimate"]["register_added_dispatch_units"],
+            1,
+        )
+
+    def test_register_ports_over_the_hard_axis_are_rejected_not_omitted(self) -> None:
+        register = _record(
+            "imp_hard_cap",
+            [
+                {
+                    "Expected IP address": "10.0.0.2",
+                    "Expected services/ports": "1-4096/tcp",
+                    "Ports that should not be enabled": "1/udp",
+                }
+            ],
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "4,097 protocol ports.*hard maximum 4,096",
+        ):
+            resolve_ip_discovery_parameters(
+                {
+                    "dry_run": True,
+                    "target_expressions": [
+                        {"kind": "address", "address": "10.0.0.2"},
+                    ],
+                    "ports": [1],
+                },
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([register]),
+            )
+
     def test_source_interface_is_bound_into_packet_plan_digest(self) -> None:
         common = {
             "dry_run": True,
@@ -206,13 +475,35 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
             "ports": [80],
         }
         first = resolve_ip_discovery_parameters(
-            {**common, "source_ip": "192.168.1.10", "local_address": "192.168.1.10/24"},
+            {
+                **common,
+                "source_ip": "192.168.1.10",
+                "local_address": "192.168.1.10/24",
+                "source_interface_identity_v1": {
+                    **_TEST_SOURCE_INTERFACE_IDENTITY,
+                    "interface_id": "test-if:10",
+                    "interface_name": "Test field NIC 10",
+                    "source_ip": "192.168.1.10",
+                    "local_address": "192.168.1.10/24",
+                },
+            },
             project_id="project-a",
             site_id="site-a",
             import_repository=self.repository,
         )["scan_contract_v1"]
         second = resolve_ip_discovery_parameters(
-            {**common, "source_ip": "192.168.2.10", "local_address": "192.168.2.10/24"},
+            {
+                **common,
+                "source_ip": "192.168.2.10",
+                "local_address": "192.168.2.10/24",
+                "source_interface_identity_v1": {
+                    **_TEST_SOURCE_INTERFACE_IDENTITY,
+                    "interface_id": "test-if:20",
+                    "interface_name": "Test field NIC 20",
+                    "source_ip": "192.168.2.10",
+                    "local_address": "192.168.2.10/24",
+                },
+            },
             project_id="project-a",
             site_id="site-a",
             import_repository=self.repository,
@@ -220,9 +511,20 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
 
         self.assertEqual(
             first["source_interface"],
-            {"source_ip": "192.168.1.10", "local_address": "192.168.1.10/24"},
+            {
+                **_TEST_SOURCE_INTERFACE_IDENTITY,
+                "interface_id": "test-if:10",
+                "interface_name": "Test field NIC 10",
+                "source_ip": "192.168.1.10",
+                "local_address": "192.168.1.10/24",
+            },
         )
-        self.assertEqual(first["resource_keys"], ["nic:192.168.1.10"])
+        self.assertEqual(
+            first["resource_keys"],
+            [
+                "nic:v1:9453e87d1ae9ef255a7a1d0554df1206beb9c746cf222957188f3db493261223"
+            ],
+        )
         self.assertNotEqual(first["packet_plan_sha256"], second["packet_plan_sha256"])
 
     def test_import_from_another_scope_or_with_tampered_count_is_rejected(self) -> None:
@@ -289,12 +591,12 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
             {
                 "max_concurrency": 8,
                 "rate_limit_per_sec": 10.0,
-                "connect_timeout_s": 3.0,
+                "connect_timeout_s": 1.5,
             },
         )
         self.assertEqual(result["scan_max_concurrency"], 8)
         self.assertEqual(result["scan_rate_limit_per_sec"], 10.0)
-        self.assertEqual(result["scan_connect_timeout_s"], 3.0)
+        self.assertEqual(result["scan_connect_timeout_s"], 1.5)
         self.assertEqual(result["scan_per_target_concurrency"], 1)
         policy = contract["ip"]["policy"]
         self.assertEqual(policy["max_targets"], 256)
@@ -461,6 +763,277 @@ class ResolveIpDiscoveryParametersTests(unittest.TestCase):
             8_624,
         )
 
+    def test_planned_extended_rejects_projected_observation_payload_over_runtime_cap(
+        self,
+    ) -> None:
+        first = int(ipaddress.IPv4Address("10.30.0.0"))
+        asset_id = "\U0001f4a1" * 4_096
+        rows = [
+            {
+                "Expected IP address": str(ipaddress.IPv4Address(first + offset)),
+                "Asset ID": asset_id,
+            }
+            for offset in range(4_096)
+        ]
+        register = _record("imp_observation_payload_cap", rows)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "planned IP observation payload.*67,108,864-byte ceiling",
+        ):
+            resolve_ip_discovery_parameters(
+                _source_parameters(**{
+                    "dry_run": True,
+                    "profile": "planned_extended",
+                    "planned_extended_risk_acknowledged": True,
+                    "target_expressions": [
+                        {
+                            "kind": "range",
+                            "start": "10.30.0.0",
+                            "end": "10.30.15.255",
+                        },
+                    ],
+                    "ports": [80],
+                }),
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([register]),
+            )
+
+    def test_ip_contract_freezes_the_complete_u3_observation_budget(self) -> None:
+        contract = resolve_ip_discovery_parameters(
+            _source_parameters(**{
+                "dry_run": True,
+                "target_expressions": [
+                    {"kind": "range", "start": "192.0.2.1", "end": "192.0.2.3"},
+                ],
+                "ports": [80, 443],
+            }),
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([]),
+        )["scan_contract_v1"]
+
+        budget = contract["ip"]["observation_budget"]
+        self.assertEqual(
+            budget,
+            {
+                "schema_version": "1.0",
+                "estimator": "ip_u3_v1",
+                "planned_observation_rows": 19,
+                "planned_observation_payload_bytes": 24_462,
+                "row_ceiling": 50_000,
+                "canonical_payload_byte_ceiling": 67_108_864,
+                "host_state_rows": 12,
+                "port_attempt_rows": 6,
+                "not_attempted_port_rows": 0,
+                "control_diagnostic_rows": 1,
+            },
+        )
+        self.assertGreater(budget["planned_observation_payload_bytes"], 0)
+        self.assertLess(
+            budget["planned_observation_payload_bytes"],
+            budget["canonical_payload_byte_ceiling"],
+        )
+
+    def test_ip_port_projection_boundary_is_admitted_or_rejected_at_preview(
+        self,
+    ) -> None:
+        common = _source_parameters(**{
+            "dry_run": True,
+            "profile": "planned_extended",
+            "planned_extended_risk_acknowledged": True,
+            "scan_connect_timeout_s": 0.1,
+            "target_expressions": [
+                {"kind": "address", "address": "192.0.2.10"},
+            ],
+        })
+        accepted = resolve_ip_discovery_parameters(
+            {**common, "ports": list(range(1, 514))},
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([]),
+        )
+        self.assertEqual(len(accepted["ports"]), 513)
+        self.assertLessEqual(
+            accepted["scan_contract_v1"]["ip"]["observation_budget"][
+                "planned_observation_payload_bytes"
+            ],
+            67_108_864,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "planned IP observation row exceeds the 65,536-byte canonical limit",
+        ):
+            resolve_ip_discovery_parameters(
+                {**common, "ports": list(range(1, 4_097))},
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([]),
+            )
+
+    def test_one_host_thousand_five_digit_ports_has_a_bounded_preview_budget(self) -> None:
+        resolved = resolve_ip_discovery_parameters(
+            _source_parameters(**{
+                "dry_run": True,
+                "profile": "planned_extended",
+                "planned_extended_risk_acknowledged": True,
+                "scan_connect_timeout_s": 0.1,
+                "target_expressions": [
+                    {"kind": "address", "address": "192.0.2.10"},
+                ],
+                "ports": list(range(10_000, 11_000)),
+            }),
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([]),
+        )
+
+        budget = resolved["scan_contract_v1"]["ip"]["observation_budget"]
+        self.assertEqual(len(resolved["ports"]), 1_000)
+        self.assertLessEqual(
+            budget["planned_observation_payload_bytes"],
+            budget["canonical_payload_byte_ceiling"],
+        )
+
+    def test_observation_budget_covers_long_multibyte_a7_projection_fields(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "Expected IP address": "192.0.2.10",
+                "Expected hostname": "h" * 253,
+                "Asset ID": "\U0001f4a1" * 4_096,
+                "Asset name": "\U0001f680" * 4_096,
+            }
+        ]
+        resolved = resolve_ip_discovery_parameters(
+            _source_parameters(**{
+                "dry_run": True,
+                "target_expressions": [
+                    {"kind": "address", "address": "192.0.2.99"},
+                ],
+                "ports": [443],
+            }),
+            project_id="project-a",
+            site_id="site-a",
+            import_repository=_ImportRepository([_record("imp_long_a7", rows)]),
+        )
+
+        budget = resolved["scan_contract_v1"]["ip"]["observation_budget"]
+        self.assertGreater(budget["planned_observation_payload_bytes"], 50_000)
+        self.assertLessEqual(
+            budget["planned_observation_payload_bytes"],
+            budget["canonical_payload_byte_ceiling"],
+        )
+
+    def test_every_authority_projection_candidate_is_viewer_safe(self) -> None:
+        rows = [
+            {
+                "Expected IP address": "192.0.2.10",
+                "Asset ID": "AHU-10",
+            },
+            {
+                "Expected IP address": "192.0.2.200",
+                "Asset name": r"C:\Users\operator\private-register.xml",
+            },
+        ]
+
+        with self.assertRaisesRegex(ValueError, "raw or locally scoped evidence"):
+            resolve_ip_discovery_parameters(
+                _source_parameters(**{
+                    "dry_run": True,
+                    "target_expressions": [
+                        {"kind": "address", "address": "192.0.2.10"},
+                    ],
+                    "ports": [443],
+                }),
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([_record("imp_unsafe", rows)]),
+            )
+
+    def test_complete_resolved_ip_parameters_are_bounded_without_freezing_rows(
+        self,
+    ) -> None:
+        first = int(ipaddress.IPv4Address("10.40.0.0"))
+
+        def resolve(row_count: int) -> dict[str, object]:
+            rows = [
+                {
+                    "Expected IP address": str(
+                        ipaddress.IPv4Address(first + offset)
+                    ),
+                    "Asset ID": f"asset-{offset:04d}-" + ("x" * 40),
+                }
+                for offset in range(row_count)
+            ]
+            return resolve_ip_discovery_parameters(
+                _source_parameters(**{
+                    "dry_run": True,
+                    "profile": "planned_extended",
+                    "planned_extended_risk_acknowledged": True,
+                    "target_expressions": [
+                        {
+                            "kind": "range",
+                            "start": "10.40.0.0",
+                            "end": str(ipaddress.IPv4Address(first + row_count - 1)),
+                        },
+                    ],
+                    "ports": [443],
+                }),
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository(
+                    [_record(f"imp_resolved_{row_count}", rows)]
+                ),
+            )
+
+        near_bound = resolve(2_500)
+        encoded = canonical_json_bytes(near_bound)
+        self.assertGreater(len(encoded), 196_608)
+        self.assertLessEqual(len(encoded), SCAN_CONTRACT_MAX_BYTES)
+        self.assertNotIn(b'"accepted_rows"', encoded)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "resolved IP engine parameters.*262,144-byte ceiling",
+        ):
+            resolve(4_096)
+
+    def test_planned_extended_rejects_more_than_50000_observation_rows(self) -> None:
+        first = int(ipaddress.IPv4Address("10.31.0.0"))
+        last = str(ipaddress.IPv4Address(first + 4_095))
+        udp_ports = ",".join(f"{port}/udp" for port in range(40_000, 40_007))
+        rows = [
+            {
+                "Expected IP address": str(ipaddress.IPv4Address(first + offset)),
+                "Expected services/ports": udp_ports,
+            }
+            for offset in range(4_096)
+        ]
+        register = _record("imp_observation_row_cap", rows)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "53,249 rows.*50,000-row ceiling",
+        ):
+            resolve_ip_discovery_parameters(
+                _source_parameters(**{
+                    "dry_run": True,
+                    "profile": "planned_extended",
+                    "planned_extended_risk_acknowledged": True,
+                    "target_expressions": [
+                        {"kind": "range", "start": "10.31.0.0", "end": last},
+                    ],
+                    "ports": [80],
+                }),
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([register]),
+            )
+
     def test_nonfinite_throttle_and_short_executor_or_authorization_window_fail_closed(self) -> None:
         request = {
             "dry_run": True,
@@ -600,8 +1173,8 @@ class ResolveBacnetDiscoveryParametersTests(unittest.TestCase):
         )
         self.assertEqual(contract["bacnet"]["local_address"], "10.20.0.10/24")
         self.assertTrue(any(key.startswith("bacnet:") for key in contract["resource_keys"]))
-        self.assertIn("nic:10.20.0.10", contract["resource_keys"])
-        self.assertEqual(len(contract["resource_keys"]), 2)
+        self.assertFalse(any(key.startswith("nic:") for key in contract["resource_keys"]))
+        self.assertEqual(len(contract["resource_keys"]), 1)
         self.assertEqual(contract["bacnet"]["expected_device_count"], 2)
         self.assertEqual(
             contract["bacnet"]["authorities"]["devices"]["import_id"],

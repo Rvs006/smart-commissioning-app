@@ -1,3 +1,4 @@
+import ipaddress
 import unicodedata
 from datetime import datetime
 from typing import Literal
@@ -13,6 +14,17 @@ from pydantic import (
 
 # ValidationIssueRecord moved to the shared core package; imported here so existing
 # `from app.schemas.jobs import ValidationIssueRecord` consumers keep working.
+from smart_commissioning_core.discovery_observations import (
+    IPCapabilityActionV1,
+    IPControlReasonV1,
+    IPCoverageStateV1,
+    IPObservationProvenanceV1,
+    IPPolicyVerdictV1,
+    IPProbeOutcomeV1,
+    IPReachabilityStateV1,
+    IPRegisterMatchV1,
+    IPTransportV1,
+)
 from smart_commissioning_core.records import ValidationIssueRecord  # noqa: F401
 
 _SECRET_SENTINEL = "********"
@@ -61,10 +73,7 @@ def _redact_parameter_value(key: str, value: object) -> object:
 
 def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, object]:
     """Replace broker/cert secret values with a sentinel for API serialization."""
-    return {
-        str(key): _redact_parameter_value(str(key), value)
-        for key, value in parameters.items()
-    }
+    return {str(key): _redact_parameter_value(str(key), value) for key, value in parameters.items()}
 
 
 JobType = Literal[
@@ -80,6 +89,15 @@ JobType = Literal[
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 ReportFormat = Literal["zip", "xlsx", "docx", "pdf"]
+BacnetPropertyName = Literal[
+    "object_name",
+    "present_value",
+    "units",
+    "status_flags",
+    "reliability",
+    "out_of_service",
+    "description",
+]
 
 
 class JobCreateRequest(BaseModel):
@@ -96,6 +114,81 @@ class JobAcceptedResponse(BaseModel):
     job_type: JobType
     status: JobStatus
     message: str
+
+
+class BacnetPropertyRunRequest(BaseModel):
+    """A bounded property-expansion request for one sealed BACnet device."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=255)
+    site_id: str = Field(min_length=1, max_length=255)
+    parent_run_id: str = Field(min_length=1, max_length=64)
+    device_instance: int = Field(ge=0, le=4_194_302)
+    destination: str | None = Field(default=None, min_length=1, max_length=255)
+    requested_read_set: list[BacnetPropertyName] = Field(min_length=1, max_length=7)
+    parameters: dict[str, object] = Field(default_factory=dict)
+    preview_run_id: str | None = Field(default=None, max_length=64)
+    scan_authorization_id: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> "BacnetPropertyRunRequest":
+        if (self.preview_run_id is None) != (self.scan_authorization_id is None):
+            raise ValueError("property live runs require both preview_run_id and scan_authorization_id")
+        if self.preview_run_id is not None and self.parameters:
+            raise ValueError("property live runs must use the sealed preview parameters")
+        if not self.preview_run_id and self.parameters.get("dry_run") is False:
+            raise ValueError("property previews must set dry_run=true")
+        return self
+
+
+class DiscoveryObservationRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cursor: int = Field(ge=1)
+    run_id: str
+    attempt: int = Field(ge=1)
+    protocol: Literal["ip", "bacnet"]
+    entity_kind: Literal[
+        "lane",
+        "host",
+        "port",
+        "device",
+        "object",
+        "property",
+        "diagnostic",
+    ]
+    entity_key: str
+    entity_version: int = Field(ge=1)
+    event_key: str
+    phase: Literal["planned", "reachability", "enrichment", "comparison", "finalize"]
+    outcome: str
+    payload_schema_version: str
+    payload: dict[str, object] = Field(default_factory=dict)
+    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_at: datetime | None = None
+    created_at: datetime
+
+
+class DiscoveryObservationTerminal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["succeeded", "failed", "cancelled"]
+    terminal_cursor: int = Field(ge=0)
+
+
+class DiscoveryObservationPageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    attempt: int = Field(ge=1)
+    observations: list[DiscoveryObservationRecord] = Field(default_factory=list)
+    next_cursor: int = Field(ge=0)
+    latest_cursor: int = Field(ge=0)
+    has_more: bool
+    observations_pruned: bool = False
+    observations_quarantined: bool = False
+    terminal: DiscoveryObservationTerminal | None = None
 
 
 class JobSummary(BaseModel):
@@ -125,13 +218,82 @@ class JobSummary(BaseModel):
     acceptance_eligible: bool | None = None
 
 
-class ObservedPort(BaseModel):
-    port: int
+class _IPObservationFields(BaseModel):
+    """Additive typed IP evidence shared by host and port result rows."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    schema_version: Literal["1.0"] | None = None
+    coverage_state: IPCoverageStateV1 | None = None
+    reachability_state: IPReachabilityStateV1 | None = None
+    probe_outcome: IPProbeOutcomeV1 | None = None
+    register_match: IPRegisterMatchV1 | None = None
+    policy_verdict: IPPolicyVerdictV1 | None = None
+    target: str | None = None
+    transport: IPTransportV1 | None = None
+    provider: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    )
+    provider_version: str | None = Field(default=None, min_length=1, max_length=64)
+    provider_contract_version: Literal["1.0"] | None = None
+    provenance: IPObservationProvenanceV1 | None = None
+    reason: str | None = Field(default=None, max_length=4_096)
+    attempts: int | None = Field(default=None, ge=0)
+    elapsed_ms: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    port_hint: str | None = Field(default=None, max_length=255)
+    detected_service: str | None = Field(default=None, max_length=255)
+    detected_version: str | None = Field(default=None, max_length=255)
+    capability_action: IPCapabilityActionV1 | None = None
+    control_reason: IPControlReasonV1 | None = None
+    last_packet_dispatched_at: datetime | None = None
+
+    @field_validator("target")
+    @classmethod
+    def _canonical_ipv4_target(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = ipaddress.ip_address(value.strip())
+        except (AttributeError, ValueError) as error:
+            raise ValueError("target must be a numeric IPv4 address") from error
+        if not isinstance(parsed, ipaddress.IPv4Address):
+            raise ValueError("target must be a numeric IPv4 address")
+        return str(parsed)
+
+    @field_validator("last_packet_dispatched_at")
+    @classmethod
+    def _aware_last_packet_time(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("last_packet_dispatched_at must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def _capability_action_matches_unattempted_bacnet_udp(
+        self,
+    ) -> "_IPObservationFields":
+        if self.capability_action is not None and not (
+            self.coverage_state == "not_attempted"
+            and self.probe_outcome is None
+            and self.attempts == 0
+            and getattr(self, "port", None) == 47808
+            and getattr(self, "protocol", None) == "udp"
+        ):
+            raise ValueError("BACnet capability action requires an unattempted UDP/47808 port")
+        return self
+
+
+class ObservedPort(_IPObservationFields):
+    port: int = Field(ge=1, le=65_535)
     protocol: Literal["tcp", "udp"]
+    # Historical result rows use ``service`` for a port-number hint. Keep it
+    # readable while new rows distinguish hints from detected protocol evidence.
     service: str | None = None
 
 
-class DiscoveryAssetObservation(BaseModel):
+class DiscoveryAssetObservation(_IPObservationFields):
     asset_id: str | None = None
     ip_address: str | None = None
     mac_address: str | None = None
@@ -146,7 +308,7 @@ class DiscoveryAssetObservation(BaseModel):
     status_detail: str | None = None
     # Engines carry extra per-asset fields (BACnet device_instance/vendor,
     # point_count, ...) that consumers may use; allow them through unmodelled.
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
 
 
 class RunRecord(JobSummary):
@@ -156,6 +318,9 @@ class RunRecord(JobSummary):
     result_summary: dict[str, object] = Field(default_factory=dict)
     issues: list[ValidationIssueRecord] = Field(default_factory=list)
     error_message: str | None = None
+    # Execution lane is persisted on the run and exposed so hosted acceptance
+    # can verify queued worker runs after restart and terminalization.
+    execution_mode: str | None = None
 
     @field_serializer("parameters")
     def _redact_parameters(self, parameters: dict[str, object]) -> dict[str, object]:
@@ -187,11 +352,29 @@ class DiscoveryResultsResponse(BaseModel):
     register_comparison: dict[str, object] | None = None
 
 
+class DiscoveryComparisonResponse(BaseModel):
+    """Typed, sealed comparison between two compatible discovery runs."""
+
+    baseline_run_id: str
+    candidate_run_id: str
+    job_type: JobType | None = None
+    compatible: bool
+    reason: str | None = None
+    additions: list[dict[str, object]] = Field(default_factory=list)
+    removals: list[dict[str, object]] = Field(default_factory=list)
+    changes: list[dict[str, object]] = Field(default_factory=list)
+
+
 class DiscoveryPointsResponse(BaseModel):
     run_id: str
     job_type: JobType
     status: JobStatus
     points: list[dict[str, object]] = Field(default_factory=list)
+    # Additive keyset page metadata. Older clients can continue consuming the
+    # complete ``points`` list while new clients request bounded pages.
+    total: int = Field(default=0, ge=0)
+    next_cursor: str | None = None
+    has_more: bool = False
 
 
 class DiscoveryTopicsResponse(BaseModel):
@@ -223,11 +406,7 @@ def _bounded_plain_text(value: str, *, label: str) -> str:
     text = value.strip()
     if not text:
         raise ValueError(f"{label} must not be blank.")
-    if any(
-        unicodedata.category(character) in {"Cc", "Cs"}
-        or ord(character) in {0xFFFE, 0xFFFF}
-        for character in text
-    ):
+    if any(unicodedata.category(character) in {"Cc", "Cs"} or ord(character) in {0xFFFE, 0xFFFF} for character in text):
         raise ValueError(f"{label} must not contain control or invalid Unicode characters.")
     return text
 
@@ -266,9 +445,7 @@ class UdmiReportFilterProvenance(BaseModel):
     def validate_text(cls, value: str, info: object) -> str:
         text = value.strip()
         if any(
-            unicodedata.category(character) in {"Cc", "Cs"}
-            or ord(character) in {0xFFFE, 0xFFFF}
-            for character in text
+            unicodedata.category(character) in {"Cc", "Cs"} or ord(character) in {0xFFFE, 0xFFFF} for character in text
         ):
             field_name = getattr(info, "field_name", "filter")
             raise ValueError(f"Filter {field_name} contains invalid characters.")
@@ -291,17 +468,11 @@ class UdmiReportScope(BaseModel):
     @field_validator("unexpected_device_ids")
     @classmethod
     def validate_unexpected_device_ids(cls, values: list[str]) -> list[str]:
-        return [
-            _bounded_plain_text(value, label="Unexpected device ID")
-            for value in values
-        ]
+        return [_bounded_plain_text(value, label="Unexpected device ID") for value in values]
 
     @model_validator(mode="after")
     def selected_payloads_are_unique(self) -> "UdmiReportScope":
-        keys = [
-            (row.source_run_id, row.asset_id, row.payload_type)
-            for row in self.selected_payloads
-        ]
+        keys = [(row.source_run_id, row.asset_id, row.payload_type) for row in self.selected_payloads]
         if len(keys) != len(set(keys)):
             raise ValueError("UDMI report scope contains a duplicate selected payload.")
         if len(self.unexpected_device_ids) != len(set(self.unexpected_device_ids)):
@@ -350,13 +521,9 @@ class ReportRequest(BaseModel):
         if len(title) > 160:
             raise ValueError("Report title must be 160 characters or fewer.")
         if any(
-            unicodedata.category(character) in {"Cc", "Cs"}
-            or ord(character) in {0xFFFE, 0xFFFF}
-            for character in title
+            unicodedata.category(character) in {"Cc", "Cs"} or ord(character) in {0xFFFE, 0xFFFF} for character in title
         ):
-            raise ValueError(
-                "Report title must not contain control or invalid Unicode characters."
-            )
+            raise ValueError("Report title must not contain control or invalid Unicode characters.")
         return title
 
 

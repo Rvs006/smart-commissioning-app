@@ -44,7 +44,16 @@ Build the Smart Commissioning Tool as a real commissioning platform, not a brows
 
 - BACnet: `bacpypes3` or `BAC0`
 - MQTT: `paho-mqtt` or an async MQTT client
-- IP scan orchestration: `nmap` subprocesses plus controlled parsing
+- IP scan orchestration: the built-in TCP provider on every supported lane. A
+  separately installed Nmap copy is an optional, administrator-confirmed
+  provider only for the portable inline Windows lane in recorded
+  `internal_operator_managed` deployments. Linux, Docker/queue workers, and
+  external/customer deployments expose it as unavailable and never parse its XML.
+  The external portable launcher forces
+  `SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED=0`, including when an
+  inherited environment contains `1`. Internal operator deployments use a
+  separate launch profile before the parser route is mounted, then complete the
+  append-only policy and exact installation-confirmation workflow.
 - Reports: `pandas`, `openpyxl`, `WeasyPrint` or `Playwright`
 - Object storage for raw evidence: local disk in MVP, MinIO or S3-compatible storage after that
 

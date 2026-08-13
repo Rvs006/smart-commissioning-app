@@ -22,6 +22,11 @@ x-app-env: &app-env
   REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required (copy infra/.env.example to infra/.env)}@redis:6379/0"
   JOB_EXECUTION_MODE: "queue"
   SMART_COMMISSIONING_DEPLOYMENT_ID: "${SMART_COMMISSIONING_DEPLOYMENT_ID:?SMART_COMMISSIONING_DEPLOYMENT_ID is required (a stable, non-secret deployment name)}"
+  # Deliberately blank in the stock two-container topology: api and worker do
+  # not share one OS network namespace, so the api cannot freeze the worker's
+  # NIC inventory honestly. A deployment override may set this only after it
+  # co-locates the two processes in one namespace and pins this queue lane to it.
+  SMART_COMMISSIONING_NETWORK_EXECUTOR_ID: "${SMART_COMMISSIONING_NETWORK_EXECUTOR_ID:-}"
   SMART_COMMISSIONING_RUNTIME_ROOT: "/app/runtime"
   SMART_COMMISSIONING_SECRETS_ROOT: "/app/runtime/secrets"
   SMART_COMMISSIONING_ARTIFACTS_ROOT: "/app/runtime/artifacts"

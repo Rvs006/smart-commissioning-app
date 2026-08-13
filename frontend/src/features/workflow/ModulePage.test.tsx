@@ -1,7 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
-import { clearApiKey, setApiKey, type ReportFormat } from "../../api/client";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router";
+import {
+  clearApiKey,
+  setApiKey,
+  type DiscoveryObservationRecord,
+  type ReportFormat,
+} from "../../api/client";
 import { SessionProvider } from "../../app/session";
 import { ModulePage } from "./ModulePage";
 
@@ -27,6 +32,26 @@ const acceptedRun = {
   message: "IP discovery accepted.",
 };
 
+const previewAuthorization = {
+  authorization_id: "auth-ip-1",
+  preview_run_id: "run-ip-1",
+  project_id: "demo-project",
+  site_id: "demo-site",
+  packet_plan_sha256: "a".repeat(64),
+  approved_by: "admin-1",
+  ticket: "CHG-1001",
+  purpose: "ModulePage contract test",
+  not_before: "2026-06-11T08:00:00Z",
+  not_after: "2026-06-11T18:00:00Z",
+  max_uses: 1,
+  use_count: 0,
+  consumed_run_id: null,
+  revoked_at: null,
+  revoked_by: null,
+  revoke_reason: null,
+  created_at: "2026-06-11T08:00:00Z",
+};
+
 const terminalRun = {
   run_id: "run-ip-1",
   job_type: "ip_discovery",
@@ -38,7 +63,55 @@ const terminalRun = {
   project_id: "demo-project",
   site_id: "demo-site",
   parameters: {},
-  result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+  result_summary: {
+    hosts_responsive: 1,
+    hosts_scanned: 3,
+    ip_headline_metrics_v1: {
+      schema_version: "1.0",
+      metrics: [
+        {
+          schema_version: "1.0",
+          heading: "Expected Devices",
+          configured: true,
+          value: 2,
+          denominator: 2,
+          percentage: 100,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+        {
+          schema_version: "1.0",
+          heading: "Reachable Devices",
+          configured: true,
+          value: 1,
+          denominator: 3,
+          percentage: 33.33,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+        {
+          schema_version: "1.0",
+          heading: "Register Matches",
+          configured: true,
+          value: 1,
+          denominator: 2,
+          percentage: 50,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+        {
+          schema_version: "1.0",
+          heading: "Unexpected / Unregistered Hosts",
+          configured: true,
+          value: 0,
+          denominator: 3,
+          percentage: 0,
+          pending_count: 0,
+          finalized_count: 3,
+        },
+      ],
+    },
+  },
   error_message: null,
 };
 
@@ -46,7 +119,11 @@ const resultsPayload = {
   run_id: "run-ip-1",
   job_type: "ip_discovery",
   status: "succeeded",
-  result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+  result_summary: {
+    ...terminalRun.result_summary,
+    hosts_responsive: 1,
+    hosts_scanned: 3,
+  },
   discovered_assets: [
     {
       asset_id: null,
@@ -73,22 +150,109 @@ function jsonResponse(payload: unknown): Response {
   } as unknown as Response;
 }
 
-function renderModule(route: string) {
+function controlledSseStream() {
+  const encoder = new TextEncoder();
+  const queued: Array<{ done: boolean; value?: Uint8Array }> = [];
+  let pending: ((value: { done: boolean; value?: Uint8Array }) => void) | null = null;
+  const deliver = (value: { done: boolean; value?: Uint8Array }) => {
+    if (pending) {
+      const resolve = pending;
+      pending = null;
+      resolve(value);
+      return;
+    }
+    queued.push(value);
+  };
+  return {
+    close: () => deliver({ done: true }),
+    push: (frame: string) => deliver({ done: false, value: encoder.encode(frame) }),
+    response: {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "Content-Type": "text/event-stream" }),
+      body: {
+        getReader: () => ({
+          read: () => {
+            const next = queued.shift();
+            if (next) {
+              return Promise.resolve(next);
+            }
+            return new Promise<{ done: boolean; value?: Uint8Array }>((resolve) => {
+              pending = resolve;
+            });
+          },
+        }),
+      },
+      json: async () => ({}),
+    } as unknown as Response,
+  };
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <span data-testid="test-location" hidden>
+      {location.pathname}
+      {location.search}
+    </span>
+  );
+}
+
+function renderModule(route: string, initialEntry = "/") {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   // A key is set so the SessionProvider fetches /me; the stubs below return an
   // engineer role, matching the pre-RBAC behaviour these wiring tests assert.
   setApiKey("engineer-key");
+  stubScanAuthorizationFallback();
   return render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider>
-        <MemoryRouter>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <LocationProbe />
           <ModulePage moduleRoute={route} />
         </MemoryRouter>
       </SessionProvider>
     </QueryClientProvider>,
   );
+}
+
+function stubScanAuthorizationFallback() {
+  const currentFetch = globalThis.fetch;
+  if (typeof currentFetch !== "function") return;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/discovery/scan-authorizations?")) {
+        return jsonResponse([previewAuthorization]);
+      }
+      return currentFetch(input, init);
+    }),
+  );
+}
+
+async function prepareAuthorizedIpRun(): Promise<HTMLElement> {
+  const dryRun = await screen.findByLabelText(/Dry run/i);
+  fireEvent.click(dryRun);
+  const previewButton = await screen.findByRole("button", { name: "Preview" });
+  await waitFor(() => expect(previewButton).toBeEnabled());
+  fireEvent.click(previewButton);
+  await waitFor(() => expect(screen.getByText(/Run ID: run-ip-1/i)).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText(/Dry run/i));
+  fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+  const authorization = await screen.findByRole("combobox", {
+    name: /Sealed preview authorization/i,
+  });
+  await waitFor(() => expect(authorization).toBeEnabled());
+  fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+
+  const runButton = await screen.findByRole("button", { name: "Run" });
+  await waitFor(() => expect(runButton).toBeEnabled());
+  return runButton;
 }
 
 async function submitReportDialog(opener: HTMLElement, title?: string) {
@@ -115,7 +279,7 @@ describe("ModulePage discovery wiring", () => {
     // a TCP-connect miss, never proof a host is absent.
     const liveResultsPayload = {
       ...resultsPayload,
-      result_summary: { hosts_responsive: 1, hosts_scanned: 3 },
+      result_summary: { ...resultsPayload.result_summary, hosts_responsive: 1, hosts_scanned: 3 },
       discovered_assets: [
         ...resultsPayload.discovered_assets,
         {
@@ -176,14 +340,15 @@ describe("ModulePage discovery wiring", () => {
     const queueButton = await screen.findByRole("button", { name: "Run" });
     expect(queueButton).toBeDisabled();
 
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    // Enabled once the engineer role resolves (/me) and auth is confirmed.
-    await waitFor(() => expect(queueButton).toBeEnabled());
-
-    fireEvent.click(queueButton);
+    const authorizedRunButton = await prepareAuthorizedIpRun();
+    fireEvent.click(authorizedRunButton);
 
     // Run monitor appears and live discovered hosts render from the results payload.
     expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
+    await waitFor(
+      () => expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
+      { timeout: 5000 },
+    );
     // hostname is unique to the live results payload (not present in sample rows);
     // it now appears in both the results table and the selected-result detail aside.
     expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
@@ -203,6 +368,11 @@ describe("ModulePage discovery wiring", () => {
     // old hardcoded "118" sample.
     expect(await screen.findByText("responsive hosts")).toBeInTheDocument();
     expect(screen.queryByText("118")).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "IP scan headline metrics" })).toBeInTheDocument();
+    expect(screen.getByText("Expected Devices")).toBeInTheDocument();
+    expect(screen.getByText("Reachable Devices")).toBeInTheDocument();
+    expect(screen.getByText("Register Matches")).toBeInTheDocument();
+    expect(screen.getByText("Unexpected / Unregistered Hosts")).toBeInTheDocument();
 
     // A run the operator started here auto-advances to Results on success. Only
     // a *restored* run is exempt (see the run retention suite below).
@@ -365,7 +535,8 @@ describe("ModulePage discovery wiring", () => {
   });
 
   it("sends a CIDR target override as parameters.cidr with no addresses key and no fabricated authorization principal", async () => {
-    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    let previewBody: { parameters: Record<string, unknown> } | null = null;
+    let liveBody: { parameters: Record<string, unknown> } | null = null;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -382,7 +553,9 @@ describe("ModulePage discovery wiring", () => {
           return jsonResponse(profilesPayload);
         }
         if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
-          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          const body = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          if (body.parameters.dry_run === true) previewBody = body;
+          else liveBody = body;
           return jsonResponse(acceptedRun);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
@@ -402,25 +575,97 @@ describe("ModulePage discovery wiring", () => {
     fireEvent.change(screen.getByLabelText(/Target override/i), {
       target: { value: "10.20.0.0/24" },
     });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(queueButton).toBeEnabled());
+    const queueButton = await prepareAuthorizedIpRun();
     fireEvent.click(queueButton);
 
-    await waitFor(() => expect(postedBody).not.toBeNull());
-    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+    await waitFor(() => expect(previewBody).not.toBeNull());
+    const parameters = (previewBody as unknown as { parameters: Record<string, unknown> })
       .parameters;
-    // CIDR override flows through as parameters.cidr; the single-address branch
-    // is untouched, so no addresses key is sent.
+    // CIDR override belongs to the sealed preview. The authorized live request
+    // carries only the preview and authorization references.
     expect(parameters.cidr).toBe("10.20.0.0/24");
     expect(parameters).not.toHaveProperty("addresses");
     expect(parameters).not.toHaveProperty("start");
     expect(parameters).not.toHaveProperty("end");
-    // Fix 6: only the boolean shorthand is sent; the backend stamps the real
-    // authenticated principal, so no fabricated scan_authorization block.
-    expect(parameters.authorized).toBe(true);
-    expect(parameters).not.toHaveProperty("scan_authorization");
+    expect(parameters.dry_run).toBe(true);
+    expect(liveBody).toEqual({
+      job_type: "ip_discovery",
+      parameters: {},
+      preview_run_id: "run-ip-1",
+      scan_authorization_id: previewAuthorization.authorization_id,
+      project_id: "demo-project",
+      site_id: "demo-site",
+    });
+  });
+
+  it("shows only confirmed Nmap profiles and submits the exact fixed profile contract", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/imports/latest")) {
+          return new Response(JSON.stringify({ detail: "none" }), { status: 404 });
+        }
+        if (url.includes("/api/v1/nmap/capability?")) {
+          return jsonResponse({
+            schema_version: "1.0",
+            provider: "nmap",
+            state: "available",
+            reason: "available",
+            provider_mode: "internal_operator_managed",
+            policy_id: "policy-1",
+            policy_revision: 2,
+            publisher: "Insecure.Com LLC",
+            version: "7.98",
+            fingerprint_sha256: "a".repeat(64),
+            npcap_version: "1.83",
+            npcap_state: "raw_capable",
+            raw_capable: true,
+            process_selection_allowed: true,
+            xml_import_allowed: false,
+            permitted_profiles: ["selected_udp", "host_discovery"],
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          postedBody = JSON.parse(String(init.body)) as { parameters: Record<string, unknown> };
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(terminalRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          return jsonResponse(resultsPayload);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    expect(await screen.findByText(/Nmap 7\.98 is confirmed for this site/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Discovery provider"), {
+      target: { value: "operator_managed_nmap" },
+    });
+    const profile = screen.getByLabelText("Fixed Nmap profile");
+    expect(within(profile).queryByRole("option", { name: "OS inventory" })).not.toBeInTheDocument();
+    expect((profile as HTMLSelectElement).value).toBe("selected_udp");
+    expect((screen.getAllByLabelText("Protocol")[0] as HTMLSelectElement).value).toBe("udp");
+    fireEvent.change(profile, { target: { value: "host_discovery" } });
+    expect(screen.queryByRole("button", { name: "Add port" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/Dry run/));
+    const previewButton = await screen.findByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    fireEvent.click(previewButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
+    expect(parameters.provider).toBe("operator_managed_nmap");
+    expect(parameters.nmap_profile).toBe("host_discovery");
+    expect(parameters).not.toHaveProperty("port_specification");
   });
 
   const mqttAccepted = {
@@ -1161,10 +1406,8 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("ip-scanner");
 
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    await waitFor(() => expect(queueButton).toBeEnabled());
-    fireEvent.click(queueButton);
+    const authorizedRunButton = await prepareAuthorizedIpRun();
+    fireEvent.click(authorizedRunButton);
 
     // The now-populated MAC column renders (header + the live cell value), proving
     // the engine's mac_address flows through to the table.
@@ -1292,9 +1535,7 @@ describe("ModulePage discovery wiring", () => {
 
     renderModule("ip-scanner");
 
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(queueButton).toBeEnabled());
+    const queueButton = await prepareAuthorizedIpRun();
     fireEvent.click(queueButton);
 
     expect(
@@ -1999,7 +2240,9 @@ describe("ModulePage labels and templates", () => {
     ]);
     renderModule("reports");
     expect(await screen.findByRole("heading", { name: "Generated Reports" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Generate Excel Report/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Generate Excel Report/i }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Generate Word Report/i })).not.toBeInTheDocument();
     await waitFor(() => {
       expect(
@@ -2007,9 +2250,7 @@ describe("ModulePage labels and templates", () => {
       ).toBeInTheDocument();
     });
     expect(
-      screen.getByText(
-        /Generate a scoped report from a completed discovery or validation run\./i,
-      ),
+      screen.getByText(/Generate a scoped report from a completed discovery or validation run\./i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/format actions above/i)).not.toBeInTheDocument();
     expect(document.querySelector(".inspector")).not.toBeInTheDocument();
@@ -2473,9 +2714,15 @@ describe("ModulePage UDMI workbench live results", () => {
 
     const resultsTable = document.querySelector(".results-scroll table") as HTMLTableElement;
     const inspector = document.querySelector(".inspector") as HTMLElement;
-    expect(resultsTable.compareDocumentPosition(inspector) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(inspector.compareDocumentPosition(discovery) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(discovery.compareDocumentPosition(detail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      resultsTable.compareDocumentPosition(inspector) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      inspector.compareDocumentPosition(discovery) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      discovery.compareDocumentPosition(detail) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(
       within(resultsTable).getByRole("columnheader", { name: "Topic status" }),
     ).toBeInTheDocument();
@@ -3391,7 +3638,11 @@ describe("ModulePage UDMI workbench live results", () => {
           return jsonResponse(udmiAccepted);
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(issues);
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(run);
-        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST" && reportBodies) {
+        if (
+          url.split("?")[0].endsWith("/api/v1/reports") &&
+          init?.method === "POST" &&
+          reportBodies
+        ) {
           reportBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
           return jsonResponse({
             file_name: "udmi_validation_rep-subset.pdf",
@@ -3593,7 +3844,9 @@ describe("ModulePage UDMI workbench live results", () => {
     // Observed selects the invalid-but-retained expected-topic payload. The
     // missing EM-2 (and separate unexpected publishers) are not promoted.
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "observed" } });
-    expect(await within(table).findByRole("button", { expanded: true, name: /EM-1/ })).toBeInTheDocument();
+    expect(
+      await within(table).findByRole("button", { expanded: true, name: /EM-1/ }),
+    ).toBeInTheDocument();
     expect(within(table).queryByRole("button", { name: /EM-2/ })).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Observation"), { target: { value: "all" } });
@@ -4749,7 +5002,7 @@ describe("ModulePage UDMI workbench live results", () => {
     });
   });
 
-  it("re-attaches a still-running run on arrival and offers Stop run, without locking Execute (ITEM-4)", async () => {
+  it("re-attaches a still-running run with Stop retained and Execute locked", async () => {
     const runningRun = {
       run_id: "run-udmi-1",
       job_type: "udmi_validation",
@@ -4798,14 +5051,16 @@ describe("ModulePage UDMI workbench live results", () => {
     );
     renderModule("udmi-validation");
 
-    // The live run re-attaches its monitor with a Stop run control and the
-    // data-kept note. A REHYDRATED run must NOT lock Execute while worker
-    // heartbeat recovery is deciding whether the restored run is still live.
-    // Only a run started THIS session blocks.
+    // The confirmed live run re-attaches its monitor with a Stop run control
+    // and blocks a second capture, including after a reload.
     expect(await screen.findByRole("button", { name: "Stop run" })).toBeInTheDocument();
     expect(screen.getByText(/Stop run keeps the data collected so far/i)).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Execute capture" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "Execute capture" })).toBeDisabled(),
+    );
+    expect(screen.getByRole("button", { name: "Execute capture" })).toHaveAttribute(
+      "title",
+      "A run is already in progress. Stop it before starting another.",
     );
 
     // Progress + elapsed (ITEM-6): the monitor shows an Elapsed entry, and an
@@ -4821,84 +5076,7 @@ describe("ModulePage UDMI workbench live results", () => {
     );
   });
 
-  it("cancels a still-live rehydrated run when a new run takes over the monitor (ITEM-4 orphan guard)", async () => {
-    // A rehydrated run genuinely still running (a backgrounded capture) owns the
-    // single monitor + its only Stop control. Starting a NEW run replaces the
-    // monitor, so the old run must be cancelled as part of the swap — otherwise
-    // it keeps running with no reachable Stop (an orphaned parallel capture).
-    const runningRun = {
-      run_id: "run-udmi-1",
-      job_type: "udmi_validation",
-      status: "running",
-      stage: "capturing",
-      progress_percent: 15,
-      created_at: "2026-06-11T09:00:00Z",
-      updated_at: "2026-06-11T09:00:30Z",
-      project_id: "demo-project",
-      site_id: "demo-site",
-      parameters: { capture_seconds: 0 },
-      result_summary: {},
-      error_message: null,
-    };
-    let cancelledRunId: string | null = null;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.includes("/api/v1/runs?")) {
-          return jsonResponse({
-            runs: [
-              {
-                run_id: "run-udmi-1",
-                job_type: "udmi_validation",
-                status: "running",
-                stage: "capturing",
-                progress_percent: 15,
-                created_at: "2026-06-11T09:00:00Z",
-                updated_at: "2026-06-11T09:00:30Z",
-                edge_id: null,
-              },
-            ],
-          });
-        }
-        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
-        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
-        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
-        const cancelMatch = url.match(/\/api\/v1\/runs\/([^/]+)\/cancel$/);
-        if (cancelMatch && init?.method === "POST") {
-          cancelledRunId = cancelMatch[1];
-          return jsonResponse({ ...runningRun, status: "cancelled" });
-        }
-        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
-          return jsonResponse({ ...udmiAccepted, run_id: "run-udmi-2" });
-        }
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-2/issues"))
-          return jsonResponse({ run_id: "run-udmi-2", issues: [] });
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues"))
-          return jsonResponse({ run_id: "run-udmi-1", issues: [] });
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-2"))
-          return jsonResponse({ ...runningRun, run_id: "run-udmi-2" });
-        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(runningRun);
-        throw new Error(`Unexpected fetch in test: ${url}`);
-      }),
-    );
-    renderModule("udmi-validation");
-
-    // The rehydrated run re-attaches its monitor; Execute stays enabled (anti-
-    // fossilize), so starting a new run is possible.
-    await screen.findByRole("button", { name: "Stop run" });
-    const runButton = await screen.findByRole("button", { name: "Execute capture" });
-    await waitFor(() => expect(runButton).toBeEnabled());
-
-    fireEvent.click(runButton);
-    await waitFor(() => expect(cancelledRunId).toBe("run-udmi-1"));
-  });
-
-  it("does NOT cancel a live rehydrated run when the new run's submit is rejected (cancel-before-swap regression)", async () => {
-    // The orphan cancel must fire only AFTER the new run is accepted. Fired at the
-    // top of the submit (before the POST), a rejected POST — or an invalid run-time
-    // typo that throws before it — would strand the live capture: old run cancelled,
-    // nothing started, monitor still showing the now-dead run.
+  it("does not submit or cancel through a locked restored-run Execute control", async () => {
     const runningRun = {
       run_id: "run-udmi-1",
       job_type: "udmi_validation",
@@ -4944,31 +5122,29 @@ describe("ModulePage UDMI workbench live results", () => {
           return jsonResponse({ ...runningRun, status: "cancelled" });
         }
         if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
-          // The new run's submit is REJECTED — onSuccess never runs.
           submitAttempted = true;
-          return {
-            ok: false,
-            status: 400,
-            statusText: "Bad Request",
-            json: async () => ({ detail: "invalid parameters" }),
-          } as unknown as Response;
+          return jsonResponse({ ...udmiAccepted, run_id: "run-udmi-2" });
         }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-2/issues"))
+          return jsonResponse({ run_id: "run-udmi-2", issues: [] });
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues"))
           return jsonResponse({ run_id: "run-udmi-1", issues: [] });
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-2"))
+          return jsonResponse({ ...runningRun, run_id: "run-udmi-2" });
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(runningRun);
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
     renderModule("udmi-validation");
 
+    // The restored run keeps its reachable Stop action and the disabled control
+    // cannot dispatch a replacement or implicitly cancel the original.
     await screen.findByRole("button", { name: "Stop run" });
     const runButton = await screen.findByRole("button", { name: "Execute capture" });
-    await waitFor(() => expect(runButton).toBeEnabled());
+    await waitFor(() => expect(runButton).toBeDisabled());
 
     fireEvent.click(runButton);
-    // The submit was attempted and rejected; the cancel path (onSuccess only) is
-    // now unreachable, so the live run was never cancelled and keeps its Stop.
-    await waitFor(() => expect(submitAttempted).toBe(true));
+    expect(submitAttempted).toBe(false);
     expect(cancelledRunId).toBeNull();
     expect(screen.getByRole("button", { name: "Stop run" })).toBeInTheDocument();
   });
@@ -5510,6 +5686,7 @@ describe("ModulePage UDMI workbench live results", () => {
 
   it("clears a stale over-cap capture window when navigating to another module", async () => {
     stubUdmiRunFetch(udmiIssuesPayload);
+    stubScanAuthorizationFallback();
     const queryClient = new QueryClient({
       defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
     });
@@ -6232,9 +6409,7 @@ describe("ModulePage run retention", () => {
     renderModule("ip-scanner");
     expect(stepOf()).toBe("setup");
 
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
+    const runButton = await prepareAuthorizedIpRun();
     fireEvent.click(runButton);
 
     await waitFor(() => expect(stepOf()).toBe("run"));
@@ -6249,6 +6424,1532 @@ describe("ModulePage run retention", () => {
     expect(await screen.findByText("No results yet")).toBeInTheDocument();
     expect(screen.queryByText(/Sample preview/i)).not.toBeInTheDocument();
     expect(screen.queryByText("Boiler 1 Controller")).not.toBeInTheDocument();
+  });
+});
+
+describe("ModulePage progressive discovery observations", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    clearApiKey();
+  });
+
+  it("pauses the observation interval while SSE is driving and resumes it on fallback", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-sse-poll",
+      status: "running",
+      stage: "probing",
+      progress_percent: 30,
+      result_summary: {},
+    };
+    const activeStream = controlledSseStream();
+    const fallbackStream = controlledSseStream();
+    let streamRequests = 0;
+    let observationRequests = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-sse-poll/events")) {
+          streamRequests += 1;
+          return streamRequests === 1 ? activeStream.response : fallbackStream.response;
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-sse-poll/observations?")) {
+          observationRequests += 1;
+          return jsonResponse({
+            run_id: "run-ip-sse-poll",
+            attempt: 8,
+            observations: [
+              {
+                cursor: 1,
+                run_id: "run-ip-sse-poll",
+                attempt: 8,
+                protocol: "ip",
+                entity_kind: "host",
+                entity_key: "host:192.0.2.80",
+                entity_version: 1,
+                event_key: "host:192.0.2.80:v1",
+                phase: "reachability",
+                outcome: "observed",
+                payload_schema_version: "1.0",
+                payload: {
+                  projection_v1: {
+                    collection: "devices",
+                    record: {
+                      hostname: "sse-poll-controller",
+                      ip_address: "192.0.2.80",
+                      observed_ports: [],
+                    },
+                  },
+                },
+                payload_sha256: "8".repeat(64),
+                observed_at: "2026-08-11T06:00:00Z",
+                created_at: "2026-08-11T06:00:01Z",
+              },
+            ],
+            next_cursor: 1,
+            latest_cursor: 1,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-sse-poll")) {
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    await waitFor(() => expect(observationRequests).toBeGreaterThan(0));
+
+    await act(async () => {
+      activeStream.push(
+        `data: ${JSON.stringify({
+          run_id: "run-ip-sse-poll",
+          status: "running",
+          latest_observation_cursor: 1,
+        })}\n\n`,
+      );
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+        "Live updates are connected",
+      ),
+    );
+    const requestsWhileSseConnected = observationRequests;
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 1_750)));
+    expect(observationRequests).toBe(requestsWhileSseConnected);
+
+    await act(async () => {
+      activeStream.push(
+        `event: timeout\ndata: ${JSON.stringify({
+          run_id: "run-ip-sse-poll",
+          status: "running",
+          latest_observation_cursor: 1,
+        })}\n\n`,
+      );
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+        "Connection interrupted",
+      ),
+    );
+    await waitFor(() => expect(observationRequests).toBeGreaterThan(requestsWhileSseConnected), {
+      timeout: 2_500,
+    });
+  });
+
+  it("scopes a newly accepted discovery run into the URL for exact reload reattachment", async () => {
+    const runningRun = {
+      ...terminalRun,
+      status: "running",
+      stage: "probing",
+      progress_percent: 5,
+      result_summary: {},
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          return jsonResponse(acceptedRun);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
+          return jsonResponse(runningRun);
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-1/observations?")) {
+          return jsonResponse({
+            run_id: "run-ip-1",
+            attempt: 1,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner", "/ip-scanner");
+    const runButton = await prepareAuthorizedIpRun();
+    fireEvent.click(runButton);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("test-location")).toHaveTextContent("/ip-scanner?run=run-ip-1"),
+    );
+  });
+
+  it("drains acknowledged cursor pages for a restored active IP run and keeps start disabled", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-live",
+      status: "running",
+      stage: "probing",
+      progress_percent: 35,
+      result_summary: {},
+    };
+    const observation = (
+      cursor: number,
+      address: string,
+      hostname: string,
+    ): DiscoveryObservationRecord => ({
+      cursor,
+      run_id: "run-ip-live",
+      attempt: 4,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: `host:${address}`,
+      entity_version: 1,
+      event_key: `host:${address}:v1`,
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            asset_id: null,
+            hostname,
+            ip_address: address,
+            last_seen_at: "2026-08-11T05:00:00Z",
+            match_basis: "ip",
+            observed_ports: [],
+            status_detail: "responsive",
+          },
+        },
+      },
+      payload_sha256: cursor === 1 ? "a".repeat(64) : "b".repeat(64),
+      observed_at: "2026-08-11T05:00:00Z",
+      created_at: "2026-08-11T05:00:01Z",
+    });
+    const observationRequests: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: [
+              {
+                ...runningRun,
+                edge_id: null,
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/discovery/runs/run-ip-live/observations?")) {
+          observationRequests.push(url);
+          if (url.includes("after=0")) {
+            return jsonResponse({
+              run_id: "run-ip-live",
+              attempt: 4,
+              observations: [observation(1, "192.0.2.8", "ahu-eight")],
+              next_cursor: 1,
+              latest_cursor: 9,
+              has_more: true,
+              terminal: null,
+              observations_pruned: false,
+            });
+          }
+          if (url.includes("after=1")) {
+            return jsonResponse({
+              run_id: "run-ip-live",
+              attempt: 4,
+              observations: [observation(2, "192.0.2.9", "ahu-nine")],
+              next_cursor: 2,
+              latest_cursor: 9,
+              has_more: false,
+              terminal: null,
+              observations_pruned: false,
+            });
+          }
+          return jsonResponse({
+            run_id: "run-ip-live",
+            attempt: 4,
+            observations: [],
+            next_cursor: 2,
+            latest_cursor: 9,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-live")) {
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    expect((await screen.findAllByText("ahu-eight")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("ahu-nine")).length).toBeGreaterThan(0);
+    expect(observationRequests[0]).toContain("after=0&limit=100");
+    expect(observationRequests[1]).toContain("after=1&limit=100");
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      "2 observations loaded. Catching up.",
+    );
+    expect(screen.getByRole("button", { name: "Stop run" })).toBeEnabled();
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Run" })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Run" })).toHaveAttribute(
+      "title",
+      "A run is already in progress. Stop it before starting another.",
+    );
+  });
+
+  it("refetches terminal metadata when the terminal cursor equals the acknowledged cursor", async () => {
+    const stream = controlledSseStream();
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-equal-terminal",
+      status: "running",
+      stage: "probing",
+      progress_percent: 60,
+      result_summary: {},
+    };
+    const sealedRun = {
+      ...terminalRun,
+      run_id: "run-ip-equal-terminal",
+      result_summary: {
+        observation_evidence_v1: {
+          attempt: 2,
+          observation_count: 1,
+          terminal_cursor: 1,
+        },
+      },
+    };
+    const observation: DiscoveryObservationRecord = {
+      cursor: 1,
+      run_id: "run-ip-equal-terminal",
+      attempt: 2,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: "host:192.0.2.61",
+      entity_version: 1,
+      event_key: "host:192.0.2.61:v1",
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            hostname: "equal-cursor-controller",
+            ip_address: "192.0.2.61",
+            observed_ports: [],
+          },
+        },
+      },
+      payload_sha256: "6".repeat(64),
+      observed_at: "2026-08-11T06:00:00Z",
+      created_at: "2026-08-11T06:00:01Z",
+    };
+    let terminal = false;
+    let observationRequests = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-equal-terminal/events")) return stream.response;
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-equal-terminal/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: "run-ip-equal-terminal" });
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-equal-terminal/observations?")) {
+          observationRequests += 1;
+          const after = new URL(url, "http://localhost").searchParams.get("after");
+          if (after === "0") {
+            return jsonResponse({
+              run_id: "run-ip-equal-terminal",
+              attempt: 2,
+              observations: [observation],
+              next_cursor: 1,
+              latest_cursor: 1,
+              has_more: false,
+              terminal: null,
+              observations_pruned: false,
+            });
+          }
+          return jsonResponse({
+            run_id: "run-ip-equal-terminal",
+            attempt: 2,
+            observations: [],
+            next_cursor: 1,
+            latest_cursor: 1,
+            has_more: false,
+            terminal: terminal ? { status: "succeeded", terminal_cursor: 1 } : null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-equal-terminal")) {
+          return jsonResponse(terminal ? sealedRun : runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    expect((await screen.findAllByText("equal-cursor-controller")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(observationRequests).toBe(2));
+
+    terminal = true;
+    stream.push(
+      `event: terminal\ndata: ${JSON.stringify({
+        run_id: "run-ip-equal-terminal",
+        status: "succeeded",
+        latest_observation_cursor: 1,
+      })}\n\n`,
+    );
+
+    await waitFor(() => expect(observationRequests).toBe(3));
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+        "Sealed results loaded",
+      ),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(observationRequests).toBe(3);
+    stream.close();
+  });
+
+  it("loads terminal metadata once for a zero-observation run", async () => {
+    const stream = controlledSseStream();
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-zero-terminal",
+      status: "running",
+      stage: "probing",
+      progress_percent: 80,
+      result_summary: {},
+    };
+    const sealedRun = {
+      ...terminalRun,
+      run_id: "run-ip-zero-terminal",
+      result_summary: {
+        observation_evidence_v1: {
+          attempt: 5,
+          observation_count: 0,
+          terminal_cursor: 0,
+        },
+      },
+    };
+    let terminal = false;
+    let observationRequests = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-zero-terminal/events")) return stream.response;
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-zero-terminal/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: "run-ip-zero-terminal",
+            discovered_assets: [],
+          });
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-zero-terminal/observations?")) {
+          observationRequests += 1;
+          return jsonResponse({
+            run_id: "run-ip-zero-terminal",
+            attempt: 5,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: terminal ? { status: "succeeded", terminal_cursor: 0 } : null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-zero-terminal")) {
+          return jsonResponse(terminal ? sealedRun : runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    await waitFor(() => expect(observationRequests).toBe(1));
+    terminal = true;
+    stream.push(
+      `event: terminal\ndata: ${JSON.stringify({
+        run_id: "run-ip-zero-terminal",
+        status: "succeeded",
+        latest_observation_cursor: 0,
+      })}\n\n`,
+    );
+
+    await waitFor(() => expect(observationRequests).toBe(2));
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+        "Sealed results loaded",
+      ),
+    );
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(observationRequests).toBe(2);
+    stream.close();
+  });
+
+  it("reattaches the exact scoped run from the URL before asking for the latest run", async () => {
+    const requestedRun = {
+      ...terminalRun,
+      run_id: "run-ip-requested",
+      status: "running",
+      stage: "probing",
+      progress_percent: 25,
+      result_summary: {},
+    };
+    let latestRequests = 0;
+    let exactRequests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          latestRequests += 1;
+          return jsonResponse({
+            runs: [{ ...requestedRun, run_id: "run-ip-newer", edge_id: null }],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-requested")) {
+          exactRequests += 1;
+          return jsonResponse(requestedRun);
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-requested/observations?")) {
+          return jsonResponse({
+            run_id: "run-ip-requested",
+            attempt: 2,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner", "/ip-scanner?run=run-ip-requested");
+
+    expect((await screen.findAllByText("run-ip-requested")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("run-ip-newer")).not.toBeInTheDocument();
+    expect(exactRequests).toBeGreaterThan(0);
+    expect(latestRequests).toBe(0);
+  });
+
+  it("clears an inaccessible run link and falls back without revealing whether that run exists", async () => {
+    const accessibleRun = {
+      ...terminalRun,
+      run_id: "run-ip-accessible",
+      status: "running",
+      stage: "probing",
+      progress_percent: 10,
+      result_summary: {},
+    };
+    const requests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        requests.push(url);
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-hidden")) {
+          return {
+            ok: false,
+            status: 404,
+            statusText: "Not Found",
+            json: async () => ({ detail: "Run not found" }),
+          } as unknown as Response;
+        }
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...accessibleRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-accessible")) {
+          return jsonResponse(accessibleRun);
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-accessible/observations?")) {
+          return jsonResponse({
+            run_id: "run-ip-accessible",
+            attempt: 1,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner", "/ip-scanner?run=run-ip-hidden");
+
+    expect((await screen.findAllByText("run-ip-accessible")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("run-ip-hidden")).not.toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "The requested run is not available in this workspace. Showing the latest accessible run.",
+    );
+    const exactIndex = requests.findIndex((url) =>
+      url.endsWith("/api/v1/discovery/runs/run-ip-hidden"),
+    );
+    const latestIndex = requests.findIndex((url) => url.includes("/api/v1/runs?"));
+    expect(exactIndex).toBeGreaterThanOrEqual(0);
+    expect(latestIndex).toBeGreaterThan(exactIndex);
+  });
+
+  it("keeps provisional rows until the whole terminal cursor is folded", async () => {
+    const sealedRun = {
+      ...terminalRun,
+      run_id: "run-ip-sealed",
+      result_summary: {
+        observation_evidence_v1: {
+          attempt: 3,
+          observation_count: 3,
+          terminal_cursor: 3,
+        },
+      },
+    };
+    const firstObservation: DiscoveryObservationRecord = {
+      cursor: 1,
+      run_id: "run-ip-sealed",
+      attempt: 3,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: "host:192.0.2.20",
+      entity_version: 1,
+      event_key: "host:192.0.2.20:v1",
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            asset_id: null,
+            hostname: "provisional-controller",
+            ip_address: "192.0.2.20",
+            observed_ports: [],
+            status_detail: "responsive",
+          },
+        },
+      },
+      payload_sha256: "c".repeat(64),
+      observed_at: "2026-08-11T05:00:00Z",
+      created_at: "2026-08-11T05:00:01Z",
+    };
+    const selectedObservation: DiscoveryObservationRecord = {
+      ...firstObservation,
+      cursor: 2,
+      entity_key: "host:192.0.2.21",
+      event_key: "host:192.0.2.21:v1",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            asset_id: null,
+            hostname: "provisional-selected-controller",
+            ip_address: "192.0.2.21",
+            observed_ports: [],
+            status_detail: "responsive",
+          },
+        },
+      },
+      payload_sha256: "1".repeat(64),
+    };
+    let releaseFinalPage!: (response: Response) => void;
+    const finalPage = new Promise<Response>((resolve) => {
+      releaseFinalPage = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...sealedRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-sealed/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: "run-ip-sealed",
+            discovered_assets: [
+              {
+                ...resultsPayload.discovered_assets[0],
+                hostname: "sealed-controller",
+                ip_address: "192.0.2.20",
+              },
+              {
+                ...resultsPayload.discovered_assets[0],
+                hostname: "sealed-selected-controller",
+                ip_address: "192.0.2.21",
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-sealed/observations?")) {
+          if (url.includes("after=0")) {
+            return jsonResponse({
+              run_id: "run-ip-sealed",
+              attempt: 3,
+              observations: [firstObservation, selectedObservation],
+              next_cursor: 2,
+              latest_cursor: 3,
+              has_more: true,
+              terminal: { status: "succeeded", terminal_cursor: 3 },
+              observations_pruned: false,
+            });
+          }
+          return finalPage;
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-sealed")) {
+          return jsonResponse(sealedRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    expect((await screen.findAllByText("provisional-controller")).length).toBeGreaterThan(0);
+    const provisionalSelected = (
+      await screen.findAllByText("provisional-selected-controller")
+    ).find((element) => element.closest("tr"));
+    const provisionalSelectedRow = provisionalSelected?.closest("tr") ?? null;
+    expect(provisionalSelectedRow).not.toBeNull();
+    fireEvent.click(
+      within(provisionalSelectedRow as HTMLTableRowElement).getByRole("button", {
+        name: "Select evidence",
+      }),
+    );
+    expect(screen.queryByText("sealed-controller")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      "2 terminal observations loaded. Catching up before sealed results are shown.",
+    );
+
+    releaseFinalPage(
+      jsonResponse({
+        run_id: "run-ip-sealed",
+        attempt: 3,
+        observations: [
+          {
+            ...firstObservation,
+            cursor: 3,
+            entity_kind: "diagnostic",
+            entity_key: "diagnostic:complete",
+            event_key: "diagnostic:complete:v1",
+            payload: { message: "complete" },
+            payload_sha256: "d".repeat(64),
+          },
+        ],
+        next_cursor: 3,
+        latest_cursor: 3,
+        has_more: false,
+        terminal: { status: "succeeded", terminal_cursor: 3 },
+        observations_pruned: false,
+      }),
+    );
+
+    expect((await screen.findAllByText("sealed-controller")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("provisional-controller")).not.toBeInTheDocument();
+    const sealedSelected = (await screen.findAllByText("sealed-selected-controller")).find(
+      (element) => element.closest("tr"),
+    );
+    const sealedSelectedRow = sealedSelected?.closest("tr") ?? null;
+    expect(sealedSelectedRow).not.toBeNull();
+    expect(
+      within(sealedSelectedRow as HTMLTableRowElement).getByRole("button", {
+        name: "Select evidence",
+      }),
+    ).toHaveAttribute("aria-pressed", "true");
+    const sealedFirst = (await screen.findAllByText("sealed-controller")).find((element) =>
+      element.closest("tr"),
+    );
+    const sealedFirstRow = sealedFirst?.closest("tr") ?? null;
+    expect(sealedFirstRow).not.toBeNull();
+    expect(
+      within(sealedFirstRow as HTMLTableRowElement).getByRole("button", {
+        name: "Select evidence",
+      }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      "Sealed results loaded",
+    );
+  });
+
+  it("drops expired provisional history and crosses directly to sealed results", async () => {
+    const prunedRun = {
+      ...terminalRun,
+      run_id: "run-ip-pruned",
+      result_summary: {
+        observation_evidence_v1: {
+          attempt: 5,
+          observation_count: 3,
+          terminal_cursor: 3,
+        },
+      },
+    };
+    const provisional: DiscoveryObservationRecord = {
+      cursor: 1,
+      run_id: "run-ip-pruned",
+      attempt: 5,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: "host:192.0.2.30",
+      entity_version: 1,
+      event_key: "host:192.0.2.30:v1",
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            hostname: "expired-provisional-controller",
+            ip_address: "192.0.2.30",
+            observed_ports: [],
+          },
+        },
+      },
+      payload_sha256: "e".repeat(64),
+      observed_at: "2026-07-01T05:00:00Z",
+      created_at: "2026-07-01T05:00:01Z",
+    };
+    let releasePrunedMarker!: (response: Response) => void;
+    const prunedMarker = new Promise<Response>((resolve) => {
+      releasePrunedMarker = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...prunedRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-pruned/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: "run-ip-pruned",
+            discovered_assets: [
+              {
+                ...resultsPayload.discovered_assets[0],
+                hostname: "retained-sealed-controller",
+                ip_address: "192.0.2.30",
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-pruned/observations?")) {
+          if (url.includes("after=0")) {
+            return jsonResponse({
+              run_id: "run-ip-pruned",
+              attempt: 5,
+              observations: [provisional],
+              next_cursor: 1,
+              latest_cursor: 3,
+              has_more: true,
+              terminal: { status: "succeeded", terminal_cursor: 3 },
+              observations_pruned: false,
+            });
+          }
+          return prunedMarker;
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-pruned")) {
+          return jsonResponse(prunedRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    expect((await screen.findAllByText("expired-provisional-controller")).length).toBeGreaterThan(
+      0,
+    );
+
+    releasePrunedMarker(
+      jsonResponse({
+        run_id: "run-ip-pruned",
+        attempt: 5,
+        observations: [],
+        next_cursor: 1,
+        latest_cursor: 3,
+        has_more: false,
+        terminal: { status: "succeeded", terminal_cursor: 3 },
+        observations_pruned: true,
+      }),
+    );
+
+    expect((await screen.findAllByText("retained-sealed-controller")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("expired-provisional-controller")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      /^Provisional history expired; sealed results loaded\.$/,
+    );
+    for (const storage of [window.localStorage, window.sessionStorage]) {
+      for (let index = 0; index < storage.length; index += 1) {
+        const value = storage.getItem(storage.key(index) ?? "") ?? "";
+        expect(value).not.toContain("expired-provisional-controller");
+        expect(value).not.toContain("run-ip-pruned");
+      }
+    }
+  });
+
+  it("shows integrity quarantine copy instead of retention-expiry copy", async () => {
+    const quarantinedRun = {
+      ...terminalRun,
+      run_id: "run-ip-quarantined",
+      result_summary: {
+        observation_evidence_v1: {
+          attempt: 6,
+          observation_count: 2,
+          terminal_cursor: 2,
+        },
+      },
+    };
+    const provisional: DiscoveryObservationRecord = {
+      cursor: 1,
+      run_id: "run-ip-quarantined",
+      attempt: 6,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: "host:192.0.2.31",
+      entity_version: 1,
+      event_key: "host:192.0.2.31:v1",
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            hostname: "quarantined-provisional-controller",
+            ip_address: "192.0.2.31",
+            observed_ports: [],
+          },
+        },
+      },
+      payload_sha256: "3".repeat(64),
+      observed_at: "2026-08-11T05:00:00Z",
+      created_at: "2026-08-11T05:00:01Z",
+    };
+    let releaseQuarantineMarker!: (response: Response) => void;
+    const quarantineMarker = new Promise<Response>((resolve) => {
+      releaseQuarantineMarker = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...quarantinedRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-quarantined/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: "run-ip-quarantined",
+            discovered_assets: [
+              {
+                ...resultsPayload.discovered_assets[0],
+                hostname: "quarantined-sealed-controller",
+                ip_address: "192.0.2.31",
+              },
+            ],
+          });
+        }
+        if (url.includes("/api/v1/discovery/runs/run-ip-quarantined/observations?")) {
+          if (url.includes("after=0")) {
+            return jsonResponse({
+              run_id: "run-ip-quarantined",
+              attempt: 6,
+              observations: [provisional],
+              next_cursor: 1,
+              latest_cursor: 2,
+              has_more: true,
+              terminal: { status: "succeeded", terminal_cursor: 2 },
+              observations_pruned: false,
+              observations_quarantined: false,
+            });
+          }
+          return quarantineMarker;
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-quarantined")) {
+          return jsonResponse(quarantinedRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    expect(
+      (await screen.findAllByText("quarantined-provisional-controller")).length,
+    ).toBeGreaterThan(0);
+
+    releaseQuarantineMarker(
+      jsonResponse({
+        run_id: "run-ip-quarantined",
+        attempt: 6,
+        observations: [],
+        next_cursor: 1,
+        latest_cursor: 2,
+        has_more: false,
+        terminal: { status: "succeeded", terminal_cursor: 2 },
+        observations_pruned: false,
+        observations_quarantined: true,
+      }),
+    );
+
+    expect((await screen.findAllByText("quarantined-sealed-controller")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("quarantined-provisional-controller")).not.toBeInTheDocument();
+    const connectionStatus = screen.getByRole("status", { name: "Discovery connection" });
+    expect(connectionStatus).toHaveTextContent(
+      /^Provisional observations were quarantined after an integrity check; sealed results loaded\.$/,
+    );
+    expect(connectionStatus).not.toHaveTextContent("expired");
+  });
+
+  it("keeps the selected entity attached when a later page replaces its projection", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-selection",
+      status: "running",
+      stage: "probing",
+      progress_percent: 45,
+      result_summary: {},
+    };
+    const observation = (
+      cursor: number,
+      entityKey: string,
+      entityVersion: number,
+      address: string,
+      hostname: string,
+    ): DiscoveryObservationRecord => ({
+      cursor,
+      run_id: "run-ip-selection",
+      attempt: 6,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: entityKey,
+      entity_version: entityVersion,
+      event_key: `${entityKey}:v${entityVersion}`,
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            hostname,
+            ip_address: address,
+            observed_ports: [],
+            status_detail: "responsive",
+          },
+        },
+      },
+      payload_sha256: String(cursor).repeat(64),
+      observed_at: "2026-08-11T05:00:00Z",
+      created_at: "2026-08-11T05:00:01Z",
+    });
+    let releaseReplacement!: (response: Response) => void;
+    const replacementPage = new Promise<Response>((resolve) => {
+      releaseReplacement = resolve;
+    });
+    const stream = controlledSseStream();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-selection/events")) return stream.response;
+        if (url.includes("/api/v1/discovery/runs/run-ip-selection/observations?")) {
+          if (url.includes("after=0")) {
+            return jsonResponse({
+              run_id: "run-ip-selection",
+              attempt: 6,
+              observations: [
+                observation(1, "host:first", 1, "192.0.2.40", "first-controller"),
+                observation(2, "host:selected", 1, "192.0.2.41", "selected-before"),
+              ],
+              next_cursor: 2,
+              latest_cursor: 3,
+              has_more: true,
+              terminal: null,
+              observations_pruned: false,
+            });
+          }
+          return replacementPage;
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-selection")) {
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    const selectedBefore = await screen.findByText("selected-before");
+    const selectedBeforeRow = selectedBefore.closest("tr");
+    expect(selectedBeforeRow).not.toBeNull();
+    const selectedBeforeButton = within(selectedBeforeRow as HTMLTableRowElement).getByRole(
+      "button",
+      { name: "Select evidence" },
+    );
+    fireEvent.click(selectedBeforeButton);
+    await waitFor(() => expect(selectedBeforeButton).toHaveAttribute("aria-pressed", "true"));
+
+    releaseReplacement(
+      jsonResponse({
+        run_id: "run-ip-selection",
+        attempt: 6,
+        observations: [observation(3, "host:selected", 2, "192.0.2.41", "selected-after")],
+        next_cursor: 3,
+        latest_cursor: 3,
+        has_more: false,
+        terminal: null,
+        observations_pruned: false,
+      }),
+    );
+
+    const selectedAfter = (await screen.findAllByText("selected-after")).find((element) =>
+      element.closest("tr"),
+    );
+    const selectedAfterRow = selectedAfter?.closest("tr") ?? null;
+    expect(selectedAfterRow).not.toBeNull();
+    await waitFor(() =>
+      expect(
+        within(selectedAfterRow as HTMLTableRowElement).getByRole("button", {
+          name: "Select evidence",
+        }),
+      ).toHaveAttribute("aria-pressed", "true"),
+    );
+    const firstRow = screen.getByText("first-controller").closest("tr");
+    expect(firstRow).not.toBeNull();
+    expect(
+      within(firstRow as HTMLTableRowElement).getByRole("button", { name: "Select evidence" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    stream.close();
+  });
+
+  it("clears provisional evidence and focuses the page heading when scoped access closes", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-closed",
+      status: "running",
+      stage: "probing",
+      progress_percent: 45,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    const provisional: DiscoveryObservationRecord = {
+      cursor: 1,
+      run_id: "run-ip-closed",
+      attempt: 7,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: "host:closed",
+      entity_version: 1,
+      event_key: "host:closed:v1",
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            hostname: "private-closed-controller",
+            ip_address: "192.0.2.50",
+            observed_ports: [],
+          },
+        },
+      },
+      payload_sha256: "f".repeat(64),
+      observed_at: "2026-08-11T05:00:00Z",
+      created_at: "2026-08-11T05:00:01Z",
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-closed/events")) return stream.response;
+        if (url.includes("/api/v1/discovery/runs/run-ip-closed/observations?")) {
+          return jsonResponse({
+            run_id: "run-ip-closed",
+            attempt: 7,
+            observations: [provisional],
+            next_cursor: 1,
+            latest_cursor: 1,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-closed")) {
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+
+    expect((await screen.findAllByText("private-closed-controller")).length).toBeGreaterThan(0);
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({ run_id: "run-ip-closed", status: "closed" })}\n\n`,
+    );
+    stream.close();
+
+    await waitFor(() =>
+      expect(screen.queryByText("private-closed-controller")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      "Access changed. Live run evidence is no longer available in this workspace.",
+    );
+    expect(screen.getAllByRole("status", { name: "Discovery connection" })).toHaveLength(1);
+    const heading = screen.getByRole("heading", { name: "IP Discovery", level: 2 });
+    expect(heading).toHaveFocus();
+  });
+
+  it("fences a delayed observation page after scoped access closes", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-delayed-closed",
+      status: "running",
+      stage: "probing",
+      progress_percent: 45,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    const delayedObservation: DiscoveryObservationRecord = {
+      cursor: 1,
+      run_id: "run-ip-delayed-closed",
+      attempt: 9,
+      protocol: "ip",
+      entity_kind: "host",
+      entity_key: "host:delayed-closed",
+      entity_version: 1,
+      event_key: "host:delayed-closed:v1",
+      phase: "reachability",
+      outcome: "observed",
+      payload_schema_version: "1.0",
+      payload: {
+        projection_v1: {
+          collection: "devices",
+          record: {
+            hostname: "late-private-controller",
+            ip_address: "192.0.2.71",
+            observed_ports: [],
+          },
+        },
+      },
+      payload_sha256: "7".repeat(64),
+      observed_at: "2026-08-11T05:00:00Z",
+      created_at: "2026-08-11T05:00:01Z",
+    };
+    let observationRequested = false;
+    let releaseObservation!: (response: Response) => void;
+    const delayedPage = new Promise<Response>((resolve) => {
+      releaseObservation = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-delayed-closed/events")) return stream.response;
+        if (url.includes("/api/v1/discovery/runs/run-ip-delayed-closed/observations?")) {
+          observationRequested = true;
+          return delayedPage;
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-delayed-closed")) {
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    await waitFor(() => expect(observationRequested).toBe(true));
+
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({
+        run_id: "run-ip-delayed-closed",
+        status: "closed",
+      })}\n\n`,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+        "Access changed",
+      ),
+    );
+
+    await act(async () => {
+      releaseObservation(
+        jsonResponse({
+          run_id: "run-ip-delayed-closed",
+          attempt: 9,
+          observations: [delayedObservation],
+          next_cursor: 1,
+          latest_cursor: 1,
+          has_more: false,
+          terminal: null,
+          observations_pruned: false,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(screen.queryByText("late-private-controller")).not.toBeInTheDocument();
+    stream.close();
+  });
+
+  it("removes terminal sealed results when scoped access closes", async () => {
+    const sealedRun = {
+      ...terminalRun,
+      run_id: "run-ip-terminal-closed",
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...sealedRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-terminal-closed/events")) return stream.response;
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-terminal-closed/results")) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: "run-ip-terminal-closed",
+            discovered_assets: [
+              {
+                ...resultsPayload.discovered_assets[0],
+                hostname: "terminal-private-controller",
+                ip_address: "192.0.2.72",
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-terminal-closed")) {
+          return jsonResponse(sealedRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    expect((await screen.findAllByText("terminal-private-controller")).length).toBeGreaterThan(0);
+
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({
+        run_id: "run-ip-terminal-closed",
+        status: "closed",
+      })}\n\n`,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("terminal-private-controller")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      "Access changed. Live run evidence is no longer available in this workspace.",
+    );
+    stream.close();
+  });
+
+  it("stops run and observation polling after scoped access closes", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-ip-polling-closed",
+      status: "running",
+      stage: "probing",
+      progress_percent: 45,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    let runRequests = 0;
+    let observationRequests = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-ip-polling-closed/events")) return stream.response;
+        if (url.includes("/api/v1/discovery/runs/run-ip-polling-closed/observations?")) {
+          observationRequests += 1;
+          return jsonResponse({
+            run_id: "run-ip-polling-closed",
+            attempt: 3,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-ip-polling-closed")) {
+          runRequests += 1;
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    await waitFor(() => {
+      expect(runRequests).toBeGreaterThan(0);
+      expect(observationRequests).toBeGreaterThan(0);
+    });
+
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({
+        run_id: "run-ip-polling-closed",
+        status: "closed",
+      })}\n\n`,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+        "Access changed",
+      ),
+    );
+    const closedRunRequests = runRequests;
+    const closedObservationRequests = observationRequests;
+
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 1_750)));
+    expect(runRequests).toBe(closedRunRequests);
+    expect(observationRequests).toBe(closedObservationRequests);
+    stream.close();
+  });
+
+  it("stops MQTT topic polling after scoped access closes", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-mqtt-polling-closed",
+      job_type: "mqtt_discovery",
+      status: "running",
+      stage: "capture",
+      progress_percent: 45,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    let runRequests = 0;
+    let topicRequests = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-mqtt-polling-closed/events")) return stream.response;
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-polling-closed/topics")) {
+          topicRequests += 1;
+          return jsonResponse({ run_id: "run-mqtt-polling-closed", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-polling-closed")) {
+          runRequests += 1;
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+    await waitFor(() => {
+      expect(runRequests).toBeGreaterThan(0);
+      expect(topicRequests).toBeGreaterThan(0);
+    });
+
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({
+        run_id: "run-mqtt-polling-closed",
+        status: "closed",
+      })}\n\n`,
+    );
+    const heading = screen.getByRole("heading", { name: "MQTT Discovery", level: 2 });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(screen.getAllByRole("status", { name: "Discovery connection" })).toHaveLength(1);
+    expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
+      "Access changed. Live run evidence is no longer available in this workspace.",
+    );
+    const closedRunRequests = runRequests;
+    const closedTopicRequests = topicRequests;
+
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 2_250)));
+    expect(runRequests).toBe(closedRunRequests);
+    expect(topicRequests).toBe(closedTopicRequests);
+    stream.close();
   });
 });
 
@@ -6391,6 +8092,7 @@ describe("ModulePage reports visibility", () => {
     });
     setApiKey("engineer-key");
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    stubScanAuthorizationFallback();
     render(
       <QueryClientProvider client={queryClient}>
         <SessionProvider>
@@ -6401,9 +8103,7 @@ describe("ModulePage reports visibility", () => {
       </QueryClientProvider>,
     );
 
-    fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
-    const runButton = await screen.findByRole("button", { name: "Run" });
-    await waitFor(() => expect(runButton).toBeEnabled());
+    const runButton = await prepareAuthorizedIpRun();
     fireEvent.click(runButton);
 
     const generateButtons = await screen.findAllByRole("button", {
@@ -6701,9 +8401,7 @@ describe("ModulePage report controls placement", () => {
     ]);
     expect(captured.maxActiveReportRequests).toBe(1);
     expect(screen.queryByText("Report generation incomplete")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /Download all reports/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Download all reports/i })).not.toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Generate report" })).toBeEnabled();
   });
 
@@ -6857,9 +8555,7 @@ describe("ModulePage snap-to-top when results open", () => {
     stubIpScanner();
     renderModule("ip-scanner");
 
-    const queueButton = await screen.findByRole("button", { name: "Run" });
-    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
-    await waitFor(() => expect(queueButton).toBeEnabled());
+    const queueButton = await prepareAuthorizedIpRun();
 
     // Nothing has opened Results yet, so setting up must not move the page.
     expect(scrollSpy).not.toHaveBeenCalled();

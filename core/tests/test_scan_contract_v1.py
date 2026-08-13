@@ -11,6 +11,7 @@ from smart_commissioning_core.scan_contract import (
     DiscoveryPolicyV1,
     EffectiveThrottleV1,
     ImportAuthorityReferenceV1,
+    IPNotAttemptedPortV1,
     IPScanParametersV1,
     IPv4TargetExpressionV1,
     ProtocolPortV1,
@@ -119,6 +120,48 @@ class IPv4TargetContractTests(unittest.TestCase):
 
 
 class ProtocolPortContractTests(unittest.TestCase):
+    def test_not_attempted_port_records_are_strict_and_capability_bound(self) -> None:
+        self.assertEqual(
+            IPNotAttemptedPortV1(
+                port=47808,
+                protocol="udp",
+                source="expected",
+                reason="unsupported_protocol",
+                capability="use_bacnet_discovery",
+            ).model_dump(mode="json", exclude_none=True),
+            {
+                "port": 47808,
+                "protocol": "udp",
+                "source": "expected",
+                "reason": "unsupported_protocol",
+                "capability": "use_bacnet_discovery",
+            },
+        )
+        invalid = (
+            {
+                "port": 47808,
+                "protocol": "udp",
+                "source": "expected",
+                "reason": "unsupported_protocol",
+            },
+            {
+                "port": 80,
+                "protocol": "tcp",
+                "source": "expected",
+                "reason": "profile_port_cap",
+                "capability": "use_bacnet_discovery",
+            },
+            {
+                "port": 80,
+                "protocol": "tcp",
+                "source": "operator",
+                "reason": "profile_port_cap",
+            },
+        )
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                IPNotAttemptedPortV1.model_validate(value)
+
     def test_text_spec_preserves_protocol_and_expands_ranges(self) -> None:
         self.assertEqual(
             parse_protocol_port_spec("443/tcp, 47808/udp, 8000-8002"),
@@ -155,7 +198,10 @@ class ProtocolPortContractTests(unittest.TestCase):
         )
 
     def test_builtin_provider_rejects_udp_instead_of_scanning_it_as_tcp(self) -> None:
-        with self.assertRaisesRegex(ValidationError, "does not support UDP"):
+        with self.assertRaisesRegex(
+            ValidationError,
+            "use the BACnet discovery workflow for BACnet/IP UDP/47808",
+        ):
             IPScanParametersV1(
                 target_expressions=(
                     IPv4TargetExpressionV1(kind="address", address="10.0.0.1"),

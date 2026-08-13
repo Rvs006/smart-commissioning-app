@@ -20,7 +20,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from smart_commissioning_core.db.engine import session_factory
+from smart_commissioning_core.db.engine import query_session_factory, session_factory
 from smart_commissioning_core.db.models import (
     Project,
     ReportEvidenceContract,
@@ -139,6 +139,7 @@ class DbRunStore:
     def __init__(self, engine: Engine) -> None:
         self._engine = engine
         self._session_factory = session_factory(engine)
+        self._query_session_factory = query_session_factory(engine)
 
     # -- creation / retrieval -------------------------------------------------
 
@@ -187,6 +188,13 @@ class DbRunStore:
 
     def get_run(self, run_id: str) -> dict[str, object]:
         with self._session_factory() as session:
+            run = self._load(session, run_id)
+            return _run_to_dict(run)
+
+    def get_run_read_only(self, run_id: str) -> dict[str, object]:
+        """Read one run without reserving SQLite's writer slot."""
+
+        with self._query_session_factory() as session:
             run = self._load(session, run_id)
             return _run_to_dict(run)
 

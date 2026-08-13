@@ -3,31 +3,41 @@ import {
   AUTH_REQUIRED_MESSAGE,
   cancelRun,
   clearApiKey,
+  createScanAuthorization,
   createSessionBoundApiClient,
   createReport,
   deleteReports,
   downloadFile,
   formatApiDetail,
   getApiKey,
+  getDiscoveryObservations,
   getDiscoveryResults,
   getDiscoveryRun,
   getDiscoveryTopicsXlsxPath,
   getHealth,
   getLatestImport,
   getMe,
+  getNmapCapability,
+  getScanAuthorization,
   getValidationJsonExportPath,
+  isRunAccessClosedError,
+  isRunProgressEvent,
   listReports,
   listRuns,
+  listScanAuthorizations,
   parseSseBuffer,
   roleAtLeast,
   rollbackMqttConfigPublish,
+  revokeScanAuthorization,
   setApiKey,
+  startAuthorizedDiscoveryRun,
+  startDiscoveryPreview,
   startMqttConfigPublishRun,
   streamRunEvents,
   validateConfiguration,
   type ConfigurationSnapshot,
   type HealthStatus,
-  type RunEvent,
+  type RunEventPayload,
   type RunEventName,
 } from "./client";
 import { createSessionScopeId, DEFAULT_WORKSPACE } from "../app/sessionScope";
@@ -54,6 +64,44 @@ describe("formatApiDetail", () => {
   it("falls back to a generic message for null or undefined details", () => {
     expect(formatApiDetail(null)).toBe("Unknown API error.");
     expect(formatApiDetail(undefined)).toBe("Unknown API error.");
+  });
+});
+
+describe("Nmap capability", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("requests the exact scoped, path-free capability endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          schema_version: "1.0",
+          provider: "nmap",
+          state: "available",
+          reason: "available",
+          provider_mode: "internal_operator_managed",
+          policy_id: "policy-1",
+          policy_revision: 2,
+          publisher: "Insecure.Com LLC",
+          version: "7.98",
+          fingerprint_sha256: "a".repeat(64),
+          npcap_version: "1.83",
+          npcap_state: "raw_capable",
+          raw_capable: true,
+          process_selection_allowed: true,
+          xml_import_allowed: false,
+          permitted_profiles: ["tcp_connect_inventory"],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getNmapCapability({ projectId: "project a", siteId: "site/1" });
+
+    expect(result.permitted_profiles).toEqual(["tcp_connect_inventory"]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/v1/nmap/capability?project_id=project+a&site_id=site%2F1",
+    );
   });
 });
 
@@ -134,6 +182,117 @@ function stubFetch(response: Response) {
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
 }
+
+describe("scan authorization client", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const authorization = {
+    authorization_id: "auth/1",
+    preview_run_id: "preview/1",
+    project_id: "project a",
+    site_id: "site/1",
+    packet_plan_sha256: "a".repeat(64),
+    approved_by: "admin",
+    ticket: "CHG-1042",
+    purpose: "Controlled field scan",
+    not_before: "2026-08-12T10:00:00Z",
+    not_after: "2026-08-12T11:00:00Z",
+    max_uses: 1,
+    use_count: 0,
+    consumed_run_id: null,
+    revoked_at: null,
+    revoked_by: null,
+    revoke_reason: null,
+    created_at: "2026-08-12T09:59:00Z",
+  };
+
+  it("uses the admin mutation and exact scoped read endpoints", async () => {
+    const fetchMock = vi
+      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse(authorization))
+      .mockResolvedValueOnce(jsonResponse([authorization]))
+      .mockResolvedValueOnce(jsonResponse(authorization))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...authorization, revoked_at: "2026-08-12T10:05:00Z" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createScanAuthorization({
+      previewRunId: "preview/1",
+      ticket: "CHG-1042",
+      purpose: "Controlled field scan",
+      notBefore: "2026-08-12T10:00:00Z",
+      notAfter: "2026-08-12T11:00:00Z",
+    });
+    await listScanAuthorizations({
+      workspace: { projectId: "project a", siteId: "site/1" },
+      previewRunId: "preview/1",
+    });
+    await getScanAuthorization("auth/1");
+    await revokeScanAuthorization({ authorizationId: "auth/1", reason: "Window closed" });
+
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/v1/discovery/scan-authorizations",
+      "/api/v1/discovery/scan-authorizations?project_id=project+a&site_id=site%2F1&preview_run_id=preview%2F1",
+      "/api/v1/discovery/scan-authorizations/auth%2F1",
+      "/api/v1/discovery/scan-authorizations/auth%2F1/revoke",
+    ]);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      preview_run_id: "preview/1",
+      ticket: "CHG-1042",
+      purpose: "Controlled field scan",
+      not_before: "2026-08-12T10:00:00Z",
+      not_after: "2026-08-12T11:00:00Z",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toEqual({
+      reason: "Window closed",
+    });
+  });
+
+  it("keeps preview parameters separate from the sealed live envelope", async () => {
+    const fetchMock = vi
+      .fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>()
+      .mockResolvedValue(
+        jsonResponse({
+          run_id: "run-1",
+          job_type: "ip_discovery",
+          status: "queued",
+          message: "accepted",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const common = {
+      runKind: "ip" as const,
+      jobType: "ip_discovery" as const,
+      workspace: { projectId: "project a", siteId: "site/1" },
+    };
+
+    await startDiscoveryPreview({
+      ...common,
+      parameters: { dry_run: true, cidr: "10.20.0.0/24" },
+    });
+    await startAuthorizedDiscoveryRun({
+      ...common,
+      previewRunId: "preview/1",
+      scanAuthorizationId: "auth/1",
+    });
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      job_type: "ip_discovery",
+      parameters: { dry_run: true, cidr: "10.20.0.0/24" },
+      project_id: "project a",
+      site_id: "site/1",
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+      job_type: "ip_discovery",
+      preview_run_id: "preview/1",
+      scan_authorization_id: "auth/1",
+      parameters: {},
+      project_id: "project a",
+      site_id: "site/1",
+    });
+  });
+});
 
 describe("API key helpers", () => {
   afterEach(() => {
@@ -277,9 +436,7 @@ describe("downloadFile", () => {
 
   it("parses the filename from the Content-Disposition header", async () => {
     const blob = new Blob(["spreadsheet-bytes"]);
-    stubFetch(
-      blobResponse(blob, { "Content-Disposition": 'attachment; filename="report.xlsx"' }),
-    );
+    stubFetch(blobResponse(blob, { "Content-Disposition": 'attachment; filename="report.xlsx"' }));
 
     await expect(downloadFile("/reports/report-1/download")).resolves.toEqual({
       blob,
@@ -474,9 +631,7 @@ describe("run and discovery API functions", () => {
 
     const [url, init] = fetchMock.mock.calls[0];
     // job_type, edge_id, and status all ride the query string.
-    expect(url).toBe(
-      "/api/v1/runs?job_type=mqtt_discovery&edge_id=edge-west-2&status=running",
-    );
+    expect(url).toBe("/api/v1/runs?job_type=mqtt_discovery&edge_id=edge-west-2&status=running");
     expect(new Headers(init?.headers).get("X-API-Key")).toBe("stored-key");
     // edge_id is exposed on each run (null for a local run, populated otherwise).
     expect(result.runs[0].edge_id).toBeNull();
@@ -500,10 +655,54 @@ describe("run and discovery API functions", () => {
     await getDiscoveryRun("r1");
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/discovery/runs/r1");
 
-    const resultsPayload = { run_id: "r1", status: "succeeded", devices: [], points: [], topics: [], discovered_assets: [] };
+    const resultsPayload = {
+      run_id: "r1",
+      status: "succeeded",
+      devices: [],
+      points: [],
+      topics: [],
+      discovered_assets: [],
+    };
     fetchMock = stubFetch(jsonResponse(resultsPayload));
     await expect(getDiscoveryResults("r1")).resolves.toEqual(resultsPayload);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/discovery/runs/r1/results");
+  });
+
+  it("pages progressive discovery observations after the acknowledged cursor", async () => {
+    const page = {
+      run_id: "r1",
+      attempt: 3,
+      observations: [
+        {
+          cursor: 8,
+          run_id: "r1",
+          attempt: 3,
+          protocol: "ip",
+          entity_kind: "host",
+          entity_key: "192.0.2.8",
+          entity_version: 1,
+          event_key: "host:192.0.2.8:planned",
+          phase: "planned",
+          outcome: "planned",
+          payload_schema_version: "1.0",
+          payload: { address: "192.0.2.8" },
+          payload_sha256: "a".repeat(64),
+          observed_at: null,
+          created_at: "2026-08-11T02:00:00Z",
+        },
+      ],
+      next_cursor: 8,
+      latest_cursor: 12,
+      has_more: true,
+      terminal: null,
+    };
+    const fetchMock = stubFetch(jsonResponse(page));
+
+    await expect(getDiscoveryObservations("r1", 7, 100)).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/discovery/runs/r1/observations?after=7&limit=100",
+      undefined,
+    );
   });
 
   it("listReports hits the reports list endpoint", async () => {
@@ -544,7 +743,12 @@ describe("run and discovery API functions", () => {
     // the live-publish feature can never succeed. The explicit live-broker choice
     // (plus the confirm checkbox) IS the authorization.
     const fetchMock = stubFetch(
-      jsonResponse({ run_id: "r1", job_type: "mqtt_config_publish", status: "queued", message: "ok" }),
+      jsonResponse({
+        run_id: "r1",
+        job_type: "mqtt_config_publish",
+        status: "queued",
+        message: "ok",
+      }),
     );
     await startMqttConfigPublishRun({
       confirmed: true,
@@ -561,7 +765,12 @@ describe("run and discovery API functions", () => {
 
   it("startMqttConfigPublishRun leaves a validate-only publish unauthorized (no broker write)", async () => {
     const fetchMock = stubFetch(
-      jsonResponse({ run_id: "r1", job_type: "mqtt_config_publish", status: "queued", message: "ok" }),
+      jsonResponse({
+        run_id: "r1",
+        job_type: "mqtt_config_publish",
+        status: "queued",
+        message: "ok",
+      }),
     );
     await startMqttConfigPublishRun({
       confirmed: true,
@@ -578,7 +787,12 @@ describe("run and discovery API functions", () => {
 
   it("rollbackMqttConfigPublish POSTs to the rollback route", async () => {
     const fetchMock = stubFetch(
-      jsonResponse({ run_id: "r1", job_type: "mqtt_config_publish", status: "succeeded", message: "ok" }),
+      jsonResponse({
+        run_id: "r1",
+        job_type: "mqtt_config_publish",
+        status: "succeeded",
+        message: "ok",
+      }),
     );
     await rollbackMqttConfigPublish("r1");
     const [url, init] = fetchMock.mock.calls[0];
@@ -743,6 +957,45 @@ describe("parseSseBuffer", () => {
     expect(events[0].data).toMatchObject({ status: "succeeded" });
   });
 
+  it("keeps progressive discovery metadata on progress frames", () => {
+    const { events } = parseSseBuffer(
+      sseFrame({
+        run_id: "r1",
+        status: "running",
+        observation_attempt: 2,
+        latest_observation_cursor: 41,
+        progressive_counts: { planned: 64, observed: 17 },
+      }),
+    );
+
+    expect(events[0]).toEqual({
+      name: "message",
+      data: expect.objectContaining({
+        observation_attempt: 2,
+        latest_observation_cursor: 41,
+        progressive_counts: { planned: 64, observed: 17 },
+      }),
+    });
+  });
+
+  it.each([
+    ["closed", "closed"],
+    ["unavailable", "unavailable"],
+  ] as const)(
+    "discriminates the %s control frame without treating its status as a JobStatus",
+    (name, status) => {
+      const { events } = parseSseBuffer(sseFrame({ run_id: "r1", status }, name));
+
+      expect(events[0]).toEqual({ name, data: { run_id: "r1", status } });
+    },
+  );
+
+  it("rejects a control pseudo-status on a progress frame", () => {
+    const { events } = parseSseBuffer(sseFrame({ run_id: "r1", status: "closed" }));
+
+    expect(events[0]).toEqual({ name: "message", data: null });
+  });
+
   it("skips a frame with malformed JSON without throwing", () => {
     const { events } = parseSseBuffer("data: {not-json}\n\n");
     expect(events).toHaveLength(1);
@@ -750,14 +1003,36 @@ describe("parseSseBuffer", () => {
   });
 });
 
+describe("isRunProgressEvent", () => {
+  it("distinguishes job progress from stream control payloads", () => {
+    expect(isRunProgressEvent({ run_id: "r1", status: "running" })).toBe(true);
+    expect(isRunProgressEvent({ run_id: "r1", status: "closed" })).toBe(false);
+    expect(isRunProgressEvent({ run_id: "r1", status: "unavailable" })).toBe(false);
+  });
+});
+
+describe("isRunAccessClosedError", () => {
+  it.each([401, 403, 404])(
+    "classifies a concealed run response with status %s as closed",
+    (status) => {
+      expect(isRunAccessClosedError(new ApiError("Run is unavailable.", status))).toBe(true);
+    },
+  );
+
+  it("keeps transport and server failures retryable", () => {
+    expect(isRunAccessClosedError(new ApiError("Try again.", 503))).toBe(false);
+    expect(isRunAccessClosedError(new TypeError("Failed to fetch"))).toBe(false);
+  });
+});
+
 // Collects events from streamRunEvents and resolves once the stream closes.
 function collectRunEvents(runId: string): Promise<{
-  events: { event: RunEvent; name: RunEventName }[];
+  events: { event: RunEventPayload; name: RunEventName }[];
   reachedTerminal: boolean;
   error: unknown;
 }> {
   return new Promise((resolve) => {
-    const events: { event: RunEvent; name: RunEventName }[] = [];
+    const events: { event: RunEventPayload; name: RunEventName }[] = [];
     let error: unknown;
     streamRunEvents(runId, {
       onClose: (reachedTerminal) => resolve({ error, events, reachedTerminal }),
@@ -797,12 +1072,20 @@ describe("streamRunEvents", () => {
     expect(error).toBeUndefined();
     expect(reachedTerminal).toBe(true);
     expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ name: "message", event: { status: "running", stage: "scanning" } });
-    expect(events[1]).toMatchObject({ name: "terminal", event: { status: "succeeded", progress_percent: 100 } });
+    expect(events[0]).toMatchObject({
+      name: "message",
+      event: { status: "running", stage: "scanning" },
+    });
+    expect(events[1]).toMatchObject({
+      name: "terminal",
+      event: { status: "succeeded", progress_percent: 100 },
+    });
   });
 
   it("treats a status-derived terminal frame as terminal even without the event name", async () => {
-    stubFetch(sseStreamResponse([sseFrame({ run_id: "r1", status: "failed", progress_percent: 100 })]));
+    stubFetch(
+      sseStreamResponse([sseFrame({ run_id: "r1", status: "failed", progress_percent: 100 })]),
+    );
 
     const { reachedTerminal, events } = await collectRunEvents("r1");
 

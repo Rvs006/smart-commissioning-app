@@ -14,18 +14,27 @@ I/O and are allowed without authorization (a side-effect-free preview), matching
 the safety module's stated convention.
 """
 
+import ipaddress
 import json
+from copy import deepcopy
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.db.run_lifecycle import (
+    DiscoveryObservationIntegrityError,
     ProtocolConflictError,
+    RunLifecycleRepository,
     ScanAuthorizationError,
 )
 from smart_commissioning_core.engines.bacnet_discovery import process_bacnet_discovery_run
 from smart_commissioning_core.engines.base import ThrottleConfig
+from smart_commissioning_core.engines.ip import NmapProviderDependencies
+from smart_commissioning_core.engines.ip.nmap_windows import (
+    CtypesNmapRuntimeCapabilityProbe,
+    CtypesNmapWindowsProcessApi,
+)
 from smart_commissioning_core.engines.ip_scan import process_ip_discovery_run
 from smart_commissioning_core.engines.mqtt_discovery import (
     DEFAULT_CAPTURE_SECONDS,
@@ -35,7 +44,7 @@ from smart_commissioning_core.engines.safety import is_authorized
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.run_context import canonical_sha256
-from smart_commissioning_core.run_lifecycle import ScanAuthorizationV1
+from smart_commissioning_core.run_lifecycle import ScanAuthorizationV1, TerminalResultV1
 
 from app.core.auth import AuthPrincipal, get_principal, require_role
 from app.core.config import get_settings
@@ -46,6 +55,11 @@ from app.core.scopes import (
     require_project_site_access,
 )
 from app.schemas.jobs import (
+    BacnetPropertyRunRequest,
+    DiscoveryComparisonResponse,
+    DiscoveryObservationPageResponse,
+    DiscoveryObservationRecord,
+    DiscoveryObservationTerminal,
     DiscoveryPointsResponse,
     DiscoveryResultsResponse,
     DiscoveryTopicsResponse,
@@ -62,8 +76,10 @@ from app.schemas.scan_authorizations import (
 from app.services import interface_service
 from app.services.configuration_service import ConfigurationService
 from app.services.discovery_contract_service import (
+    refresh_nmap_scan_plan_packet_digest,
     resolve_bacnet_discovery_parameters,
     resolve_ip_discovery_parameters,
+    validate_nmap_scan_plan_execution_authority,
 )
 from app.services.engine_dispatch import (
     build_throttle,
@@ -74,7 +90,18 @@ from app.services.engine_dispatch import (
     resolve_source_interface,
 )
 from app.services.job_queue import JobQueueService
+from app.services.nmap_capability_service import (
+    NmapCapabilityDeniedError,
+    NmapCapabilityService,
+    NmapExecutionAuthorityV1,
+    WindowsNmapInstallationProbe,
+)
+from app.services.raw_evidence_artifacts import RawEvidenceArtifactStore
 from app.services.register_topics import expected_topic_filters
+from app.services.retention_service import (
+    ObservationRetentionConflictError,
+    ObservationRetentionService,
+)
 from app.services.run_dispatch import dispatch_run
 from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
 from app.services.scan_authorization_service import ScanAuthorizationService
@@ -83,6 +110,15 @@ router = APIRouter()
 service = RunService()
 queue_service = JobQueueService()
 config_service = ConfigurationService()
+lifecycle_repository = RunLifecycleRepository(service.engine)
+observation_retention_service = ObservationRetentionService(service.engine)
+
+_QUEUED_NETWORK_EXECUTOR_UNAVAILABLE = (
+    "Queued network discovery is unavailable because "
+    "SMART_COMMISSIONING_NETWORK_EXECUTOR_ID is not configured. Set one stable ID "
+    "only on API and worker processes that share the same OS network namespace and "
+    "NIC inventory, or use the inline field executor."
+)
 
 # RBAC: reading discovery data is viewer+; creating/running a discovery job
 # (which can drive a real network scan) is engineer+. The separate scan
@@ -165,19 +201,98 @@ def _prepare_scan_parameters(
     return resolved, False
 
 
-def _bind_control_identity(
-    parameters: dict[str, object], principal: AuthPrincipal
-) -> None:
+def _bind_control_identity(parameters: dict[str, object], principal: AuthPrincipal) -> None:
     contract = parameters.get("scan_contract_v1")
     if not isinstance(contract, dict):
         raise HTTPException(status_code=400, detail="scan_contract_v1 is missing")
     contract["initiating_user_id"] = principal.user_id
     contract["principal_source"] = principal.source
     contract["deployment_role"] = get_settings().deployment_role
-    packet_plan = {
-        key: value for key, value in contract.items() if key != "packet_plan_sha256"
-    }
+    packet_plan = {key: value for key, value in contract.items() if key != "packet_plan_sha256"}
     contract["packet_plan_sha256"] = canonical_sha256(packet_plan)
+    refresh_nmap_scan_plan_packet_digest(parameters)
+
+
+def _nmap_discovery_capability_service() -> NmapCapabilityService:
+    settings = get_settings()
+    return NmapCapabilityService(
+        service.engine,
+        deployment_id=settings.deployment_id,
+        # The dependency is built for every IP request. Nmap selection itself
+        # is rejected below unless execution is explicitly inline, so a queue
+        # deployment without a network executor must not break built-in scans.
+        network_executor_id=(settings.network_executor_id or f"inline:{settings.deployment_id}"),
+        probe=WindowsNmapInstallationProbe(),
+    )
+
+
+def _nmap_contract_binding(authority: NmapExecutionAuthorityV1) -> dict[str, object]:
+    return {
+        "deployment_id": authority.deployment_id,
+        "network_executor_id": authority.network_executor_id,
+        "machine_executor_identity": authority.machine_executor_identity,
+        "confirmation_id": authority.confirmation_id,
+        "capability": authority.capability.model_dump(mode="json"),
+        "reviewed_scripts": [item.model_dump(mode="json") for item in authority.fingerprint.reviewed_scripts],
+    }
+
+
+def _nmap_live_dependencies(
+    *,
+    run_id: str,
+    project_id: str,
+    site_id: str,
+    parameters: dict[str, object],
+    capability_service: NmapCapabilityService,
+) -> NmapProviderDependencies:
+    if not get_settings().nmap_internal_provider_enabled:
+        raise ValueError("Operator-managed Nmap is disabled in this deployment.")
+    authority = capability_service.execution_authority(
+        project_id=project_id,
+        site_id=site_id,
+    )
+    _guard_nmap_live_authority(parameters, authority)
+
+    artifacts = RawEvidenceArtifactStore(service.engine)
+    return NmapProviderDependencies(
+        artifacts=artifacts.for_nmap_run(
+            run_id=run_id,
+            producer_executor_id=str(authority.machine_executor_identity),
+        ),
+        windows=CtypesNmapWindowsProcessApi(),
+        runtime_probe=CtypesNmapRuntimeCapabilityProbe(),
+        revalidate_trust=lambda: capability_service.revalidate_execution_authority(authority),
+        read_xml_artifact=lambda artifact_id: artifacts.read_for_normalization(
+            run_id=run_id,
+            artifact_id=artifact_id,
+        ),
+    )
+
+
+def _guard_nmap_live_authority(
+    parameters: dict[str, object],
+    authority: NmapExecutionAuthorityV1,
+) -> None:
+    validate_nmap_scan_plan_execution_authority(
+        parameters,
+        _nmap_contract_binding(authority),
+    )
+    contract = parameters.get("scan_contract_v1")
+    ip_contract = contract.get("ip") if isinstance(contract, dict) else None
+    provider_state = ip_contract.get("provider_state") if isinstance(ip_contract, dict) else None
+    expected = {
+        "deployment_id": authority.deployment_id,
+        "network_executor_id": authority.network_executor_id,
+        "expected_executor_identity": str(authority.machine_executor_identity),
+        "policy_id": authority.policy_id,
+        "policy_revision": authority.policy_revision,
+        "confirmation_id": authority.confirmation_id,
+        "installation_fingerprint_sha256": authority.fingerprint.fingerprint_sha256,
+        "publisher": authority.fingerprint.publisher,
+        "version": authority.fingerprint.version,
+    }
+    if not isinstance(provider_state, dict) or any(provider_state.get(key) != value for key, value in expected.items()):
+        raise ValueError("Nmap execution authority changed after the sealed preview.")
 
 
 def _bind_retry_relation(
@@ -202,9 +317,7 @@ def _bind_retry_relation(
     }
 
 
-def _verify_frozen_control_identity(
-    parameters: dict[str, object], principal: AuthPrincipal
-) -> None:
+def _verify_frozen_control_identity(parameters: dict[str, object], principal: AuthPrincipal) -> None:
     contract = parameters.get("scan_contract_v1")
     if not isinstance(contract, dict):
         raise HTTPException(status_code=409, detail="sealed preview is missing control identity")
@@ -233,9 +346,7 @@ def _require_legacy_scan_authorization(parameters: dict[str, object]) -> None:
         raise HTTPException(status_code=403, detail=_SCAN_AUTH_DETAIL)
 
 
-def _stamp_legacy_authorizer(
-    parameters: dict[str, object], principal: AuthPrincipal
-) -> None:
+def _stamp_legacy_authorizer(parameters: dict[str, object], principal: AuthPrincipal) -> None:
     if is_dry_run(parameters) or not is_authorized(parameters):
         return
     existing = parameters.get("scan_authorization")
@@ -251,12 +362,17 @@ def _create_run(
     request: JobCreateRequest,
     expected_job_type: JobType,
     principal: AuthPrincipal,
+    *,
+    parent_run_id: str | None = None,
+    relation: str | None = None,
 ) -> RunRecord:
     try:
         return service.create_job_run(
             request,
             expected_job_type=expected_job_type,
             requesting_principal=principal.username,
+            parent_run_id=parent_run_id,
+            relation=relation,
         )
     except ProtocolConflictError as error:
         raise HTTPException(
@@ -280,11 +396,27 @@ def _configured_source_interface(project_id: str, site_id: str) -> str | None:
     """The saved device."Source Interface" value (source-NIC selection), or None.
 
     Reads the same saved config snapshot the MQTT defaults use; an empty / absent
-    value means "Auto (OS default route)" and is normalised to None so the
-    resolver treats it as a no-op (OS picks the egress interface).
+    value means "Auto (OS default route)". The resolver still freezes the
+    concrete default-route adapter, address, prefix, and stable OS identity.
     """
     values = config_service.load(project_id, site_id).device.values
     return str(values.get("Source Interface") or "").strip() or None
+
+
+def _network_executor_scope() -> str:
+    settings = get_settings()
+    if settings.network_executor_id:
+        return settings.network_executor_id
+    if settings.job_execution_mode == "inline":
+        return f"inline:{settings.deployment_id}"
+    raise HTTPException(status_code=503, detail=_QUEUED_NETWORK_EXECUTOR_UNAVAILABLE)
+
+
+def _runtime_source_interface_guard(parameters: dict) -> None:
+    interface_service.guard_frozen_source_interface(
+        parameters,
+        expected_executor_scope=_network_executor_scope(),
+    )
 
 
 def _resolve_source_interface(project_id: str, site_id: str, parameters: dict) -> None:
@@ -296,15 +428,18 @@ def _resolve_source_interface(project_id: str, site_id: str, parameters: dict) -
     creation, matching the other validation failures on these routes — no
     orphaned run is persisted and the run NEVER silently falls back to another NIC.
 
-    Dry runs skip the availability guard deliberately (side-effect-free preview
-    convention). A NIC dropping between run creation and worker pickup is still
-    caught by the engine-level honesty checks (ip_scan bind pre-check, MQTT
-    OSError -> the broker_unreachable family, BACnet _ensure_app RuntimeError).
+    Dry runs skip only the bind proof. They still freeze a concrete adapter
+    identity without sending traffic. Inline and queued execution repeat the
+    shared guard immediately before their transport processor starts.
     """
     try:
-        resolve_source_interface(parameters, _configured_source_interface(project_id, site_id))
-        if not is_dry_run(parameters) and parameters.get("source_ip"):
-            interface_service.ensure_source_ip_available(str(parameters["source_ip"]))
+        resolve_source_interface(
+            parameters,
+            _configured_source_interface(project_id, site_id),
+            executor_scope=_network_executor_scope(),
+        )
+        if not is_dry_run(parameters):
+            _runtime_source_interface_guard(parameters)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -344,11 +479,8 @@ def _resolve_bacnet_transport(project_id: str, site_id: str, parameters: dict) -
 def _guard_frozen_source_interface(parameters: dict[str, object]) -> None:
     """Validate the preview's selected NIC without consulting changed config."""
 
-    source_ip = str(parameters.get("source_ip") or "").strip()
-    if not source_ip:
-        return
     try:
-        interface_service.ensure_source_ip_available(source_ip)
+        _runtime_source_interface_guard(parameters)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -383,11 +515,17 @@ def create_scan_authorization(
     response_model=list[ScanAuthorizationV1],
 )
 def list_scan_authorizations(
-    project_id: str | None = None,
-    site_id: str | None = None,
+    project_id: str = Query(min_length=1),
+    site_id: str = Query(min_length=1),
     preview_run_id: str | None = None,
-    _principal: AuthPrincipal = Depends(require_global_admin),
+    principal: AuthPrincipal = Depends(require_viewer),
 ) -> list[ScanAuthorizationV1]:
+    require_project_site_access(
+        principal,
+        project_id,
+        site_id,
+        engine=service.engine,
+    )
     return ScanAuthorizationService(service).list(
         project_id=project_id,
         site_id=site_id,
@@ -410,12 +548,27 @@ def _effective_throttle(parameters: dict[str, object]) -> dict[str, object]:
 )
 def get_scan_authorization(
     authorization_id: str,
-    _principal: AuthPrincipal = Depends(require_global_admin),
+    principal: AuthPrincipal = Depends(require_viewer),
 ) -> ScanAuthorizationV1:
     try:
-        return ScanAuthorizationService(service).get(authorization_id)
+        authorization = ScanAuthorizationService(service).get(authorization_id)
     except FileNotFoundError as error:
         raise HTTPException(status_code=404, detail="Scan authorization was not found.") from error
+    try:
+        require_project_site_access(
+            principal,
+            authorization.project_id,
+            authorization.site_id,
+            engine=service.engine,
+        )
+    except HTTPException as error:
+        if error.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail="Scan authorization was not found.",
+            ) from error
+        raise
+    return authorization
 
 
 @router.post(
@@ -443,18 +596,38 @@ def revoke_scan_authorization(
 def create_ip_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
+    nmap_capability: NmapCapabilityService = Depends(_nmap_discovery_capability_service),
 ) -> JobAcceptedResponse:
-    require_project_site_access(
-        principal, request.project_id, request.site_id, engine=service.engine
-    )
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
     if request.preview_run_id:
         load_scoped_run(request.preview_run_id, principal, engine=service.engine)
-    parameters, preview = _prepare_scan_parameters(
-        request, expected_job_type="ip_discovery", principal=principal
-    )
+    parameters, preview = _prepare_scan_parameters(request, expected_job_type="ip_discovery", principal=principal)
+    if parameters.get("provider") == "operator_managed_nmap" and not get_settings().nmap_internal_provider_enabled:
+        raise HTTPException(
+            status_code=409,
+            detail="Operator-managed Nmap is disabled in this deployment.",
+        )
     if preview:
         resolve_ip_enrichment(parameters)
         _resolve_source_interface(request.project_id, request.site_id, parameters)
+        nmap_execution_authority: dict[str, object] | None = None
+        if parameters.get("provider") == "operator_managed_nmap":
+            if get_settings().job_execution_mode != "inline":
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "Operator-managed Nmap runs require the local Windows inline "
+                        "executor. Queue and external execution remain disabled."
+                    ),
+                )
+            try:
+                authority = nmap_capability.execution_authority(
+                    project_id=request.project_id,
+                    site_id=request.site_id,
+                )
+            except NmapCapabilityDeniedError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            nmap_execution_authority = _nmap_contract_binding(authority)
         try:
             parameters = resolve_ip_discovery_parameters(
                 parameters,
@@ -462,6 +635,7 @@ def create_ip_discovery_run(
                 site_id=request.site_id,
                 import_repository=ImportRepository(service.engine),
                 effective_throttle=_effective_throttle(parameters),
+                nmap_execution_authority=nmap_execution_authority,
             )
         except FileNotFoundError as error:
             raise HTTPException(
@@ -478,11 +652,33 @@ def create_ip_discovery_run(
         _bind_control_identity(parameters, principal)
     else:
         _guard_frozen_source_interface(parameters)
-    run = _create_run(
-        request.model_copy(update={"parameters": parameters}), "ip_discovery", principal
-    )
+        if parameters.get("provider") == "operator_managed_nmap":
+            try:
+                authority = nmap_capability.execution_authority(
+                    project_id=request.project_id,
+                    site_id=request.site_id,
+                )
+                _guard_nmap_live_authority(parameters, authority)
+            except NmapCapabilityDeniedError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except ValueError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
+        if not is_dry_run(frozen_parameters):
+            _runtime_source_interface_guard(frozen_parameters)
+        nmap_dependencies = None
+        if frozen_parameters.get("scan_contract_v1", {}).get("ip", {}).get(
+            "provider"
+        ) == "operator_managed_nmap" and not is_dry_run(frozen_parameters):
+            nmap_dependencies = _nmap_live_dependencies(
+                run_id=run.run_id,
+                project_id=request.project_id,
+                site_id=request.site_id,
+                parameters=frozen_parameters,
+                capability_service=nmap_capability,
+            )
         return process_ip_discovery_run(
             run.run_id,
             frozen_parameters,
@@ -491,6 +687,8 @@ def create_ip_discovery_run(
             throttle=_settings_throttle(frozen_parameters),
             dry_run=is_dry_run(frozen_parameters),
             persist_records=run_store.replace_devices,
+            import_loader=ImportRepository(service.engine).get_accepted_rows,
+            nmap_dependencies=nmap_dependencies,
         )
 
     return _dispatch(
@@ -506,14 +704,10 @@ def create_bacnet_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    require_project_site_access(
-        principal, request.project_id, request.site_id, engine=service.engine
-    )
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
     if request.preview_run_id:
         load_scoped_run(request.preview_run_id, principal, engine=service.engine)
-    parameters, preview = _prepare_scan_parameters(
-        request, expected_job_type="bacnet_discovery", principal=principal
-    )
+    parameters, preview = _prepare_scan_parameters(request, expected_job_type="bacnet_discovery", principal=principal)
     if preview:
         _resolve_source_interface(request.project_id, request.site_id, parameters)
         _resolve_bacnet_transport(request.project_id, request.site_id, parameters)
@@ -549,11 +743,11 @@ def create_bacnet_discovery_run(
         resolve_bacnet_backend(parameters)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    run = _create_run(
-        request.model_copy(update={"parameters": parameters}), "bacnet_discovery", principal
-    )
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_discovery", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
+        if not is_dry_run(frozen_parameters):
+            _runtime_source_interface_guard(frozen_parameters)
         return process_bacnet_discovery_run(
             run.run_id,
             frozen_parameters,
@@ -573,14 +767,192 @@ def create_bacnet_discovery_run(
     )
 
 
+@router.post(
+    "/bacnet/property-runs",
+    response_model=JobAcceptedResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def create_bacnet_property_run(
+    request: BacnetPropertyRunRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
+    """Create a bounded BACnet property child preview or authorized live run."""
+
+    parent = _load_discovery_run(request.parent_run_id, principal)
+    if parent.job_type != "bacnet_discovery" or parent.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail="Property expansion requires a succeeded sealed BACnet parent run.",
+        )
+    parent_terminal = _verified_discovery_terminal(parent)
+    if parent_terminal is None:
+        raise HTTPException(status_code=409, detail="Property expansion parent evidence is not sealed.")
+    try:
+        stored_parent = service.get_execution_context(parent.run_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="BACnet parent run was not found.") from error
+    parent_parameters = dict(stored_parent.context.engine_parameters)
+    parent_contract = parent_parameters.get("scan_contract_v1")
+    parent_bacnet = parent_contract.get("bacnet") if isinstance(parent_contract, dict) else None
+    if not isinstance(parent_bacnet, dict):
+        raise HTTPException(status_code=409, detail="BACnet parent has no frozen transport contract.")
+    ceiling = tuple(str(item) for item in parent_bacnet.get("authorized_property_ceiling", ()))
+    requested = tuple(dict.fromkeys(str(item) for item in request.requested_read_set))
+    outside_ceiling = [item for item in requested if item not in ceiling]
+    if outside_ceiling:
+        raise HTTPException(
+            status_code=400,
+            detail="Requested BACnet properties exceed the sealed parent ceiling.",
+        )
+    expected_devices = parent_bacnet.get("expected_devices", [])
+    selected = next(
+        (
+            item
+            for item in expected_devices
+            if isinstance(item, dict) and int(item.get("device_instance", -1)) == request.device_instance
+        ),
+        None,
+    )
+    if selected is None:
+        raise HTTPException(status_code=404, detail="BACnet device is not present in the sealed parent run.")
+    source_address = str(selected.get("source_address") or "").strip()
+    if not source_address:
+        raise HTTPException(status_code=409, detail="BACnet parent device has no frozen destination.")
+    try:
+        source_address = str(ipaddress.ip_address(source_address))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail="BACnet parent destination is invalid.") from error
+    if request.destination is not None:
+        try:
+            requested_destination = str(ipaddress.ip_address(request.destination.strip()))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="destination must be an IPv4 address.") from error
+        if requested_destination != source_address:
+            raise HTTPException(status_code=400, detail="destination must match the sealed parent device.")
+
+    if set(request.parameters) - {"dry_run"}:
+        raise HTTPException(status_code=400, detail="Property expansion parameters are server-derived.")
+    preview = request.preview_run_id is None
+    child_parameters: dict[str, object]
+    if preview:
+        child_parameters = deepcopy(parent_parameters)
+        child_parameters.pop("scan_contract_v1", None)
+        child_parameters["dry_run"] = True
+        child_parameters["property_parent_run_id"] = request.parent_run_id
+        child_parameters["property_device_instance"] = request.device_instance
+        child_parameters["property_destination"] = source_address
+        child_parameters["base_read_set"] = list(requested)
+        child_parameters["authorized_property_ceiling"] = list(ceiling)
+        child_parameters["device_instance_low"] = request.device_instance
+        child_parameters["device_instance_high"] = request.device_instance
+        child_parameters["bacnet_targets"] = [
+            {
+                "address": source_address,
+                "device_instance": request.device_instance,
+                "internetwork_id": selected.get("internetwork_id"),
+                "network": selected.get("network"),
+                "asset_id": selected.get("asset_id"),
+                "asset_name": selected.get("asset_name"),
+            }
+        ]
+        _resolve_source_interface(request.project_id, request.site_id, child_parameters)
+        _resolve_bacnet_transport(request.project_id, request.site_id, child_parameters)
+        try:
+            child_parameters = resolve_bacnet_discovery_parameters(
+                child_parameters,
+                project_id=request.project_id,
+                site_id=request.site_id,
+                import_repository=ImportRepository(service.engine),
+                effective_throttle=_effective_throttle(child_parameters),
+            )
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        contract = child_parameters.get("scan_contract_v1")
+        if not isinstance(contract, dict):
+            raise HTTPException(status_code=400, detail="BACnet child contract could not be frozen.")
+        contract["relation_snapshot"] = {
+            "relation": "property_expansion",
+            "parent_run_id": request.parent_run_id,
+        }
+        _bind_control_identity(child_parameters, principal)
+        child_request = JobCreateRequest(
+            project_id=request.project_id,
+            site_id=request.site_id,
+            job_type="bacnet_discovery",
+            parameters=child_parameters,
+        )
+    else:
+        child_request = JobCreateRequest(
+            project_id=request.project_id,
+            site_id=request.site_id,
+            job_type="bacnet_discovery",
+            parameters={},
+            preview_run_id=request.preview_run_id,
+            scan_authorization_id=request.scan_authorization_id,
+        )
+        child_parameters, _ = _prepare_scan_parameters(
+            child_request,
+            expected_job_type="bacnet_discovery",
+            principal=principal,
+        )
+        relation_contract = child_parameters.get("scan_contract_v1")
+        if not isinstance(relation_contract, dict):
+            raise HTTPException(status_code=409, detail="Sealed property preview is missing its parent link.")
+        relation_snapshot = relation_contract.get("relation_snapshot")
+        if relation_snapshot != {
+            "relation": "property_expansion",
+            "parent_run_id": request.parent_run_id,
+        }:
+            raise HTTPException(status_code=409, detail="Sealed property preview does not match this parent device.")
+        if int(child_parameters.get("property_device_instance", -1)) != request.device_instance:
+            raise HTTPException(status_code=409, detail="Sealed property preview does not match this device.")
+        if str(child_parameters.get("property_destination") or "") != source_address:
+            raise HTTPException(status_code=409, detail="Sealed property preview does not match this destination.")
+        sealed_read_set = tuple(str(item) for item in child_parameters.get("base_read_set", ()))
+        if sealed_read_set != requested:
+            raise HTTPException(status_code=409, detail="Sealed property preview does not match this read set.")
+        child_request = child_request.model_copy(update={"parameters": child_parameters})
+
+    try:
+        resolve_bacnet_backend(child_parameters)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    run = _create_run(
+        child_request,
+        "bacnet_discovery",
+        principal,
+        parent_run_id=request.parent_run_id,
+        relation="property_expansion",
+    )
+
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        if not is_dry_run(frozen_parameters):
+            _runtime_source_interface_guard(frozen_parameters)
+        return process_bacnet_discovery_run(
+            run.run_id,
+            frozen_parameters,
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            persist_records=run_store.replace_devices_and_points,
+            is_cancelled=make_cancel_checker(run_store, run.run_id),
+        )
+
+    return _dispatch(
+        run,
+        enqueue=queue_service.enqueue_for("discover_bacnet", "discovery"),
+        run_inline=run_inline,
+        label="BACnet property expansion",
+    )
+
+
 @router.post("/mqtt/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_mqtt_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
 ) -> JobAcceptedResponse:
-    require_project_site_access(
-        principal, request.project_id, request.site_id, engine=service.engine
-    )
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
     parameters = dict(request.parameters)
     _require_legacy_scan_authorization(parameters)
     _stamp_legacy_authorizer(parameters, principal)
@@ -588,9 +960,7 @@ def create_mqtt_discovery_run(
     # routes/validation.py) so a rejected request never leaves an orphaned run.
     # None (0/blank = indefinite) passes: it runs until Stop run, the distinct-
     # topic cap, or the 48-hour backstop the engine applies to the transport.
-    capture_seconds = parse_capture_seconds(
-        parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS
-    )
+    capture_seconds = parse_capture_seconds(parameters.get("capture_seconds"), default=DEFAULT_CAPTURE_SECONDS)
     if capture_seconds is not None and capture_seconds > MQTT_MAX_CAPTURE_SECONDS:
         raise HTTPException(
             status_code=400,
@@ -606,15 +976,15 @@ def create_mqtt_discovery_run(
     parameters.setdefault("qos", config_service.mqtt_subscribe_defaults(request.project_id, request.site_id)["qos"])
     _bind_mqtt_register(request.project_id, request.site_id, parameters)
     _resolve_source_interface(request.project_id, request.site_id, parameters)
-    run = _create_run(
-        request.model_copy(update={"parameters": parameters}), "mqtt_discovery", principal
-    )
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_discovery", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
         # live_capture defaults to the real raw-socket subscribe_and_capture; in
         # the API process broker egress may be absent, but the engine honestly
         # records 'broker_unreachable'/'live_capture_unavailable' rather than
         # faking success, so we keep the real default here.
+        if not is_dry_run(frozen_parameters):
+            _runtime_source_interface_guard(frozen_parameters)
         return process_mqtt_discovery_run(
             run.run_id,
             frozen_parameters,
@@ -670,6 +1040,163 @@ def get_discovery_run(
 
 
 @router.get(
+    "/runs/{run_id}/observations",
+    response_model=DiscoveryObservationPageResponse,
+    dependencies=[Depends(require_viewer)],
+)
+def get_discovery_observations(
+    run_id: str,
+    response: Response,
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=1000),
+    principal: AuthPrincipal = Depends(get_principal),
+) -> DiscoveryObservationPageResponse:
+    """Return one scoped, viewer-safe progressive observation cursor page."""
+
+    scoped = load_scoped_run(
+        run_id,
+        principal,
+        engine=service.engine,
+        query_only=True,
+    )
+    try:
+        run = service.get_run_read_only(run_id)
+        attempt = service.get_run_attempt_read_only(run_id)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail="Discovery run not found.") from error
+    if run.job_type not in {"ip_discovery", "bacnet_discovery"}:
+        raise HTTPException(status_code=404, detail="Discovery run not found.")
+
+    try:
+        terminal_marker = service.get_terminal_observation_marker_read_only(run_id)
+    except RuntimeError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored discovery observation evidence failed integrity verification.",
+        ) from error
+    if attempt == 0:
+        if after > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Observation cursor is no longer valid.",
+            )
+        response.headers["Cache-Control"] = "no-store"
+        return DiscoveryObservationPageResponse(
+            run_id=run_id,
+            attempt=1,
+            observations=[],
+            next_cursor=0,
+            latest_cursor=0,
+            has_more=False,
+            observations_pruned=False,
+            terminal=(
+                DiscoveryObservationTerminal(
+                    status=terminal_marker["status"],
+                    terminal_cursor=0,
+                )
+                if terminal_marker is not None
+                else None
+            ),
+        )
+
+    cutoff = lifecycle_repository.get_discovery_observation_cutoff(
+        run_id,
+        attempt,
+        project_id=scoped.project_id,
+        site_id=scoped.site_id,
+    )
+    observations_quarantined = bool(
+        terminal_marker is not None and terminal_marker.get("observations_quarantined") is True
+    )
+    observations_pruned = False
+    if terminal_marker is not None and not observations_quarantined:
+        missing_observation_count = int(terminal_marker["observation_count"]) - cutoff.observation_count
+        if missing_observation_count < 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored discovery observation evidence failed integrity verification.",
+            )
+        if missing_observation_count > 0:
+            try:
+                attested_deletion_count = observation_retention_service.get_attested_observation_deletion_count(
+                    run_id=run_id,
+                    project_id=scoped.project_id,
+                    site_id=scoped.site_id,
+                    attempt=int(terminal_marker["attempt"]),
+                    terminal_cursor=int(terminal_marker["terminal_cursor"]),
+                    observation_count=int(terminal_marker["observation_count"]),
+                    observation_stream_sha256=str(terminal_marker["observation_stream_sha256"]),
+                )
+            except ObservationRetentionConflictError as error:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored discovery observation evidence failed integrity verification.",
+                ) from error
+            if attested_deletion_count != missing_observation_count:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored discovery observation evidence failed integrity verification.",
+                )
+            observations_pruned = True
+    latest_cursor = int(terminal_marker["terminal_cursor"]) if terminal_marker is not None else cutoff.terminal_cursor
+    if after > latest_cursor:
+        raise HTTPException(status_code=409, detail="Observation cursor is no longer valid.")
+
+    try:
+        requested_rows = (
+            []
+            if observations_quarantined
+            else lifecycle_repository.list_discovery_observations(
+                run_id,
+                cutoff.attempt,
+                after_cursor=after,
+                limit=limit,
+                project_id=scoped.project_id,
+                site_id=scoped.site_id,
+            )
+        )
+    except DiscoveryObservationIntegrityError as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored discovery observation evidence failed integrity verification.",
+        ) from error
+    observations = [DiscoveryObservationRecord.model_validate(item.model_dump(mode="json")) for item in requested_rows]
+    if terminal_marker is not None:
+        cutoff_after_page = lifecycle_repository.get_discovery_observation_cutoff(
+            run_id,
+            attempt,
+            project_id=scoped.project_id,
+            site_id=scoped.site_id,
+        )
+        if cutoff_after_page != cutoff:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored discovery observation evidence failed integrity verification.",
+            )
+    next_cursor = observations[-1].cursor if observations else after
+    response.headers["Cache-Control"] = "no-store"
+    terminal = (
+        DiscoveryObservationTerminal(
+            status=terminal_marker["status"],
+            terminal_cursor=int(terminal_marker["terminal_cursor"]),
+        )
+        if terminal_marker is not None
+        else None
+    )
+    return DiscoveryObservationPageResponse(
+        run_id=run_id,
+        attempt=cutoff.attempt,
+        observations=observations,
+        next_cursor=next_cursor,
+        latest_cursor=latest_cursor,
+        has_more=not observations_quarantined and not observations_pruned and next_cursor < latest_cursor,
+        observations_pruned=observations_pruned,
+        observations_quarantined=observations_quarantined,
+        terminal=terminal,
+    )
+
+
+@router.get(
     "/runs/{run_id}/results",
     response_model=DiscoveryResultsResponse,
     dependencies=[Depends(require_viewer)],
@@ -679,26 +1206,93 @@ def get_discovery_results(
     principal: AuthPrincipal = Depends(get_principal),
 ) -> DiscoveryResultsResponse:
     run = _load_discovery_run(run_id, principal)
+    terminal = _verified_discovery_terminal(run)
 
-    # Back-compat: discovered_assets still come from result_summary (the engines
-    # write them there). Structured rows additionally come from the repository
-    # so consumers see persisted devices/points/topics, not just the summary.
-    discovered_assets = run.result_summary.get("discovered_assets", [])
+    result_summary = dict(terminal.summary) if terminal is not None else run.result_summary
+    discovered_assets = result_summary.get("discovered_assets", [])
     if not isinstance(discovered_assets, list):
         discovered_assets = []
 
     repository = _discovery_repository()
-    topics, register_comparison = _annotate_register_matches(run, repository.list_topics(run_id))
+    devices = list(terminal.devices) if terminal is not None else repository.list_devices(run_id)
+    points = list(terminal.points) if terminal is not None else repository.list_points(run_id)
+    topic_rows = list(terminal.topics) if terminal is not None else repository.list_topics(run_id)
+    authoritative_run = run.model_copy(update={"result_summary": result_summary})
+    topics, register_comparison = _annotate_register_matches(authoritative_run, topic_rows)
     return DiscoveryResultsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
         status=run.status,
-        result_summary=run.result_summary,
+        result_summary=result_summary,
         discovered_assets=discovered_assets,
-        devices=repository.list_devices(run_id),
-        points=repository.list_points(run_id),
+        devices=devices,
+        points=points,
         topics=topics,
         register_comparison=register_comparison,
+    )
+
+
+@router.get(
+    "/runs/{run_id}/comparison",
+    response_model=DiscoveryComparisonResponse,
+    dependencies=[Depends(require_viewer)],
+)
+def get_discovery_comparison(
+    run_id: str,
+    against: str = Query(..., min_length=1, max_length=128),
+    principal: AuthPrincipal = Depends(get_principal),
+) -> DiscoveryComparisonResponse:
+    """Compare two scoped, succeeded discovery seals deterministically."""
+
+    candidate = _load_discovery_run(run_id, principal)
+    baseline = _load_discovery_run(against, principal)
+    if baseline.run_id == candidate.run_id:
+        return DiscoveryComparisonResponse(
+            baseline_run_id=baseline.run_id,
+            candidate_run_id=candidate.run_id,
+            job_type=candidate.job_type,
+            compatible=False,
+            reason="Choose two different discovery runs.",
+        )
+    if baseline.job_type != candidate.job_type:
+        return DiscoveryComparisonResponse(
+            baseline_run_id=baseline.run_id,
+            candidate_run_id=candidate.run_id,
+            compatible=False,
+            reason="Runs use different discovery protocols.",
+        )
+    if baseline.status != "succeeded" or candidate.status != "succeeded":
+        return DiscoveryComparisonResponse(
+            baseline_run_id=baseline.run_id,
+            candidate_run_id=candidate.run_id,
+            job_type=candidate.job_type,
+            compatible=False,
+            reason="Comparison requires two succeeded sealed runs.",
+        )
+
+    baseline_rows = _comparison_rows(baseline)
+    candidate_rows = _comparison_rows(candidate)
+    baseline_by_key = {_comparison_key(candidate.job_type, row): row for row in baseline_rows}
+    candidate_by_key = {_comparison_key(candidate.job_type, row): row for row in candidate_rows}
+    additions = [
+        {"key": key, "value": candidate_by_key[key]} for key in sorted(candidate_by_key.keys() - baseline_by_key.keys())
+    ]
+    removals = [
+        {"key": key, "value": baseline_by_key[key]} for key in sorted(baseline_by_key.keys() - candidate_by_key.keys())
+    ]
+    changes = [
+        {"key": key, "before": baseline_by_key[key], "after": candidate_by_key[key]}
+        for key in sorted(candidate_by_key.keys() & baseline_by_key.keys())
+        if candidate_by_key[key] != baseline_by_key[key]
+    ]
+    return DiscoveryComparisonResponse(
+        baseline_run_id=baseline.run_id,
+        candidate_run_id=candidate.run_id,
+        job_type=candidate.job_type,
+        compatible=True,
+        additions=additions,
+        removals=removals,
+        changes=changes,
     )
 
 
@@ -709,14 +1303,60 @@ def get_discovery_results(
 )
 def get_discovery_points(
     run_id: str,
+    after: str | None = Query(default=None, min_length=1, max_length=128),
+    limit: int = Query(default=100, ge=1, le=500),
+    search: str | None = Query(default=None, max_length=128),
     principal: AuthPrincipal = Depends(get_principal),
 ) -> DiscoveryPointsResponse:
     run = _load_discovery_run(run_id, principal)
+    terminal = _verified_discovery_terminal(run)
+    raw_points = list(terminal.points if terminal is not None else _discovery_repository().list_points(run_id))
+    # Terminal result points are immutable payload dicts and do not carry the
+    # repository row position. Reintroduce that stable position before paging;
+    # repository-backed rows already provide it.
+    source_points = [
+        row if isinstance(row.get("position"), int) else {**row, "position": index}
+        for index, row in enumerate(raw_points)
+    ]
+
+    def point_key(row: dict[str, object]) -> tuple[int, str]:
+        raw_position = row.get("position")
+        position = raw_position if isinstance(raw_position, int) else 0
+        raw_id = row.get("id")
+        return position, str(raw_id or "")
+
+    source_points.sort(key=point_key)
+    normalized_search = search.strip().casefold() if search else ""
+    if normalized_search:
+        source_points = [
+            row
+            for row in source_points
+            if normalized_search in " ".join(str(value) for value in row.values() if value is not None).casefold()
+        ]
+    total = len(source_points)
+    start = 0
+    if after:
+        try:
+            after_position, after_id = after.split(":", 1)
+            cursor_key = (int(after_position), after_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid points cursor.") from None
+        while start < total and point_key(source_points[start]) <= cursor_key:
+            start += 1
+    page = source_points[start : start + limit]
+    has_more = start + len(page) < total
+    next_cursor = None
+    if page and has_more:
+        position, row_id = point_key(page[-1])
+        next_cursor = f"{position}:{row_id}"
     return DiscoveryPointsResponse(
         run_id=run.run_id,
         job_type=run.job_type,
         status=run.status,
-        points=_discovery_repository().list_points(run_id),
+        points=page,
+        total=total,
+        next_cursor=next_cursor,
+        has_more=has_more,
     )
 
 
@@ -730,8 +1370,16 @@ def get_discovery_topics(
     principal: AuthPrincipal = Depends(get_principal),
 ) -> DiscoveryTopicsResponse:
     run = _load_discovery_run(run_id, principal)
+    terminal = (
+        None
+        if run.job_type == "mqtt_discovery" and run.status not in {"succeeded", "failed", "cancelled"}
+        else _verified_discovery_terminal(run)
+    )
+    result_summary = dict(terminal.summary) if terminal is not None else run.result_summary
+    authoritative_run = run.model_copy(update={"result_summary": result_summary})
     topics, register_comparison = _annotate_register_matches(
-        run, _discovery_repository().list_topics(run_id)
+        authoritative_run,
+        (list(terminal.topics) if terminal is not None else _discovery_repository().list_topics(run_id)),
     )
     return DiscoveryTopicsResponse(
         run_id=run.run_id,
@@ -757,7 +1405,12 @@ def export_discovery_topics_xlsx(
     the export matches what the operator sees.
     """
     run = _load_discovery_run(run_id, principal)
-    rows = _discovery_repository().list_topics(run_id)
+    terminal = (
+        None
+        if run.job_type == "mqtt_discovery" and run.status not in {"succeeded", "failed", "cancelled"}
+        else _verified_discovery_terminal(run)
+    )
+    rows = list(terminal.topics) if terminal is not None else _discovery_repository().list_topics(run_id)
     if topic_filter:
         rows = [row for row in rows if _matches_topic_filter(str(row.get("topic") or ""), topic_filter)]
     # Annotate the (already filter-narrowed) rows with the same register-match
@@ -783,9 +1436,7 @@ def _build_topics_xlsx(rows: list[dict[str, object]]) -> bytes:
         attributes = row.get("attributes")
         attributes = attributes if isinstance(attributes, dict) else {}
         last_payload = row.get("last_payload")
-        payload_text = (
-            json.dumps(last_payload) if isinstance(last_payload, dict) and last_payload else ""
-        )
+        payload_text = json.dumps(last_payload) if isinstance(last_payload, dict) and last_payload else ""
         sheet.append(
             [
                 _xlsx_cell(row.get("topic")),
@@ -843,6 +1494,37 @@ def _matches_topic_filter(topic: str, pattern: str) -> bool:
     return len(filter_parts) == len(topic_parts)
 
 
+def _comparison_rows(run: RunRecord) -> list[dict[str, object]]:
+    terminal = _verified_discovery_terminal(run)
+    if terminal is not None:
+        if run.job_type == "ip_discovery":
+            raw = terminal.summary.get("discovered_assets", [])
+        elif run.job_type == "bacnet_discovery":
+            raw = terminal.devices
+        else:
+            raw = terminal.topics
+    else:
+        if run.job_type == "ip_discovery":
+            raw = run.result_summary.get("discovered_assets", [])
+        elif run.job_type == "bacnet_discovery":
+            raw = _discovery_repository().list_devices(run.run_id)
+        else:
+            raw = _discovery_repository().list_topics(run.run_id)
+    return [dict(row) for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+
+
+def _comparison_key(job_type: JobType, row: dict[str, object]) -> str:
+    if job_type == "ip_discovery":
+        key = row.get("ip_address") or row.get("observed_ip") or row.get("expected_ip")
+    elif job_type == "bacnet_discovery":
+        key = row.get("device_key") or row.get("device_instance") or row.get("instance") or row.get("address")
+    else:
+        key = row.get("topic") or row.get("topic_filter")
+    if key is None:
+        key = row.get("id") or row.get("entity_key")
+    return str(key) if key is not None else canonical_sha256(row)
+
+
 def _load_discovery_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
     load_scoped_run(run_id, principal, engine=service.engine)
     try:
@@ -854,17 +1536,30 @@ def _load_discovery_run(run_id: str, principal: AuthPrincipal) -> RunRecord:
     return run
 
 
-def _bind_mqtt_register(
-    project_id: str, site_id: str, parameters: dict[str, object]
-) -> None:
+def _verified_discovery_terminal(run: RunRecord) -> TerminalResultV1 | None:
+    """Use the sealed RunResult as terminal authority, with narrow legacy fallback."""
+
+    if run.status not in {"succeeded", "failed", "cancelled"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Terminal discovery results are not ready.",
+        )
+    try:
+        return service.get_verified_terminal_result(run.run_id)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(
+            status_code=409,
+            detail="Stored discovery evidence failed integrity verification.",
+        ) from error
+
+
+def _bind_mqtt_register(project_id: str, site_id: str, parameters: dict[str, object]) -> None:
     """Freeze the newest usable MQTT register into the run parameters."""
 
     # The route owns this binding. A caller cannot smuggle an import from
     # another workspace by supplying its id in the request body.
     parameters.pop("mqtt_register_import_id", None)
-    imports = ImportRepository(service.engine).list(
-        project_id=project_id, site_id=site_id, import_type="mqtt_register"
-    )
+    imports = ImportRepository(service.engine).list(project_id=project_id, site_id=site_id, import_type="mqtt_register")
     for record in imports:
         if record.get("accepted_rows"):
             parameters["mqtt_register_import_id"] = str(record["import_id"])
@@ -896,9 +1591,7 @@ def _mqtt_register_filters(
     return [], None
 
 
-def _annotate_register_matches(
-    run: RunRecord, topics: list[dict]
-) -> tuple[list[dict], dict | None]:
+def _annotate_register_matches(run: RunRecord, topics: list[dict]) -> tuple[list[dict], dict | None]:
     """Stamp observed topics using the register frozen into the run at creation.
 
     Verdicts are derived on GET from the exact import bound at run creation.
@@ -914,9 +1607,7 @@ def _annotate_register_matches(
         device: a silent topic is not proof the device is gone.
     """
     if not (
-        run.job_type == "mqtt_discovery"
-        and run.status == "succeeded"
-        and run.result_summary.get("dry_run") is not True
+        run.job_type == "mqtt_discovery" and run.status == "succeeded" and run.result_summary.get("dry_run") is not True
     ):
         return topics, None
     filters, filename = _mqtt_register_filters(run)

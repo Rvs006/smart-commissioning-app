@@ -125,6 +125,14 @@ abstraction with two implementations:
 | Authorization gate before a real scan | Tested | A real (non-dry-run) scan requires the authorization contract. |
 | Directed (unicast) Who-Is | Not wired in real path | The documented signature did not accept it; flagged UNVERIFIED. |
 
+The hardened discovery contract now freezes lane identity, response-source
+predicates, composite device/object keys, bounded `base_read_set` and
+`authorized_property_ceiling` values, and a separate sealed child run for
+property expansion. Those boundaries are covered by simulated and lifecycle
+tests. They remain **UNPROVEN on physical BACnet/IP controllers** until the
+signed qualification matrix, packet capture, and repeated field runs in
+`docs/team-pilot-deployment.md` are attached.
+
 **Transport modes - a BBMD is OPTIONAL; local broadcast is the default (hard
 requirement, field-confirmed 2026-07-17).** Not every job site has a BBMD:
 single-subnet ("flat") networks are a normal case, and the app must scan them

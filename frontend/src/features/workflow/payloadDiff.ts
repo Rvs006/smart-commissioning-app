@@ -15,6 +15,8 @@
 // Ceiling: arrays and type-mismatched nodes are treated as leaves (no descent).
 // UDMI payloads are object-shaped, so per-index array diffing is out of scope.
 
+import { isPlainObject } from "../../utils/isPlainObject";
+
 export type DiffMark = "only-expected" | "only-observed" | null;
 
 export type DiffLine = {
@@ -28,10 +30,6 @@ export type PayloadDiff = {
 };
 
 const INDENT = "  ";
-
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 // Object property keys JSON.stringify actually serialises: it drops keys whose
 // value is undefined, a function, or a symbol. Mirroring that keeps the
@@ -74,7 +72,13 @@ function serializeValue(
       const missing = otherObject !== null && !(key in otherObject);
       const keyForced = missing ? markForMissing : forced;
       const childOther = otherObject !== null ? otherObject[key] : undefined;
-      const childLines = serializeValue(value[key], depth + 1, childOther, markForMissing, keyForced);
+      const childLines = serializeValue(
+        value[key],
+        depth + 1,
+        childOther,
+        markForMissing,
+        keyForced,
+      );
       // Merge the `"key": ` prefix into the child's first line, which starts
       // with exactly indentOf(depth + 1).
       const childIndent = indentOf(depth + 1);

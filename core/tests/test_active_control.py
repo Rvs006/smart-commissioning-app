@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,8 @@ from smart_commissioning_core.db.engine import (
 from smart_commissioning_core.db.models import (
     Run,
     RunExecutionContext,
+    RunResult,
+    RunSeal,
     User,
     UserScopeGrant,
 )
@@ -35,7 +38,7 @@ from smart_commissioning_core.engines.base import (
 from smart_commissioning_core.owned_run_store import OwnedRunStore
 from smart_commissioning_core.run_context import RunContextV1, canonical_context_sha256
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 _DIGEST = "c" * 64
 _PROJECT_ID = "project-active-control"
@@ -193,6 +196,96 @@ class ActiveControlRepositoryTests(unittest.TestCase):
                 liveness,
             )
 
+    def test_control_reads_use_query_only_sessions(self) -> None:
+        statements: list[str] = []
+
+        def capture(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _many: bool,
+        ) -> None:
+            statements.append(statement.strip().upper())
+
+        event.listen(self.engine, "before_cursor_execute", capture)
+        try:
+            self.assertFalse(self.owned.is_cancel_requested(self.live_run_id))
+            self.owned.require_active_control(now=self.now + timedelta(seconds=1))
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture)
+
+        self.assertGreaterEqual(statements.count("PRAGMA QUERY_ONLY=ON"), 2)
+        self.assertNotIn("BEGIN IMMEDIATE", statements)
+
+    def test_held_active_control_reader_does_not_reserve_the_writer_lock(self) -> None:
+        real_factory = self.repository._query_session_factory
+        reader_is_held = threading.Event()
+        release_reader = threading.Event()
+
+        class HeldQuerySession:
+            def __init__(self) -> None:
+                self._context = real_factory()
+
+            def __enter__(self):
+                return self._context.__enter__()
+
+            def __exit__(self, *args: object) -> object:
+                reader_is_held.set()
+                if not release_reader.wait(3):
+                    raise TimeoutError("control reader was not released")
+                return self._context.__exit__(*args)
+
+        self.repository._query_session_factory = HeldQuerySession
+        self.addCleanup(
+            setattr,
+            self.repository,
+            "_query_session_factory",
+            real_factory,
+        )
+        reader_errors: list[BaseException] = []
+
+        def hold_control_read() -> None:
+            try:
+                self.repository.require_active_control(
+                    self.live_run_id,
+                    self.owned.lease.owner_token,
+                    self.owned.lease.attempt,
+                    now=self.now + timedelta(seconds=1),
+                )
+            except BaseException as error:  # pragma: no cover - asserted below
+                reader_errors.append(error)
+
+        reader = threading.Thread(target=hold_control_read)
+        reader.start()
+        self.assertTrue(reader_is_held.wait(3))
+
+        writer_finished = threading.Event()
+        writer_errors: list[BaseException] = []
+
+        def write_while_reader_is_held() -> None:
+            try:
+                with session_factory(self.engine).begin() as session:
+                    session.get(Run, self.live_run_id).stage = "writer-was-not-blocked"
+            except BaseException as error:  # pragma: no cover - asserted below
+                writer_errors.append(error)
+            finally:
+                writer_finished.set()
+
+        writer = threading.Thread(target=write_while_reader_is_held)
+        writer.start()
+        completed_while_held = writer_finished.wait(3)
+        release_reader.set()
+        reader.join(5)
+        writer.join(5)
+
+        self.assertTrue(completed_while_held)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(writer.is_alive())
+        self.assertFalse(reader_errors, reader_errors)
+        self.assertFalse(writer_errors, writer_errors)
+
     def test_owner_attempt_cancel_and_lease_are_checked_together(self) -> None:
         with self.assertRaisesRegex(ActiveControlDeniedError, "active control"):
             self.repository.require_active_control(
@@ -230,6 +323,64 @@ class ActiveControlRepositoryTests(unittest.TestCase):
     def test_authorization_window_expiry_denies_mid_run(self) -> None:
         with self.assertRaisesRegex(ActiveControlDeniedError, "window has ended"):
             self.owned.require_active_control(now=self.now + timedelta(seconds=11))
+
+    def test_successful_discovery_seal_fails_after_authorization_revocation(self) -> None:
+        """A last in-flight probe cannot turn a revoked run into success."""
+
+        # This is the deterministic SQLite race seam: the engine's post-drain
+        # read succeeds, then the approval is revoked before its success seal.
+        self.owned.require_active_control(now=self.now + timedelta(seconds=4))
+        self.repository.revoke_scan_authorization(
+            self.authorization_id,
+            revoked_by="admin-one",
+            reason="Window withdrawn while the final probe was in flight",
+            now=self.now + timedelta(seconds=5),
+        )
+
+        outcome = self.repository.finalize_discovery_run(
+            self.live_run_id,
+            self.owned.lease.owner_token,
+            self.owned.lease.attempt,
+            TerminalResultV1(status="succeeded", stage="engine_complete"),
+            now=self.now + timedelta(seconds=6),
+        )
+
+        self.assertTrue(outcome.applied)
+        with session_factory(self.engine)() as session:
+            result = session.get(RunResult, self.live_run_id)
+            seal = session.get(RunSeal, self.live_run_id)
+        self.assertEqual((result.terminal_status, seal.terminal_status), ("failed", "failed"))
+        self.assertEqual(result.terminal_stage, "active_control_lost")
+        self.assertEqual(result.summary["control_reason"], "authorization_revoked")
+        self.assertIs(result.summary["provider_drained"], True)
+        self.assertIs(result.summary["acceptance_eligible"], False)
+
+    def test_successful_discovery_seal_fails_after_initiator_grant_revocation(self) -> None:
+        """The terminal success fence locks and rechecks the active scope grant."""
+
+        with session_factory(self.engine).begin() as session:
+            grant = session.scalar(
+                select(UserScopeGrant).where(UserScopeGrant.user_id == _USER_ID)
+            )
+            grant.active_marker = None
+            grant.revoked_by = "admin-one"
+            grant.revoke_reason = "Scope withdrawn while the final probe was in flight"
+            grant.revoked_at = self.now + timedelta(seconds=5)
+
+        outcome = self.repository.finalize_discovery_run(
+            self.live_run_id,
+            self.owned.lease.owner_token,
+            self.owned.lease.attempt,
+            TerminalResultV1(status="succeeded", stage="engine_complete"),
+            now=self.now + timedelta(seconds=6),
+        )
+
+        self.assertTrue(outcome.applied)
+        with session_factory(self.engine)() as session:
+            result = session.get(RunResult, self.live_run_id)
+        self.assertEqual(result.terminal_status, "failed")
+        self.assertEqual(result.summary["control_reason"], "grant_revoked")
+        self.assertIs(result.summary["acceptance_eligible"], False)
 
     def test_deactivated_user_or_revoked_grant_denies_mid_run(self) -> None:
         with session_factory(self.engine).begin() as session:
@@ -338,15 +489,19 @@ class ActiveControlRepositoryTests(unittest.TestCase):
         self.owned.require_active_control(now=self.now + timedelta(seconds=3))
 
     def test_control_store_error_propagates_instead_of_authorizing(self) -> None:
-        original_factory = self.repository._session_factory
+        original_factory = self.repository._query_session_factory
 
         class UnavailableStore:
-            @staticmethod
-            def begin():
+            def __init__(self) -> None:
                 raise RuntimeError("control store unavailable")
 
-        self.repository._session_factory = UnavailableStore()
-        self.addCleanup(setattr, self.repository, "_session_factory", original_factory)
+        self.repository._query_session_factory = UnavailableStore
+        self.addCleanup(
+            setattr,
+            self.repository,
+            "_query_session_factory",
+            original_factory,
+        )
         with self.assertRaisesRegex(RuntimeError, "control store unavailable"):
             self.owned.require_active_control(now=self.now + timedelta(seconds=2))
 

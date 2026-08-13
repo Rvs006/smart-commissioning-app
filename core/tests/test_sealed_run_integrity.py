@@ -223,6 +223,25 @@ def _report_sealed_snapshot() -> dict[str, object]:
     }
 
 
+def _stamp_observation_evidence(
+    snapshot: dict[str, object],
+    evidence: dict[str, object],
+) -> None:
+    payload = copy.deepcopy(snapshot["result"]["result_payload"])
+    summary = dict(payload["summary"])
+    summary["observation_evidence_v1"] = evidence
+    payload["summary"] = summary
+    terminal = TerminalResultV1.model_validate(payload)
+    digest = terminal.sha256()
+    snapshot["run"]["attempt"] = evidence["attempt"]
+    snapshot["run"]["result_summary"] = summary
+    snapshot["run"]["result_sha256"] = digest
+    snapshot["result"]["summary"] = summary
+    snapshot["result"]["result_payload"] = payload
+    snapshot["result"]["result_sha256"] = digest
+    snapshot["seal"]["result_sha256"] = digest
+
+
 class SealedRunIntegrityTests(unittest.TestCase):
     def test_rejects_each_terminal_metadata_projection_that_drifted(self) -> None:
         mutations = {
@@ -259,6 +278,44 @@ class SealedRunIntegrityTests(unittest.TestCase):
         verified = verify_sealed_run(**_sealed_snapshot())
 
         self.assertIsNotNone(verified)
+
+    def test_accepts_a_well_formed_observation_stream_commitment(self) -> None:
+        snapshot = _sealed_snapshot()
+        _stamp_observation_evidence(
+            snapshot,
+            {
+                "schema_version": "1.0",
+                "attempt": 2,
+                "observation_count": 2,
+                "terminal_cursor": 8,
+                "observation_stream_sha256": "b" * 64,
+            },
+        )
+
+        verified = verify_sealed_run(**snapshot)
+
+        self.assertEqual(
+            verified.terminal_result.summary["observation_evidence_v1"][
+                "terminal_cursor"
+            ],
+            8,
+        )
+
+    def test_rejects_a_coherently_rehashed_inconsistent_observation_commitment(self) -> None:
+        snapshot = _sealed_snapshot()
+        _stamp_observation_evidence(
+            snapshot,
+            {
+                "schema_version": "1.0",
+                "attempt": 2,
+                "observation_count": 0,
+                "terminal_cursor": 8,
+                "observation_stream_sha256": "b" * 64,
+            },
+        )
+
+        with self.assertRaisesRegex(SealedRunIntegrityError, "count and cursor"):
+            verify_sealed_run(**snapshot)
 
     def test_legacy_compatibility_requires_every_lifecycle_component_to_be_absent(self) -> None:
         snapshot = _sealed_snapshot()

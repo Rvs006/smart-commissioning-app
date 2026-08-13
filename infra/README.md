@@ -29,6 +29,7 @@ are missing:
 | `REDIS_PASSWORD` | Redis `requirepass` password. Generate: `openssl rand -hex 32` |
 | `API_KEY` | Shared key clients must send when `AUTH_MODE=api_key`. Generate: `openssl rand -hex 32` |
 | `SMART_COMMISSIONING_DEPLOYMENT_ID` | Stable non-secret name used when deriving unique MQTT client IDs. |
+| `SMART_COMMISSIONING_NETWORK_EXECUTOR_ID` (optional) | Stable ID for exactly one shared OS network namespace and NIC inventory. Leave unset in the stock two-container topology. |
 | `FRONTEND_PORT` (optional, default 8080) | Loopback host port for the frontend + `/api` proxy. |
 | `API_PORT` (optional, default 8000) | Loopback host port for direct API debugging. |
 | `POSTGRES_PORT` (optional, default 5432) | Loopback host port for direct Postgres debugging. |
@@ -59,6 +60,17 @@ encrypted-store key, the task module, and `bacpypes3`.
 Hosted execution is always `JOB_EXECUTION_MODE=queue`. If Redis publication is
 unavailable, the durable outbox keeps the dispatch pending for automatic retry.
 The API never starts a second inline copy of a queued job.
+
+The stock API and worker containers have separate network namespaces. For that
+reason, IP, BACnet and MQTT discovery previews and live runs fail closed unless
+the deployment is deliberately changed so preview resolution and execution use
+the same namespace. Such an override must set the same
+`SMART_COMMISSIONING_NETWORK_EXECUTOR_ID` on the co-located API and worker and
+dedicate that queue lane to the namespace. Merely setting the same ID on the
+stock two-container stack is not enough: the worker repeats the concrete stable
+NIC, address, prefix, default-route and bind checks before any transport starts.
+The portable inline profile resolves and executes in one process, so it derives
+an inline executor scope automatically.
 
 `infra/docker-compose.inline.yml` is the explicit parity profile. It sets the
 API to asynchronous inline execution and keeps the worker behind a non-default

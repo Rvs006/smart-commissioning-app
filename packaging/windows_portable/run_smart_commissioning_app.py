@@ -287,6 +287,10 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     # the hosted compose profile (infra/) sets AUTH_MODE=api_key instead.
     _set_env_default("AUTH_MODE", "local")
     _set_env_default("JOB_EXECUTION_MODE", "inline")
+    # This launcher builds the external portable deployment boundary. Do not
+    # inherit an internal deployment opt-in from the parent process. Internal
+    # deployments enable this setting through their separate launch profile.
+    os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"] = "0"
 
 
 def open_browser_later(url: str) -> None:

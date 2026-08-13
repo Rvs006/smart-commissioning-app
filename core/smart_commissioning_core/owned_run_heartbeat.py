@@ -225,7 +225,14 @@ class OwnedRunHeartbeat:
                     outcome = self._owned_store.terminal_outcome
                     if outcome is not None and not outcome.conflict:
                         break
-                    self._owned_store.mark_ownership_lost()
+                    marked = self._owned_store.mark_ownership_lost()
+                    if marked is False:
+                        # Discovery finalization closes its sink before folding
+                        # outside the lifecycle lock. A false beat after the
+                        # terminal commit but before the local outcome is set is
+                        # transient; the finalizer alone decides that race.
+                        delay = min(self._interval_seconds, 0.05)
+                        continue
                     self._ownership_lost.set()
                     logger.warning(
                         "owned-run heartbeat confirmed ownership loss for run_id=%s "
@@ -237,7 +244,10 @@ class OwnedRunHeartbeat:
 
                 self._last_success = self._monotonic()
                 if consecutive_failures:
-                    logger.info(
+                    # Recovery is an operationally significant transition. Keep
+                    # it visible in hosted worker logs even when Dramatiq raises
+                    # its effective console threshold above INFO.
+                    logger.warning(
                         "owned-run heartbeat recovered for run_id=%s executor=%s "
                         "after %d failed attempt(s)",
                         run_id,
