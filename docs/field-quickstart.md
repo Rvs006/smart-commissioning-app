@@ -54,6 +54,31 @@ them and chooses which adapter to scan from.
 4. **First real scan:** if Windows Firewall pops up, click **Allow**.
 5. Review results, add comments, **export CSV/Excel**, send it back.
 
+## v0.1.42 protocol-recovery check
+
+Use this only with the merged v0.1.42 recovery candidate described in
+[the validation guide](v0.1.42-protocol-recovery-validation.md). It is not a
+published GitHub release.
+
+1. **IP Scanner:** import the approved IP register. If that register is the
+   target list, leave the target editor blank, make a **Preview**, verify the
+   imported addresses and exclusions, then use the matching one-use
+   authorization for the live run. A blank editor now explicitly selects the
+   imported register; it does not send an empty target request.
+2. **BACnet Discovery:** save the site's BACnet UDP port in **Configuration**,
+   make a **Preview**, and confirm the source interface, device range, and
+   port before authorizing the matching live run. The saved non-default port is
+   part of the transport plan. After a successful run, use **Points / Live
+   Data** to review each persisted point value and unit.
+3. **MQTT Discovery:** make a preview of the topic filter and capture window,
+   then authorize and start the live capture. When the run is terminal, open
+   **Results**. A temporary refresh problem in the supplementary live-topic
+   panel must not hide the sealed terminal results.
+4. Save the application version, source commit, EXE hash, preview/run IDs,
+   source interface, imported-register revision, and any error text in the
+   private field record. Never put broker credentials, site data, or raw
+   payloads into the repository.
+
 ## Look back at what you ran
 
 **Operate → Run History** lists every run this laptop has done, with the date and
