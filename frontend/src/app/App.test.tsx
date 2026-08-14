@@ -4,8 +4,10 @@ import { createMemoryRouter } from "react-router";
 import { RouterProvider } from "react-router/dom";
 import { clearApiKey, getApiKey, setApiKey } from "../api/client";
 import { DashboardPage } from "../features/workflow/DashboardPage";
+import backendCoreSource from "../../../core/smart_commissioning_core/__init__.py?raw";
 import { App } from "./App";
 import { SessionProvider } from "./session";
+import { resolveAppVersion } from "./version";
 
 const healthPayload = { status: "ok", version: "0.1.39", timestamp: "2026-06-11T00:00:00Z" };
 
@@ -179,24 +181,26 @@ describe("App shell", () => {
     expect(await screen.findByText("ok")).toBeInTheDocument();
   });
 
-  it("falls back to 'dev' when no version was baked in", async () => {
-    // Dev servers and the test run have no VITE_APP_VERSION (no frontend/.env*
-    // file exists). `||` not `??`, so a future CI step exporting an empty
-    // VITE_APP_VERSION="" also lands here instead of rendering a blank pill.
+  it("uses the backend health fallback when no version was baked in", async () => {
+    // Source and dev builds can have no VITE_APP_VERSION. The fallback must
+    // remain the same release identity that the backend health route reports.
     stubDashboardFetch();
     renderApp();
 
-    expect(screen.getByTitle("App version")).toHaveTextContent("dev");
+    const backendHealthFallback = backendCoreSource.match(/^__version__ = "([^"]+)"$/m)?.[1];
+    expect(backendHealthFallback).toBeDefined();
+    expect(resolveAppVersion("")).toBe(backendHealthFallback);
+    expect(screen.getByTitle("App version")).toHaveTextContent(backendHealthFallback!);
 
     expect(await screen.findByText("ok")).toBeInTheDocument();
   });
 
-  it("renders an empty-string version as 'dev' rather than a blank pill", async () => {
+  it("renders an empty-string version as the source fallback rather than a blank pill", async () => {
     vi.stubEnv("VITE_APP_VERSION", "");
     stubDashboardFetch();
     renderApp();
 
-    expect(screen.getByTitle("App version")).toHaveTextContent("dev");
+    expect(screen.getByTitle("App version")).toHaveTextContent(resolveAppVersion(""));
 
     expect(await screen.findByText("ok")).toBeInTheDocument();
   });

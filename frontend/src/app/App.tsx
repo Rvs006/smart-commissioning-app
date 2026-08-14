@@ -4,6 +4,7 @@ import { isAuthRejection } from "../api/client";
 import { ReviewFeedback } from "../features/workflow/ReviewFeedback";
 import { useSession } from "./sessionContext";
 import { getTheme, toggleTheme, type ThemeMode } from "./theme";
+import { resolveAppVersion } from "./version";
 
 // Navigation grouped by the commissioning workflow stage (Configure → Discover
 // → Validate → Report → Operate) instead of a flat list of equal tabs, so the
@@ -103,14 +104,11 @@ export function App() {
           </NavLink>
 
           <div className="app-header-meta">
-            {/* Build-stamped release version. build.ps1 sets VITE_APP_VERSION before
-                `npm run build`, so a release bundle reads "v0.1.11" and an unstamped
-                CI bundle reads its git-describe string; dev servers and the test run
-                read "dev". Kept inline (not a module const) so it is read per render,
-                and `||` not `??` so an empty-string env var falls back rather than
-                rendering a blank pill. */}
+            {/* build.ps1 supplies the release stamp for portable builds. Source and
+                dev builds derive the same canonical fallback from package.json that
+                the release contract keeps aligned with backend health metadata. */}
             <span className="site-pill subtle" title="App version">
-              {import.meta.env.VITE_APP_VERSION || "dev"}
+              {resolveAppVersion()}
             </span>
             <Link
               className="header-pill"
