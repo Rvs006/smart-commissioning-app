@@ -51,8 +51,9 @@ class ApiTestCase(unittest.TestCase):
     _BASE_ENV: dict[str, str | None] = {
         "INLINE_RUN_ASYNC": "0",
         # The release default keeps the operator-managed Nmap lane absent.
-        # U4 API tests opt into the internal same-organization lane explicitly.
+        # U4 API tests opt into both internal Nmap capabilities explicitly.
         "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED": "1",
+        "SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED": "1",
     }
     # Subclasses override; a None value means "ensure the variable is unset".
     env: dict[str, str | None] = {}

@@ -13,6 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
 import {
   ApiError,
+  approveDetectedNmap,
   cancelRun,
   createImport,
   createReport,
@@ -115,6 +116,7 @@ import {
 import { alignPayloadDiff, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
 import { LiveRunConsole } from "./LiveRunConsole";
+import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 import type { RunRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
@@ -467,7 +469,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Discovery/validation/report runs, imports, cancel, publish, and rollback are
   // all engineer+ mutations server-side. A viewer/reviewer sees these controls
   // disabled with an explanatory tooltip rather than letting the click 403.
-  const { apiClient, canEngineer, sessionScopeId, workspace: workspaceRef } = useSession();
+  const { apiClient, canAdmin, canEngineer, me, sessionScopeId, workspace: workspaceRef } = useSession();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const module = getModuleByRoute(moduleRoute);
@@ -531,6 +533,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [scanAuthorizationId, setScanAuthorizationId] = useState<string | null>(null);
   const [scanProvider, setScanProvider] = useState<IPDiscoveryProvider>("builtin_tcp_connect");
   const [nmapProfile, setNmapProfile] = useState<NmapProfileName>("tcp_connect_inventory");
+  const applyNmapProfile = (profile: NmapProfileName) => {
+    setNmapProfile(profile);
+    setScanPorts((current) =>
+      current.map((entry) => ({
+        ...entry,
+        protocol: profile === "selected_udp" ? ("udp" as const) : ("tcp" as const),
+      })),
+    );
+  };
   // Register-driven mode: Run sends NO pasted schedule/payloads, so the backend
   // fans out one expected asset per imported mqtt_register row (topics + points
   // + units + schema version from the register). Auto-enabled when an
@@ -700,6 +711,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       runAccessClosed || isTerminalStatus(query.state.data?.status) ? false : 1500,
   });
 
+  const nmapCapabilityQueryKey = [
+    ...queryKeys.workspace(sessionScopeId, workspaceRef),
+    "nmap-capability",
+  ] as const;
   const nmapCapabilityQuery = useQuery({
     enabled: module.route === "ip-scanner",
     queryFn: ({ signal }) =>
@@ -708,8 +723,27 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         siteId: workspaceRef.siteId,
         context: { client: apiClient, signal },
       }),
-    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "nmap-capability"],
+    queryKey: nmapCapabilityQueryKey,
     staleTime: 15_000,
+  });
+  const approveNmapMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "nmap.approve_detected"),
+    mutationFn: () =>
+      approveDetectedNmap({
+        projectId: workspaceRef.projectId,
+        siteId: workspaceRef.siteId,
+        context: { client: apiClient },
+    }),
+    onSuccess: (capability) => {
+      queryClient.setQueryData(nmapCapabilityQueryKey, capability);
+      const permittedProfile = resolvePermittedNmapProfile(
+        nmapProfile,
+        capability.permitted_profiles,
+      );
+      if (permittedProfile) {
+        applyNmapProfile(permittedProfile);
+      }
+    },
   });
 
   const scanAuthorizationsQuery = useQuery<ScanAuthorizationV1[]>({
@@ -3204,13 +3238,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   };
 
   const changeNmapProfile = (profile: NmapProfileName) => {
-    setNmapProfile(profile);
-    setScanPorts((current) =>
-      current.map((entry) => ({
-        ...entry,
-        protocol: profile === "selected_udp" ? ("udp" as const) : ("tcp" as const),
-      })),
-    );
+    applyNmapProfile(profile);
   };
 
   const changeScanProvider = (provider: IPDiscoveryProvider) => {
@@ -3220,9 +3248,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return;
     }
     const permittedProfiles = nmapCapabilityQuery.data?.permitted_profiles ?? [];
-    const permittedProfile = permittedProfiles.includes(nmapProfile)
-      ? nmapProfile
-      : permittedProfiles[0];
+    const permittedProfile = resolvePermittedNmapProfile(nmapProfile, permittedProfiles);
     if (permittedProfile) {
       changeNmapProfile(permittedProfile);
     }
@@ -4552,6 +4578,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     }. Only administrator-approved profiles are shown.`
                   : `Nmap process execution is unavailable: ${nmapCapabilityQuery.data.reason.replace(/_/g, " ")}.`}
               </p>
+            )}
+            {canAdmin &&
+              me?.global_scope &&
+              nmapCapabilityQuery.data &&
+              !nmapAvailable &&
+              nmapCapabilityQuery.data.reason !== "deployment_feature_disabled" && (
+                <div className="inline-actions">
+                  <button
+                    className="secondary-button compact"
+                    disabled={approveNmapMutation.isPending}
+                    onClick={() => approveNmapMutation.mutate()}
+                    type="button"
+                  >
+                    {approveNmapMutation.isPending ? "Approving Nmap..." : "Approve detected Nmap"}
+                  </button>
+                  <p className="field-note">
+                    Records this signed local installation once. Approval is requested again only if
+                    its installed files change.
+                  </p>
+                </div>
+              )}
+            {approveNmapMutation.isError && (
+              <div className="state-panel error" role="alert">
+                <strong>Nmap approval could not be completed</strong>
+                <span>{approveNmapMutation.error.message}</span>
+              </div>
             )}
             <p className="field-note">
               {scanProvider === "builtin_tcp_connect"

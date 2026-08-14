@@ -139,7 +139,9 @@ Alembic-shipping options works - pick one.
 > end-to-end (frontend build → PyInstaller freeze → bundle assembly with the
 > cache trimming below + a sanity check that `core/alembic.ini` landed). Run
 > `pwsh packaging/windows_portable/build.ps1` (or `-SkipFrontend` to reuse an
-> existing `frontend/dist`). The freeze + clean-box launch are still build-box /
+> existing `frontend/dist`). This builds the one v0.1.43 portable EXE, which can
+> approve the locally installed Nmap once from IP Scanner. It does not package,
+> download, or install Nmap or Npcap. The freeze + clean-box launch are still build-box /
 > on-site steps (see §6). The raw commands below document what the script does.
 >
 > **Requires PowerShell 7 (the `pwsh` command).** Windows PowerShell 5.1 does not

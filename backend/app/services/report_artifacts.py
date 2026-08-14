@@ -25,7 +25,7 @@ REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.1"
 # The source release contract scans this fallback directly. Portable candidates
 # override it at runtime through :func:`effective_report_renderer_version`.
-REPORT_RENDERER_VERSION = "0.1.42"
+REPORT_RENDERER_VERSION = "0.1.43"
 
 
 def effective_report_renderer_version() -> str:

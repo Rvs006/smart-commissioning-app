@@ -9,6 +9,7 @@ Nmap. Windows detection and trust inspection enter through an injected probe.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Protocol
 from uuid import uuid4
@@ -31,6 +32,7 @@ from smart_commissioning_core.engines.ip.nmap_trust import (
     NmapTrustReason,
     NmapTrustResultV1,
     inspect_nmap_installation,
+    inspect_nmap_installation_for_administrator_approval,
     revalidate_nmap_installation,
 )
 from smart_commissioning_core.engines.ip.nmap_windows import (
@@ -42,6 +44,7 @@ from smart_commissioning_core.run_context import canonical_sha256
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from app.core.auth import AuthPrincipal
 from app.core.db import get_engine
@@ -55,6 +58,7 @@ from app.schemas.nmap import (
     NmapInstallationConfirmationRequest,
     NmapInstallationConfirmationResponse,
     NmapNpcapState,
+    NmapProfilePolicyV1,
     NmapProjectSiteScope,
     NmapProviderMode,
 )
@@ -102,6 +106,8 @@ _RAW_CAPABILITY_PROFILES = frozenset(
     }
 )
 
+_ONE_CLICK_PROFILES = (NmapProfileName.TCP_CONNECT_INVENTORY,)
+
 
 def _runtime_permitted_profiles(
     profiles: tuple[NmapProfileName, ...],
@@ -141,6 +147,8 @@ class NmapProbeObservationV1(BaseModel):
 class NmapInstallationProbe(Protocol):
     """Injected local detector/trust adapter; implementations stay OS-specific."""
 
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]: ...
+
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]: ...
 
     def revalidate(
@@ -153,6 +161,9 @@ class NmapInstallationProbe(Protocol):
 
 class UnavailableNmapInstallationProbe:
     """Fail-closed default until the Windows adapter is wired by the runtime."""
+
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        return ()
 
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]:
         del policy
@@ -178,7 +189,28 @@ class UnavailableNmapInstallationProbe:
 class WindowsNmapInstallationProbe:
     """Network-free adapter over the core HKLM, trust, Npcap, and token APIs."""
 
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        """Collect the one trusted local identity a global administrator may approve."""
+        return self._collect_observations(
+            lambda candidate, backend: inspect_nmap_installation_for_administrator_approval(
+                candidate=candidate,
+                backend=backend,
+            )
+        )
+
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]:
+        return self._collect_observations(
+            lambda candidate, backend: inspect_nmap_installation(
+                candidate=candidate,
+                policy=policy,
+                backend=backend,
+            )
+        )
+
+    def _collect_observations(
+        self,
+        inspect_trust: Callable[[NmapDetectionCandidateV1, CtypesNmapTrustBackend], NmapTrustResultV1],
+    ) -> tuple[NmapProbeObservationV1, ...]:
         try:
             backend = CtypesNmapTrustBackend()
             candidates = detect_nmap_candidates(
@@ -189,19 +221,40 @@ class WindowsNmapInstallationProbe:
             return ()
         machine_identity, npcap_version, npcap_state, raw_capable = self._runtime_capability()
         return tuple(
-            NmapProbeObservationV1(
+            self._observation(
                 candidate=candidate,
-                trust=inspect_nmap_installation(
-                    candidate=candidate,
-                    policy=policy,
-                    backend=backend,
-                ),
-                machine_executor_identity=machine_identity,
+                trust=inspect_trust(candidate, backend),
+                machine_identity=machine_identity,
                 npcap_version=npcap_version,
                 npcap_state=npcap_state,
                 raw_capable=raw_capable,
             )
             for candidate in candidates
+        )
+
+    @staticmethod
+    def _observation(
+        *,
+        candidate: NmapDetectionCandidateV1,
+        trust: NmapTrustResultV1,
+        machine_identity: str | None,
+        npcap_version: str | None,
+        npcap_state: NmapNpcapState,
+        raw_capable: bool,
+    ) -> NmapProbeObservationV1:
+        if trust.available and machine_identity is None:
+            trust = NmapTrustResultV1(
+                available=False,
+                reason=NmapTrustReason.INSPECTION_FAILED,
+                fingerprint=None,
+            )
+        return NmapProbeObservationV1(
+            candidate=candidate,
+            trust=trust,
+            machine_executor_identity=machine_identity,
+            npcap_version=npcap_version,
+            npcap_state=npcap_state,
+            raw_capable=raw_capable,
         )
 
     def revalidate(
@@ -224,10 +277,10 @@ class WindowsNmapInstallationProbe:
                 fingerprint=None,
             )
         machine_identity, npcap_version, npcap_state, raw_capable = self._runtime_capability()
-        return NmapProbeObservationV1(
+        return self._observation(
             candidate=candidate,
             trust=trust,
-            machine_executor_identity=machine_identity,
+            machine_identity=machine_identity,
             npcap_version=npcap_version,
             npcap_state=npcap_state,
             raw_capable=raw_capable,
@@ -353,66 +406,176 @@ class NmapCapabilityService:
         principal: AuthPrincipal,
     ) -> NmapDeploymentPolicyResponse:
         """Append one administrator-reviewed revision for this exact executor."""
+        with self._session_factory.begin() as session:
+            row = self._append_policy(session, request=request, principal=principal)
+            response = self._policy_response(row, request=request)
+        return response
+
+    def _append_policy(
+        self,
+        session: Session,
+        *,
+        request: NmapDeploymentPolicyCreateRequest,
+        principal: AuthPrincipal,
+    ) -> NmapDeploymentPolicy:
+        """Append a policy inside a caller-owned transaction."""
         now = datetime.now(UTC)
         actor = _actor(principal)
         scopes_payload = [item.model_dump(mode="json") for item in request.permitted_project_sites]
         profile_payload = request.profile_policy.model_dump(mode="json")
-        with self._session_factory.begin() as session:
-            previous = session.scalar(
-                select(NmapDeploymentPolicy)
-                .where(
-                    NmapDeploymentPolicy.deployment_id == self.deployment_id,
-                    NmapDeploymentPolicy.network_executor_id == self.network_executor_id,
-                )
-                .order_by(NmapDeploymentPolicy.revision.desc())
-                .limit(1)
+        previous = session.scalar(
+            select(NmapDeploymentPolicy)
+            .where(
+                NmapDeploymentPolicy.deployment_id == self.deployment_id,
+                NmapDeploymentPolicy.network_executor_id == self.network_executor_id,
             )
-            revision = 1 if previous is None else previous.revision + 1
-            row = NmapDeploymentPolicy(
-                policy_id=str(uuid4()),
-                deployment_id=self.deployment_id,
-                network_executor_id=self.network_executor_id,
-                revision=revision,
-                deployment_lane=request.deployment_lane.value,
-                provider_mode=request.provider_mode.value,
-                organization_internal=(request.deployment_lane is NmapDeploymentLane.INTERNAL_SAME_ORGANIZATION),
-                deployment_owner=request.deployment_owner,
-                operator_install_responsibility=request.operator_install_responsibility,
-                permitted_project_sites_json=_canonical_json(scopes_payload),
-                permitted_project_sites_sha256=canonical_sha256(scopes_payload),
-                update_owner=request.update_owner,
-                reviewed_version_policy=request.reviewed_version_policy,
-                permitted_publishers_json=_canonical_json(list(request.permitted_publishers)),
-                permitted_versions_json=_canonical_json(list(request.permitted_versions)),
-                permitted_signer_sha256_json=_canonical_json(list(request.permitted_signer_sha256)),
-                permitted_executable_sha256_json=_canonical_json(list(request.permitted_executable_sha256)),
-                permitted_data_manifest_sha256_json=_canonical_json(list(request.permitted_data_manifest_sha256)),
-                permitted_licence_sha256_json=_canonical_json(list(request.permitted_licence_sha256)),
-                permitted_npsl_versions_json=_canonical_json(list(request.permitted_npsl_versions)),
-                reviewed_scripts_json=_canonical_json(
-                    [item.model_dump(mode="json") for item in request.reviewed_scripts]
-                ),
-                max_data_files=request.max_data_files,
-                max_file_bytes=request.max_file_bytes,
-                max_manifest_bytes=request.max_manifest_bytes,
-                profile_policy_json=_canonical_json(profile_payload),
-                profile_policy_sha256=canonical_sha256(profile_payload),
-                reviewed_at=now,
-                acknowledged_no_redistribution=request.acknowledged_no_redistribution,
-                created_by=actor,
-                reason=request.reason,
-                created_at=now,
-                supersedes_policy_id=None if previous is None else previous.policy_id,
+            .order_by(NmapDeploymentPolicy.revision.desc())
+            .limit(1)
+        )
+        revision = 1 if previous is None else previous.revision + 1
+        row = NmapDeploymentPolicy(
+            policy_id=str(uuid4()),
+            deployment_id=self.deployment_id,
+            network_executor_id=self.network_executor_id,
+            revision=revision,
+            deployment_lane=request.deployment_lane.value,
+            provider_mode=request.provider_mode.value,
+            organization_internal=(request.deployment_lane is NmapDeploymentLane.INTERNAL_SAME_ORGANIZATION),
+            deployment_owner=request.deployment_owner,
+            operator_install_responsibility=request.operator_install_responsibility,
+            permitted_project_sites_json=_canonical_json(scopes_payload),
+            permitted_project_sites_sha256=canonical_sha256(scopes_payload),
+            update_owner=request.update_owner,
+            reviewed_version_policy=request.reviewed_version_policy,
+            permitted_publishers_json=_canonical_json(list(request.permitted_publishers)),
+            permitted_versions_json=_canonical_json(list(request.permitted_versions)),
+            permitted_signer_sha256_json=_canonical_json(list(request.permitted_signer_sha256)),
+            permitted_executable_sha256_json=_canonical_json(list(request.permitted_executable_sha256)),
+            permitted_data_manifest_sha256_json=_canonical_json(list(request.permitted_data_manifest_sha256)),
+            permitted_licence_sha256_json=_canonical_json(list(request.permitted_licence_sha256)),
+            permitted_npsl_versions_json=_canonical_json(list(request.permitted_npsl_versions)),
+            reviewed_scripts_json=_canonical_json(
+                [item.model_dump(mode="json") for item in request.reviewed_scripts]
+            ),
+            max_data_files=request.max_data_files,
+            max_file_bytes=request.max_file_bytes,
+            max_manifest_bytes=request.max_manifest_bytes,
+            profile_policy_json=_canonical_json(profile_payload),
+            profile_policy_sha256=canonical_sha256(profile_payload),
+            reviewed_at=now,
+            acknowledged_no_redistribution=request.acknowledged_no_redistribution,
+            created_by=actor,
+            reason=request.reason,
+            created_at=now,
+            supersedes_policy_id=None if previous is None else previous.policy_id,
+        )
+        session.add(row)
+        try:
+            session.flush()
+        except IntegrityError as error:
+            raise NmapPolicyStateError(
+                "A concurrent Nmap policy revision was created; reload and retry."
+            ) from error
+        return row
+
+    def approve_detected_installation(
+        self,
+        *,
+        project_id: str,
+        site_id: str,
+        principal: AuthPrincipal,
+    ) -> NmapCapabilityResponse:
+        """Persist a one-click global-admin approval for one local Nmap copy.
+
+        Approval begins with a network-free bootstrap inspection, persists every
+        observed trust value as an exact allowlist, then performs the ordinary
+        policy-backed confirmation before returning. The persistent database
+        records both events, so the engineer does not repeat setup on restart.
+        """
+        existing = self.capability(project_id=project_id, site_id=site_id)
+        if existing.process_selection_allowed:
+            return existing
+
+        matching = [
+            item
+            for item in self._probe.bootstrap_inspect()
+            if item.trust.available
+            and item.trust.fingerprint is not None
+            and item.candidate is not None
+            and item.machine_executor_identity is not None
+        ]
+        if len(matching) != 1:
+            raise NmapInstallationNotFoundError(
+                "One-click approval needs exactly one signed, protected local Nmap installation."
             )
-            session.add(row)
+        fingerprint = matching[0].trust.fingerprint
+        assert fingerprint is not None
+
+        inherited_scopes: tuple[NmapProjectSiteScope, ...] = ()
+        current_policy = self._current_policy()
+        if current_policy is not None:
             try:
-                session.flush()
-            except IntegrityError as error:
+                current_request = self._policy_request_from_record(current_policy)
+            except NmapPolicyStateError:
+                current_request = None
+            if current_request is not None and current_request.provider_mode is NmapProviderMode.OPERATOR_XML_IMPORT:
                 raise NmapPolicyStateError(
-                    "A concurrent Nmap policy revision was created; reload and retry."
-                ) from error
-            response = self._policy_response(row, request=request)
-        return response
+                    "One-click Nmap approval cannot replace an active operator XML import policy."
+                )
+            if (
+                current_request is not None
+                and current_request.deployment_lane is NmapDeploymentLane.INTERNAL_SAME_ORGANIZATION
+                and current_request.provider_mode is NmapProviderMode.INTERNAL_OPERATOR_MANAGED
+            ):
+                inherited_scopes = current_request.permitted_project_sites
+        scope_pairs = {(scope.project_id, scope.site_id) for scope in inherited_scopes}
+        scope_pairs.add((project_id, site_id))
+        scopes = tuple(
+            NmapProjectSiteScope(project_id=known_project_id, site_id=known_site_id)
+            for known_project_id, known_site_id in sorted(scope_pairs)
+        )
+        policy_request = NmapDeploymentPolicyCreateRequest(
+            deployment_lane=NmapDeploymentLane.INTERNAL_SAME_ORGANIZATION,
+            provider_mode=NmapProviderMode.INTERNAL_OPERATOR_MANAGED,
+            deployment_owner="Smart Commissioning global administrator",
+            operator_install_responsibility="The operator maintains the locally installed Nmap copy.",
+            permitted_project_sites=scopes,
+            update_owner="Smart Commissioning global administrator",
+            reviewed_version_policy=(
+                f"Recorded detected Nmap {fingerprint.version} and NPSL {fingerprint.npsl_version}."
+            ),
+            permitted_publishers=(fingerprint.publisher,),
+            permitted_versions=(fingerprint.version,),
+            permitted_signer_sha256=(fingerprint.signer_sha256,),
+            permitted_executable_sha256=(fingerprint.executable_sha256,),
+            permitted_data_manifest_sha256=(fingerprint.data_manifest_sha256,),
+            permitted_licence_sha256=(fingerprint.licence_sha256,),
+            permitted_npsl_versions=(fingerprint.npsl_version,),
+            reviewed_scripts=(),
+            profile_policy=NmapProfilePolicyV1(permitted_profiles=_ONE_CLICK_PROFILES),
+            acknowledged_no_redistribution=True,
+            reason="Global administrator approved the detected local Nmap installation.",
+        )
+        observation = self._confirmation_observation(
+            policy_request,
+            fingerprint_sha256=fingerprint.fingerprint_sha256,
+        )
+        with self._session_factory.begin() as session:
+            policy = self._append_policy(session, request=policy_request, principal=principal)
+            self._append_confirmation(
+                session,
+                policy=policy,
+                policy_request=policy_request,
+                observation=observation,
+                principal=principal,
+                reason="Global administrator confirmed the detected local Nmap installation.",
+            )
+        capability = self.capability(project_id=project_id, site_id=site_id)
+        if not capability.process_selection_allowed:
+            raise NmapPolicyStateError("The detected Nmap installation could not be confirmed.")
+        if capability.policy_id != policy.policy_id:
+            raise NmapPolicyStateError("The Nmap policy changed during one-click approval.")
+        return capability
 
     def list_policy_history(self) -> tuple[NmapDeploymentPolicyResponse, ...]:
         """Return validated history for the local deployment and executor only."""
@@ -429,7 +592,10 @@ class NmapCapabilityService:
 
     def trust_policy_from_record(self, row: NmapDeploymentPolicy) -> NmapTrustPolicyV1:
         """Reconstruct the exact core trust contract from canonical persistence."""
-        request = self._policy_request_from_record(row)
+        return self._trust_policy_from_request(self._policy_request_from_record(row))
+
+    @staticmethod
+    def _trust_policy_from_request(request: NmapDeploymentPolicyCreateRequest) -> NmapTrustPolicyV1:
         if request.provider_mode is not NmapProviderMode.INTERNAL_OPERATOR_MANAGED:
             raise NmapPolicyStateError("The current mode has no process trust policy.")
         return NmapTrustPolicyV1(
@@ -515,13 +681,35 @@ class NmapCapabilityService:
         policy_request = self._policy_request_from_record(policy)
         if policy_request.provider_mode is not NmapProviderMode.INTERNAL_OPERATOR_MANAGED:
             raise NmapPolicyStateError("Installation confirmation requires process mode.")
-        trust_policy = self.trust_policy_from_record(policy)
+        observation = self._confirmation_observation(
+            policy_request,
+            fingerprint_sha256=request.fingerprint_sha256,
+        )
+        with self._session_factory.begin() as session:
+            row = self._append_confirmation(
+                session,
+                policy=policy,
+                policy_request=policy_request,
+                observation=observation,
+                principal=principal,
+                reason=request.reason,
+            )
+            response = self._confirmation_response(row)
+        return response
+
+    def _confirmation_observation(
+        self,
+        policy_request: NmapDeploymentPolicyCreateRequest,
+        *,
+        fingerprint_sha256: str,
+    ) -> NmapProbeObservationV1:
+        trust_policy = self._trust_policy_from_request(policy_request)
         matching = [
             item
             for item in self._probe.inspect(trust_policy)
             if item.trust.available
             and item.trust.fingerprint is not None
-            and item.trust.fingerprint.fingerprint_sha256 == request.fingerprint_sha256
+            and item.trust.fingerprint.fingerprint_sha256 == fingerprint_sha256
         ]
         if len(matching) != 1:
             raise NmapInstallationNotFoundError("No single trusted installation matches that exact fingerprint.")
@@ -539,6 +727,22 @@ class NmapCapabilityService:
             or fingerprint.data_total_bytes > policy_request.max_manifest_bytes
         ):
             raise NmapInstallationNotFoundError("The installation does not match the reviewed data and licence policy.")
+        return observation
+
+    def _append_confirmation(
+        self,
+        session: Session,
+        *,
+        policy: NmapDeploymentPolicy,
+        policy_request: NmapDeploymentPolicyCreateRequest,
+        observation: NmapProbeObservationV1,
+        principal: AuthPrincipal,
+        reason: str,
+    ) -> NmapInstallationConfirmation:
+        fingerprint = observation.trust.fingerprint
+        candidate = observation.candidate
+        assert fingerprint is not None and candidate is not None
+        assert observation.machine_executor_identity is not None
         now = datetime.now(UTC)
         scopes_payload = [item.model_dump(mode="json") for item in policy_request.permitted_project_sites]
         candidate_payload = candidate.model_dump(mode="json")
@@ -576,23 +780,21 @@ class NmapCapabilityService:
             npcap_state=observation.npcap_state.value,
             raw_capable=observation.raw_capable,
             confirmed_by=_actor(principal),
-            reason=request.reason,
+            reason=reason,
             confirmed_at=now,
         )
-        with self._session_factory.begin() as session:
-            latest_confirmed_at = session.scalar(
-                select(func.max(NmapInstallationConfirmation.confirmed_at)).where(
-                    NmapInstallationConfirmation.policy_id == policy.policy_id,
-                    NmapInstallationConfirmation.deployment_id == self.deployment_id,
-                    NmapInstallationConfirmation.network_executor_id == self.network_executor_id,
-                )
+        latest_confirmed_at = session.scalar(
+            select(func.max(NmapInstallationConfirmation.confirmed_at)).where(
+                NmapInstallationConfirmation.policy_id == policy.policy_id,
+                NmapInstallationConfirmation.deployment_id == self.deployment_id,
+                NmapInstallationConfirmation.network_executor_id == self.network_executor_id,
             )
-            if latest_confirmed_at is not None and row.confirmed_at <= latest_confirmed_at:
-                row.confirmed_at = latest_confirmed_at + timedelta(microseconds=1)
-            session.add(row)
-            session.flush()
-            response = self._confirmation_response(row)
-        return response
+        )
+        if latest_confirmed_at is not None and row.confirmed_at <= latest_confirmed_at:
+            row.confirmed_at = latest_confirmed_at + timedelta(microseconds=1)
+        session.add(row)
+        session.flush()
+        return row
 
     def capability(self, *, project_id: str, site_id: str) -> NmapCapabilityResponse:
         """Return the sanitized local capability for one explicitly permitted site."""

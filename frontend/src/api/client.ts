@@ -1175,6 +1175,22 @@ export function getNmapCapability(input: {
   return request<NmapCapabilityResponse>(`/nmap/capability?${query}`, undefined, input.context);
 }
 
+export function approveDetectedNmap(input: {
+  projectId: string;
+  siteId: string;
+  context?: ApiRequestContext;
+}): Promise<NmapCapabilityResponse> {
+  return request<NmapCapabilityResponse>(
+    "/nmap/approve-detected",
+    {
+      body: JSON.stringify({ project_id: input.projectId, site_id: input.siteId }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
 export function listNmapDeploymentPolicies(
   context?: ApiRequestContext,
 ): Promise<NmapDeploymentPolicyResponse[]> {

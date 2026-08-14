@@ -1,4 +1,5 @@
 import {
+  approveDetectedNmap,
   confirmNmapInstallation,
   createNmapDeploymentPolicy,
   detectNmapInstallations,
@@ -47,6 +48,23 @@ describe("Nmap administration API", () => {
     await expect(listNmapDeploymentPolicies()).resolves.toEqual([]);
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/v1/nmap/policies");
     expect(fetchMock.mock.calls[0]?.[1]).toBeUndefined();
+  });
+
+  it("approves one detected local Nmap installation without policy form data", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ state: "available", provider: "nmap" }), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await approveDetectedNmap({ projectId: "project-a", siteId: "site-1" });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("/api/v1/nmap/approve-detected");
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ project_id: "project-a", site_id: "site-1" });
   });
 
   it("creates an exact deployment policy revision", async () => {

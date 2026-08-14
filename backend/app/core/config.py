@@ -74,8 +74,8 @@ class Settings(BaseSettings):
         ),
     )
     # Build/deployment gate for the internal same-organization Nmap lane. The
-    # release default is off, so external bundles neither mount the XML parser
-    # endpoint nor admit operator-managed process selection. Enabling the lane
+    # release default is off, so non-portable deployments do not admit
+    # operator-managed process selection unless they opt in. Enabling the lane
     # still requires the persisted administrator policy and exact installation
     # confirmation; this flag grants no authority by itself.
     nmap_internal_provider_enabled: bool = Field(
@@ -84,6 +84,17 @@ class Settings(BaseSettings):
             "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED",
             "NMAP_INTERNAL_PROVIDER_ENABLED",
             "nmap_internal_provider_enabled",
+        ),
+    )
+    # XML import is independently exposed because it parses an operator-supplied
+    # artifact. Existing internal deployments retain that route when they opt
+    # into the Nmap lane; the v0.1.43 portable launcher always disables it.
+    nmap_xml_import_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED",
+            "NMAP_XML_IMPORT_ENABLED",
+            "nmap_xml_import_enabled",
         ),
     )
     # Edge->hub synchronization role (smart_commissioning_core.sync). Determines

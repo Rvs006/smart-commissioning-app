@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.42
+        default: v0.1.43
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -23,7 +23,7 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.42.md"
+      - "docs/migration-rollback-v0.1.43.md"
       - ".github/workflows/windows-portable.yml"
   push:
     branches: [main]
@@ -37,7 +37,7 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.42.md"
+      - "docs/migration-rollback-v0.1.43.md"
       - ".github/workflows/windows-portable.yml"
 
 permissions:
@@ -48,7 +48,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.42' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.43' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -73,8 +73,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.42') {
-            throw "This workflow is pinned to v0.1.42, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.43') {
+            throw "This workflow is pinned to v0.1.43, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -155,7 +155,7 @@ jobs:
               Set-Content -LiteralPath $npmSbom -Encoding utf8
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.42.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.43.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
           python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
             --sbom $pythonSbom --sbom $npmSbom
@@ -176,6 +176,8 @@ jobs:
           $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
           $env:RUN_LEASE_SECONDS = '15'
           $env:RUN_HEARTBEAT_SECONDS = '2'
+          # The one v0.1.43 portable must ignore the runner's parent Nmap
+          # setting and expose its built-in Global Admin approval capability.
           $env:SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED = '0'
           Set-Content -LiteralPath $stdin -Value '' -NoNewline
 
@@ -213,8 +215,11 @@ jobs:
             $openApiUrl = $healthUrl -replace '/api/v1/health$', '/openapi.json'
             $openApi = Invoke-RestMethod -Uri $openApiUrl -TimeoutSec 10
             $routeNames = @($openApi.paths.PSObject.Properties.Name)
+            if ($routeNames -notcontains '/api/v1/nmap/approve-detected') {
+              throw 'Unified portable route table did not expose the Nmap approval lane.'
+            }
             if ($routeNames -contains '/api/v1/nmap/xml-import') {
-              throw 'External portable route table exposed the Nmap XML parser endpoint.'
+              throw 'Unified portable must not expose the separate Nmap XML import endpoint.'
             }
 
             $actualProcess = Get-Process -Id $proc.Id
@@ -238,6 +243,21 @@ jobs:
               --stdout-log $out --stderr-log $err `
               --output (Join-Path $bundle 'windows-acceptance.json')
             if ($LASTEXITCODE -ne 0) { throw 'Portable release acceptance helper failed.' }
+            $nmapApprovalBody = @{
+              project_id = 'portable-release-project'
+              site_id = 'portable-release-site'
+            } | ConvertTo-Json -Depth 3
+            $nmapApproval = Invoke-WebRequest `
+              -Uri "$apiBase/api/v1/nmap/approve-detected" `
+              -Method Post -ContentType 'application/json' -Body $nmapApprovalBody `
+              -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 15
+            if ($nmapApproval.StatusCode -ne 409) {
+              throw "Unified portable Nmap approval returned HTTP $($nmapApproval.StatusCode), not the expected no-installation 409."
+            }
+            $nmapApprovalError = $nmapApproval.Content | ConvertFrom-Json
+            if ($nmapApprovalError.detail -ceq 'Operator-managed Nmap is disabled in this deployment.') {
+              throw 'Unified portable Nmap approval incorrectly reported the deployment gate as disabled.'
+            }
             $nmapPreviewBody = @{
               project_id = 'portable-release-project'
               site_id = 'portable-release-site'
@@ -255,11 +275,11 @@ jobs:
               -Method Post -ContentType 'application/json' -Body $nmapPreviewBody `
               -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 15
             if ($nmapPreview.StatusCode -ne 409) {
-              throw "External portable Nmap preview returned HTTP $($nmapPreview.StatusCode), not 409."
+              throw "Unified portable Nmap preview returned HTTP $($nmapPreview.StatusCode), not 409."
             }
             $nmapPreviewError = $nmapPreview.Content | ConvertFrom-Json
-            if ($nmapPreviewError.detail -cne 'Operator-managed Nmap is disabled in this deployment.') {
-              throw 'External portable Nmap preview did not return the deployment-gate error.'
+            if ($nmapPreviewError.detail -ceq 'Operator-managed Nmap is disabled in this deployment.') {
+              throw 'Unified portable Nmap preview incorrectly reported the deployment gate as disabled.'
             }
             if (Test-Path -LiteralPath (Join-Path $launchRoot 'runtime\smart_commissioning.db')) {
               throw 'Portable state leaked beside the executable.'
@@ -312,7 +332,7 @@ jobs:
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/validate_v0142_release_evidence.py `
+          python scripts/validate_v0143_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `
@@ -339,7 +359,7 @@ jobs:
       - name: Scan Windows portable evidence for credential material
         shell: pwsh
         run: |
-          python scripts/scan_v0142_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
+          python scripts/scan_v0143_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build and scan the exact portable release ZIP
