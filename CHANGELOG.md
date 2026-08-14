@@ -13,6 +13,25 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.44] - 2026-08-14
+
+### Fixed
+
+- BACnet Foreign Device settings now accept a legacy IPv4 `BBMD address:port`
+  value, while an explicitly entered BBMD UDP port still takes precedence.
+- BACnet property scans now create the selected-device child run from a valid
+  sealed parent scan instead of rejecting its relation snapshot.
+- BACnet contracts now reject more than 1,024 expected unicast targets before
+  any run is created, matching the execution limit.
+- Simultaneous Nmap approvals for the same local installation converge on one
+  recorded authority rather than appending competing approval records.
+
+### Compatibility
+
+- The one portable Windows EXE remains the same unified operator build. It
+  detects locally installed Nmap but does not package, install, or download
+  Nmap or Npcap. UDMI behavior is unchanged.
+
 ## [0.1.43] - 2026-08-14
 
 ### Added
