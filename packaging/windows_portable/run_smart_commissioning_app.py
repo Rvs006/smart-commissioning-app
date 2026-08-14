@@ -235,11 +235,6 @@ def _bundle_provenance(root: Path) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _internal_nmap_profile_enabled(provenance: dict[str, object]) -> bool:
-    """Enable Nmap only for a deliberately built internal portable profile."""
-    return provenance.get("portable_profile") == "internal_operator_nmap"
-
-
 def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     backend_root = root / "backend"
     core_root = root / "core"
@@ -292,12 +287,14 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     # the hosted compose profile (infra/) sets AUTH_MODE=api_key instead.
     _set_env_default("AUTH_MODE", "local")
     _set_env_default("JOB_EXECUTION_MODE", "inline")
-    # Never inherit an operator-managed Nmap opt-in from a parent process. Only
-    # an explicitly built same-organization profile can expose its approval
-    # route; every older and external portable remains disabled.
-    os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"] = (
-        "1" if _internal_nmap_profile_enabled(provenance) else "0"
-    )
+    # v0.1.43 has one portable product. Nmap remains guarded by the persisted
+    # Global Admin approval and exact local-installation confirmation; this
+    # fixed launcher setting only exposes that approval capability. It is not
+    # authorized by editable build metadata or a parent process environment.
+    os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"] = "1"
+    # XML import is a separate operator workflow. The portable release offers
+    # only the one-click local approval and process lane.
+    os.environ["SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED"] = "0"
 
 
 def open_browser_later(url: str) -> None:

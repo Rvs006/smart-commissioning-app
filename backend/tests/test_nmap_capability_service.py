@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from app.core.auth import AuthPrincipal
 from app.schemas.nmap import (
@@ -14,7 +15,11 @@ from app.schemas.nmap import (
 from app.services.nmap_capability_service import (
     NmapCapabilityDeniedError,
     NmapCapabilityService,
+    NmapInstallationNotFoundError,
+    NmapNpcapState,
+    NmapPolicyStateError,
     NmapProbeObservationV1,
+    WindowsNmapInstallationProbe,
 )
 from pydantic import ValidationError
 from smart_commissioning_core.db.engine import session_factory
@@ -129,6 +134,8 @@ class _Probe:
         self.revalidate_calls = 0
         self.revalidation_error: Exception | None = None
         self.revalidation = self._available(fingerprint) if fingerprint is not None else None
+        self.bootstrap_observations: tuple[NmapProbeObservationV1, ...] | None = None
+        self.inspect_observations: tuple[NmapProbeObservationV1, ...] | None = None
 
     @staticmethod
     def _available(fingerprint: NmapInstallationFingerprintV1 | None) -> NmapProbeObservationV1:
@@ -148,11 +155,15 @@ class _Probe:
 
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]:
         self.inspect_calls += 1
+        if self.inspect_observations is not None:
+            return self.inspect_observations
         if self.fingerprint is None:
             return ()
         return (self._available(self.fingerprint),)
 
     def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        if self.bootstrap_observations is not None:
+            return self.bootstrap_observations
         if self.fingerprint is None:
             return ()
         return (self._available(self.fingerprint),)
@@ -275,6 +286,67 @@ class NmapCapabilityServiceTests(unittest.TestCase):
         with factory() as session:
             self.assertEqual(session.scalar(select(func.count(NmapDeploymentPolicy.policy_id))), 1)
             self.assertEqual(session.scalar(select(func.count(NmapInstallationConfirmation.confirmation_id))), 1)
+
+    def test_one_click_approval_rejects_zero_or_multiple_trusted_installations_without_writes(self) -> None:
+        factory = session_factory(self.engine)
+        for observations in ((), (self.probe._available(self.fingerprint),) * 2):
+            with self.subTest(observations=len(observations)):
+                self.probe.bootstrap_observations = observations
+                with self.assertRaises(NmapInstallationNotFoundError):
+                    self.service.approve_detected_installation(
+                        project_id="project-a",
+                        site_id="site-a",
+                        principal=self.principal,
+                    )
+                with factory() as session:
+                    self.assertEqual(session.scalar(select(func.count(NmapDeploymentPolicy.policy_id))), 0)
+                    self.assertEqual(
+                        session.scalar(select(func.count(NmapInstallationConfirmation.confirmation_id))),
+                        0,
+                    )
+
+    def test_one_click_approval_preserves_a_working_policy_when_reapproval_cannot_confirm(self) -> None:
+        first = self.service.approve_detected_installation(
+            project_id="project-a",
+            site_id="site-a",
+            principal=self.principal,
+        )
+        self.probe.inspect_observations = ()
+
+        with self.assertRaises(NmapInstallationNotFoundError):
+            self.service.approve_detected_installation(
+                project_id="project-a",
+                site_id="site-b",
+                principal=self.principal,
+            )
+
+        still_approved = self.service.capability(project_id="project-a", site_id="site-a")
+        self.assertTrue(still_approved.process_selection_allowed)
+        self.assertEqual(still_approved.policy_id, first.policy_id)
+        factory = session_factory(self.engine)
+        with factory() as session:
+            self.assertEqual(session.scalar(select(func.count(NmapDeploymentPolicy.policy_id))), 1)
+            self.assertEqual(session.scalar(select(func.count(NmapInstallationConfirmation.confirmation_id))), 1)
+
+    def test_one_click_approval_rejects_replacement_of_active_xml_import_policy(self) -> None:
+        created = self.service.create_policy(
+            _policy_request(mode=NmapProviderMode.OPERATOR_XML_IMPORT),
+            principal=self.principal,
+        )
+
+        with self.assertRaisesRegex(
+            NmapPolicyStateError,
+            "cannot replace an active operator XML import policy",
+        ):
+            self.service.approve_detected_installation(
+                project_id="project-a",
+                site_id="site-b",
+                principal=self.principal,
+            )
+
+        capability = self.service.capability(project_id="project-a", site_id="site-a")
+        self.assertTrue(capability.xml_import_allowed)
+        self.assertEqual(capability.policy_id, created.policy_id)
 
     def test_persist_reload_reconstructs_exact_typed_policy_and_fingerprint(self) -> None:
         created = self.service.create_policy(_policy_request(), principal=self.principal)
@@ -657,6 +729,79 @@ class NmapCapabilityServiceTests(unittest.TestCase):
                     "permitted_versions": ["7.99", "7.98"],
                 }
             )
+
+
+class WindowsNmapInstallationProbeTests(unittest.TestCase):
+    def test_missing_runtime_identity_returns_fail_closed_observations(self) -> None:
+        fingerprint = _fingerprint()
+        available = NmapTrustResultV1(
+            available=True,
+            reason=NmapTrustReason.AVAILABLE,
+            fingerprint=fingerprint,
+        )
+        probe = WindowsNmapInstallationProbe()
+        with (
+            patch.object(
+                WindowsNmapInstallationProbe,
+                "_runtime_capability",
+                return_value=(None, None, NmapNpcapState.NOT_CHECKED, False),
+            ),
+            patch(
+                "app.services.nmap_capability_service.CtypesNmapTrustBackend",
+            ),
+            patch(
+                "app.services.nmap_capability_service.nmap_uninstall_registry",
+                return_value=object(),
+            ),
+            patch(
+                "app.services.nmap_capability_service.detect_nmap_candidates",
+                return_value=(_candidate(),),
+            ),
+            patch(
+                "app.services.nmap_capability_service.inspect_nmap_installation_for_administrator_approval",
+                return_value=available,
+            ),
+            patch(
+                "app.services.nmap_capability_service.inspect_nmap_installation",
+                return_value=available,
+            ),
+            patch(
+                "app.services.nmap_capability_service.revalidate_nmap_installation",
+                return_value=available,
+            ),
+        ):
+            bootstrap = probe.bootstrap_inspect()
+            inspected = probe.inspect(
+                NmapTrustPolicyV1(
+                    permitted_publishers=(fingerprint.publisher,),
+                    permitted_versions=(fingerprint.version,),
+                    permitted_signer_sha256=(fingerprint.signer_sha256,),
+                    permitted_executable_sha256=(fingerprint.executable_sha256,),
+                    permitted_npsl_versions=(fingerprint.npsl_version,),
+                    max_data_files=8192,
+                    max_file_bytes=64 * 1024 * 1024,
+                    max_manifest_bytes=1024 * 1024 * 1024,
+                )
+            )
+            revalidated = probe.revalidate(
+                _candidate(),
+                fingerprint,
+                NmapTrustPolicyV1(
+                    permitted_publishers=(fingerprint.publisher,),
+                    permitted_versions=(fingerprint.version,),
+                    permitted_signer_sha256=(fingerprint.signer_sha256,),
+                    permitted_executable_sha256=(fingerprint.executable_sha256,),
+                    permitted_npsl_versions=(fingerprint.npsl_version,),
+                    max_data_files=8192,
+                    max_file_bytes=64 * 1024 * 1024,
+                    max_manifest_bytes=1024 * 1024 * 1024,
+                ),
+            )
+
+        for observation in (*bootstrap, *inspected, revalidated):
+            self.assertFalse(observation.trust.available)
+            self.assertEqual(observation.trust.reason, NmapTrustReason.INSPECTION_FAILED)
+            self.assertIsNone(observation.trust.fingerprint)
 
 
 if __name__ == "__main__":

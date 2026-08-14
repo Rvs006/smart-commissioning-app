@@ -9,6 +9,7 @@ import {
 } from "../../api/client";
 import { SessionProvider } from "../../app/session";
 import { ModulePage } from "./ModulePage";
+import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 
 // The engineer-gated controls (Queue, Upload, Publish, Cancel) require a known
 // engineer+ role. These wiring tests set a key and stub /me as engineer so the
@@ -266,6 +267,12 @@ async function submitReportDialog(opener: HTMLElement, title?: string) {
 }
 
 describe("ModulePage discovery wiring", () => {
+  it("resets a stale Nmap profile to the first approved profile", () => {
+    expect(
+      resolvePermittedNmapProfile("selected_udp", ["tcp_connect_inventory"]),
+    ).toBe("tcp_connect_inventory");
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
@@ -736,7 +743,7 @@ describe("ModulePage discovery wiring", () => {
             raw_capable: false,
             process_selection_allowed: false,
             xml_import_allowed: false,
-            permitted_profiles: [],
+            permitted_profiles: ["selected_udp"],
           });
         }
         if (url.endsWith("/api/v1/nmap/approve-detected") && init?.method === "POST") {

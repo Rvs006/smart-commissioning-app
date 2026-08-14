@@ -1,16 +1,17 @@
 # v0.1.43 - Nmap one-click approval
 
-v0.1.43 moves Nmap deployment authority out of Configuration. In a
-same-organization internal portable build, a global administrator opens IP
-Scanner and approves the one detected signed local Nmap installation. Engineers
-then select the approved TCP-connect scanner without entering publisher,
-version, hash, licence, path, or script details.
+v0.1.43 moves Nmap deployment authority out of Configuration. In the one
+Windows portable EXE, a global administrator opens IP Scanner and approves the
+one detected signed local Nmap installation. Engineers then select the approved
+TCP-connect scanner without entering publisher, version, hash, licence, path,
+or script details.
 
 The recorded approval lives in the stable local app data, so it survives a
 portable upgrade. A changed Nmap installation or executor identity disables the
-approval until a global administrator reviews it again. The internal portable
-profile does not include, download, or install Nmap or Npcap. Public and
-external portable profiles continue to keep the provider disabled.
+approval until a global administrator reviews it again. There is one portable
+EXE for every release audience. It does not include, download, or install Nmap
+or Npcap, and it does not expose the separate XML-import endpoint. Docker and
+Linux keep their existing disabled-by-default Nmap provider setting.
 
 ## Validation boundary
 

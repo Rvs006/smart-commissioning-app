@@ -24,10 +24,15 @@ from app.core.auth import require_auth, require_role
 from app.core.config import get_settings
 
 
-def include_internal_nmap_routes(target: APIRouter, *, enabled: bool) -> None:
-    """Mount parser/execution-specific routes only in the internal build lane."""
+def include_internal_nmap_routes(
+    target: APIRouter,
+    *,
+    enabled: bool,
+    xml_import_enabled: bool,
+) -> None:
+    """Mount the optional XML parser only for opted-in internal deployments."""
 
-    if not enabled:
+    if not enabled or not xml_import_enabled:
         return
     from app.api.routes import nmap_xml_import
 
@@ -105,6 +110,7 @@ protected_router.include_router(nmap.router, prefix="/nmap", tags=["nmap"])
 include_internal_nmap_routes(
     protected_router,
     enabled=get_settings().nmap_internal_provider_enabled,
+    xml_import_enabled=get_settings().nmap_xml_import_enabled,
 )
 # Edge->hub sync: hub ingest endpoint (POST /hub/runs/ingest). The router is
 # always mounted but every route returns 404 unless deployment_role == 'hub'

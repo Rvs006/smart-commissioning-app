@@ -9,10 +9,10 @@ reports, encrypted configuration, and the exact artifact hashes. Deploy API,
 worker, and frontend together, then confirm health, visible version, worker
 heartbeat, one report download, and the evidence manifest.
 
-For an internal portable, build the v0.1.43 bundle with
-`-InternalOperatorNmap`. The existing stable local app data continues to hold a
-valid Nmap approval. If the local Nmap installation changes, a global
-administrator must approve it again after upgrade.
+The v0.1.43 unified portable enables the Nmap approval capability. The existing
+stable local app data continues to hold a valid Nmap approval. If the local Nmap
+installation changes, a global administrator must approve it again after
+upgrade.
 
 To roll back, stop v0.1.43 after active work ends and restore the recorded
 compatible v0.1.42 artifact or immutable image digests. Because this release

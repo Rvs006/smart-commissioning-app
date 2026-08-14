@@ -5,9 +5,10 @@ local/inline/sqlite profile, which lets a stray pre-existing env var silently
 override the intended value. The launcher now routes those through
 ``_set_env_default``, which PRESERVES the override (the escape hatch) but PRINTS
 a warning naming the variable only — never its value, since ``DATABASE_URL`` may
-embed a password. The external-distribution Nmap gate is the security exception:
-the portable launcher always forces it off instead of inheriting an internal
-deployment opt-in.
+embed a password. The Nmap gate is the security exception: a v0.1.43 unified
+portable bundle enables the approval capability from its build marker, while
+legacy, unknown, and explicitly external markers remain off. The launcher never
+trusts an inherited parent-process opt-in.
 
 Stable data dir (2026-07-14): frozen builds keep state in
 ``%LOCALAPPDATA%/SmartCommissioning`` (``data_root``) instead of the
@@ -44,6 +45,7 @@ _MANAGED_VARS = (
     "AUTH_MODE",
     "JOB_EXECUTION_MODE",
     "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED",
+    "SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED",
     "SMART_COMMISSIONING_APP_VERSION",
 )
 
@@ -112,49 +114,36 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         # Nothing overridden, so nothing is printed.
         self.assertEqual(buffer.getvalue(), "")
 
-    def test_external_portable_default_keeps_internal_nmap_routes_disabled(self) -> None:
-        root = self._make_root()
+    def test_every_v0143_portable_forces_the_same_approval_only_nmap_environment(self) -> None:
         for name in _MANAGED_VARS:
             os.environ.pop(name, None)
-
-        self.launcher.configure_environment(root)
-
-        self.assertEqual(
-            os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
-            "0",
-        )
-
-    def test_external_portable_forces_inherited_nmap_gate_off(self) -> None:
-        root = self._make_root()
-        for name in _MANAGED_VARS:
-            os.environ.pop(name, None)
-        os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"] = "1"
-
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            self.launcher.configure_environment(root)
-
-        self.assertEqual(
-            os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
-            "0",
-        )
-        self.assertNotIn("SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED", output.getvalue())
-
-    def test_internal_portable_profile_enables_nmap_without_inheriting_the_parent_env(self) -> None:
-        root = self._make_root()
-        (root / "BUILD_PROVENANCE.json").write_text(
+        provenance_payloads = (
+            None,
+            '{"portable_profile":"external"}',
             '{"portable_profile":"internal_operator_nmap"}',
-            encoding="utf-8",
+            '{"portable_profile":"unified"}',
+            '{"portable_profile":"unknown"}',
+            "not json",
         )
-        for name in _MANAGED_VARS:
-            os.environ.pop(name, None)
+        for parent_value in ("0", "1"):
+            for provenance_payload in provenance_payloads:
+                with self.subTest(parent_value=parent_value, provenance_payload=provenance_payload):
+                    root = self._make_root()
+                    if provenance_payload is not None:
+                        (root / "BUILD_PROVENANCE.json").write_text(
+                            provenance_payload,
+                            encoding="utf-8",
+                        )
+                    os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"] = parent_value
+                    os.environ["SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED"] = parent_value
 
-        self.launcher.configure_environment(root)
+                    self.launcher.configure_environment(root)
 
-        self.assertEqual(
-            os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
-            "1",
-        )
+                    self.assertEqual(
+                        os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
+                        "1",
+                    )
+                    self.assertEqual(os.environ["SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED"], "0")
 
     def test_explicit_runtime_root_rewires_db_secrets_and_runtime_env(self) -> None:
         root = self._make_root()

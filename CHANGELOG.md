@@ -17,7 +17,7 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Added
 
-- Internal portable builds can allow a global administrator to approve one
+- The unified Windows portable can allow a global administrator to approve one
   detected signed Nmap installation from IP Scanner. The approval is stored in
   the stable local app data and survives later portable upgrades.
 
@@ -26,15 +26,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 - Configuration no longer exposes the Nmap deployment-policy form. Engineers
   choose the approved Nmap scanner from IP Scanner without entering publisher,
   file-hash, licence, or path details.
-- The portable builder has an explicit `-InternalOperatorNmap` profile. It
-  enables the approval route but never packages, installs, or downloads Nmap or
-  Npcap; external portable builds remain disabled.
+- The portable builder now produces one unified EXE. It enables the approval
+  route for every portable audience, but never packages, installs, or downloads
+  Nmap or Npcap. The separate XML-import endpoint is not exposed by the EXE.
 
 ### Security
 
 - One-click approval checks for exactly one protected, signed local Nmap copy,
   records its exact identity, and requires global-admin approval again when the
-  installed files or executor identity change.
+  installed files or executor identity change. Reapproval is atomic, so a
+  failed replacement leaves the previously working approval in place.
 
 ## [0.1.42] - 2026-08-13
 

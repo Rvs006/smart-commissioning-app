@@ -116,6 +116,7 @@ import {
 import { alignPayloadDiff, tokenizeJsonLine, type AlignedRow } from "./payloadDiff";
 import { useRunEvents } from "./useRunEvents";
 import { LiveRunConsole } from "./LiveRunConsole";
+import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 import type { RunRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
@@ -532,6 +533,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [scanAuthorizationId, setScanAuthorizationId] = useState<string | null>(null);
   const [scanProvider, setScanProvider] = useState<IPDiscoveryProvider>("builtin_tcp_connect");
   const [nmapProfile, setNmapProfile] = useState<NmapProfileName>("tcp_connect_inventory");
+  const applyNmapProfile = (profile: NmapProfileName) => {
+    setNmapProfile(profile);
+    setScanPorts((current) =>
+      current.map((entry) => ({
+        ...entry,
+        protocol: profile === "selected_udp" ? ("udp" as const) : ("tcp" as const),
+      })),
+    );
+  };
   // Register-driven mode: Run sends NO pasted schedule/payloads, so the backend
   // fans out one expected asset per imported mqtt_register row (topics + points
   // + units + schema version from the register). Auto-enabled when an
@@ -723,9 +733,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         projectId: workspaceRef.projectId,
         siteId: workspaceRef.siteId,
         context: { client: apiClient },
-      }),
+    }),
     onSuccess: (capability) => {
       queryClient.setQueryData(nmapCapabilityQueryKey, capability);
+      const permittedProfile = resolvePermittedNmapProfile(
+        nmapProfile,
+        capability.permitted_profiles,
+      );
+      if (permittedProfile) {
+        applyNmapProfile(permittedProfile);
+      }
     },
   });
 
@@ -3221,13 +3238,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   };
 
   const changeNmapProfile = (profile: NmapProfileName) => {
-    setNmapProfile(profile);
-    setScanPorts((current) =>
-      current.map((entry) => ({
-        ...entry,
-        protocol: profile === "selected_udp" ? ("udp" as const) : ("tcp" as const),
-      })),
-    );
+    applyNmapProfile(profile);
   };
 
   const changeScanProvider = (provider: IPDiscoveryProvider) => {
@@ -3237,9 +3248,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return;
     }
     const permittedProfiles = nmapCapabilityQuery.data?.permitted_profiles ?? [];
-    const permittedProfile = permittedProfiles.includes(nmapProfile)
-      ? nmapProfile
-      : permittedProfiles[0];
+    const permittedProfile = resolvePermittedNmapProfile(nmapProfile, permittedProfiles);
     if (permittedProfile) {
       changeNmapProfile(permittedProfile);
     }

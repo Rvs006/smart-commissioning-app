@@ -74,7 +74,7 @@ collection order is alphabetical - keep it so.
   v0.1.42 discovery recovery work and makes the operator Nmap route practical:
   Configuration no longer carries a manual authority form, a global
   administrator can approve one signed local installation from IP Scanner, and
-  engineers reuse that recorded approval. The internal portable profile still
+  engineers reuse that recorded approval. The unified portable EXE still
   excludes Nmap/Npcap files; it enables the local approval route only. Field
   acceptance remains open until the approved register, applicability matrix,
   paired collector evidence, and complete cadence run pass

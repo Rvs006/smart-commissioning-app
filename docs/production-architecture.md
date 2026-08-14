@@ -46,17 +46,15 @@ Build the Smart Commissioning Tool as a real commissioning platform, not a brows
 - MQTT: `paho-mqtt` or an async MQTT client
 - IP scan orchestration: the built-in TCP provider on every supported lane. A
   separately installed Nmap copy is an optional, administrator-confirmed
-  provider only for the portable inline Windows lane in recorded
-  `internal_operator_managed` deployments. Linux, Docker/queue workers, and
-  external/customer deployments expose it as unavailable and never parse its XML.
-  The external portable launcher forces
-  `SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED=0`, including when an
-  inherited environment contains `1`. Build a same-organization portable with
-  `packaging/windows_portable/build.ps1 -InternalOperatorNmap` to expose the
-  internal approval route. That profile still excludes Nmap/Npcap binaries; a
-  global administrator records and confirms the detected local installation
-  once, then engineers can use the approved profile until the local Nmap files
-  change.
+  provider for the one v0.1.43 Windows portable inline lane. There are no
+  internal or external portable variants. The portable launcher always exposes
+  the Global Admin approval capability and never reads build provenance or a
+  parent environment setting as an authority decision. It still excludes
+  Nmap/Npcap binaries and the separate XML-import endpoint. A global
+  administrator records and confirms the detected local installation once,
+  then engineers can use the approved TCP-connect profile until the local Nmap
+  files change. Docker and Linux keep their existing disabled-by-default Nmap
+  provider setting.
 - Reports: `pandas`, `openpyxl`, `WeasyPrint` or `Playwright`
 - Object storage for raw evidence: local disk in MVP, MinIO or S3-compatible storage after that
 
