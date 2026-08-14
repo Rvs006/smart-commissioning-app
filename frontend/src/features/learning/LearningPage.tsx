@@ -663,6 +663,25 @@ const FIRST_RUN: Lesson[] = [
       },
     ],
   },
+  {
+    num: "3",
+    title: "Use Nmap without configuring it",
+    rows: [
+      { lab: "Go to", text: "IP Discovery" },
+      {
+        lab: "Do",
+        text: "When Operator-managed Nmap is confirmed for the selected project and site, choose it and select one of the displayed fixed profiles.",
+      },
+      {
+        lab: "See",
+        text: "Only administrator-approved profiles. There are no fields for Nmap paths, flags, scripts, or commands.",
+      },
+      {
+        lab: "Why",
+        text: "A global administrator approves the detected local Nmap installation once. The engineer can then run the approved profile without repeating that setup. Approval is requested again only if the installed files change.",
+      },
+    ],
+  },
 ];
 
 // One guided walkthrough block; used by both the setup paths and the role paths.
@@ -739,7 +758,7 @@ export function LearningPage() {
             <div className="dc-kicker">Installation &amp; Setup</div>
             <h1 className="dc-h1">Get the tool running first.</h1>
             <p className="dc-lead">
-              One supported way to run it — the Windows portable app — then the two first-run
+              One supported way to run it — the Windows portable app — then the three first-run
               steps below.
             </p>
           </div>
