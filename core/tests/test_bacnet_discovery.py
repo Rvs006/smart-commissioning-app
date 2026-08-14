@@ -1343,6 +1343,44 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         self.assertEqual(fd_lane["device_count"], 2)
         self.assertEqual(fd_lane["udp_port"], FD_LOCAL_UDP_PORT)
 
+    def test_foreign_device_mode_fails_when_its_backend_was_not_injected(self) -> None:
+        # A test or caller may inject the local/direct backend without providing
+        # a second Foreign Device app. That is an unavailable selected transport,
+        # not a clean empty scan: no Who-Is can have been sent through the BBMD.
+        store = FakeRunStore()
+        backend = RecordingSimBackend()
+        params = {
+            **_AUTHORIZED,
+            PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
+            PARAM_BBMD_ADDRESS: "10.0.0.5",
+        }
+
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        def persist(run_id: str, records: list[dict[str, Any]]) -> None:
+            persisted.append((run_id, list(records)))
+
+        result = process_bacnet_discovery_run(
+            "run_fd_unavailable",
+            params,
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            backend=backend,
+            throttle=ThrottleConfig(rate_limit_per_sec=None),
+            persist_records=persist,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Foreign Device transport is unavailable", str(result["error_message"]))
+        self.assertEqual(backend.who_is_calls, [])
+        self.assertEqual(persisted, [])
+        summary = store.summary_calls[-1]
+        self.assertFalse(summary["bacnet_diagnostics"]["transport_verified"])
+        self.assertEqual(
+            summary["lanes"][LANE_FOREIGN_DEVICE],
+            {"ran": False, "reason": "backend_injected"},
+        )
+
     def test_a_configured_bbmd_address_alone_never_starts_the_foreign_device_lane(self) -> None:
         # THE GATE (COORDINATION decision 6). Every default install carries the
         # seeded — and fictional — BBMD Address, so gating lane 3 on its PRESENCE

@@ -2235,10 +2235,18 @@ async def _run_bacnet_discovery(
             "bbmd_address": _fd_bbmd_address(fd_backend),
         }
     else:
+        fd_reason = fd_skip_reason or ("not_configured" if mode != MODE_FOREIGN_DEVICE else "unavailable")
         lanes[LANE_FOREIGN_DEVICE] = {
             "ran": False,
-            "reason": fd_skip_reason or ("not_configured" if mode != MODE_FOREIGN_DEVICE else "unavailable"),
+            "reason": fd_reason,
         }
+        if mode == MODE_FOREIGN_DEVICE:
+            # The selected transport never sent a packet. Treating this as a
+            # clean, verified empty scan would hide an unavailable BBMD lane.
+            raise RuntimeError(
+                "Foreign Device transport is unavailable; no discovery traffic was sent. "
+                "Provide the Foreign Device backend or retry after its transport is available."
+            )
 
     # -- Directed unicast, fallback-only --------------------------------------
     #
