@@ -70,18 +70,19 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-13. The v0.1.42 release carries
-  the sealed IP/BACnet authority, progressive observation, authorization,
-  protected-evidence, and operator Nmap contracts from v0.1.41. It also repairs
-  IP-register fallback, BACnet preview and saved UDP-port propagation, BACnet
-  live-data rendering, MQTT terminal Results recovery, and portable version
-  stamping. Field acceptance remains open until the approved register,
-  applicability matrix, paired collector evidence, and complete cadence run
-  pass `docs/v0.1.42-field-acceptance-checklist.md`.
+- **Current handoff**: status as of 2026-08-14. The v0.1.43 candidate keeps the
+  v0.1.42 discovery recovery work and makes the operator Nmap route practical:
+  Configuration no longer carries a manual authority form, a global
+  administrator can approve one signed local installation from IP Scanner, and
+  engineers reuse that recorded approval. The internal portable profile still
+  excludes Nmap/Npcap files; it enables the local approval route only. Field
+  acceptance remains open until the approved register, applicability matrix,
+  paired collector evidence, and complete cadence run pass
+  `docs/v0.1.43-field-acceptance-checklist.md`.
   A one-minute operator Stop is cancellation evidence, not cadence evidence.
-  The latest public release is v0.1.42 and there is no later candidate. Keep
-  source, raw evidence, report bytes, EXE identity, Docker
-  labels, and release SHA bound to the same run or commit.
+  The latest public release is v0.1.42; v0.1.43 is the current candidate. Keep
+  source, raw evidence, report bytes, EXE identity, Docker labels, and release
+  SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the

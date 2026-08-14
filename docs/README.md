@@ -42,12 +42,27 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
+| Internal portable candidate | v0.1.43 candidate | [Release notes](release-notes-v0.1.43.md), [validation](release-validation-v0.1.43.md), and [rollback](migration-rollback-v0.1.43.md) |
 | Hosted Docker | v0.1.42 release | [Docker deployment and rollback](docker-deployment-rollback-v0.1.42.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
+
+## v0.1.43 candidate
+
+v0.1.43 is awaiting its release gates. It simplifies the internally installed
+Nmap route: a global administrator records the detected local installation once
+from IP Scanner, then engineers reuse that approval. The public v0.1.42 release
+remains the current download until the candidate completes its checks.
+
+- [Release notes](release-notes-v0.1.43.md)
+- [Release validation record](release-validation-v0.1.43.md)
+- [Migration and rollback](migration-rollback-v0.1.43.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.43.md)
+- [Field acceptance checklist](v0.1.43-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.43-evidence-manifest.md)
 
 ## v0.1.42 release
 

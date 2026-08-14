@@ -13,6 +13,29 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.43] - 2026-08-14
+
+### Added
+
+- Internal portable builds can allow a global administrator to approve one
+  detected signed Nmap installation from IP Scanner. The approval is stored in
+  the stable local app data and survives later portable upgrades.
+
+### Changed
+
+- Configuration no longer exposes the Nmap deployment-policy form. Engineers
+  choose the approved Nmap scanner from IP Scanner without entering publisher,
+  file-hash, licence, or path details.
+- The portable builder has an explicit `-InternalOperatorNmap` profile. It
+  enables the approval route but never packages, installs, or downloads Nmap or
+  Npcap; external portable builds remain disabled.
+
+### Security
+
+- One-click approval checks for exactly one protected, signed local Nmap copy,
+  records its exact identity, and requires global-admin approval again when the
+  installed files or executor identity change.
+
 ## [0.1.42] - 2026-08-13
 
 This recovery release restores the intended IP, BACnet/IP, MQTT, and portable
