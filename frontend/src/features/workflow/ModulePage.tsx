@@ -13,6 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
 import {
   ApiError,
+  approveDetectedNmap,
   cancelRun,
   createImport,
   createReport,
@@ -467,7 +468,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Discovery/validation/report runs, imports, cancel, publish, and rollback are
   // all engineer+ mutations server-side. A viewer/reviewer sees these controls
   // disabled with an explanatory tooltip rather than letting the click 403.
-  const { apiClient, canEngineer, sessionScopeId, workspace: workspaceRef } = useSession();
+  const { apiClient, canAdmin, canEngineer, me, sessionScopeId, workspace: workspaceRef } = useSession();
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const module = getModuleByRoute(moduleRoute);
@@ -700,6 +701,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       runAccessClosed || isTerminalStatus(query.state.data?.status) ? false : 1500,
   });
 
+  const nmapCapabilityQueryKey = [
+    ...queryKeys.workspace(sessionScopeId, workspaceRef),
+    "nmap-capability",
+  ] as const;
   const nmapCapabilityQuery = useQuery({
     enabled: module.route === "ip-scanner",
     queryFn: ({ signal }) =>
@@ -708,8 +713,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         siteId: workspaceRef.siteId,
         context: { client: apiClient, signal },
       }),
-    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "nmap-capability"],
+    queryKey: nmapCapabilityQueryKey,
     staleTime: 15_000,
+  });
+  const approveNmapMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "nmap.approve_detected"),
+    mutationFn: () =>
+      approveDetectedNmap({
+        projectId: workspaceRef.projectId,
+        siteId: workspaceRef.siteId,
+        context: { client: apiClient },
+      }),
+    onSuccess: (capability) => {
+      queryClient.setQueryData(nmapCapabilityQueryKey, capability);
+    },
   });
 
   const scanAuthorizationsQuery = useQuery<ScanAuthorizationV1[]>({
@@ -4552,6 +4569,32 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     }. Only administrator-approved profiles are shown.`
                   : `Nmap process execution is unavailable: ${nmapCapabilityQuery.data.reason.replace(/_/g, " ")}.`}
               </p>
+            )}
+            {canAdmin &&
+              me?.global_scope &&
+              nmapCapabilityQuery.data &&
+              !nmapAvailable &&
+              nmapCapabilityQuery.data.reason !== "deployment_feature_disabled" && (
+                <div className="inline-actions">
+                  <button
+                    className="secondary-button compact"
+                    disabled={approveNmapMutation.isPending}
+                    onClick={() => approveNmapMutation.mutate()}
+                    type="button"
+                  >
+                    {approveNmapMutation.isPending ? "Approving Nmap..." : "Approve detected Nmap"}
+                  </button>
+                  <p className="field-note">
+                    Records this signed local installation once. Approval is requested again only if
+                    its installed files change.
+                  </p>
+                </div>
+              )}
+            {approveNmapMutation.isError && (
+              <div className="state-panel error" role="alert">
+                <strong>Nmap approval could not be completed</strong>
+                <span>{approveNmapMutation.error.message}</span>
+              </div>
             )}
             <p className="field-note">
               {scanProvider === "builtin_tcp_connect"

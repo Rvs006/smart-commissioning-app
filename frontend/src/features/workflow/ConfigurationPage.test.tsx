@@ -1423,7 +1423,7 @@ describe("ConfigurationPage", () => {
     expect(await screen.findByText(/Uploaded 1 file/i)).toBeInTheDocument();
   });
 
-  it("mounts Nmap deployment authority in configuration only for a global admin", async () => {
+  it("does not expose Nmap deployment controls in configuration", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -1443,22 +1443,18 @@ describe("ConfigurationPage", () => {
         if (url.endsWith("/api/v1/configuration")) {
           return jsonResponse(configurationPayload());
         }
-        if (url.endsWith("/api/v1/nmap/policies")) {
-          return jsonResponse([]);
-        }
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
 
     renderPage();
 
-    const heading = await screen.findByRole("heading", { name: "Nmap deployment authority" });
-    expect(heading).toBeVisible();
-    const authority = heading.closest("section");
-    expect(authority).not.toBeNull();
-    const policyForm = within(authority as HTMLElement).getByRole("form", {
-      name: "Create Nmap deployment policy",
-    });
-    expect(within(policyForm).queryByRole("button", { name: "Save Configuration" })).toBeNull();
+    expect(await screen.findByRole("heading", { name: "Configuration" })).toBeVisible();
+    expect(
+      screen.queryByRole("heading", { name: "Nmap deployment authority" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("form", { name: "Create Nmap deployment policy" }),
+    ).not.toBeInTheDocument();
   });
 });

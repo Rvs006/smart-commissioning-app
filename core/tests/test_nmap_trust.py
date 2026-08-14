@@ -12,6 +12,7 @@ from smart_commissioning_core.engines.ip.nmap_trust import (
     NmapTrustReason,
     NmapTrustResultV1,
     inspect_nmap_installation,
+    inspect_nmap_installation_for_administrator_approval,
     revalidate_nmap_installation,
 )
 
@@ -167,6 +168,49 @@ class NmapTrustTests(unittest.TestCase):
         self.assertEqual(len(result.fingerprint.executable_sha256), 64)
         self.assertEqual(len(result.fingerprint.data_manifest_sha256), 64)
         self.assertEqual(len(result.fingerprint.fingerprint_sha256), 64)
+
+    def test_administrator_approval_records_a_signed_local_installation_before_policy_exists(self) -> None:
+        result = inspect_nmap_installation_for_administrator_approval(
+            candidate=_candidate(),
+            backend=_TrustBackend(),
+        )
+
+        self.assertTrue(result.available)
+        self.assertEqual(result.reason, NmapTrustReason.AVAILABLE)
+        assert result.fingerprint is not None
+        self.assertEqual(result.fingerprint.publisher, "Insecure.Com LLC")
+        self.assertEqual(result.fingerprint.version, "7.98")
+
+    def test_administrator_approval_still_rejects_an_untrusted_or_unsafe_installation(self) -> None:
+        cases: tuple[tuple[str, callable, NmapTrustReason], ...] = (
+            (
+                "user_writable",
+                lambda backend: backend.user_writable.add(backend._key(r"C:\Program Files\Nmap")),
+                NmapTrustReason.ACL_REJECTED,
+            ),
+            (
+                "untrusted_signature",
+                lambda backend: setattr(backend, "signature_trusted", False),
+                NmapTrustReason.SIGNATURE_REJECTED,
+            ),
+            (
+                "licence_missing",
+                lambda backend: backend.files.__setitem__(
+                    backend._key(r"C:\Program Files\Nmap\LICENSE"), b"different licence"
+                ),
+                NmapTrustReason.LICENCE_REJECTED,
+            ),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(label=label):
+                backend = _TrustBackend()
+                mutate(backend)
+                result = inspect_nmap_installation_for_administrator_approval(
+                    candidate=_candidate(),
+                    backend=backend,
+                )
+                self.assertFalse(result.available)
+                self.assertEqual(result.reason, expected)
 
     def test_execution_time_revalidation_fails_closed_on_any_identity_drift(self) -> None:
         backend = _TrustBackend()

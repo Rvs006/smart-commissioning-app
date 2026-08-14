@@ -700,6 +700,80 @@ describe("ModulePage discovery wiring", () => {
     expect(parameters).not.toHaveProperty("port_specification");
   });
 
+  it("lets a global administrator approve the detected local Nmap installation once", async () => {
+    let approvalBody: Record<string, string> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({
+            ...mePayload,
+            effective_scopes: [],
+            global_scope: true,
+            role: "admin",
+          });
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.includes("/api/v1/imports/latest")) {
+          return new Response(JSON.stringify({ detail: "none" }), { status: 404 });
+        }
+        if (url.includes("/api/v1/nmap/capability?")) {
+          return jsonResponse({
+            schema_version: "1.0",
+            provider: "nmap",
+            state: "disabled",
+            reason: "policy_not_configured",
+            provider_mode: "disabled",
+            policy_id: null,
+            policy_revision: null,
+            publisher: null,
+            version: null,
+            fingerprint_sha256: null,
+            npcap_version: null,
+            npcap_state: "not_checked",
+            raw_capable: false,
+            process_selection_allowed: false,
+            xml_import_allowed: false,
+            permitted_profiles: [],
+          });
+        }
+        if (url.endsWith("/api/v1/nmap/approve-detected") && init?.method === "POST") {
+          approvalBody = JSON.parse(String(init.body)) as Record<string, string>;
+          return jsonResponse({
+            schema_version: "1.0",
+            provider: "nmap",
+            state: "available",
+            reason: "available",
+            provider_mode: "internal_operator_managed",
+            policy_id: "policy-1",
+            policy_revision: 1,
+            publisher: "Insecure.Com LLC",
+            version: "7.98",
+            fingerprint_sha256: "a".repeat(64),
+            npcap_version: "1.83",
+            npcap_state: "raw_capable",
+            raw_capable: true,
+            process_selection_allowed: true,
+            xml_import_allowed: false,
+            permitted_profiles: ["tcp_connect_inventory"],
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    const approve = await screen.findByRole("button", { name: "Approve detected Nmap" });
+    fireEvent.click(approve);
+
+    await waitFor(() => expect(approvalBody).not.toBeNull());
+    expect(approvalBody).toEqual({ project_id: "demo-project", site_id: "demo-site" });
+    expect(await screen.findByText(/Nmap 7\.98 is confirmed for this site/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve detected Nmap" })).not.toBeInTheDocument();
+  });
+
   const mqttAccepted = {
     run_id: "run-mqtt-1",
     job_type: "mqtt_discovery",

@@ -31,6 +31,7 @@ from smart_commissioning_core.engines.ip.nmap_trust import (
     NmapTrustReason,
     NmapTrustResultV1,
     inspect_nmap_installation,
+    inspect_nmap_installation_for_administrator_approval,
     revalidate_nmap_installation,
 )
 from smart_commissioning_core.engines.ip.nmap_windows import (
@@ -55,6 +56,7 @@ from app.schemas.nmap import (
     NmapInstallationConfirmationRequest,
     NmapInstallationConfirmationResponse,
     NmapNpcapState,
+    NmapProfilePolicyV1,
     NmapProjectSiteScope,
     NmapProviderMode,
 )
@@ -102,6 +104,8 @@ _RAW_CAPABILITY_PROFILES = frozenset(
     }
 )
 
+_ONE_CLICK_PROFILES = (NmapProfileName.TCP_CONNECT_INVENTORY,)
+
 
 def _runtime_permitted_profiles(
     profiles: tuple[NmapProfileName, ...],
@@ -141,6 +145,8 @@ class NmapProbeObservationV1(BaseModel):
 class NmapInstallationProbe(Protocol):
     """Injected local detector/trust adapter; implementations stay OS-specific."""
 
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]: ...
+
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]: ...
 
     def revalidate(
@@ -153,6 +159,9 @@ class NmapInstallationProbe(Protocol):
 
 class UnavailableNmapInstallationProbe:
     """Fail-closed default until the Windows adapter is wired by the runtime."""
+
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        return ()
 
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]:
         del policy
@@ -177,6 +186,32 @@ class UnavailableNmapInstallationProbe:
 
 class WindowsNmapInstallationProbe:
     """Network-free adapter over the core HKLM, trust, Npcap, and token APIs."""
+
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        """Collect the one trusted local identity a global administrator may approve."""
+        try:
+            backend = CtypesNmapTrustBackend()
+            candidates = detect_nmap_candidates(
+                registry=nmap_uninstall_registry(),
+                paths=backend,
+            )
+        except (OSError, TypeError, ValueError):
+            return ()
+        machine_identity, npcap_version, npcap_state, raw_capable = self._runtime_capability()
+        return tuple(
+            NmapProbeObservationV1(
+                candidate=candidate,
+                trust=inspect_nmap_installation_for_administrator_approval(
+                    candidate=candidate,
+                    backend=backend,
+                ),
+                machine_executor_identity=machine_identity,
+                npcap_version=npcap_version,
+                npcap_state=npcap_state,
+                raw_capable=raw_capable,
+            )
+            for candidate in candidates
+        )
 
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]:
         try:
@@ -413,6 +448,97 @@ class NmapCapabilityService:
                 ) from error
             response = self._policy_response(row, request=request)
         return response
+
+    def approve_detected_installation(
+        self,
+        *,
+        project_id: str,
+        site_id: str,
+        principal: AuthPrincipal,
+    ) -> NmapCapabilityResponse:
+        """Persist a one-click global-admin approval for one local Nmap copy.
+
+        Approval begins with a network-free bootstrap inspection, persists every
+        observed trust value as an exact allowlist, then performs the ordinary
+        policy-backed confirmation before returning. The persistent database
+        records both events, so the engineer does not repeat setup on restart.
+        """
+        existing = self.capability(project_id=project_id, site_id=site_id)
+        if existing.process_selection_allowed:
+            return existing
+
+        matching = [
+            item
+            for item in self._probe.bootstrap_inspect()
+            if item.trust.available
+            and item.trust.fingerprint is not None
+            and item.candidate is not None
+            and item.machine_executor_identity is not None
+        ]
+        if len(matching) != 1:
+            raise NmapInstallationNotFoundError(
+                "One-click approval needs exactly one signed, protected local Nmap installation."
+            )
+        fingerprint = matching[0].trust.fingerprint
+        assert fingerprint is not None
+
+        inherited_scopes: tuple[NmapProjectSiteScope, ...] = ()
+        current_policy = self._current_policy()
+        if current_policy is not None:
+            try:
+                current_request = self._policy_request_from_record(current_policy)
+            except NmapPolicyStateError:
+                current_request = None
+            if (
+                current_request is not None
+                and current_request.deployment_lane is NmapDeploymentLane.INTERNAL_SAME_ORGANIZATION
+                and current_request.provider_mode is NmapProviderMode.INTERNAL_OPERATOR_MANAGED
+            ):
+                inherited_scopes = current_request.permitted_project_sites
+        scope_pairs = {(scope.project_id, scope.site_id) for scope in inherited_scopes}
+        scope_pairs.add((project_id, site_id))
+        scopes = tuple(
+            NmapProjectSiteScope(project_id=known_project_id, site_id=known_site_id)
+            for known_project_id, known_site_id in sorted(scope_pairs)
+        )
+        policy = self.create_policy(
+            NmapDeploymentPolicyCreateRequest(
+                deployment_lane=NmapDeploymentLane.INTERNAL_SAME_ORGANIZATION,
+                provider_mode=NmapProviderMode.INTERNAL_OPERATOR_MANAGED,
+                deployment_owner="Smart Commissioning global administrator",
+                operator_install_responsibility="The operator maintains the locally installed Nmap copy.",
+                permitted_project_sites=scopes,
+                update_owner="Smart Commissioning global administrator",
+                reviewed_version_policy=(
+                    f"Recorded detected Nmap {fingerprint.version} and NPSL {fingerprint.npsl_version}."
+                ),
+                permitted_publishers=(fingerprint.publisher,),
+                permitted_versions=(fingerprint.version,),
+                permitted_signer_sha256=(fingerprint.signer_sha256,),
+                permitted_executable_sha256=(fingerprint.executable_sha256,),
+                permitted_data_manifest_sha256=(fingerprint.data_manifest_sha256,),
+                permitted_licence_sha256=(fingerprint.licence_sha256,),
+                permitted_npsl_versions=(fingerprint.npsl_version,),
+                reviewed_scripts=(),
+                profile_policy=NmapProfilePolicyV1(permitted_profiles=_ONE_CLICK_PROFILES),
+                acknowledged_no_redistribution=True,
+                reason="Global administrator approved the detected local Nmap installation.",
+            ),
+            principal=principal,
+        )
+        self.confirm_installation(
+            NmapInstallationConfirmationRequest(
+                fingerprint_sha256=fingerprint.fingerprint_sha256,
+                reason="Global administrator confirmed the detected local Nmap installation.",
+            ),
+            principal=principal,
+        )
+        capability = self.capability(project_id=project_id, site_id=site_id)
+        if not capability.process_selection_allowed:
+            raise NmapPolicyStateError("The detected Nmap installation could not be confirmed.")
+        if capability.policy_id != policy.policy_id:
+            raise NmapPolicyStateError("The Nmap policy changed during one-click approval.")
+        return capability
 
     def list_policy_history(self) -> tuple[NmapDeploymentPolicyResponse, ...]:
         """Return validated history for the local deployment and executor only."""

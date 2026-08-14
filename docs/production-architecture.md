@@ -51,9 +51,12 @@ Build the Smart Commissioning Tool as a real commissioning platform, not a brows
   external/customer deployments expose it as unavailable and never parse its XML.
   The external portable launcher forces
   `SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED=0`, including when an
-  inherited environment contains `1`. Internal operator deployments use a
-  separate launch profile before the parser route is mounted, then complete the
-  append-only policy and exact installation-confirmation workflow.
+  inherited environment contains `1`. Build a same-organization portable with
+  `packaging/windows_portable/build.ps1 -InternalOperatorNmap` to expose the
+  internal approval route. That profile still excludes Nmap/Npcap binaries; a
+  global administrator records and confirms the detected local installation
+  once, then engineers can use the approved profile until the local Nmap files
+  change.
 - Reports: `pandas`, `openpyxl`, `WeasyPrint` or `Playwright`
 - Object storage for raw evidence: local disk in MVP, MinIO or S3-compatible storage after that
 

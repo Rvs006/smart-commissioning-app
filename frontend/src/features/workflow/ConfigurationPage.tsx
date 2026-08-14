@@ -18,7 +18,6 @@ import {
 } from "../../api/client";
 import { isSecretSentinel, maskSecretValue } from "./secretField";
 import { SourceInterfaceDetails } from "./SourceInterfaceDetails";
-import { NmapAuthorityPanel } from "./NmapAuthorityPanel";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { mergeConfigurationRefresh } from "./configurationRefresh";
@@ -942,7 +941,6 @@ export function ConfigurationPage() {
         })}
       </section>
       </form>
-      <NmapAuthorityPanel />
     </div>
   );
 }

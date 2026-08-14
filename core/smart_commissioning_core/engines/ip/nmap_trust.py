@@ -21,6 +21,9 @@ _NPSL_VERSION = re.compile(
     re.IGNORECASE,
 )
 _LICENCE_NAMES = frozenset({"license", "license.txt", "npsl", "npsl.txt"})
+_DEFAULT_MAX_DATA_FILES = 8192
+_DEFAULT_MAX_FILE_BYTES = 64 * 1024 * 1024
+_DEFAULT_MAX_MANIFEST_BYTES = 512 * 1024 * 1024
 
 
 class NmapTrustReason(StrEnum):
@@ -198,6 +201,34 @@ def inspect_nmap_installation(
     )
 
 
+def inspect_nmap_installation_for_administrator_approval(
+    *,
+    candidate: NmapDetectionCandidateV1,
+    backend: NmapTrustBackend,
+) -> NmapTrustResultV1:
+    """Inspect one locally installed Nmap copy before a global-admin approval.
+
+    This is intentionally narrower than the normal policy inspection: an
+    administrator has not approved the exact publisher, release and digests
+    yet, so the first observation records those values rather than comparing
+    them to a pre-existing allowlist. The non-negotiable local checks still
+    apply: protected install location, path/ACL safety, trusted Authenticode,
+    bounded manifest construction, and a parseable NPSL file.
+    """
+
+    try:
+        fingerprint = _inspect(candidate=candidate, policy=None, backend=backend)
+    except _TrustFailure as error:
+        return _unavailable(error.reason)
+    except (OSError, TypeError, ValueError, UnicodeError):
+        return _unavailable(NmapTrustReason.INSPECTION_FAILED)
+    return NmapTrustResultV1(
+        available=True,
+        reason=NmapTrustReason.AVAILABLE,
+        fingerprint=fingerprint,
+    )
+
+
 def revalidate_nmap_installation(
     *,
     candidate: NmapDetectionCandidateV1,
@@ -218,7 +249,7 @@ def revalidate_nmap_installation(
 def _inspect(
     *,
     candidate: NmapDetectionCandidateV1,
-    policy: NmapTrustPolicyV1,
+    policy: NmapTrustPolicyV1 | None,
     backend: NmapTrustBackend,
 ) -> NmapInstallationFingerprintV1:
     protected_roots = tuple(_canonical_path(backend, item) for item in backend.protected_install_roots())
@@ -247,34 +278,44 @@ def _inspect(
     signature = NmapAuthenticodeEvidenceV1.model_validate(backend.authenticode(executable_path))
     if not signature.trusted:
         raise _TrustFailure(NmapTrustReason.SIGNATURE_REJECTED)
-    permitted_publishers = {item.casefold() for item in policy.permitted_publishers}
-    if signature.publisher.casefold() not in permitted_publishers:
-        raise _TrustFailure(NmapTrustReason.PUBLISHER_REJECTED)
-    if signature.signer_sha256 not in policy.permitted_signer_sha256:
-        raise _TrustFailure(NmapTrustReason.SIGNATURE_REJECTED)
     version = backend.file_version(executable_path).strip()
-    if version not in policy.permitted_versions:
+    if not version:
         raise _TrustFailure(NmapTrustReason.VERSION_REJECTED)
+    if policy is not None:
+        permitted_publishers = {item.casefold() for item in policy.permitted_publishers}
+        if signature.publisher.casefold() not in permitted_publishers:
+            raise _TrustFailure(NmapTrustReason.PUBLISHER_REJECTED)
+        if signature.signer_sha256 not in policy.permitted_signer_sha256:
+            raise _TrustFailure(NmapTrustReason.SIGNATURE_REJECTED)
+        if version not in policy.permitted_versions:
+            raise _TrustFailure(NmapTrustReason.VERSION_REJECTED)
 
     executable_key = ntpath.normcase(ntpath.relpath(executable_path, data_directory))
     retained_paths = {
         executable_key,
-        *(ntpath.normcase(ntpath.join("scripts", f"{script.name}.nse")) for script in policy.reviewed_scripts),
+        *(
+            ntpath.normcase(ntpath.join("scripts", f"{script.name}.nse"))
+            for script in (() if policy is None else policy.reviewed_scripts)
+        ),
     }
     manifest_rows, contents = _build_manifest(
         backend=backend,
         data_directory=data_directory,
-        policy=policy,
+        max_data_files=(policy.max_data_files if policy is not None else _DEFAULT_MAX_DATA_FILES),
+        max_file_bytes=(policy.max_file_bytes if policy is not None else _DEFAULT_MAX_FILE_BYTES),
+        max_manifest_bytes=(
+            policy.max_manifest_bytes if policy is not None else _DEFAULT_MAX_MANIFEST_BYTES
+        ),
         retained_paths=retained_paths,
     )
     executable = contents.get(executable_key)
     if executable is None:
         raise _TrustFailure(NmapTrustReason.DATA_MANIFEST_REJECTED)
     executable_sha256 = hashlib.sha256(executable).hexdigest()
-    if executable_sha256 not in policy.permitted_executable_sha256:
+    if policy is not None and executable_sha256 not in policy.permitted_executable_sha256:
         raise _TrustFailure(NmapTrustReason.EXECUTABLE_DIGEST_REJECTED)
 
-    for script in policy.reviewed_scripts:
+    for script in (() if policy is None else policy.reviewed_scripts):
         relative = ntpath.normcase(ntpath.join("scripts", f"{script.name}.nse"))
         script_payload = contents.get(relative)
         if script_payload is None or hashlib.sha256(script_payload).hexdigest() != script.sha256:
@@ -290,7 +331,9 @@ def _inspect(
     except UnicodeDecodeError as error:
         raise _TrustFailure(NmapTrustReason.LICENCE_REJECTED) from error
     match = _NPSL_VERSION.search(licence_text[:65_536])
-    if match is None or match.group(1) not in policy.permitted_npsl_versions:
+    if match is None or (
+        policy is not None and match.group(1) not in policy.permitted_npsl_versions
+    ):
         raise _TrustFailure(NmapTrustReason.LICENCE_REJECTED)
 
     payload = {
@@ -307,7 +350,7 @@ def _inspect(
         "licence_relative_path": licence_relative_path,
         "licence_sha256": hashlib.sha256(licence).hexdigest(),
         "npsl_version": match.group(1),
-        "reviewed_scripts": policy.reviewed_scripts,
+        "reviewed_scripts": () if policy is None else policy.reviewed_scripts,
     }
     return NmapInstallationFingerprintV1(
         **payload,
@@ -319,7 +362,9 @@ def _build_manifest(
     *,
     backend: NmapTrustBackend,
     data_directory: str,
-    policy: NmapTrustPolicyV1,
+    max_data_files: int,
+    max_file_bytes: int,
+    max_manifest_bytes: int,
     retained_paths: set[str],
 ) -> tuple[list[dict[str, object]], dict[str, bytes]]:
     rows: list[dict[str, object]] = []
@@ -327,7 +372,7 @@ def _build_manifest(
     seen_paths: set[str] = set()
     total = 0
     for index, raw_path in enumerate(backend.iter_files(data_directory)):
-        if index >= policy.max_data_files:
+        if index >= max_data_files:
             raise _TrustFailure(NmapTrustReason.DATA_MANIFEST_REJECTED)
         path = _canonical_path(backend, raw_path)
         if not _contained(data_directory, path) or not backend.is_regular_file(path):
@@ -338,13 +383,13 @@ def _build_manifest(
             raise _TrustFailure(NmapTrustReason.DATA_MANIFEST_REJECTED)
         seen_paths.add(relative)
         try:
-            payload = backend.read_file(path, max_bytes=policy.max_file_bytes)
+            payload = backend.read_file(path, max_bytes=max_file_bytes)
         except (OSError, TypeError, ValueError) as error:
             raise _TrustFailure(NmapTrustReason.DATA_MANIFEST_REJECTED) from error
-        if not isinstance(payload, bytes) or len(payload) > policy.max_file_bytes:
+        if not isinstance(payload, bytes) or len(payload) > max_file_bytes:
             raise _TrustFailure(NmapTrustReason.DATA_MANIFEST_REJECTED)
         total += len(payload)
-        if total > policy.max_manifest_bytes:
+        if total > max_manifest_bytes:
             raise _TrustFailure(NmapTrustReason.DATA_MANIFEST_REJECTED)
         if relative in retained_paths or ntpath.basename(relative).casefold() in _LICENCE_NAMES:
             contents[relative] = payload

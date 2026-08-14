@@ -140,6 +140,22 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         )
         self.assertNotIn("SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED", output.getvalue())
 
+    def test_internal_portable_profile_enables_nmap_without_inheriting_the_parent_env(self) -> None:
+        root = self._make_root()
+        (root / "BUILD_PROVENANCE.json").write_text(
+            '{"portable_profile":"internal_operator_nmap"}',
+            encoding="utf-8",
+        )
+        for name in _MANAGED_VARS:
+            os.environ.pop(name, None)
+
+        self.launcher.configure_environment(root)
+
+        self.assertEqual(
+            os.environ["SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED"],
+            "1",
+        )
+
     def test_explicit_runtime_root_rewires_db_secrets_and_runtime_env(self) -> None:
         root = self._make_root()
         stable_dir = tempfile.TemporaryDirectory()

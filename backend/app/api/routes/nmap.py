@@ -16,6 +16,7 @@ from app.schemas.nmap import (
     NmapDetectedInstallationResponse,
     NmapInstallationConfirmationRequest,
     NmapInstallationConfirmationResponse,
+    NmapProjectSiteScope,
 )
 from app.services.nmap_capability_service import (
     NmapAuthorityError,
@@ -104,6 +105,27 @@ def read_capability(
             reason="deployment_feature_disabled",
         )
     return service.capability(project_id=project_id, site_id=site_id)
+
+
+@router.post(
+    "/approve-detected",
+    response_model=NmapCapabilityResponse,
+)
+def approve_detected_installation(
+    scope: NmapProjectSiteScope,
+    principal: AuthPrincipal = Depends(require_global_admin),
+    service: NmapCapabilityService = Depends(get_nmap_capability_service),
+) -> NmapCapabilityResponse:
+    """One-click approval for the single detected local Nmap installation."""
+    _require_internal_feature()
+    try:
+        return service.approve_detected_installation(
+            project_id=scope.project_id,
+            site_id=scope.site_id,
+            principal=principal,
+        )
+    except NmapAuthorityError as error:
+        raise _authority_error(error) from error
 
 
 @router.post(

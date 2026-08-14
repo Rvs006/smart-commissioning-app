@@ -84,6 +84,9 @@ class _Probe:
         self.inspect_calls += 1
         return (self._observation(),)
 
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        return (self._observation(),)
+
     def revalidate(
         self,
         candidate: NmapDetectionCandidateV1,
@@ -196,6 +199,27 @@ class NmapCapabilityApiTests(ApiTestCase):
         self.assertNotIn("path", capability.text.lower())
         self.assertNotIn("acl", capability.text.lower())
 
+    def test_global_admin_can_approve_the_detected_installation_without_policy_fields(self) -> None:
+        response = self.client.post(
+            "/api/v1/nmap/approve-detected",
+            json={"project_id": "nmap-project", "site_id": "nmap-site"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["state"], "available")
+        self.assertTrue(body["process_selection_allowed"])
+        self.assertEqual(body["permitted_profiles"], ["tcp_connect_inventory"])
+        self.assertNotIn("path", response.text.lower())
+        self.assertNotIn("acl", response.text.lower())
+
+        repeated = self.client.post(
+            "/api/v1/nmap/approve-detected",
+            json={"project_id": "nmap-project", "site_id": "nmap-site"},
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json()["policy_id"], body["policy_id"])
+
     def test_disabled_deployment_reports_no_capability_without_local_detection(self) -> None:
         from app.core.config import get_settings
 
@@ -252,6 +276,12 @@ class NmapCapabilityApiTests(ApiTestCase):
             json=_policy_payload(),
         )
         self.assertEqual(denied.status_code, 403, denied.text)
+        denied_approval = self.client.post(
+            "/api/v1/nmap/approve-detected",
+            headers=headers,
+            json={"project_id": "nmap-project", "site_id": "nmap-site"},
+        )
+        self.assertEqual(denied_approval.status_code, 403, denied_approval.text)
         allowed = self.client.get(
             "/api/v1/nmap/capability",
             headers=headers,

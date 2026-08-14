@@ -33,7 +33,7 @@ from smart_commissioning_core.engines.ip.nmap_trust import (
 )
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.run_context import canonical_sha256
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.pool import StaticPool
 
 _A = "a" * 64
@@ -54,7 +54,10 @@ def _fingerprint() -> NmapInstallationFingerprintV1:
         "executable_sha256": _B,
         "data_manifest_sha256": _C,
         "data_file_count": 17,
-        "data_total_bytes": 987_654_321,
+        # Keep this within the bootstrap inspection's bounded 512 MiB manifest
+        # allowance. A real one-click approval can only record an installation
+        # it was able to inspect under that same bound.
+        "data_total_bytes": 123_456_789,
         "licence_relative_path": "LICENSE.txt",
         "licence_sha256": _D,
         "npsl_version": "1.1",
@@ -145,6 +148,11 @@ class _Probe:
 
     def inspect(self, policy: NmapTrustPolicyV1) -> tuple[NmapProbeObservationV1, ...]:
         self.inspect_calls += 1
+        if self.fingerprint is None:
+            return ()
+        return (self._available(self.fingerprint),)
+
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
         if self.fingerprint is None:
             return ()
         return (self._available(self.fingerprint),)
@@ -247,6 +255,27 @@ class NmapCapabilityServiceTests(unittest.TestCase):
             ),
         )
 
+    def test_one_click_approval_persists_the_detected_installation_and_is_idempotent(self) -> None:
+        first = self.service.approve_detected_installation(
+            project_id="project-a",
+            site_id="site-a",
+            principal=self.principal,
+        )
+        second = self.service.approve_detected_installation(
+            project_id="project-a",
+            site_id="site-a",
+            principal=self.principal,
+        )
+
+        self.assertTrue(first.process_selection_allowed)
+        self.assertEqual(first.permitted_profiles, (NmapProfileName.TCP_CONNECT_INVENTORY,))
+        self.assertEqual(second.policy_id, first.policy_id)
+        self.assertEqual(second.policy_revision, first.policy_revision)
+        factory = session_factory(self.engine)
+        with factory() as session:
+            self.assertEqual(session.scalar(select(func.count(NmapDeploymentPolicy.policy_id))), 1)
+            self.assertEqual(session.scalar(select(func.count(NmapInstallationConfirmation.confirmation_id))), 1)
+
     def test_persist_reload_reconstructs_exact_typed_policy_and_fingerprint(self) -> None:
         created = self.service.create_policy(_policy_request(), principal=self.principal)
         expected_policy = NmapTrustPolicyV1(
@@ -296,7 +325,7 @@ class NmapCapabilityServiceTests(unittest.TestCase):
                 self.service.detection_candidate_from_confirmation(stored_confirmation),
                 self.probe.candidate,
             )
-            self.assertEqual(stored_confirmation.data_total_bytes, 987_654_321)
+            self.assertEqual(stored_confirmation.data_total_bytes, 123_456_789)
             self.assertEqual(stored_confirmation.network_executor_id, "executor-a")
             self.assertEqual(
                 stored_confirmation.machine_executor_identity,

@@ -77,6 +77,10 @@ param(
     [switch]$SkipFrontend,
     [switch]$SkipFreeze,
     [string[]]$ExtraPyInstallerArgs = @(),
+    # Explicit same-organization profile. It never packages, downloads, or
+    # installs Nmap/Npcap; it only permits the already-present local Nmap
+    # provider to be approved by a global administrator inside the app.
+    [switch]$InternalOperatorNmap,
     [switch]$Clean
 )
 
@@ -175,6 +179,7 @@ Write-Host "  file info : $VersionInfoPath"
 Write-Host "  repo root : $RepoRoot"
 Write-Host "  output    : $OutputDir"
 Write-Host "  python    : $Python"
+Write-Host "  Nmap lane : $(if ($InternalOperatorNmap) { 'internal operator approval enabled' } else { 'external profile disabled' })"
 
 # --- preflight: required source dirs ---
 $BackendSrc      = Join-Path $RepoRoot "backend"
@@ -297,6 +302,7 @@ Set-Content -LiteralPath (Join-Path $OutputDir "APP_VERSION.txt") -Value $BuildV
 $BuildProvenance = [ordered]@{
     schema_version = "1.0"
     application_version = $BuildVersion
+    portable_profile = if ($InternalOperatorNmap) { "internal_operator_nmap" } else { "external" }
     source_commit = $SourceCommit
     source_tree_state = $SourceTreeState
     publishable = ($SourceTreeState -eq "clean")
@@ -344,6 +350,21 @@ Copy-Item -Path $FrontendDistSrc -Destination $FrontendDistDst -Recurse -Force
 
 # 3e. operator note (unsigned tester build)
 $ReadmePath = Join-Path $OutputDir "README_FIRST.txt"
+$NmapProfileNote = if ($InternalOperatorNmap) {
+@"
+This is the same-organization internal portable profile. It does not contain,
+download, or install Nmap or Npcap. A global administrator can open IP Scanner
+once and choose "Approve detected Nmap". The app records the signed local
+installation and keeps it ready for engineers across later app upgrades. If the
+installed Nmap files change, a global administrator must approve the changed
+installation again.
+"@
+} else {
+@"
+Operator-managed Nmap is disabled in this external portable profile. The XML
+parser route is absent in this bundle.
+"@
+}
 @"
 Smart Commissioning App $BuildVersion - Windows portable (tester build)
 =========================================================
@@ -374,10 +395,7 @@ written to %LOCALAPPDATA%\SmartCommissioning\logs\crash-*.log. On first launch
 this version migrates state from an older release's runtime\ folder if it
 finds one beside the exe.
 
-Operator-managed Nmap is disabled in the external portable profile. The XML
-parser route is absent unless a same-organization administrator explicitly
-enables the internal provider lane and completes the recorded policy and exact
-installation-confirmation workflow.
+$NmapProfileNote
 "@ | Set-Content -LiteralPath $ReadmePath -Encoding UTF8
 
 # --- done ---
