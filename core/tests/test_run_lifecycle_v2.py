@@ -43,15 +43,17 @@ def _context(
     *,
     resource_keys: tuple[str, ...] = (),
     dry_run: bool = False,
+    scan_contract: dict[str, object] | None = None,
 ) -> RunContextV1:
     engine_parameters: dict[str, object] = {
         "authorized": True,
         "dry_run": dry_run,
     }
-    if resource_keys:
+    if resource_keys or scan_contract is not None:
         engine_parameters["scan_contract_v1"] = {
             "scan_contract_version": "1.0",
             "resource_keys": list(resource_keys),
+            **(scan_contract or {}),
         }
     return RunContextV1.model_validate(
         {
@@ -150,6 +152,51 @@ class DispatchAndContextTests(LifecycleTestCase):
         self.assertEqual(dispatch.state, "pending")
         self.assertTrue(self.repository.mark_dispatch_published(dispatch_id))
         self.assertEqual(self.repository.get_dispatch(dispatch_id).state, "published")
+
+    def test_property_expansion_creates_a_child_for_a_sealed_bacnet_parent(self) -> None:
+        parent = self.repository.create_run_with_context(
+            job_type="bacnet_discovery",
+            context=_context(
+                dry_run=True,
+                scan_contract={"bacnet": {"lanes": ["local_broadcast"]}},
+            ),
+            execution_mode="dramatiq_worker",
+        )
+        lease = self.repository.claim_run(parent.run_id, parent.dispatch_id, lease_seconds=60)
+        self.assertIsNotNone(lease)
+        self.assertTrue(
+            self.repository.finalize_run(parent.run_id, lease.owner_token, _terminal(marker="parent")).applied
+        )
+        with session_factory(self.engine)() as session:
+            parent_row = session.get(Run, parent.run_id)
+            parent_result = session.get(RunResult, parent.run_id)
+            parent_seal = session.get(RunSeal, parent.run_id)
+            self.assertEqual(parent_row.job_type, "bacnet_discovery")
+            self.assertEqual(parent_row.status, "succeeded")
+            self.assertEqual(parent_result.terminal_status, "succeeded")
+            self.assertEqual(parent_seal.terminal_status, "succeeded")
+
+        child = self.repository.create_run_with_context(
+            job_type="bacnet_discovery",
+            context=_context(
+                scan_contract={
+                    "relation_snapshot": {
+                        "relation": "property_expansion",
+                        "parent_run_id": parent.run_id,
+                    }
+                }
+            ),
+            execution_mode="dramatiq_worker",
+            parent_run_id=parent.run_id,
+            relation="property_expansion",
+        )
+
+        links = self.repository.list_run_links(child.run_id)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["parent_run_id"], parent.run_id)
+        self.assertEqual(links[0]["child_run_id"], child.run_id)
+        self.assertEqual(links[0]["relation"], "property_expansion")
+        self.assertIsNone(links[0]["authorization_id"])
 
     def test_protocol_slot_rejects_second_active_run_with_owner_id(self) -> None:
         protocol_key = "mqtt:" + "a" * 64

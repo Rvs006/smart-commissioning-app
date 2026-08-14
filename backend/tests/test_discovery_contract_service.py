@@ -1187,6 +1187,28 @@ class ResolveBacnetDiscoveryParametersTests(unittest.TestCase):
         self.assertNotIn("accepted_rows", contract["bacnet"]["authorities"]["points"])
         self.assertLess(len(canonical_json_bytes(contract)), SCAN_CONTRACT_MAX_BYTES)
 
+    def test_bacnet_rejects_targets_above_the_execution_ceiling_before_contract_creation(self) -> None:
+        targets = [
+            {
+                "address": f"10.20.{index // 254}.{(index % 254) + 1}",
+                "device_instance": index + 1,
+                "internetwork_id": "plant-a",
+            }
+            for index in range(1_025)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "1025.*1024"):
+            resolve_bacnet_discovery_parameters(
+                {
+                    "dry_run": True,
+                    "internetwork_id": "plant-a",
+                    "bacnet_targets": targets,
+                },
+                project_id="project-a",
+                site_id="site-a",
+                import_repository=_ImportRepository([]),
+            )
+
     def test_foreign_lane_is_explicit_and_requires_a_bbmd(self) -> None:
         with self.assertRaisesRegex(ValueError, "bbmd_address"):
             resolve_bacnet_discovery_parameters(

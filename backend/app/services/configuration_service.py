@@ -37,6 +37,29 @@ from app.schemas.configuration import (
 DEFAULT_PROJECT_ID = "demo-project"
 DEFAULT_SITE_ID = "demo-site"
 
+
+def _parse_bbmd_ipv4_endpoint(value: str) -> tuple[str, int | None]:
+    """Return a canonical BBMD IPv4 address and optional legacy embedded port."""
+
+    raw = value.strip()
+    if not raw:
+        raise ValueError("must not be empty")
+    address, separator, port_text = raw.partition(":")
+    if separator and ":" in port_text:
+        raise ValueError("must contain one IPv4 address and one optional UDP port")
+    try:
+        parsed = ipaddress.IPv4Address(address)
+    except ipaddress.AddressValueError as error:
+        raise ValueError("must contain a valid IPv4 address") from error
+    if not separator:
+        return str(parsed), None
+    if not port_text.isdigit():
+        raise ValueError("UDP port must be numeric")
+    port = int(port_text)
+    if not 1 <= port <= 65_535:
+        raise ValueError("UDP port must be between 1 and 65535")
+    return str(parsed), port
+
 DEFAULT_CONFIGURATION = ConfigurationSnapshot(
     device=ConfigurationSection(
         values={
@@ -83,7 +106,10 @@ DEFAULT_CONFIGURATION = ConfigurationSnapshot(
             # "Foreign Device" == Enabled triggers registration, and an operator
             # who enables it must type their real BBMD's address here.
             "BBMD Address": "192.0.2.20",
-            "BBMD UDP Port": "47808",
+            # Optional: leave blank to use the port embedded in BBMD Address
+            # (for example 198.51.100.30:47809), otherwise 47808. A value here
+            # is an explicit override and wins over an embedded port.
+            "BBMD UDP Port": "",
             "Foreign Device": "Disabled",
             "TTL": "300",
         },
@@ -428,22 +454,25 @@ class ConfigurationService:
                 "run discovery again."
             )
         try:
-            parsed = ipaddress.ip_address(address)
+            parsed_address, embedded_port = _parse_bbmd_ipv4_endpoint(address)
         except ValueError as error:
             raise ValueError(
-                f"Foreign Device is Enabled but BBMD Address '{address}' is not a valid IP "
-                "address. Fix it on the Configuration page (BACnet -> BBMD Address) and Save, "
+                f"Foreign Device is Enabled but BBMD Address '{address}' is invalid. Enter an IPv4 "
+                "address, optionally followed by :UDP-port, on the Configuration page (BACnet -> "
+                "BBMD Address) and Save, "
                 "then run discovery again."
             ) from error
         # Read the soft-defaulted values through the contract's own readers so the
         # bounds and fallbacks are defined in exactly one place (the engine reads
         # the same functions back off the run parameters).
-        stored = {PARAM_BBMD_PORT: values.get("BBMD UDP Port"), PARAM_FD_TTL: values.get("TTL")}
+        configured_port = str(values.get("BBMD UDP Port") or "").strip()
+        stored = {PARAM_BBMD_PORT: configured_port, PARAM_FD_TTL: values.get("TTL")}
+        resolved_bbmd_port = bbmd_port(stored) if configured_port else (embedded_port or bbmd_port(stored))
         return {
             **defaults,
             PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
-            PARAM_BBMD_ADDRESS: str(parsed),
-            PARAM_BBMD_PORT: bbmd_port(stored),
+            PARAM_BBMD_ADDRESS: parsed_address,
+            PARAM_BBMD_PORT: resolved_bbmd_port,
             PARAM_FD_TTL: fd_ttl(stored),
         }
 
@@ -670,7 +699,9 @@ class ConfigurationService:
         self._validate_dns_servers(errors, configuration.device.values.get("DNS Servers", ""))
         self._validate_source_interface(errors, configuration.device.values.get("Source Interface", ""))
         self._validate_port(errors, "BACnet UDP Port", configuration.bacnet.values.get("UDP Port", ""))
-        self._validate_port(errors, "BBMD UDP Port", configuration.bacnet.values.get("BBMD UDP Port", ""))
+        bbmd_udp_port = configuration.bacnet.values.get("BBMD UDP Port", "").strip()
+        if bbmd_udp_port:
+            self._validate_port(errors, "BBMD UDP Port", bbmd_udp_port)
         self._validate_enabled_disabled(errors, "BACnet Foreign Device", configuration.bacnet.values.get("Foreign Device", ""))
         self._validate_enabled_disabled(errors, "BACnet BBMD", configuration.bacnet.values.get("BBMD", ""))
         # The FD/BBMD mutual-exclusion rule is GONE (was: "Foreign Device must be
@@ -686,8 +717,8 @@ class ConfigurationService:
         # validating it at all (the old behaviour) let garbage through to a
         # 400 at run time, far from the field the operator has to fix.
         if configuration.bacnet.values.get("Foreign Device", "").strip().casefold() == "enabled":
-            self._validate_ip_field(
-                errors, "BACnet BBMD Address", configuration.bacnet.values.get("BBMD Address", "")
+            self._validate_bbmd_ipv4_endpoint(
+                errors, configuration.bacnet.values.get("BBMD Address", "")
             )
         self._validate_positive_int(errors, "BACnet TTL", configuration.bacnet.values.get("TTL", ""))
         self._validate_range_number(
@@ -883,6 +914,15 @@ class ConfigurationService:
             ipaddress.ip_address(value)
         except ValueError:
             errors.append(f"{label} must be a valid IPv4 or IPv6 address.")
+
+    def _validate_bbmd_ipv4_endpoint(self, errors: list[str], value: str) -> None:
+        try:
+            _parse_bbmd_ipv4_endpoint(value)
+        except ValueError as error:
+            errors.append(
+                "BACnet BBMD Address must be a valid IPv4 address, optionally followed by "
+                f"a UDP port (for example 198.51.100.30:47809): {error}."
+            )
 
     def _validate_subnet_mask(self, errors: list[str], value: str) -> None:
         value = value.strip()
