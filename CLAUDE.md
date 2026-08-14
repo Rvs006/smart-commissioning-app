@@ -70,17 +70,15 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-14. The v0.1.43 candidate keeps the
-  v0.1.42 discovery recovery work and makes the operator Nmap route practical:
-  Configuration no longer carries a manual authority form, a global
-  administrator can approve one signed local installation from IP Scanner, and
-  engineers reuse that recorded approval. The unified portable EXE still
-  excludes Nmap/Npcap files; it enables the local approval route only. Field
+- **Current handoff**: status as of 2026-08-14. The v0.1.44 candidate retains
+  the unified one-click Nmap approval route and corrects BACnet foreign-device
+  endpoint handling, property-child runs, and the pre-run target ceiling.
+  Concurrent global-admin Nmap approvals now converge on one authority. Field
   acceptance remains open until the approved register, applicability matrix,
   paired collector evidence, and complete cadence run pass
-  `docs/v0.1.43-field-acceptance-checklist.md`.
+  `docs/v0.1.44-field-acceptance-checklist.md`.
   A one-minute operator Stop is cancellation evidence, not cadence evidence.
-  The latest public release is v0.1.42; v0.1.43 is the current candidate. Keep
+  The latest public release is v0.1.43; v0.1.44 is the current candidate. Keep
   source, raw evidence, report bytes, EXE identity, Docker labels, and release
   SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a

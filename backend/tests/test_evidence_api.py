@@ -139,8 +139,8 @@ class ReportArtifactStorageTests(unittest.TestCase):
     def test_renderer_version_uses_the_portable_runtime_stamp(self) -> None:
         from app.services.report_artifacts import effective_report_renderer_version
 
-        with mock.patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": "v0.1.43"}):
-            self.assertEqual(effective_report_renderer_version(), "v0.1.43")
+        with mock.patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": "v0.1.44"}):
+            self.assertEqual(effective_report_renderer_version(), "v0.1.44")
 
     def test_signing_failure_does_not_publish_unmanifested_artifact(self) -> None:
         from app.services import report_artifacts
