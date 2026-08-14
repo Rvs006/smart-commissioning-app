@@ -17,6 +17,9 @@ from smart_commissioning_core.discovery_observations import (
     normalize_public_string_v1,
     observation_payload,
 )
+from smart_commissioning_core.engines.bacnet_discovery import (
+    MAX_BACNET_UNICAST_TARGETS_CEILING,
+)
 from smart_commissioning_core.engines.bacnet_params import (
     DEFAULT_BBMD_PORT,
     MODE_FOREIGN_DEVICE,
@@ -76,7 +79,7 @@ from smart_commissioning_core.source_interface import (
 )
 
 SCAN_CONTRACT_MAX_BYTES = 256 * 1024
-MAX_BACNET_EXPECTED_DEVICES = 4096
+MAX_BACNET_EXPECTED_DEVICES = MAX_BACNET_UNICAST_TARGETS_CEILING
 DEFAULT_EXECUTOR_LIMIT_SECONDS = 60 * 60
 
 _IP_PROFILE_LIMITS: dict[str, dict[str, int | float | bool]] = {

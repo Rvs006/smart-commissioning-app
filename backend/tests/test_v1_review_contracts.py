@@ -162,7 +162,66 @@ class ConfigurationReviewTests(unittest.TestCase):
         result = ConfigurationService().validate(configuration)
 
         self.assertFalse(result.valid)
-        self.assertIn("BACnet BBMD Address must not be empty.", result.errors)
+        self.assertIn(
+            "BACnet BBMD Address must be a valid IPv4 address, optionally followed by "
+            "a UDP port (for example 198.51.100.30:47809): must not be empty.",
+            result.errors,
+        )
+
+    def test_foreign_device_accepts_legacy_bbmd_ipv4_port_and_prefers_explicit_port(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = _temporary_engine(temp_dir)
+            try:
+                service = ConfigurationService(engine=engine)
+                configuration = service.load("plant-project", "north-wing", mask_secrets=False)
+                configuration.bacnet.values.update(
+                    {
+                        "Foreign Device": "Enabled",
+                        "BBMD Address": "198.51.100.30:47809",
+                    }
+                )
+
+                self.assertTrue(service.validate(configuration).valid)
+                service.save(
+                    configuration,
+                    project_id="plant-project",
+                    site_id="north-wing",
+                )
+
+                self.assertEqual(
+                    service.bacnet_transport_defaults("plant-project", "north-wing"),
+                    {
+                        "bacnet_mode": "foreign_device",
+                        "bbmd_address": "198.51.100.30",
+                        "bbmd_port": 47809,
+                        "fd_ttl": 300,
+                    },
+                )
+
+                configuration.bacnet.values["BBMD UDP Port"] = "47810"
+                service.save(
+                    configuration,
+                    project_id="plant-project",
+                    site_id="north-wing",
+                )
+                self.assertEqual(
+                    service.bacnet_transport_defaults("plant-project", "north-wing")["bbmd_port"],
+                    47810,
+                )
+            finally:
+                engine.dispose()
+
+    def test_foreign_device_rejects_malformed_bbmd_ipv4_port(self) -> None:
+        for address in ("198.51.100.30:", "198.51.100.30:0", "198.51.100.30:65536", "bbmd.local:47809"):
+            with self.subTest(address=address):
+                configuration = DEFAULT_CONFIGURATION.model_copy(deep=True)
+                configuration.bacnet.values["Foreign Device"] = "Enabled"
+                configuration.bacnet.values["BBMD Address"] = address
+
+                result = ConfigurationService().validate(configuration)
+
+                self.assertFalse(result.valid)
+                self.assertTrue(any(error.startswith("BACnet BBMD Address must be a valid IPv4") for error in result.errors))
 
     def test_bacnet_internetwork_defaults_reads_the_saved_site_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

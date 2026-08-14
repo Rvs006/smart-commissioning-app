@@ -9,6 +9,7 @@ Nmap. Windows detection and trust inspection enter through an injected probe.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Protocol
@@ -107,6 +108,20 @@ _RAW_CAPABILITY_PROFILES = frozenset(
 )
 
 _ONE_CLICK_PROFILES = (NmapProfileName.TCP_CONNECT_INVENTORY,)
+_ONE_CLICK_APPROVAL_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_ONE_CLICK_APPROVAL_LOCKS_GUARD = threading.Lock()
+
+
+def _one_click_approval_lock(deployment_id: str, network_executor_id: str) -> threading.Lock:
+    """Return the process-wide lock for one persisted Nmap authority."""
+
+    key = (deployment_id, network_executor_id)
+    with _ONE_CLICK_APPROVAL_LOCKS_GUARD:
+        lock = _ONE_CLICK_APPROVAL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _ONE_CLICK_APPROVAL_LOCKS[key] = lock
+        return lock
 
 
 def _runtime_permitted_profiles(
@@ -492,6 +507,21 @@ class NmapCapabilityService:
         policy-backed confirmation before returning. The persistent database
         records both events, so the engineer does not repeat setup on restart.
         """
+        with _one_click_approval_lock(self.deployment_id, self.network_executor_id):
+            return self._approve_detected_installation_locked(
+                project_id=project_id,
+                site_id=site_id,
+                principal=principal,
+            )
+
+    def _approve_detected_installation_locked(
+        self,
+        *,
+        project_id: str,
+        site_id: str,
+        principal: AuthPrincipal,
+    ) -> NmapCapabilityResponse:
+        """Approve once while the deployment/executor authority is serialized."""
         existing = self.capability(project_id=project_id, site_id=site_id)
         if existing.process_selection_allowed:
             return existing

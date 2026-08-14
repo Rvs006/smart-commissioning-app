@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from app.core.auth import AuthPrincipal
@@ -183,6 +185,25 @@ class _Probe:
         return self.revalidation
 
 
+class _BlockingBootstrapProbe(_Probe):
+    def __init__(self, fingerprint: NmapInstallationFingerprintV1) -> None:
+        super().__init__(fingerprint)
+        self.bootstrap_started = threading.Event()
+        self.release_bootstrap = threading.Event()
+        self.bootstrap_calls = 0
+        self._bootstrap_lock = threading.Lock()
+
+    def bootstrap_inspect(self) -> tuple[NmapProbeObservationV1, ...]:
+        with self._bootstrap_lock:
+            self.bootstrap_calls += 1
+            first_call = self.bootstrap_calls == 1
+        if first_call:
+            self.bootstrap_started.set()
+            if not self.release_bootstrap.wait(3.0):
+                raise TimeoutError("concurrent approval test did not release bootstrap inspection")
+        return super().bootstrap_inspect()
+
+
 class NmapCapabilityServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = create_engine(
@@ -286,6 +307,43 @@ class NmapCapabilityServiceTests(unittest.TestCase):
         with factory() as session:
             self.assertEqual(session.scalar(select(func.count(NmapDeploymentPolicy.policy_id))), 1)
             self.assertEqual(session.scalar(select(func.count(NmapInstallationConfirmation.confirmation_id))), 1)
+
+    def test_concurrent_one_click_approvals_converge_on_one_policy_identity(self) -> None:
+        probe = _BlockingBootstrapProbe(self.fingerprint)
+        first_service = NmapCapabilityService(
+            self.engine,
+            deployment_id="deployment-concurrent",
+            network_executor_id="executor-concurrent",
+            probe=probe,
+        )
+        second_service = NmapCapabilityService(
+            self.engine,
+            deployment_id="deployment-concurrent",
+            network_executor_id="executor-concurrent",
+            probe=probe,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(
+                first_service.approve_detected_installation,
+                project_id="project-a",
+                site_id="site-a",
+                principal=self.principal,
+            )
+            self.assertTrue(probe.bootstrap_started.wait(1.0))
+            second_future = pool.submit(
+                second_service.approve_detected_installation,
+                project_id="project-a",
+                site_id="site-a",
+                principal=self.principal,
+            )
+            probe.release_bootstrap.set()
+            first = first_future.result(timeout=3.0)
+            second = second_future.result(timeout=3.0)
+
+        self.assertEqual((first.policy_id, first.policy_revision), (second.policy_id, second.policy_revision))
+        self.assertEqual(probe.bootstrap_calls, 1)
+        self.assertEqual(len(first_service.list_policy_history()), 1)
 
     def test_one_click_approval_rejects_zero_or_multiple_trusted_installations_without_writes(self) -> None:
         factory = session_factory(self.engine)

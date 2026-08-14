@@ -595,6 +595,21 @@ class BacnetTransportPlumbingApiTests(_EngineApiTestCase):
         self.assertEqual(parameters[PARAM_BBMD_PORT], 47809)
         self.assertEqual(parameters[PARAM_FD_TTL], 120)
 
+    def test_legacy_bbmd_ipv4_port_is_persisted_when_no_explicit_port_is_set(self) -> None:
+        self._save_bacnet_config(
+            "fd-legacy-port",
+            {
+                "Foreign Device": "Enabled",
+                "BBMD Address": "198.51.100.30:47809",
+                "BBMD UDP Port": "",
+            },
+        )
+
+        parameters = self._persisted_parameters(self._dry_run("fd-legacy-port"))
+
+        self.assertEqual(parameters[PARAM_BBMD_ADDRESS], "198.51.100.30")
+        self.assertEqual(parameters[PARAM_BBMD_PORT], 47809)
+
     def test_foreign_device_enabled_soft_defaults_junk_port_and_ttl(self) -> None:
         # Port/TTL were only ever validated on save, so an old snapshot can hold
         # junk in them. Neither is worth blocking a lab scan over — unlike the

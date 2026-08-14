@@ -291,6 +291,11 @@ def _retry_parent_run_id(context: RunContextV1) -> str | None:
     snapshot = contract.get("relation_snapshot")
     if snapshot is None:
         return None
+    # Property-expansion children have their own strict reader below.  Let that
+    # reader validate its sealed relation instead of treating it as a malformed
+    # retry before child creation can reach the property-parent check.
+    if isinstance(snapshot, Mapping) and snapshot.get("relation") == "property_expansion":
+        return None
     if not isinstance(snapshot, Mapping) or snapshot.get("relation") != "retry":
         raise ScanAuthorizationError("scan contract has an invalid relation snapshot")
     parent_run_id = str(snapshot.get("parent_run_id") or "").strip()
