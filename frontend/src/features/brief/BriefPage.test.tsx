@@ -35,4 +35,13 @@ describe("BriefPage", () => {
     expect(designer).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByText("For a BMS Designer")).toBeInTheDocument();
   });
+
+  it("explains the fixed-profile Nmap flow in IP Discovery", () => {
+    renderBrief();
+
+    fireEvent.click(screen.getByRole("button", { name: /Key Features/i }));
+
+    expect(screen.getByText(/approved detected local Nmap/)).toBeInTheDocument();
+    expect(screen.getByText(/without filling in Nmap setup fields/)).toBeInTheDocument();
+  });
 });

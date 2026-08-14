@@ -435,7 +435,9 @@ export function BriefPage() {
                 <div className="dc-card-title">IP Discovery</div>
                 <p className="dc-card-desc">
                   Scan the site network to find what is reachable, what is missing and what
-                  is unexpected before you touch a protocol.
+                  is unexpected before you touch a protocol. Where a global administrator has
+                  approved detected local Nmap, engineers select a fixed profile without filling
+                  in Nmap setup fields.
                 </p>
                 <ul className="dc-bullets">
                   <li>Reachable, missing and unexpected hosts</li>

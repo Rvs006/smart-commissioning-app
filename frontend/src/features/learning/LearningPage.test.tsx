@@ -43,6 +43,8 @@ describe("LearningPage — Installation & Setup", () => {
 
     expect(screen.getByText("Source Interface")).toBeInTheDocument();
     expect(screen.getByText(/no packets are sent and no authorization is needed/)).toBeInTheDocument();
+    expect(screen.getByText("Use Nmap without configuring it")).toBeInTheDocument();
+    expect(screen.getByText(/no fields for Nmap paths, flags, scripts, or commands/)).toBeInTheDocument();
   });
 });
 

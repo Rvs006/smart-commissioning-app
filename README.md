@@ -92,7 +92,7 @@ Generate / Export stay disabled; that is expected):
 project data - so an engineer can prepare a register before they have a key. See
 [infra/README.md](infra/README.md) for the full hosted runbook.
 
-### First run (both paths) - 3 steps
+### First run (both paths) - 4 steps
 
 1. **Hosted only:** click **Set API key** (top-right) and paste your key - the portable app skips
    this step entirely.
@@ -104,8 +104,14 @@ project data - so an engineer can prepare a register before they have a key. See
    templates are downloadable in the same panel - scan targets come from the register's
    "Expected IP address" column), then tick **Dry run** and start the scan - it produces a plan
    of scan targets, sends no packets, and needs no authorization.
+4. **If the project uses Nmap:** after a global administrator has approved the detected local
+   installation once for the project and site, select **Operator-managed Nmap** and an approved
+   fixed profile in IP Scanner. Engineers do not enter paths, flags, scripts, or command text.
+   The portable app never packages, installs, or downloads Nmap or Npcap.
 
 The same guide lives in the app: **Learning → Installation & Setup** (`/#/learning`).
+See [Nmap on a field laptop](docs/nmap-one-click-operator-guide.md) for the one-time
+administrator approval and the engineer's normal scan steps.
 
 ### Prerequisites at a glance
 
@@ -150,7 +156,7 @@ ships two standalone onboarding surfaces (linked from the header, or reachable d
 - **Product Brief** - `/#/brief` - what the tool is and how it works, in four tabs: Basics, Key
   Features, Section Reference, and a role-based **Guided Tour**.
 - **Learning** - `/#/learning` - an **Installation & Setup** guide (both install paths plus
-  first-run steps) and pick-your-role walkthroughs of the exact modules each role (Commissioning
+  first-run steps, including one-click Nmap use) and pick-your-role walkthroughs of the exact modules each role (Commissioning
   Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
 
 The module tabs are grouped by workflow stage - **Configure → Discover → Validate → Report →

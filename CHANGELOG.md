@@ -13,6 +13,25 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.45] - 2026-08-14
+
+### Fixed
+
+- Unstamped frontend builds now show the package release version instead of
+  `dev`, matching the backend health and report fallback version.
+
+### Changed
+
+- The Product Brief, Learning page, README, and operator guide now describe the
+  one-click Nmap approval flow. Engineers select an approved fixed profile and
+  do not complete Nmap path, flag, script, or command fields.
+
+### Compatibility
+
+- The portable Windows EXE remains one unified build. It detects locally
+  installed Nmap but does not package, install, or download Nmap or Npcap.
+  UDMI behavior is unchanged.
+
 ## [0.1.44] - 2026-08-14
 
 ### Fixed
