@@ -148,11 +148,13 @@ with Foreign Device left Disabled - the scan then uses **local broadcast
 only**, which on a flat network is the healthy state, not a degraded fallback.
 Foreign-device registration through a BBMD engages ONLY when the saved
 configuration has Foreign Device = Enabled (with a real BBMD Address), and
-exists solely to reach devices behind routers on other subnets. Operator docs
-and messages must never present "local broadcast only" as an error, and must
-never instruct enabling the BBMD fields except for sites that actually have
-one - a 2026-07-17 field session was misdirected by exactly that (see the
-correction note in `docs/field-message-v0.1.15.md`).
+exists solely to reach devices behind routers on other subnets. In that mode,
+the selected transport is the BBMD path only; it does not also send a local
+broadcast. Register-backed directed unicast can still run for expected devices.
+Operator docs and messages must never present "local broadcast only" as an
+error, and must never instruct enabling the BBMD fields except for sites that
+actually have one - a 2026-07-17 field session was misdirected by exactly that
+(see the correction note in `docs/field-message-v0.1.15.md`).
 
 Install the real path with the optional extra:
 `pip install 'smart-commissioning-core[bacnet]'` (not installed by default; see

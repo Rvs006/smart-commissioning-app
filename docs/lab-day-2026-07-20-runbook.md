@@ -159,20 +159,22 @@ There is no message for it. This section is the only defence.
 
 | Port | Lane | Used when |
 |---|---|---|
-| **47808** | Local broadcast | Always (both paths) |
+| **47808** | Local broadcast or directed register fallback | Local broadcast for Path A; directed unicast only when Path B has expected register targets |
 | **47809** | Foreign-device registration via the BBMD | **Path B only** (Foreign Device = Enabled) |
 
 **47809 is not the port anyone expects.** It exists because a foreign-device
-app suppresses its own local broadcast, so we run two separate BACnet stacks
-and each needs its own port. It also keeps us out of the way of a BACnet
-browser sitting on 47808.
+app suppresses its own local broadcast. Path B therefore sends its broadcast
+through the BBMD on 47809 and does not also send a local broadcast on 47808.
+When expected devices are supplied from the register, their directed-unicast
+fallback may still use 47808. The separate port also keeps us out of the way of
+a BACnet browser sitting on 47808.
 
 Do this before the lab:
 
 - Create a **Windows Firewall inbound allow rule** for the app's executable
-  covering **UDP 47808** (and **UDP 47809** if Path B is possible). Or run one
-  scan and accept the Defender prompt when it appears - but do that *before*
-  anyone is watching, not at 09:00.
+  covering **UDP 47808** for Path A (or Path B with register-backed directed
+  targets) and **UDP 47809** for Path B. Or run one scan and accept the Defender
+  prompt when it appears - but do that *before* anyone is watching, not at 09:00.
 - Path B: ask whoever owns the network whether anything between your subnet
   and the BBMD's subnet filters UDP. The BBMD will send its registration
   acknowledgement and forwarded broadcasts **back to port 47809**. A firewall
@@ -340,15 +342,17 @@ is still applied; you are only narrowing the Who-Is window.
 **Success looks like:** status `succeeded`, 1 device, with points, and in the
 run record:
 
-- **Both paths:** `result_summary.bacnet_diagnostics.bind` =
+- **Path A:** `result_summary.bacnet_diagnostics.bind` =
   `{"attempted": true, "ok": true, "ip": "<your NIC>", "port": 47808}`,
-  `transport_verified` = `true`,
-  `bacpypes3_version` = `"0.0.106"`.
-- **Path A:** `bacnet_diagnostics.mode` = `"broadcast"` and
-  `fd_registration` = `null` - both **correct** here.
-- **Path B:** `mode` = `"foreign_device"`,
-  `fd_registration.outcome` = `"registered"`,
-  `result_summary.lanes.foreign_device.ran` = `true`.
+  `mode` = `"broadcast"`, `fd_registration` = `null`, and
+  `transport_verified` = `true` - all **correct** here.
+- **Path B:** `fd_bind` =
+  `{"attempted": true, "ok": true, "ip": "<your NIC>", "port": 47809}`,
+  `mode` = `"foreign_device"`, `fd_registration.outcome` = `"registered"`,
+  `result_summary.lanes.foreign_device.ran` = `true`, and
+  `transport_verified` = `true`. A Path B run with no register-backed targets
+  correctly leaves the regular 47808 `bind` unattempted.
+- **Both paths:** `bacpypes3_version` = `"0.0.106"`.
 
 **If it comes back empty (`succeeded`, `device_count: 0`):**
 
@@ -524,8 +528,8 @@ must be diagnosable from the run record alone.**
 | Key | Values | What it tells you |
 |---|---|---|
 | `interface` | your Source Interface, e.g. `"198.51.100.50/24"` | What we bound, verbatim as configured. Wrong NIC = everything fails identically. |
-| `udp_port` | `47808` | The broadcast lane's local port. |
-| `bind.attempted` / `bind.ok` | `true`/`false` | `ok: false` = we never got the socket. The scan stopped there; the network was never touched. |
+| `udp_port` | `47808` | The local-broadcast or directed-fallback app port. On Path B it is used only when register-backed directed targets need a fallback probe. |
+| `bind.attempted` / `bind.ok` | `true`/`false` | The local app's bind. It is expected on Path A; on Path B without directed targets, `attempted: false` is correct. `ok: false` means that app never got its socket. |
 | `bind.reason` | `"udp_port_in_use"` | Another program has the port → Section 6b. Present only on failure. |
 | `bind.reason` | `"interface_bind_failed"` | The IP is not on this host or the adapter is down → check Source Interface. |
 | `mode` | `"broadcast"` | **Path A: correct.** Path B: Foreign Device was not Enabled - cross-subnet devices were never reachable → §1B. |
@@ -537,11 +541,11 @@ must be diagnosable from the run record alone.**
 | `fd_registration.outcome` | `"unknown"` | We could not read the registration state out of the BACnet library at all. Almost certainly the wrong `bacpypes3` version - check `bacpypes3_version` below. Tell us. |
 | `fd_registration.fd_bbmd_address` | `"198.51.100.20:47808"` | The address we actually registered against, port resolved. Compare it to what you typed. |
 | `fd_registration.waited_s` | seconds | How long we waited. Around 10 = a timeout. |
-| `fd_bind` | same shape as `bind`, port `47809` | The foreign-device lane's own bind. A conflict here is **not** the browser on 47808. |
-| `who_is.broadcast_sent` | count | How many broadcast Who-Is went out (1 local, +1 through the BBMD on Path B). |
+| `fd_bind` | same shape as `bind`, port `47809` | The foreign-device lane's own bind. Path B requires this successful bind even when its regular 47808 `bind` is unattempted. A conflict here is **not** the browser on 47808. |
+| `who_is.broadcast_sent` | count | One selected broadcast: local on Path A or through the BBMD on Path B. A Path B run must never add a local broadcast. |
 | `who_is.unicast_targets` | count | Register rows in scope for the directed lane. **0 with a register imported = the import never reached the run.** |
 | `who_is.unicast_sent` | count | Directed Who-Is actually sent (silent targets only). |
-| `who_is.i_am_count` | count | Raw I-Am replies across all lanes, before dedupe. **`i_am_count: 0` with `bind.ok: true` (and on Path B `fd_registration.outcome: "registered"`) = we sent and nothing came back.** That is a network/firewall/BBMD-distribution question, not an app question. |
+| `who_is.i_am_count` | count | Raw I-Am replies across all lanes, before dedupe. **`i_am_count: 0` with Path A `bind.ok: true`, or Path B `fd_bind.ok: true` and `fd_registration.outcome: "registered"`, means we sent and nothing came back.** That is a network/firewall/BBMD-distribution question, not an app question. |
 | `who_is.instance_low` / `instance_high` | numbers | The window we actually scanned. A device outside it cannot answer, by definition. |
 | `who_is.timeout_s` | seconds | How long each Who-Is listened. |
 | `bacpypes3_version` | `"0.0.106"` | **Anything else and this is not the build we tested.** First thing to check when CI was green and the lab is red. |

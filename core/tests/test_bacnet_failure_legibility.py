@@ -756,8 +756,7 @@ class BbmdRefusalFailsTheRunTests(unittest.TestCase):
         self.assertIn("BVLL result code 48", message)
         self.assertNotIn(_SANITIZED_FAILURE_MESSAGE, message)
         self.assertEqual(store.last_error, message)
-        # Lane 1's device is NOT reported: a lane that failed is not replaced by a
-        # lane that worked.
+        # The local-broadcast path must not run when Foreign Device is selected.
         self.assertEqual(persisted, [])
 
         summary = store.summary_calls[-1]
@@ -766,7 +765,7 @@ class BbmdRefusalFailsTheRunTests(unittest.TestCase):
         self.assertEqual(summary["bacnet_diagnostics"]["fd_registration"]["outcome"], FD_REGISTRATION_REFUSED)
         self.assertEqual(summary["bacnet_diagnostics"]["fd_registration"]["status"], 48)
         self.assertFalse(summary["bacnet_diagnostics"]["transport_verified"])
-        self.assertTrue(summary["lanes"][LANE_BROADCAST]["ran"])
+        self.assertNotIn(LANE_BROADCAST, summary["lanes"])
         # Both apps still released their sockets on the failure path.
         self.assertEqual(backend.closed, 1)
         self.assertEqual(fd_backend.closed, 1)

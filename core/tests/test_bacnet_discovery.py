@@ -1,8 +1,8 @@
 """Unit tests for the BACnet discovery engine against the SIMULATED backend.
 
 Covers the deterministic fixture backend, the PURE transport-plan builder (the
-construction decisions that reach the lab), and the three-lane orchestration —
-merge/dedupe, the fallback-only directed lane, and the foreign-device gate.
+construction decisions that reach the lab), and the mode-selected broadcast
+path with fallback-only directed unicast.
 
 HONESTY: there is NO real BACnet device or building network here. Every test
 runs against :class:`SimulatedBacnetBackend` (deterministic in-memory fixture),
@@ -28,9 +28,9 @@ WHAT THESE TESTS CANNOT PROVE — read before trusting a green run:
       hear. The fakes answer directed probes because they are told to; real
       controllers may not.
 
-The three lanes are redundant precisely because of the above. A green suite here
-means "the orchestration and the reporting are right", never "BACnet discovery
-works".
+The selected broadcast path and directed-unicast fallback are separately tested
+because they reach different devices. A green suite here means "the orchestration
+and the reporting are right", never "BACnet discovery works".
 """
 
 import asyncio
@@ -1043,10 +1043,10 @@ class BacnetTransportPlanTests(unittest.TestCase):
         self.assertNotIn("fd_bbmd_address", plan.as_dict())
         self.assertNotIn("fd_ttl", plan.as_dict())
 
-    def test_enabling_foreign_device_leaves_the_broadcast_lane_byte_identical(self) -> None:
-        # The two-app layout's regression pin, asserted as literal equality of the
-        # frozen plans: turning on foreign-device registration must not perturb
-        # lane 1 by one field. Lane 1 on an FD run IS lane 1 on a plain run.
+    def test_an_explicit_broadcast_plan_ignores_foreign_device_settings(self) -> None:
+        # A caller that deliberately asks for a broadcast plan must receive the
+        # normal local transport even when the parameter mapping also carries
+        # Foreign Device settings. Scheduling decides which plan is used.
         plain = build_transport_plan(self._params())
         lane_one_of_an_fd_run = build_transport_plan(
             self._params(
@@ -1303,11 +1303,9 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         self.assertTrue(summary["unicast_fallback_attempted"])
         self.assertEqual(summary["lanes"][LANE_DIRECTED]["probe_count"], 1)
 
-    def test_a_device_heard_on_two_lanes_is_one_device_and_the_broadcast_wins(self) -> None:
+    def test_foreign_device_mode_emits_only_foreign_device_broadcast(self) -> None:
         store = FakeRunStore()
         backend = RecordingSimBackend()
-        # The BBMD forwards 1001's I-Am too (it is a broadcast lane), plus a routed
-        # 3001 the local broadcast cannot reach.
         fd_backend = ScriptedBacnetBackend(
             broadcast=[
                 {"device_instance": 1001, "address": "10.10.0.11:47808", "name": "AHU-1 Controller"},
@@ -1323,24 +1321,65 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "succeeded")
         summary = store.summary_calls[-1]
-        # 1001 is ONE device, not two: 1001, 1002, 2050 + the routed 3001.
-        self.assertEqual(summary["device_count"], 4)
+        self.assertEqual(backend.who_is_calls, [])
+        self.assertEqual(
+            fd_backend.who_is_calls,
+            [(BACNET_INSTANCE_MIN, BACNET_INSTANCE_MAX, None)],
+        )
+        self.assertEqual(summary["device_count"], 2)
         instances = [a["device_instance"] for a in summary["discovered_assets"]]
-        self.assertEqual(instances.count(1001), 1)
+        self.assertEqual(set(instances), {1001, 3001})
 
         first = next(a for a in summary["discovered_assets"] if a["device_instance"] == 1001)
-        self.assertEqual(first["lane"], LANE_BROADCAST, "broadcast-first: first heard wins")
+        self.assertEqual(first["lane"], LANE_FOREIGN_DEVICE)
         routed = next(a for a in summary["discovered_assets"] if a["device_instance"] == 3001)
         self.assertEqual(routed["lane"], LANE_FOREIGN_DEVICE)
-        # Lane 3 IS a broadcast (through the BBMD), so what it hears is stamped as
-        # a broadcast match, not a directed one.
         self.assertEqual(routed["match_basis"], MATCH_BASIS_WHO_IS)
 
+        self.assertNotIn(LANE_BROADCAST, summary["lanes"])
         fd_lane = summary["lanes"][LANE_FOREIGN_DEVICE]
         self.assertTrue(fd_lane["ran"])
         self.assertEqual(fd_lane["i_am_count"], 2)
-        self.assertEqual(fd_lane["device_count"], 1, "only 3001 was new")
+        self.assertEqual(fd_lane["device_count"], 2)
         self.assertEqual(fd_lane["udp_port"], FD_LOCAL_UDP_PORT)
+
+    def test_foreign_device_mode_fails_when_its_backend_was_not_injected(self) -> None:
+        # A test or caller may inject the local/direct backend without providing
+        # a second Foreign Device app. That is an unavailable selected transport,
+        # not a clean empty scan: no Who-Is can have been sent through the BBMD.
+        store = FakeRunStore()
+        backend = RecordingSimBackend()
+        params = {
+            **_AUTHORIZED,
+            PARAM_BACNET_MODE: MODE_FOREIGN_DEVICE,
+            PARAM_BBMD_ADDRESS: "10.0.0.5",
+        }
+
+        persisted: list[tuple[str, list[dict[str, Any]]]] = []
+
+        def persist(run_id: str, records: list[dict[str, Any]]) -> None:
+            persisted.append((run_id, list(records)))
+
+        result = process_bacnet_discovery_run(
+            "run_fd_unavailable",
+            params,
+            run_store=store,
+            execution_mode="inline_local_fallback",
+            backend=backend,
+            throttle=ThrottleConfig(rate_limit_per_sec=None),
+            persist_records=persist,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("Foreign Device transport is unavailable", str(result["error_message"]))
+        self.assertEqual(backend.who_is_calls, [])
+        self.assertEqual(persisted, [])
+        summary = store.summary_calls[-1]
+        self.assertFalse(summary["bacnet_diagnostics"]["transport_verified"])
+        self.assertEqual(
+            summary["lanes"][LANE_FOREIGN_DEVICE],
+            {"ran": False, "reason": "backend_injected"},
+        )
 
     def test_a_configured_bbmd_address_alone_never_starts_the_foreign_device_lane(self) -> None:
         # THE GATE (COORDINATION decision 6). Every default install carries the
@@ -1393,10 +1432,10 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         self.assertEqual(summary["expected_device_count"], 1)
         self.assertEqual(summary["expected_not_responding"], [])
 
-    def test_per_device_reads_go_back_out_the_lane_that_heard_the_device(self) -> None:
-        # A routed device only the BBMD lane could hear is not necessarily readable
-        # from the local-broadcast app. Reading it through the wrong app would turn
-        # a device we genuinely found into a wall of read errors.
+    def test_foreign_device_reads_stay_on_the_foreign_device_backend(self) -> None:
+        # A routed device found through the BBMD may not be readable from the
+        # local interface. The selected Foreign Device transport must handle both
+        # discovery and the follow-up object reads.
         store = FakeRunStore()
         backend = ScriptedBacnetBackend(
             broadcast=[{"device_instance": 1001, "address": "10.10.0.11:47808"}]
@@ -1411,7 +1450,7 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         }
         self._run(store, _ctx(store, parameters=params), backend, fd_backend=fd_backend)
 
-        self.assertEqual(backend.read_devices, [1001])
+        self.assertEqual(backend.read_devices, [])
         self.assertEqual(fd_backend.read_devices, [3001])
 
     def test_register_identity_never_overwrites_what_the_device_announced(self) -> None:
@@ -1481,8 +1520,7 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         transport = plan["transport"]
         self.assertEqual(transport["mode"], MODE_FOREIGN_DEVICE)
         lanes = {lane["lane"]: lane for lane in transport["lanes"]}
-        self.assertEqual(lanes[LANE_BROADCAST]["local_address"], "192.168.1.10/24")
-        self.assertEqual(lanes[LANE_BROADCAST]["udp_port"], DEFAULT_LOCAL_UDP_PORT)
+        self.assertEqual(set(lanes), {LANE_FOREIGN_DEVICE})
         self.assertEqual(
             lanes[LANE_FOREIGN_DEVICE]["fd_bbmd_address"], f"10.0.0.5:{DEFAULT_BBMD_PORT}"
         )
@@ -1510,7 +1548,7 @@ class BacnetLaneOrchestrationTests(unittest.TestCase):
         plan = store.summary_calls[-1]["dry_run_plan"]
         lanes = {lane["lane"]: lane for lane in plan["transport"]["lanes"]}
         self.assertIn("BBMD Address", lanes[LANE_FOREIGN_DEVICE]["error"])
-        self.assertNotIn("error", lanes[LANE_BROADCAST])
+        self.assertEqual(set(lanes), {LANE_FOREIGN_DEVICE})
 
 
 if __name__ == "__main__":

@@ -1215,7 +1215,7 @@ class ResolveBacnetDiscoveryParametersTests(unittest.TestCase):
         )
         self.assertEqual(
             result["scan_contract_v1"]["bacnet"]["lanes"],
-            ["local_broadcast", "foreign_device"],
+            ["foreign_device"],
         )
         self.assertEqual(
             len(
