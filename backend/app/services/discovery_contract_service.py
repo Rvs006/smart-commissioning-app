@@ -492,10 +492,8 @@ def resolve_bacnet_discovery_parameters(
             f"exceeding the {MAX_BACNET_EXPECTED_DEVICES}-device ceiling"
         )
 
-    lanes = ["local_broadcast"]
     mode = bacnet_mode(resolved)
-    if mode == MODE_FOREIGN_DEVICE:
-        lanes.append("foreign_device")
+    lanes = ["foreign_device"] if mode == MODE_FOREIGN_DEVICE else ["local_broadcast"]
     if expected_devices:
         lanes.append("directed_unicast")
     request = BacnetScanParametersV1(

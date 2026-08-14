@@ -7,6 +7,12 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- BACnet Foreign Device scans now use only the configured BBMD transport instead
+  of also sending a local broadcast. Register-backed directed unicast remains
+  available when expected devices require it.
+
 ## [0.1.42] - 2026-08-13
 
 This recovery release restores the intended IP, BACnet/IP, MQTT, and portable

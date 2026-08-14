@@ -159,20 +159,22 @@ There is no message for it. This section is the only defence.
 
 | Port | Lane | Used when |
 |---|---|---|
-| **47808** | Local broadcast | Always (both paths) |
+| **47808** | Local broadcast or directed register fallback | Local broadcast for Path A; directed unicast only when Path B has expected register targets |
 | **47809** | Foreign-device registration via the BBMD | **Path B only** (Foreign Device = Enabled) |
 
 **47809 is not the port anyone expects.** It exists because a foreign-device
-app suppresses its own local broadcast, so we run two separate BACnet stacks
-and each needs its own port. It also keeps us out of the way of a BACnet
-browser sitting on 47808.
+app suppresses its own local broadcast. Path B therefore sends its broadcast
+through the BBMD on 47809 and does not also send a local broadcast on 47808.
+When expected devices are supplied from the register, their directed-unicast
+fallback may still use 47808. The separate port also keeps us out of the way of
+a BACnet browser sitting on 47808.
 
 Do this before the lab:
 
 - Create a **Windows Firewall inbound allow rule** for the app's executable
-  covering **UDP 47808** (and **UDP 47809** if Path B is possible). Or run one
-  scan and accept the Defender prompt when it appears - but do that *before*
-  anyone is watching, not at 09:00.
+  covering **UDP 47808** for Path A (or Path B with register-backed directed
+  targets) and **UDP 47809** for Path B. Or run one scan and accept the Defender
+  prompt when it appears - but do that *before* anyone is watching, not at 09:00.
 - Path B: ask whoever owns the network whether anything between your subnet
   and the BBMD's subnet filters UDP. The BBMD will send its registration
   acknowledgement and forwarded broadcasts **back to port 47809**. A firewall

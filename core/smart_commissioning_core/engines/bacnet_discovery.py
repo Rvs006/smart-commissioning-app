@@ -1497,10 +1497,8 @@ def _select_backend(
     """
     # Resolve the mode even when it is not used below, so an UNRECOGNISED
     # bacnet_mode raises here (-> _engine's vetted failed run) instead of being
-    # ignored. Lane 1 is built with an explicit MODE_BROADCAST override, which
-    # would otherwise never read parameters[PARAM_BACNET_MODE] at all — and a
-    # transport setting that is silently ignored is the exact bug this release
-    # exists to fix. Do not "simplify" this call away.
+    # ignored. The primary app is used for local broadcast or directed-unicast
+    # fallback, so the mode must remain validated at this boundary.
     bacnet_mode(parameters)
     if backend is not None:
         return backend
@@ -1511,14 +1509,9 @@ def _select_backend(
         # Construct here so an unavailable bacpypes3 raises the clear RuntimeError
         # (from _ensure_app) only when the real backend is actually used.
         #
-        # ZERO-REGRESSION PIN: lane 1 is ALWAYS a plain local-broadcast app on
-        # the default port, even on a foreign-device run. It is the path that
-        # works today and it must stay byte-identical to today.
-        #
-        # This is also why an FD run needs TWO apps rather than one: foreign mode
-        # sets no_broadcast internally, so a single FD app would LOSE own-subnet
-        # discovery — the devices most likely to be sitting next to the laptop.
-        # Lane 3 is built separately by _select_fd_backend.
+        # This app is the local-broadcast transport for broadcast mode and the
+        # directed-unicast fallback for registered devices. Foreign Device mode
+        # never schedules its broadcast lane; its separate app is built below.
         return Bacpypes3Backend(
             local_address=parameters.get("local_address"),
             timeout_s=_timeout_s(parameters),
@@ -2101,30 +2094,15 @@ async def _run_bacnet_discovery(
     fd_skip_reason: str | None = None,
     record: dict[str, Any] | None = None,
 ) -> EngineResult:
-    """Async engine body: three Who-Is lanes, then throttled per-device reads.
+    """Run the selected broadcast lane, then registered-device unicast fallback.
 
-    THE LANES, and why they are independent (COORDINATION decision 3). Each one
-    reaches devices the others cannot, so no single field unknown blanks the day:
+    Broadcast mode uses the local interface. Foreign Device mode uses only the
+    BBMD path: it must never add a local broadcast that the operator did not
+    select. Directed unicast remains available for registered devices still
+    silent after the selected broadcast lane.
 
-        1. LOCAL BROADCAST on 47808. Unchanged from today when nothing new is
-           configured — the zero-regression pin. Reaches the laptop's own subnet.
-        2. DIRECTED unicast to register addresses, FALLBACK-ONLY: sent only to
-           targets still silent after lanes 1 and 3. Crosses subnets by ordinary
-           IP routing with NO BBMD, so it is the path that still works when the
-           lab's BBMD refuses to cooperate.
-        3. FOREIGN-DEVICE broadcast through the BBMD on 47809. Reaches other
-           subnets, including routed MS/TP devices the directed lane cannot see.
-
-    Lane 2 runs LAST on purpose: lane 3 is also a broadcast, so any device it
-    hears needs no unicast probe. Ordering it after both broadcast lanes is what
-    keeps the fallback to the genuinely-silent minority — ~60 single UDP frames
-    worst case on Monday's lab, spaced by the throttle.
-
-    A lane never silently substitutes for another. Lane 3 hard-fails the run on
-    a BBMD NAK/timeout (the RuntimeError from ``_ensure_registered`` propagates
-    to ``_engine``) rather than quietly continuing on local broadcast — quietly
-    continuing would report a clean scan of the wrong network, which is the
-    original bug wearing a new hat.
+    A Foreign Device registration failure ends the run instead of substituting a
+    local broadcast, so the result can never describe the wrong network.
     """
     parameters = ctx.parameters
     low, high = _instance_range(parameters)
@@ -2215,34 +2193,31 @@ async def _run_bacnet_discovery(
                 )
         return new_count
 
-    # -- Lane 1: local broadcast (or the legacy single directed address) ------
+    # -- Selected broadcast lane ----------------------------------------------
     #
-    # parameters["address"] is the pre-existing single-target override and is
-    # passed through EXACTLY as before. Nothing about this call changes when no
-    # new configuration is present.
-    broadcast_devices = await _who_is(backend, address)
-    if address:
-        who_is_counters["unicast_sent"] += 1
-    else:
-        who_is_counters["broadcast_sent"] += 1
-    who_is_counters["i_am_count"] += len(broadcast_devices)
-    lanes[LANE_BROADCAST] = {
-        "ran": True,
-        "device_count": _absorb(
-            broadcast_devices,
-            match_basis=MATCH_BASIS_WHO_IS,
-            lane=LANE_BROADCAST,
-            source=backend,
-        ),
-        "i_am_count": len(broadcast_devices),
-        "directed_address": address or None,
-    }
+    # Foreign Device mode is exclusive: it must not emit a local broadcast or
+    # honour the legacy single-address override as an unlabelled extra lane.
+    if mode == MODE_BROADCAST:
+        broadcast_devices = await _who_is(backend, address)
+        if address:
+            who_is_counters["unicast_sent"] += 1
+        else:
+            who_is_counters["broadcast_sent"] += 1
+        who_is_counters["i_am_count"] += len(broadcast_devices)
+        lanes[LANE_BROADCAST] = {
+            "ran": True,
+            "device_count": _absorb(
+                broadcast_devices,
+                match_basis=MATCH_BASIS_WHO_IS,
+                lane=LANE_BROADCAST,
+                source=backend,
+            ),
+            "i_am_count": len(broadcast_devices),
+            "directed_address": address or None,
+        }
 
-    # -- Lane 3: foreign-device broadcast through the BBMD -------------------
-    #
-    # Runs before lane 2 because it is a BROADCAST: whatever it hears needs no
-    # unicast probe. A refused/silent BBMD raises out of the backend's
-    # registration gate and fails the whole run, naming the BBMD.
+    # A refused or silent BBMD raises from the backend's registration gate and
+    # fails the whole run, naming the BBMD.
     if fd_backend is not None:
         fd_devices = await _who_is(fd_backend, None)
         who_is_counters["broadcast_sent"] += 1
@@ -2260,15 +2235,12 @@ async def _run_bacnet_discovery(
             "bbmd_address": _fd_bbmd_address(fd_backend),
         }
     else:
-        # "Did not run" is always RECORDED with a reason. An operator who enabled
-        # foreign-device registration and got a lane that quietly never ran would
-        # be back where v0.1.12 started.
         lanes[LANE_FOREIGN_DEVICE] = {
             "ran": False,
             "reason": fd_skip_reason or ("not_configured" if mode != MODE_FOREIGN_DEVICE else "unavailable"),
         }
 
-    # -- Lane 2: directed unicast, fallback-only -----------------------------
+    # -- Directed unicast, fallback-only --------------------------------------
     #
     # Only targets whose expected instance sits INSIDE the operator's Who-Is
     # window are in scope: a device whose instance is outside [low, high] cannot
@@ -2728,11 +2700,11 @@ def _plan_transport(parameters: Mapping[str, Any]) -> dict[str, Any]:
     render the problem is a preview that hides it.
     """
     transport: dict[str, Any] = {"mode": bacnet_mode(parameters), "lanes": []}
-    lane_specs: list[tuple[str, str, int | None]] = [
-        (LANE_BROADCAST, MODE_BROADCAST, None),
-    ]
-    if is_foreign_device_mode(parameters):
-        lane_specs.append((LANE_FOREIGN_DEVICE, MODE_FOREIGN_DEVICE, FD_LOCAL_UDP_PORT))
+    lane_specs: list[tuple[str, str, int | None]] = (
+        [(LANE_FOREIGN_DEVICE, MODE_FOREIGN_DEVICE, FD_LOCAL_UDP_PORT)]
+        if is_foreign_device_mode(parameters)
+        else [(LANE_BROADCAST, MODE_BROADCAST, None)]
+    )
     for lane, lane_mode, udp_port in lane_specs:
         try:
             plan = build_transport_plan(parameters, mode=lane_mode, udp_port=udp_port)
@@ -2812,9 +2784,9 @@ def make_bacnet_discovery_engine(
     call from ``ctx.parameters`` unless one is injected here.
 
     Args:
-        backend: lane 1/2's transport (the local-broadcast app). Injected by
+        backend: local-broadcast or directed-unicast transport. Injected by
             tests and wiring; otherwise resolved from ``ctx.parameters``.
-        fd_backend: lane 3's foreign-device app. Injectable SOLELY so the
+        fd_backend: foreign-device app. Injectable SOLELY so the
             foreign-device orchestration is testable: CI has no BBMD, so without
             a seam here the BBMD-refusal path — the single most likely way
             Monday goes wrong — could not be exercised before Monday. A live run
@@ -2936,7 +2908,7 @@ def process_bacnet_discovery_run(
         backend: optional explicit backend (else selected from parameters).
             Inject :class:`SimulatedBacnetBackend` for offline tests; real runs
             default to the real, UNVALIDATED bacpypes3 path.
-        fd_backend: optional explicit foreign-device (lane 3) backend, for
+        fd_backend: optional explicit foreign-device backend, for
             offline tests of the BBMD paths. A live foreign-device run builds
             its own second Application and ignores this.
         throttle: optional :class:`ThrottleConfig` (defaults applied otherwise).
