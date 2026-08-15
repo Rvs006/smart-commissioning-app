@@ -70,17 +70,19 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-14. The v0.1.45 candidate aligns
-  an unstamped frontend version fallback with the backend release fallback and
-  adds concise Nmap operator guidance to the Brief, Learning path, README, and
+- **Current handoff**: status as of 2026-08-14. The v0.1.46 candidate completes
+  the frontend fallback correction with one fail-closed runtime identity: API
+  health, reports, and evidence provenance accept only the packaged version or
+  its matching `v`-prefixed build stamp. It also retains concise Nmap operator
+  guidance in the Brief, Learning path, README, and
   `docs/nmap-one-click-operator-guide.md`. The unified portable keeps its
   one-click Nmap approval route: a global administrator records a detected local
   installation once, then engineers select only an approved fixed profile.
   Field acceptance remains open until the approved register, applicability
   matrix, paired collector evidence, and complete cadence run pass
-  `docs/v0.1.45-field-acceptance-checklist.md`.
+  `docs/v0.1.46-field-acceptance-checklist.md`.
   A one-minute operator Stop is cancellation evidence, not cadence evidence.
-  The latest public release is v0.1.44; v0.1.45 is the current candidate. Keep
+  The v0.1.45 tag was halted before public publication, and the latest public release is v0.1.44; v0.1.46 is the current candidate. Keep
   source, raw evidence, report bytes, EXE identity, Docker labels, and release
   SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a

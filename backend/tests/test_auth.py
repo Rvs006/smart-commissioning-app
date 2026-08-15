@@ -21,6 +21,7 @@ import uuid
 from unittest.mock import patch
 
 from harness import ApiTestCase
+from smart_commissioning_core import __version__
 
 _API_KEY = "test-auth-secret-key"
 
@@ -84,15 +85,15 @@ class ApiKeyModeTests(_AuthClientTestCase):
     def test_health_endpoints_reachable_without_key(self) -> None:
         health = self.client.get("/api/v1/health")
         self.assertEqual(health.status_code, 200)
-        self.assertEqual(health.json()["version"], "0.1.45")
+        self.assertEqual(health.json()["version"], "0.1.46")
         self.assertEqual(self.client.get("/api/v1/ready").status_code, 200)
 
     def test_health_uses_the_portable_bundle_version_when_stamped(self) -> None:
-        with patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": "v0.1.44"}):
+        with patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": f"v{__version__}"}):
             health = self.client.get("/api/v1/health")
 
         self.assertEqual(health.status_code, 200)
-        self.assertEqual(health.json()["version"], "v0.1.44")
+        self.assertEqual(health.json()["version"], f"v{__version__}")
 
     def test_import_format_helpers_reachable_without_key(self) -> None:
         # The import profile list and blank templates are public format helpers

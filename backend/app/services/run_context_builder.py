@@ -22,8 +22,13 @@ from app.services.configuration_service import (
     ConfigurationService,
     write_secret_material,
 )
+from app.versioning import effective_application_version, validate_packaged_application_version
 
-_APP_VERSION = "0.1.45"
+_APP_VERSION = "0.1.46"
+validate_packaged_application_version(
+    _APP_VERSION,
+    source="backend.app.services.run_context_builder._APP_VERSION",
+)
 _SENSITIVE_KEYS = {
     "password",
     "broker_password",
@@ -50,6 +55,7 @@ def build_run_context(
     parameters: dict[str, Any],
     requesting_principal: str,
 ) -> RunContextV1:
+    application_version = effective_application_version()
     configuration = ConfigurationService(engine).load(
         project_id, site_id, mask_secrets=False
     ).model_dump(mode="json")
@@ -98,9 +104,7 @@ def build_run_context(
         connection_settings=connection_settings,
         secret_references=references,
         requesting_principal=requesting_principal,
-        application_version=(
-            os.environ.get("SMART_COMMISSIONING_APP_VERSION") or _APP_VERSION
-        ),
+        application_version=application_version,
         protocol_key=protocol_key,
     )
 

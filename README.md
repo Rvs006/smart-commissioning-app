@@ -34,7 +34,7 @@ executable. In Windows, right-click `SmartCommissioningApp.exe` → **Properties
 **Details** to see the product name, file description, and version. These should
 match the version on the GitHub release page you downloaded.
 
-For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#mqttudmi-field-check-v0124-or-later) after startup. The **latest release** link above is the single supported download location; confirm that its tag and bundled `README_FIRST.txt` both name v0.1.42 before using this checklist. The v0.1.42 protocol recovery has its own [field validation guide](docs/v0.1.42-protocol-recovery-validation.md), including the IP-register, BACnet/IP, and MQTT checks.
+For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#mqttudmi-field-check-v0124-or-later) after startup. The **latest release** link above is the single supported download location; confirm that its tag and bundled `README_FIRST.txt` both name the same release before using this checklist. The [v0.1.46 field acceptance checklist](docs/v0.1.46-field-acceptance-checklist.md) covers the IP-register, BACnet/IP, MQTT, and unchanged UDMI checks.
 
 > ⚠️ **Windows SmartScreen may warn** - this is an internal unsigned build. Choose
 > **More info → Run anyway**, only if you got the zip from the project owner or the releases page

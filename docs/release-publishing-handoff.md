@@ -136,9 +136,11 @@ open follow-up questions are in `docs/field-followups-2026-07-16.md`.
 
 ## Optional: attach a version-stamped exe to each Release
 
-The exes built by the auto-triggered Windows Portable Bundle runs are
-**unversioned** (the version pill reads a git-describe SHA). For a clean stamped
-build, dispatch the workflow with a version input, then download and attach it:
+The portable builder reads the shared package version and uses its `v`-prefixed
+form when `-Version` is omitted. It rejects a different explicit version, so the
+EXE, frontend, API, reports, and evidence cannot be assembled with mixed release
+identities. For a published release, dispatch the workflow with the exact tag,
+then download and attach it:
 ```bash
 gh workflow run "Windows Portable Bundle" -f version=v0.1.13   # repeat per version tag
 # when the run finishes:

@@ -38,16 +38,24 @@ from app.services.log_service import (
     purge_old_logs,
     retention_days,
 )
+from app.versioning import (
+    validate_packaged_application_version,
+    validate_runtime_application_version,
+)
 
 logger = logging.getLogger(__name__)
-APP_VERSION = "0.1.45"
-_RUNTIME_APP_VERSION = os.environ.get("SMART_COMMISSIONING_APP_VERSION") or APP_VERSION
+APP_VERSION = "0.1.46"
+validate_packaged_application_version(APP_VERSION, source="backend.app.main.APP_VERSION")
+_RUNTIME_APP_VERSION = validate_runtime_application_version()
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # A process may inherit environment changes after import in embedded/test
+    # launches. Re-check before serving so every versioned surface stays bound.
+    _app.version = validate_runtime_application_version()
     # Re-read settings at startup time (not module import time) so test
     # harnesses that override the environment per test class are honored.
     startup_settings = get_settings()
