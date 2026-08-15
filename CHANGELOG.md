@@ -13,6 +13,26 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.48] - 2026-08-15
+
+### Fixed
+
+- After an IP dry run, a global administrator can now create the required
+  sealed-preview authorization from Run Controls. The approval records its
+  change ticket, purpose, and authorization window, then becomes the selected
+  one-use authorization for the matching live run.
+
+### Changed
+
+- Engineers without global-admin access now see that an administrator must
+  approve the exact preview, rather than an empty required authorization list.
+
+### Compatibility
+
+- This release adds no database migration. Existing sealed previews and their
+  authorization rules remain unchanged; Nmap is only used when its managed
+  provider is explicitly selected.
+
 ## [0.1.47] - 2026-08-15
 
 ### Fixed

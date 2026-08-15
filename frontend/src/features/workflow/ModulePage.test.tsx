@@ -42,8 +42,8 @@ const previewAuthorization = {
   approved_by: "admin-1",
   ticket: "CHG-1001",
   purpose: "ModulePage contract test",
-  not_before: "2026-06-11T08:00:00Z",
-  not_after: "2026-06-11T18:00:00Z",
+  not_before: "2020-06-11T08:00:00Z",
+  not_after: "2099-06-11T18:00:00Z",
   max_uses: 1,
   use_count: 0,
   consumed_run_id: null,
@@ -200,14 +200,18 @@ function LocationProbe() {
   );
 }
 
-function renderModule(route: string, initialEntry = "/") {
+function renderModule(
+  route: string,
+  initialEntry = "/",
+  scanAuthorizations: ReadonlyArray<typeof previewAuthorization> = [previewAuthorization],
+) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   // A key is set so the SessionProvider fetches /me; the stubs below return an
   // engineer role, matching the pre-RBAC behaviour these wiring tests assert.
   setApiKey("engineer-key");
-  stubScanAuthorizationFallback();
+  stubScanAuthorizationFallback(scanAuthorizations);
   return render(
     <QueryClientProvider client={queryClient}>
       <SessionProvider>
@@ -220,7 +224,9 @@ function renderModule(route: string, initialEntry = "/") {
   );
 }
 
-function stubScanAuthorizationFallback() {
+function stubScanAuthorizationFallback(
+  scanAuthorizations: ReadonlyArray<typeof previewAuthorization> = [previewAuthorization],
+) {
   const currentFetch = globalThis.fetch;
   if (typeof currentFetch !== "function") return;
   vi.stubGlobal(
@@ -228,12 +234,102 @@ function stubScanAuthorizationFallback() {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/v1/discovery/scan-authorizations?")) {
-        return jsonResponse([previewAuthorization]);
+        return jsonResponse(scanAuthorizations);
       }
       return currentFetch(input, init);
     }),
   );
 }
+
+it("lets an admin approve a sealed IP preview from Run Controls", async () => {
+  const previewRunId = "run-ip-preview-approval-1";
+  const authorizations: typeof previewAuthorization[] = [];
+  let approvalBody: Record<string, unknown> | null = null;
+  let liveBody: Record<string, unknown> | null = null;
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+      if (url.endsWith("/api/v1/me")) return jsonResponse({ ...mePayload, role: "admin" });
+      if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+      if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        if ((body.parameters as Record<string, unknown>).dry_run === true) {
+          return jsonResponse({
+            run_id: previewRunId,
+            job_type: "ip_discovery",
+            status: "queued",
+            message: "IP preview accepted.",
+          });
+        }
+        liveBody = body;
+        return jsonResponse({
+          run_id: "run-ip-live-approval-1",
+          job_type: "ip_discovery",
+          status: "queued",
+          message: "IP discovery accepted.",
+        });
+      }
+      if (url.endsWith("/api/v1/discovery/scan-authorizations") && init?.method === "POST") {
+        approvalBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        const authorization = {
+          ...previewAuthorization,
+          preview_run_id: previewRunId,
+          ticket: String(approvalBody.ticket),
+          purpose: String(approvalBody.purpose),
+          not_before: String(approvalBody.not_before),
+          not_after: String(approvalBody.not_after),
+        };
+        return jsonResponse(authorization);
+      }
+      if (url.endsWith(`/api/v1/discovery/runs/${previewRunId}/results`)) {
+        return jsonResponse({ ...resultsPayload, run_id: previewRunId, result_summary: { dry_run: true } });
+      }
+      if (url.endsWith(`/api/v1/discovery/runs/${previewRunId}`)) {
+        return jsonResponse({ ...terminalRun, run_id: previewRunId, result_summary: { dry_run: true } });
+      }
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    }),
+  );
+
+  renderModule("ip-scanner", "/", authorizations);
+
+  fireEvent.click(await screen.findByLabelText(/Dry run/i));
+  fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+  await waitFor(() => expect(screen.getByText(new RegExp(`Run ID: ${previewRunId}`))).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText(/Dry run/i));
+  fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+  fireEvent.change(await screen.findByLabelText(/Change ticket/i), { target: { value: "CHG-2048" } });
+  fireEvent.change(await screen.findByLabelText(/Approval purpose/i), {
+    target: { value: "Commission the selected IP segment" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Approve preview" }));
+
+  await waitFor(() => expect(approvalBody).not.toBeNull());
+  expect(approvalBody).toMatchObject({
+    preview_run_id: previewRunId,
+    ticket: "CHG-2048",
+    purpose: "Commission the selected IP segment",
+  });
+
+  const authorization = await screen.findByRole("combobox", {
+    name: /Sealed preview authorization/i,
+  });
+  await waitFor(() => expect(authorization).toHaveValue(previewAuthorization.authorization_id));
+
+  const runButton = screen.getByRole("button", { name: "Run" });
+  await waitFor(() => expect(runButton).toBeEnabled());
+  fireEvent.click(runButton);
+  await waitFor(() => expect(liveBody).not.toBeNull());
+  expect(liveBody).toMatchObject({
+    parameters: {},
+    preview_run_id: previewRunId,
+    scan_authorization_id: previewAuthorization.authorization_id,
+  });
+});
 
 async function prepareAuthorizedIpRun(): Promise<HTMLElement> {
   const dryRun = await screen.findByLabelText(/Dry run/i);

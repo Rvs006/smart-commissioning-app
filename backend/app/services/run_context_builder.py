@@ -24,7 +24,7 @@ from app.services.configuration_service import (
 )
 from app.versioning import effective_application_version, validate_packaged_application_version
 
-_APP_VERSION = "0.1.47"
+_APP_VERSION = "0.1.48"
 validate_packaged_application_version(
     _APP_VERSION,
     source="backend.app.services.run_context_builder._APP_VERSION",
