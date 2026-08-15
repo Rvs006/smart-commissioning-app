@@ -270,11 +270,13 @@ describe("scan authorization client", () => {
     await startDiscoveryPreview({
       ...common,
       parameters: { dry_run: true, cidr: "10.20.0.0/24" },
+      idempotencyKey: "preview-retry-key",
     });
     await startAuthorizedDiscoveryRun({
       ...common,
       previewRunId: "preview/1",
       scanAuthorizationId: "auth/1",
+      idempotencyKey: "live-retry-key",
     });
 
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
@@ -291,6 +293,12 @@ describe("scan authorization client", () => {
       project_id: "project a",
       site_id: "site/1",
     });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(
+      "preview-retry-key",
+    );
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("Idempotency-Key")).toBe(
+      "live-retry-key",
+    );
   });
 });
 

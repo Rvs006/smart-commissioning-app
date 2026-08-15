@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the v0.1.46 evidence-validator entry point."""
+"""Regression tests for the v0.1.47 evidence-validator entry point."""
 
 from __future__ import annotations
 
@@ -7,27 +7,27 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import validate_v0146_release_evidence
+import validate_v0147_release_evidence
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class V0146EvidenceEntryPointTests(unittest.TestCase):
+class V0147EvidenceEntryPointTests(unittest.TestCase):
     def test_delegates_to_the_shared_contract_with_the_exact_version(self) -> None:
-        arguments = ["--version", "v0.1.46"]
+        arguments = ["--version", "v0.1.47"]
         with patch.object(
-            validate_v0146_release_evidence.base, "main_for_version", return_value=0
+            validate_v0147_release_evidence.base, "main_for_version", return_value=0
         ) as delegate:
-            self.assertEqual(validate_v0146_release_evidence.main(arguments), 0)
+            self.assertEqual(validate_v0147_release_evidence.main(arguments), 0)
         delegate.assert_called_once_with(
             arguments,
-            expected_version="v0.1.46",
-            success_label="v0.1.46 Docker and release evidence: OK",
+            expected_version="v0.1.47",
+            success_label="v0.1.47 Docker and release evidence: OK",
         )
 
     def test_dirty_portable_provenance_is_explicitly_non_publishable(self) -> None:
         build_script = (ROOT / "packaging/windows_portable/build.ps1").read_text(encoding="utf-8")
-        manifest = (ROOT / "docs/v0.1.46-evidence-manifest.md").read_text(encoding="utf-8")
+        manifest = (ROOT / "docs/v0.1.47-evidence-manifest.md").read_text(encoding="utf-8")
         for value in (
             '"dirty_local_non_publishable"',
             '"local-dirty-tree"',

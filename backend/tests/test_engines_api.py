@@ -17,7 +17,9 @@ inline parameters / fakes. No assertion in this file depends on real hardware.
 import importlib.util
 import socket
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Barrier
 from unittest.mock import patch
 
 from harness import ApiTestCase
@@ -268,6 +270,116 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(plan["target_count"], 4)  # 2 hosts x 2 ports
         self.assertEqual(summary["hosts_responsive"], 0)
         self.assertEqual(results["devices"], [], "dry run persists no devices")
+
+    def test_idempotency_key_replays_an_ip_preview_without_creating_a_second_run(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+        }
+        headers = {"Idempotency-Key": "ip-preview-replay"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        replay = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_idempotency_key_rejects_a_conflicting_ip_request(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+        }
+        headers = {"Idempotency-Key": "ip-conflict"}
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        conflict = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            json={
+                **payload,
+                "parameters": {"cidr": "10.99.0.0/30", "ports": [443], "dry_run": True},
+            },
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertIn("idempotency key", conflict.json()["detail"].lower())
+
+    def test_ip_run_without_an_idempotency_key_remains_a_new_run(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+        }
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload)
+        second = self.client.post("/api/v1/discovery/ip/runs", json=payload)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertNotEqual(second.json()["run_id"], first.json()["run_id"])
+
+    def test_concurrent_idempotency_key_replays_one_canonical_ip_preview(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+        }
+        headers = {"Idempotency-Key": "ip-concurrent-replay"}
+        barrier = Barrier(2)
+
+        def submit() -> object:
+            barrier.wait()
+            return self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first, second = list(executor.map(lambda _index: submit(), range(2)))
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["run_id"], second.json()["run_id"])
+
+    def test_idempotency_key_replays_an_authorized_ip_run_after_the_authorization_is_used(self) -> None:
+        preview = self._post(
+            "/api/v1/discovery/ip/runs",
+            {"cidr": "127.0.0.1/32", "ports": [9], "dry_run": True},
+            "ip_discovery",
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        now = datetime.now(UTC)
+        authorization = self.client.post(
+            "/api/v1/discovery/scan-authorizations",
+            json={
+                "preview_run_id": preview.json()["run_id"],
+                "ticket": "CHG-IDEMPOTENCY-TEST",
+                "purpose": "Verify authorized request replay",
+                "not_before": (now - timedelta(minutes=1)).isoformat(),
+                "not_after": (now + timedelta(hours=1)).isoformat(),
+            },
+        )
+        self.assertEqual(authorization.status_code, 201, authorization.text)
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "preview_run_id": preview.json()["run_id"],
+            "scan_authorization_id": authorization.json()["authorization_id"],
+            "parameters": {},
+        }
+        headers = {"Idempotency-Key": "ip-live-replay"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        replay = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
 
     def test_dry_run_persists_the_normalized_multi_target_contract(self) -> None:
         response = self._post(

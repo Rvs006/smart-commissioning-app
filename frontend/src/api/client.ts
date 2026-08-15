@@ -1763,6 +1763,7 @@ export function startDiscoveryPreview(input: {
   jobType: NetworkDiscoveryJobType;
   parameters: Record<string, unknown> & { dry_run: true };
   workspace: WorkspaceRef;
+  idempotencyKey?: string;
   context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
   return request<JobAcceptedResponse>(
@@ -1774,7 +1775,12 @@ export function startDiscoveryPreview(input: {
         project_id: input.workspace.projectId,
         site_id: input.workspace.siteId,
       }),
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(input.runKind === "ip" && input.idempotencyKey
+          ? { "Idempotency-Key": input.idempotencyKey }
+          : {}),
+      },
       method: "POST",
     },
     input.context,
@@ -1787,6 +1793,7 @@ export function startAuthorizedDiscoveryRun(input: {
   previewRunId: string;
   scanAuthorizationId: string;
   workspace: WorkspaceRef;
+  idempotencyKey?: string;
   context?: ApiRequestContext;
 }): Promise<JobAcceptedResponse> {
   return request<JobAcceptedResponse>(
@@ -1800,7 +1807,12 @@ export function startAuthorizedDiscoveryRun(input: {
         project_id: input.workspace.projectId,
         site_id: input.workspace.siteId,
       }),
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(input.runKind === "ip" && input.idempotencyKey
+          ? { "Idempotency-Key": input.idempotencyKey }
+          : {}),
+      },
       method: "POST",
     },
     input.context,

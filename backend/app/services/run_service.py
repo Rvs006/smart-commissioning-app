@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from smart_commissioning_core.capture_provenance import capture_acceptance_eligible
@@ -38,7 +39,7 @@ from smart_commissioning_core.execution_context import (
 )
 from smart_commissioning_core.integrity import sha256_bytes
 from smart_commissioning_core.owned_run_store import OwnedRunStore
-from smart_commissioning_core.run_context import RunContextV1
+from smart_commissioning_core.run_context import RunContextV1, canonical_sha256
 from smart_commissioning_core.run_lifecycle import TerminalResultV1
 from smart_commissioning_core.sealed_run_integrity import (
     SealedRunIntegrityError,
@@ -159,6 +160,39 @@ def _build_evidence_set_id(
 
 _DEFAULT_UDMI_REPORT_TITLE = "UDMI Validation Report"
 _TERMINAL_RUN_STATUSES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+@dataclass(frozen=True)
+class JobRunCreationResult:
+    """The canonical run and whether a keyed submission replayed it."""
+
+    run: RunRecord
+    replayed: bool
+
+
+def _idempotency_operation(job_type: JobType) -> str:
+    return f"discovery.{job_type}.create"
+
+
+def _idempotency_request_sha256(
+    request: JobCreateRequest,
+    *,
+    expected_job_type: JobType,
+) -> str:
+    """Hash request semantics before dynamic resolution mutates parameters."""
+
+    return canonical_sha256(
+        {
+            "schema_version": "1.0",
+            "operation": _idempotency_operation(expected_job_type),
+            "project_id": request.project_id,
+            "site_id": request.site_id,
+            "job_type": expected_job_type,
+            "parameters": request.parameters,
+            "preview_run_id": request.preview_run_id,
+            "scan_authorization_id": request.scan_authorization_id,
+        }
+    )
 
 
 def _project_verified_report_record(
@@ -345,9 +379,73 @@ class RunService:
         requesting_principal: str = "system",
         parent_run_id: str | None = None,
         relation: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_request: JobCreateRequest | None = None,
     ) -> RunRecord:
+        return self.create_or_reuse_job_run(
+            request,
+            expected_job_type=expected_job_type,
+            requesting_principal=requesting_principal,
+            parent_run_id=parent_run_id,
+            relation=relation,
+            idempotency_key=idempotency_key,
+            idempotency_request=idempotency_request,
+        ).run
+
+    def find_idempotent_job_run(
+        self,
+        request: JobCreateRequest,
+        *,
+        expected_job_type: JobType,
+        requesting_principal: str,
+        idempotency_key: str | None,
+    ) -> RunRecord | None:
+        """Find a prior HTTP submission before live-request checks can reject it."""
+
+        if idempotency_key is None:
+            return None
         if request.job_type != expected_job_type:
             raise ValueError(f"Endpoint expects job_type '{expected_job_type}'.")
+        envelope = self._lifecycle.find_idempotency_replay(
+            project_id=request.project_id,
+            site_id=request.site_id,
+            requesting_principal=requesting_principal,
+            operation=_idempotency_operation(expected_job_type),
+            idempotency_key=idempotency_key,
+            request_sha256=_idempotency_request_sha256(
+                request,
+                expected_job_type=expected_job_type,
+            ),
+        )
+        if envelope is None:
+            return None
+        return self.get_run(envelope.run_id)
+
+    def create_or_reuse_job_run(
+        self,
+        request: JobCreateRequest,
+        *,
+        expected_job_type: JobType,
+        requesting_principal: str = "system",
+        parent_run_id: str | None = None,
+        relation: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_request: JobCreateRequest | None = None,
+    ) -> JobRunCreationResult:
+        if request.job_type != expected_job_type:
+            raise ValueError(f"Endpoint expects job_type '{expected_job_type}'.")
+
+        fingerprint_request = idempotency_request or request
+        if idempotency_key is not None:
+            replay = self.find_idempotent_job_run(
+                fingerprint_request,
+                expected_job_type=expected_job_type,
+                requesting_principal=requesting_principal,
+                idempotency_key=idempotency_key,
+            )
+            if replay is not None:
+                logger.info("run replayed run_id=%s job_type=%s", replay.run_id, expected_job_type)
+                return JobRunCreationResult(run=replay, replayed=True)
 
         context = build_run_context(
             engine=self._engine,
@@ -366,9 +464,26 @@ class RunService:
             preview_run_id=request.preview_run_id,
             parent_run_id=parent_run_id,
             relation=relation,
+            idempotency_principal=requesting_principal if idempotency_key is not None else None,
+            idempotency_operation=(
+                _idempotency_operation(expected_job_type) if idempotency_key is not None else None
+            ),
+            idempotency_key=idempotency_key,
+            idempotency_request_sha256=(
+                _idempotency_request_sha256(
+                    fingerprint_request,
+                    expected_job_type=expected_job_type,
+                )
+                if idempotency_key is not None
+                else None
+            ),
         )
-        logger.info("run created run_id=%s job_type=%s", envelope.run_id, expected_job_type)
-        return self.get_run(envelope.run_id)
+        log_verb = "replayed" if envelope.replayed else "created"
+        logger.info("run %s run_id=%s job_type=%s", log_verb, envelope.run_id, expected_job_type)
+        return JobRunCreationResult(
+            run=self.get_run(envelope.run_id),
+            replayed=envelope.replayed,
+        )
 
     def get_dispatch_for_run(self, run_id: str):
         return self._lifecycle.get_dispatch_for_run(run_id)

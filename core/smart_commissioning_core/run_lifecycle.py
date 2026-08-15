@@ -16,6 +16,7 @@ class DispatchEnvelopeV1(BaseModel):
     run_id: str
     dispatch_id: str
     context_sha256: str
+    replayed: bool = False
 
 
 class StoredRunContextV1(BaseModel):

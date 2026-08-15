@@ -131,6 +131,7 @@ const BACNET_PROPERTY_OPTIONS: readonly BacnetPropertyName[] = [
   "out_of_service",
   "description",
 ];
+
 import {
   createReportIntent,
   createObservationFoldState,
@@ -152,6 +153,13 @@ import {
   type IpHeadlineMetricDisplay,
   type BacnetHeadlineMetricDisplay,
 } from "./ipDiscoveryModel";
+
+function newIpSubmissionKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `ip-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 type ModulePageProps = {
   moduleRoute: string;
@@ -1731,6 +1739,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           nmapProfile,
           target: scanTarget,
         });
+        // The same header survives a transport retry of this submission. A new
+        // button press creates a deliberate new IP run.
+        const idempotencyKey = action.runKind === "ip" ? newIpSubmissionKey() : undefined;
         if (dryRun) {
           return startDiscoveryPreview({
             context: { client: apiClient },
@@ -1738,6 +1749,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             parameters: { ...parameters, dry_run: true },
             runKind: action.runKind as "ip" | "bacnet",
             workspace: workspaceRef,
+            idempotencyKey,
           });
         }
         if (!scanPreviewRunId || !scanAuthorizationId) {
@@ -1750,6 +1762,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           scanAuthorizationId,
           runKind: action.runKind as "ip" | "bacnet",
           workspace: workspaceRef,
+          idempotencyKey,
         });
       }
 

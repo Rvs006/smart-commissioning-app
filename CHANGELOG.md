@@ -13,6 +13,26 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.47] - 2026-08-15
+
+### Fixed
+
+- IP discovery now accepts an optional `Idempotency-Key`. Repeating the same
+  request under the same authenticated scope returns the original run rather
+  than dispatching duplicate discovery work. Reusing the key for different
+  request data returns HTTP 409.
+
+### Changed
+
+- The idempotency mapping is stored atomically with each created run. This
+  protects concurrent submissions and permits a valid retry after its one-use
+  scan authorization has been consumed.
+
+### Compatibility
+
+- Calls without `Idempotency-Key` retain the existing behavior and create a
+  separate intentional run. UDMI behavior is unchanged.
+
 ## [0.1.46] - 2026-08-15
 
 ### Fixed

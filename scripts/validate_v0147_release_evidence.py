@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate v0.1.46 evidence with the immutable provenance contract."""
+"""Validate v0.1.47 evidence with the immutable provenance contract."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import validate_v0128_release_evidence as base
 def main(argv: list[str] | None = None) -> int:
     return base.main_for_version(
         argv,
-        expected_version="v0.1.46",
-        success_label="v0.1.46 Docker and release evidence: OK",
+        expected_version="v0.1.47",
+        success_label="v0.1.47 Docker and release evidence: OK",
     )
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify release-facing version sources and runtime boundary are v0.1.46."""
+"""Verify release-facing version sources and runtime boundary are v0.1.47."""
 
 from __future__ import annotations
 
@@ -12,23 +12,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class V0146VersionIdentityTests(unittest.TestCase):
-    def test_runtime_package_frontend_and_documentation_identity_are_v0146(self) -> None:
+class V0147VersionIdentityTests(unittest.TestCase):
+    def test_runtime_package_frontend_and_documentation_identity_are_v0147(self) -> None:
         source = (ROOT / "core/smart_commissioning_core/__init__.py").read_text(encoding="utf-8")
-        self.assertEqual(re.findall(r'(?m)^__version__\s*=\s*["\']([^"\']+)["\']$', source), ["0.1.46"])
+        self.assertEqual(re.findall(r'(?m)^__version__\s*=\s*["\']([^"\']+)["\']$', source), ["0.1.47"])
         for relative in ("core/pyproject.toml", "backend/pyproject.toml", "worker/pyproject.toml"):
             package = tomllib.loads((ROOT / relative).read_text(encoding="utf-8"))
-            self.assertEqual(package["project"]["version"], "0.1.46", relative)
+            self.assertEqual(package["project"]["version"], "0.1.47", relative)
         frontend = json.loads((ROOT / "frontend/package.json").read_text(encoding="utf-8"))
         lock = json.loads((ROOT / "frontend/package-lock.json").read_text(encoding="utf-8"))
-        self.assertEqual(frontend["version"], "0.1.46")
-        self.assertEqual(lock["version"], "0.1.46")
-        self.assertEqual(lock["packages"][""]["version"], "0.1.46")
+        self.assertEqual(frontend["version"], "0.1.47")
+        self.assertEqual(lock["version"], "0.1.47")
+        self.assertEqual(lock["packages"][""]["version"], "0.1.47")
         for relative in ("AGENTS.md", "CLAUDE.md"):
             lineage = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("v0.1.46 candidate", lineage, relative)
-            self.assertIn("latest public release is v0.1.44", lineage, relative)
-        self.assertIn("[0.1.46]", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+            self.assertIn("v0.1.47 candidate", lineage, relative)
+            self.assertIn("latest public release is v0.1.46", lineage, relative)
+        self.assertIn("[0.1.47]", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
 
     def test_every_runtime_surface_uses_the_validated_identity_resolver(self) -> None:
         required_resolvers = {
@@ -51,10 +51,10 @@ class V0146VersionIdentityTests(unittest.TestCase):
     def test_docker_defaults_use_the_canonical_release_stamp(self) -> None:
         for relative in ("backend/Dockerfile", "worker/Dockerfile", "frontend/Dockerfile"):
             source = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn("ARG APP_VERSION=v0.1.46", source, relative)
+            self.assertIn("ARG APP_VERSION=v0.1.47", source, relative)
         for relative in ("infra/docker-compose.yml", "infra/docker-compose.sync-acceptance.yml"):
             source = (ROOT / relative).read_text(encoding="utf-8")
-            self.assertIn('APP_VERSION: "${APP_VERSION:-v0.1.46}"', source, relative)
+            self.assertIn('APP_VERSION: "${APP_VERSION:-v0.1.47}"', source, relative)
 
 
 if __name__ == "__main__":

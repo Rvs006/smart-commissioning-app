@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the v0.1.46 release-facing secret scan."""
+"""Tests for the v0.1.47 release-facing secret scan."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-import scan_v0146_release_secrets as scan
+import scan_v0147_release_secrets as scan
 
 
-class V0146SecurityScanTests(unittest.TestCase):
+class V0147SecurityScanTests(unittest.TestCase):
     def test_default_command_scans_the_release_source_tree(self) -> None:
         root = Path(__file__).resolve().parents[1]
         expected = root / "README.md"
