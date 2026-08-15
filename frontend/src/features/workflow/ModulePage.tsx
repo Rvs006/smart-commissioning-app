@@ -17,6 +17,7 @@ import {
   cancelRun,
   createImport,
   createReport,
+  createScanAuthorization,
   deleteReports,
   deleteUdmiSchemaSet,
   downloadFile,
@@ -131,6 +132,17 @@ const BACNET_PROPERTY_OPTIONS: readonly BacnetPropertyName[] = [
   "out_of_service",
   "description",
 ];
+
+const SCAN_AUTHORIZATION_WINDOW_HOURS = ["1", "4", "8", "24"] as const;
+type ScanAuthorizationWindowHours = (typeof SCAN_AUTHORIZATION_WINDOW_HOURS)[number];
+
+function isUsableScanAuthorization(authorization: ScanAuthorizationV1): boolean {
+  return (
+    !authorization.revoked_at &&
+    !authorization.consumed_run_id &&
+    authorization.use_count < authorization.max_uses
+  );
+}
 
 import {
   createReportIntent,
@@ -539,6 +551,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
   const [scanPreviewActive, setScanPreviewActive] = useState(false);
   const [scanAuthorizationId, setScanAuthorizationId] = useState<string | null>(null);
+  const [scanAuthorizationTicket, setScanAuthorizationTicket] = useState("");
+  const [scanAuthorizationPurpose, setScanAuthorizationPurpose] = useState("");
+  const [scanAuthorizationWindowHours, setScanAuthorizationWindowHours] =
+    useState<ScanAuthorizationWindowHours>("1");
   const [scanProvider, setScanProvider] = useState<IPDiscoveryProvider>("builtin_tcp_connect");
   const [nmapProfile, setNmapProfile] = useState<NmapProfileName>("tcp_connect_inventory");
   const applyNmapProfile = (profile: NmapProfileName) => {
@@ -754,8 +770,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
+  const scanAuthorizationsQueryKey = queryKeys.scanAuthorizations(
+    sessionScopeId,
+    workspaceRef,
+    scanPreviewRunId ?? undefined,
+  );
   const scanAuthorizationsQuery = useQuery<ScanAuthorizationV1[]>({
-    queryKey: ["scan-authorizations", sessionScopeId, workspaceRef, scanPreviewRunId],
+    queryKey: scanAuthorizationsQueryKey,
     queryFn: () =>
       listScanAuthorizations({
         workspace: workspaceRef,
@@ -763,6 +784,34 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         context: { client: apiClient },
       }),
     enabled: isSealedNetworkDiscoveryModule && !scanDryRun && Boolean(scanPreviewRunId),
+  });
+  const hasUsableScanAuthorization = (scanAuthorizationsQuery.data ?? []).some(isUsableScanAuthorization);
+  const createScanAuthorizationMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.scan-authorization.create`),
+    mutationFn: () => {
+      if (!scanPreviewRunId) {
+        throw new Error("Run a dry preview before approving it.");
+      }
+      const notBefore = new Date();
+      const windowHours = Number(scanAuthorizationWindowHours);
+      return createScanAuthorization({
+        context: { client: apiClient },
+        notAfter: new Date(notBefore.getTime() + windowHours * 60 * 60 * 1000).toISOString(),
+        notBefore: notBefore.toISOString(),
+        previewRunId: scanPreviewRunId,
+        purpose: scanAuthorizationPurpose.trim(),
+        ticket: scanAuthorizationTicket.trim(),
+      });
+    },
+    onSuccess: (authorization) => {
+      setScanAuthorizationId(authorization.authorization_id);
+      setScanAuthorizationTicket("");
+      setScanAuthorizationPurpose("");
+      queryClient.setQueryData<ScanAuthorizationV1[]>(scanAuthorizationsQueryKey, (current) => [
+        authorization,
+        ...(current ?? []).filter((item) => item.authorization_id !== authorization.authorization_id),
+      ]);
+    },
   });
 
   // Discovery run monitor — same polling contract, against the discovery
@@ -4112,11 +4161,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           : "I am authorized to scan this network and capture MQTT messages from this broker."}
                       </label>
                       {isSealedNetworkDiscoveryModule && (
-                        <label>
-                          Sealed preview authorization
+                        <div className="form-stack">
+                          <label htmlFor="scan-authorization">Sealed preview authorization</label>
                           <select
                             aria-describedby="scan-authorization-help"
                             disabled={!scanPreviewRunId || scanAuthorizationsQuery.isLoading}
+                            id="scan-authorization"
                             onChange={(event) => setScanAuthorizationId(event.target.value || null)}
                             value={scanAuthorizationId ?? ""}
                           >
@@ -4127,11 +4177,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             </option>
                             {(scanAuthorizationsQuery.data ?? []).map((authorization) => (
                               <option
-                                disabled={Boolean(
-                                  authorization.revoked_at ||
-                                  authorization.consumed_run_id ||
-                                  authorization.use_count >= authorization.max_uses,
-                                )}
+                                disabled={!isUsableScanAuthorization(authorization)}
                                 key={authorization.authorization_id}
                                 value={authorization.authorization_id}
                               >
@@ -4144,7 +4190,74 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             Preview {scanPreviewRunId ?? "not created"}; start sends only this preview
                             and authorization reference.
                           </span>
-                        </label>
+                          {!scanAuthorizationsQuery.isLoading && !hasUsableScanAuthorization && (
+                            canAdmin ? (
+                              <div className="form-stack">
+                                <strong>Approve this preview</strong>
+                                <label>
+                                  Change ticket
+                                  <input
+                                    disabled={createScanAuthorizationMutation.isPending}
+                                    onChange={(event) => setScanAuthorizationTicket(event.target.value)}
+                                    value={scanAuthorizationTicket}
+                                  />
+                                </label>
+                                <label>
+                                  Approval purpose
+                                  <input
+                                    disabled={createScanAuthorizationMutation.isPending}
+                                    onChange={(event) => setScanAuthorizationPurpose(event.target.value)}
+                                    value={scanAuthorizationPurpose}
+                                  />
+                                </label>
+                                <label>
+                                  Approval window
+                                  <select
+                                    disabled={createScanAuthorizationMutation.isPending}
+                                    onChange={(event) => {
+                                      const selectedWindow = SCAN_AUTHORIZATION_WINDOW_HOURS.find(
+                                        (windowHours) => windowHours === event.target.value,
+                                      );
+                                      if (selectedWindow) setScanAuthorizationWindowHours(selectedWindow);
+                                    }}
+                                    value={scanAuthorizationWindowHours}
+                                  >
+                                    {SCAN_AUTHORIZATION_WINDOW_HOURS.map((windowHours) => (
+                                      <option key={windowHours} value={windowHours}>
+                                        {windowHours} {windowHours === "1" ? "hour" : "hours"}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                                <button
+                                  className="secondary-button compact"
+                                  disabled={
+                                    createScanAuthorizationMutation.isPending ||
+                                    !scanAuthorizationTicket.trim() ||
+                                    !scanAuthorizationPurpose.trim()
+                                  }
+                                  onClick={() => createScanAuthorizationMutation.mutate()}
+                                  type="button"
+                                >
+                                  {createScanAuthorizationMutation.isPending
+                                    ? "Approving..."
+                                    : "Approve preview"}
+                                </button>
+                                {createScanAuthorizationMutation.isError && (
+                                  <p className="field-note" role="alert">
+                                    {createScanAuthorizationMutation.error instanceof Error
+                                      ? createScanAuthorizationMutation.error.message
+                                      : "Could not approve this preview. Try again or check your admin access."}
+                                  </p>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="field-note">
+                                An admin must approve this preview before an engineer can run it.
+                              </span>
+                            )
+                          )}
+                        </div>
                       )}
                     </>
                   )}
