@@ -136,11 +136,17 @@ const BACNET_PROPERTY_OPTIONS: readonly BacnetPropertyName[] = [
 const SCAN_AUTHORIZATION_WINDOW_HOURS = ["1", "4", "8", "24"] as const;
 type ScanAuthorizationWindowHours = (typeof SCAN_AUTHORIZATION_WINDOW_HOURS)[number];
 
-function isUsableScanAuthorization(authorization: ScanAuthorizationV1): boolean {
+function isUsableScanAuthorization(authorization: ScanAuthorizationV1, now = Date.now()): boolean {
+  const notBefore = Date.parse(authorization.not_before);
+  const notAfter = Date.parse(authorization.not_after);
   return (
     !authorization.revoked_at &&
     !authorization.consumed_run_id &&
-    authorization.use_count < authorization.max_uses
+    authorization.use_count < authorization.max_uses &&
+    Number.isFinite(notBefore) &&
+    Number.isFinite(notAfter) &&
+    now >= notBefore &&
+    now < notAfter
   );
 }
 
@@ -785,7 +791,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       }),
     enabled: isSealedNetworkDiscoveryModule && !scanDryRun && Boolean(scanPreviewRunId),
   });
-  const hasUsableScanAuthorization = (scanAuthorizationsQuery.data ?? []).some(isUsableScanAuthorization);
+  const authorizationNow = Date.now();
+  const hasUsableScanAuthorization = (scanAuthorizationsQuery.data ?? []).some((authorization) =>
+    isUsableScanAuthorization(authorization, authorizationNow),
+  );
   const createScanAuthorizationMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.scan-authorization.create`),
     mutationFn: () => {
@@ -871,6 +880,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Prefer the live SSE frame for status/stage/progress; fall back to the
   // polled record for those fields and for everything else (result_summary).
   const activeRunStatus = (sseDriving ? sseEvent?.status : undefined) ?? activeRunRecord?.status;
+  const scanPreviewSealed =
+    scanPreviewActive &&
+    activeRun?.runId === scanPreviewRunId &&
+    activeRunStatus === "succeeded";
   const activeRunStage = (sseDriving ? sseEvent?.stage : undefined) ?? activeRunRecord?.stage;
   const activeRunProgress =
     (sseDriving ? sseEvent?.progress_percent : undefined) ?? activeRunRecord?.progress_percent ?? 0;
@@ -4177,7 +4190,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             </option>
                             {(scanAuthorizationsQuery.data ?? []).map((authorization) => (
                               <option
-                                disabled={!isUsableScanAuthorization(authorization)}
+                                disabled={!isUsableScanAuthorization(authorization, authorizationNow)}
                                 key={authorization.authorization_id}
                                 value={authorization.authorization_id}
                               >
@@ -4187,10 +4200,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             ))}
                           </select>
                           <span id="scan-authorization-help" className="field-note">
-                            Preview {scanPreviewRunId ?? "not created"}; start sends only this preview
-                            and authorization reference.
+                            {scanPreviewRunId
+                              ? scanPreviewSealed
+                                ? `Preview ${scanPreviewRunId}; start sends only this preview and authorization reference.`
+                                : `Preview ${scanPreviewRunId} is sealing. Approval becomes available after it succeeds.`
+                              : "Run a dry preview before selecting or creating an authorization."}
                           </span>
-                          {!scanAuthorizationsQuery.isLoading && !hasUsableScanAuthorization && (
+                          {scanPreviewSealed &&
+                            !scanAuthorizationsQuery.isLoading &&
+                            !hasUsableScanAuthorization && (
                             canAdmin ? (
                               <div className="form-stack">
                                 <strong>Approve this preview</strong>
