@@ -13,7 +13,7 @@
 # same password-protected Redis. The URLs are assembled here so the password
 # lives in exactly one .env variable each.
 x-image-build-args: &image-build-args
-  APP_VERSION: "${APP_VERSION:-v0.1.46}"
+  APP_VERSION: "${APP_VERSION:-v0.1.47}"
   SOURCE_COMMIT: "${SOURCE_COMMIT:-unknown}"
   SOURCE_REPOSITORY: "${SOURCE_REPOSITORY:-https://github.com/Rvs006/smart-commissioning-app}"
 

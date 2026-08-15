@@ -33,6 +33,7 @@ from smart_commissioning_core.db.models import (
     RunDiscoveryObservationState,
     RunDispatch,
     RunExecutionContext,
+    RunIdempotencyKey,
     RunIssue,
     RunLifecycleConflict,
     RunLink,
@@ -152,6 +153,10 @@ class ScanAuthorizationError(ValueError):
     """A live run could not consume or continue under its sealed approval."""
 
 
+class IdempotencyConflictError(ValueError):
+    """A retry key was reused with a request that has different semantics."""
+
+
 class ActiveControlDeniedError(RuntimeError):
     """The current executor may not schedule another outbound attempt."""
 
@@ -213,6 +218,41 @@ def _packet_plan_sha256(context: RunContextV1) -> str:
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise ScanAuthorizationError("sealed preview has an invalid packet plan digest")
     return value
+
+
+def _idempotency_metadata(
+    *,
+    requesting_principal: str | None,
+    operation: str | None,
+    idempotency_key: str | None,
+    request_sha256: str | None,
+) -> tuple[str, str, str, str] | None:
+    """Validate a complete retry identity or preserve the unkeyed legacy path."""
+
+    values = (requesting_principal, operation, idempotency_key, request_sha256)
+    if values == (None, None, None, None):
+        return None
+    if any(value is None for value in values):
+        raise ValueError("idempotency metadata must be supplied together")
+    principal = str(requesting_principal).strip()
+    normalized_operation = str(operation).strip()
+    normalized_key = str(idempotency_key).strip()
+    normalized_sha256 = str(request_sha256).strip().lower()
+    if (
+        not principal
+        or not normalized_operation
+        or not normalized_key
+        or len(principal) > 255
+        or len(normalized_operation) > 64
+        or len(normalized_key) > 255
+    ):
+        raise ValueError("idempotency metadata is invalid")
+    if (
+        len(normalized_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in normalized_sha256)
+    ):
+        raise ValueError("idempotency request fingerprint is invalid")
+    return principal, normalized_operation, normalized_key, normalized_sha256
 
 
 def _is_dry_context(context: RunContextV1) -> bool:
@@ -510,6 +550,85 @@ class RunLifecycleRepository:
 
     # -- run/context/outbox -------------------------------------------------
 
+    def find_idempotency_replay(
+        self,
+        *,
+        project_id: str,
+        site_id: str,
+        requesting_principal: str,
+        operation: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> DispatchEnvelopeV1 | None:
+        """Return the canonical run for a prior keyed submission, if any.
+
+        This read is intentionally usable before request-specific live-scan
+        checks. A legitimate retry must still resolve after its one-use scan
+        authorization was consumed by the original creation.
+        """
+
+        metadata = _idempotency_metadata(
+            requesting_principal=requesting_principal,
+            operation=operation,
+            idempotency_key=idempotency_key,
+            request_sha256=request_sha256,
+        )
+        assert metadata is not None
+        with self._query_session_factory() as session:
+            return self._idempotency_replay_in_session(
+                session,
+                project_id=project_id,
+                site_id=site_id,
+                requesting_principal=metadata[0],
+                operation=metadata[1],
+                idempotency_key=metadata[2],
+                request_sha256=metadata[3],
+            )
+
+    @staticmethod
+    def _idempotency_replay_in_session(
+        session: Session,
+        *,
+        project_id: str,
+        site_id: str,
+        requesting_principal: str,
+        operation: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> DispatchEnvelopeV1 | None:
+        row = session.scalar(
+            select(RunIdempotencyKey).where(
+                RunIdempotencyKey.requesting_principal == requesting_principal,
+                RunIdempotencyKey.project_id == project_id,
+                RunIdempotencyKey.site_id == site_id,
+                RunIdempotencyKey.operation == operation,
+                RunIdempotencyKey.idempotency_key == idempotency_key,
+            )
+        )
+        if row is None:
+            return None
+        if row.request_sha256 != request_sha256:
+            raise IdempotencyConflictError(
+                "Idempotency key was already used for a different request."
+            )
+        run = session.get(Run, row.run_id)
+        context = session.get(RunExecutionContext, row.run_id)
+        dispatch = session.scalar(select(RunDispatch).where(RunDispatch.run_id == row.run_id))
+        if (
+            run is None
+            or context is None
+            or dispatch is None
+            or run.project_id != project_id
+            or run.site_id != site_id
+        ):
+            raise RuntimeError("idempotency record has no complete canonical run")
+        return DispatchEnvelopeV1(
+            run_id=row.run_id,
+            dispatch_id=dispatch.dispatch_id,
+            context_sha256=context.context_sha256,
+            replayed=True,
+        )
+
     def create_run_with_context(
         self,
         *,
@@ -523,9 +642,21 @@ class RunLifecycleRepository:
         preview_run_id: str | None = None,
         parent_run_id: str | None = None,
         relation: str | None = None,
+        idempotency_principal: str | None = None,
+        idempotency_operation: str | None = None,
+        idempotency_key: str | None = None,
+        idempotency_request_sha256: str | None = None,
         now: datetime | None = None,
     ) -> DispatchEnvelopeV1:
         captured = context if isinstance(context, RunContextV1) else RunContextV1.model_validate(context)
+        idempotency = _idempotency_metadata(
+            requesting_principal=idempotency_principal,
+            operation=idempotency_operation,
+            idempotency_key=idempotency_key,
+            request_sha256=idempotency_request_sha256,
+        )
+        if idempotency is not None and captured.requesting_principal != idempotency[0]:
+            raise ValueError("idempotency principal must match the captured run context")
         created_at = now or _utcnow()
         actual_run_id = run_id or new_run_id(created_at)
         actual_dispatch_id = dispatch_id or f"dispatch_{uuid4().hex}"
@@ -551,6 +682,18 @@ class RunLifecycleRepository:
             raise ScanAuthorizationError("a dry preview cannot consume an authorization")
         try:
             with self._session_factory.begin() as session:
+                if idempotency is not None:
+                    replay = self._idempotency_replay_in_session(
+                        session,
+                        project_id=captured.project_id,
+                        site_id=captured.site_id,
+                        requesting_principal=idempotency[0],
+                        operation=idempotency[1],
+                        idempotency_key=idempotency[2],
+                        request_sha256=idempotency[3],
+                    )
+                    if replay is not None:
+                        return replay
                 get_or_create_project_and_site(session, captured.project_id, captured.site_id)
                 authorization: ScanAuthorization | None = None
                 if authorization_id is not None and preview_run_id is not None:
@@ -596,6 +739,19 @@ class RunLifecycleRepository:
                         updated_at=created_at,
                     )
                 )
+                if idempotency is not None:
+                    session.add(
+                        RunIdempotencyKey(
+                            run_id=actual_run_id,
+                            requesting_principal=idempotency[0],
+                            project_id=captured.project_id,
+                            site_id=captured.site_id,
+                            operation=idempotency[1],
+                            idempotency_key=idempotency[2],
+                            request_sha256=idempotency[3],
+                            created_at=created_at,
+                        )
+                    )
                 session.flush()
                 if authorization is not None:
                     consumed = session.execute(
@@ -672,7 +828,31 @@ class RunLifecycleRepository:
                         )
                     )
                 session.flush()
+        except ScanAuthorizationError:
+            if idempotency is not None:
+                replay = self.find_idempotency_replay(
+                    project_id=captured.project_id,
+                    site_id=captured.site_id,
+                    requesting_principal=idempotency[0],
+                    operation=idempotency[1],
+                    idempotency_key=idempotency[2],
+                    request_sha256=idempotency[3],
+                )
+                if replay is not None:
+                    return replay
+            raise
         except IntegrityError as error:
+            if idempotency is not None:
+                replay = self.find_idempotency_replay(
+                    project_id=captured.project_id,
+                    site_id=captured.site_id,
+                    requesting_principal=idempotency[0],
+                    operation=idempotency[1],
+                    idempotency_key=idempotency[2],
+                    request_sha256=idempotency[3],
+                )
+                if replay is not None:
+                    return replay
             for protocol_key in resource_keys:
                 active_run_id = self.get_protocol_conflict(protocol_key)
                 if active_run_id is not None:
@@ -682,6 +862,7 @@ class RunLifecycleRepository:
             run_id=actual_run_id,
             dispatch_id=actual_dispatch_id,
             context_sha256=context_sha256,
+            replayed=False,
         )
 
     @staticmethod

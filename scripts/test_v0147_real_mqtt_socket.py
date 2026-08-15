@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the retained real-socket MQTT release gate for v0.1.46."""
+"""Run the retained real-socket MQTT release gate for v0.1.47."""
 
 import argparse
 import unittest

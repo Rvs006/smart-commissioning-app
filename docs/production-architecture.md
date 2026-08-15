@@ -263,6 +263,13 @@ Restore or extend these rules from the older validator logic:
 - `GET /api/v1/discovery/runs/{run_id}`
 - `GET /api/v1/discovery/runs/{run_id}/results`
 
+IP discovery clients may send an optional `Idempotency-Key` request header.
+Within the same authenticated principal, project, site, and IP-create operation,
+reusing that key with the same request returns the original run without dispatching
+it again. Reusing it with different request content returns `409`; omit the header
+or use a new key for an intentional new run. The key is durable with the run and
+also covers a retry after a one-use scan authorization has been consumed.
+
 ### Validation
 
 - `POST /api/v1/validation/udmi/runs`

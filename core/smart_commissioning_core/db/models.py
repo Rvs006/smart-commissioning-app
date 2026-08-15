@@ -1115,6 +1115,60 @@ class RunDispatch(Base):
     published_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
+class RunIdempotencyKey(Base):
+    """One client retry key bound atomically to its canonical created run."""
+
+    __tablename__ = "run_idempotency_keys"
+
+    # A run can originate from at most one keyed submission. The request scope
+    # below is separately unique so concurrent creators converge on this row.
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    requesting_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    site_id: Mapped[str] = mapped_column(ForeignKey("sites.id"), nullable=False)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(requesting_principal) BETWEEN 1 AND 255",
+            name="ck_run_idempotency_keys_principal_length",
+        ),
+        CheckConstraint(
+            "length(operation) BETWEEN 1 AND 64",
+            name="ck_run_idempotency_keys_operation_length",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 255",
+            name="ck_run_idempotency_keys_key_length",
+        ),
+        CheckConstraint(
+            _lowercase_sha256_check("request_sha256"),
+            name="ck_run_idempotency_keys_request_sha256",
+        ),
+        UniqueConstraint(
+            "requesting_principal",
+            "project_id",
+            "site_id",
+            "operation",
+            "idempotency_key",
+            name="uq_run_idempotency_keys_scope_key",
+        ),
+        Index(
+            "ix_run_idempotency_keys_scope_lookup",
+            "requesting_principal",
+            "project_id",
+            "site_id",
+            "operation",
+            "idempotency_key",
+        ),
+    )
+
+
 class ActiveProtocolSlot(Base):
     """One reserved queued/running run per canonical network collision key."""
 

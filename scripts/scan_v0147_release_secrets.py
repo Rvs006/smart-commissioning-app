@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scan v0.1.46 source and release evidence for credential material."""
+"""Scan v0.1.47 source and release evidence for credential material."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"v0.1.46 release secret scan: OK ({len(paths)} files)")
+    print(f"v0.1.47 release secret scan: OK ({len(paths)} files)")
     return 0
 
 

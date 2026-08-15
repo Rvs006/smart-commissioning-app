@@ -19,11 +19,12 @@ import json
 from copy import deepcopy
 from io import BytesIO
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from openpyxl import Workbook
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
 from smart_commissioning_core.db.run_lifecycle import (
     DiscoveryObservationIntegrityError,
+    IdempotencyConflictError,
     ProtocolConflictError,
     RunLifecycleRepository,
     ScanAuthorizationError,
@@ -103,7 +104,7 @@ from app.services.retention_service import (
     ObservationRetentionService,
 )
 from app.services.run_dispatch import dispatch_run
-from app.services.run_service import DISCOVERY_JOB_TYPES, RunService
+from app.services.run_service import DISCOVERY_JOB_TYPES, JobRunCreationResult, RunService
 from app.services.scan_authorization_service import ScanAuthorizationService
 
 router = APIRouter()
@@ -144,6 +145,7 @@ _SCAN_AUTH_DETAIL = (
     "Create a dry_run preview first, approve that exact packet plan, then provide "
     "preview_run_id and scan_authorization_id with an empty parameters object."
 )
+_IDEMPOTENCY_KEY_MAX_LENGTH = 255
 
 
 def _settings_throttle(parameters: dict) -> ThrottleConfig:
@@ -358,22 +360,42 @@ def _stamp_legacy_authorizer(parameters: dict[str, object], principal: AuthPrinc
     }
 
 
-def _create_run(
+def _idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Idempotency-Key must not be blank.")
+    if len(normalized) > _IDEMPOTENCY_KEY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Idempotency-Key must be at most {_IDEMPOTENCY_KEY_MAX_LENGTH} characters.",
+        )
+    return normalized
+
+
+def _create_run_outcome(
     request: JobCreateRequest,
     expected_job_type: JobType,
     principal: AuthPrincipal,
     *,
     parent_run_id: str | None = None,
     relation: str | None = None,
-) -> RunRecord:
+    idempotency_key: str | None = None,
+    idempotency_request: JobCreateRequest | None = None,
+) -> JobRunCreationResult:
     try:
-        return service.create_job_run(
+        return service.create_or_reuse_job_run(
             request,
             expected_job_type=expected_job_type,
             requesting_principal=principal.username,
             parent_run_id=parent_run_id,
             relation=relation,
+            idempotency_key=idempotency_key,
+            idempotency_request=idempotency_request,
         )
+    except IdempotencyConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except ProtocolConflictError as error:
         raise HTTPException(
             status_code=409,
@@ -386,6 +408,32 @@ def _create_run(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+def _create_run(
+    request: JobCreateRequest,
+    expected_job_type: JobType,
+    principal: AuthPrincipal,
+    *,
+    parent_run_id: str | None = None,
+    relation: str | None = None,
+) -> RunRecord:
+    return _create_run_outcome(
+        request,
+        expected_job_type,
+        principal,
+        parent_run_id=parent_run_id,
+        relation=relation,
+    ).run
+
+
+def _replayed_ip_run_response(run: RunRecord) -> JobAcceptedResponse:
+    return JobAcceptedResponse(
+        run_id=run.run_id,
+        job_type=run.job_type,
+        status=run.status,
+        message="IP discovery request replayed; returning the original run.",
+    )
 
 
 def _discovery_repository() -> DiscoveryRepository:
@@ -598,8 +646,24 @@ def create_ip_discovery_run(
     request: JobCreateRequest,
     principal: AuthPrincipal = Depends(get_principal),
     nmap_capability: NmapCapabilityService = Depends(_nmap_discovery_capability_service),
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JobAcceptedResponse:
     require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
+    idempotency_key = _idempotency_key(idempotency_key_header)
+    if idempotency_key is not None:
+        try:
+            replay = service.find_idempotent_job_run(
+                request,
+                expected_job_type="ip_discovery",
+                requesting_principal=principal.username,
+                idempotency_key=idempotency_key,
+            )
+        except IdempotencyConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        if replay is not None:
+            return _replayed_ip_run_response(replay)
     if request.preview_run_id:
         load_scoped_run(request.preview_run_id, principal, engine=service.engine)
     parameters, preview = _prepare_scan_parameters(request, expected_job_type="ip_discovery", principal=principal)
@@ -664,7 +728,16 @@ def create_ip_discovery_run(
                 raise HTTPException(status_code=409, detail=str(error)) from error
             except ValueError as error:
                 raise HTTPException(status_code=409, detail=str(error)) from error
-    run = _create_run(request.model_copy(update={"parameters": parameters}), "ip_discovery", principal)
+    creation = _create_run_outcome(
+        request.model_copy(update={"parameters": parameters}),
+        "ip_discovery",
+        principal,
+        idempotency_key=idempotency_key,
+        idempotency_request=request,
+    )
+    if creation.replayed:
+        return _replayed_ip_run_response(creation.run)
+    run = creation.run
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
         if not is_dry_run(frozen_parameters):
