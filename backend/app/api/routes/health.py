@@ -1,12 +1,11 @@
-import os
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Response
-from smart_commissioning_core import __version__
 
 from app.core.config import get_settings
 from app.core.db import get_engine
 from app.core.observability import DependencyStatus, check_database, check_redis
+from app.versioning import effective_application_version
 
 router = APIRouter()
 
@@ -17,10 +16,7 @@ def get_health() -> dict[str, object]:
     return {
         "status": "ok",
         "service": "smart-commissioning-api",
-        # A portable bundle stamps its executable, frontend, and runtime
-        # evidence through this value. The source package version remains the
-        # development fallback for hosted and direct-source runs.
-        "version": os.environ.get("SMART_COMMISSIONING_APP_VERSION") or __version__,
+        "version": effective_application_version(),
         "environment": get_settings().environment,
         "timestamp": datetime.now(UTC).isoformat(),
     }

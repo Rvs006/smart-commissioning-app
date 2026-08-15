@@ -20,18 +20,23 @@ from smart_commissioning_core.integrity import (
 
 from app.core.runtime import ARTIFACTS_ROOT, ensure_runtime_directories
 from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
+from app.versioning import effective_application_version, validate_packaged_application_version
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.1"
-# The source release contract scans this fallback directly. Portable candidates
-# override it at runtime through :func:`effective_report_renderer_version`.
-REPORT_RENDERER_VERSION = "0.1.45"
+# Compatibility constant for existing manifest readers. The core package owns
+# the canonical source version; runtime stamps are validated below.
+REPORT_RENDERER_VERSION = "0.1.46"
+validate_packaged_application_version(
+    REPORT_RENDERER_VERSION,
+    source="backend.app.services.report_artifacts.REPORT_RENDERER_VERSION",
+)
 
 
 def effective_report_renderer_version() -> str:
-    """Return the portable build stamp, or the source release fallback."""
+    """Return the validated release identity used in signed report manifests."""
 
-    return os.environ.get("SMART_COMMISSIONING_APP_VERSION") or REPORT_RENDERER_VERSION
+    return effective_application_version()
 
 _SIGNED_MANIFEST_FIELDS = (
     "schema_version",

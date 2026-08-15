@@ -13,6 +13,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.46] - 2026-08-15
+
+### Fixed
+
+- Bind API health, generated-report manifests, and run-evidence provenance to
+  one validated packaged application version. A runtime stamp may use the
+  release's optional `v` prefix, but a stamp for a different release now stops
+  the backend before it serves conflicting identity data.
+
 ## [0.1.45] - 2026-08-14
 
 ### Fixed

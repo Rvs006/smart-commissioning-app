@@ -54,7 +54,7 @@ def main_for_version(
         _require(
             dockerfile,
             [
-                "ARG APP_VERSION=dev",
+                f"ARG APP_VERSION={version}",
                 "ARG SOURCE_COMMIT=unknown",
                 "ARG SOURCE_REPOSITORY=https://github.com/Rvs006/smart-commissioning-app",
                 "org.opencontainers.image.version",
@@ -69,7 +69,7 @@ def main_for_version(
     _require(
         frontend_dockerfile,
         [
-            "FROM node:24-alpine AS build\n\nARG APP_VERSION=dev",
+            f"FROM node:24-alpine AS build\n\nARG APP_VERSION={version}",
             'ENV VITE_APP_VERSION="${APP_VERSION}"',
             "RUN npm run build",
         ],
@@ -83,7 +83,7 @@ def main_for_version(
             '${API_IMAGE:-smart-commissioning-api:local}',
             '${WORKER_IMAGE:-smart-commissioning-worker:local}',
             '${FRONTEND_IMAGE:-smart-commissioning-frontend:local}',
-            'APP_VERSION: "${APP_VERSION:-dev}"',
+            f'APP_VERSION: "${{APP_VERSION:-{version}}}"',
             'SOURCE_COMMIT: "${SOURCE_COMMIT:-unknown}"',
         ],
         label="hosted Compose",

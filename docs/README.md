@@ -43,7 +43,7 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Internal portable candidate | v0.1.45 candidate | [Release notes](release-notes-v0.1.45.md), [validation](release-validation-v0.1.45.md), and [rollback](migration-rollback-v0.1.45.md) |
+| Internal portable candidate | v0.1.46 candidate | [Release notes](release-notes-v0.1.46.md), [validation](release-validation-v0.1.46.md), and [rollback](migration-rollback-v0.1.46.md) |
 | Hosted Docker | v0.1.44 release | [Docker deployment and rollback](docker-deployment-rollback-v0.1.44.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
@@ -51,19 +51,20 @@ Status meanings:
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.45 candidate
+## v0.1.46 candidate
 
-v0.1.45 corrects the unstamped frontend version fallback and documents the
-one-click Nmap workflow for global administrators and field engineers. The
-public v0.1.44 release remains the current download until the candidate
-completes its checks.
+v0.1.46 completes the unstamped frontend fallback correction by refusing a
+runtime stamp that claims a different release. It also documents the one-click
+Nmap workflow for global administrators and field engineers. The v0.1.45 tag
+was halted before public publication; v0.1.44 remains the current download
+until this candidate completes its checks.
 
-- [Release notes](release-notes-v0.1.45.md)
-- [Release validation record](release-validation-v0.1.45.md)
-- [Migration and rollback](migration-rollback-v0.1.45.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.45.md)
-- [Field acceptance checklist](v0.1.45-field-acceptance-checklist.md)
-- [Evidence manifest](v0.1.45-evidence-manifest.md)
+- [Release notes](release-notes-v0.1.46.md)
+- [Release validation record](release-validation-v0.1.46.md)
+- [Migration and rollback](migration-rollback-v0.1.46.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.46.md)
+- [Field acceptance checklist](v0.1.46-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.46-evidence-manifest.md)
 - [Nmap operator guide](nmap-one-click-operator-guide.md)
 
 ## v0.1.44 release

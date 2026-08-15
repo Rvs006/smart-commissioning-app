@@ -26,6 +26,7 @@ from threading import Barrier
 from unittest import mock
 
 from harness import ApiTestCase
+from smart_commissioning_core import __version__
 
 _API_KEY = "test-evidence-api-key"
 
@@ -139,8 +140,8 @@ class ReportArtifactStorageTests(unittest.TestCase):
     def test_renderer_version_uses_the_portable_runtime_stamp(self) -> None:
         from app.services.report_artifacts import effective_report_renderer_version
 
-        with mock.patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": "v0.1.44"}):
-            self.assertEqual(effective_report_renderer_version(), "v0.1.44")
+        with mock.patch.dict(os.environ, {"SMART_COMMISSIONING_APP_VERSION": f"v{__version__}"}):
+            self.assertEqual(effective_report_renderer_version(), f"v{__version__}")
 
     def test_signing_failure_does_not_publish_unmanifested_artifact(self) -> None:
         from app.services import report_artifacts

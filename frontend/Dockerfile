@@ -7,7 +7,7 @@
 # matching the npm that generated package-lock.json.
 FROM node:24-alpine AS build
 
-ARG APP_VERSION=dev
+ARG APP_VERSION=v0.1.46
 ENV VITE_APP_VERSION="${APP_VERSION}"
 
 WORKDIR /build
@@ -22,7 +22,7 @@ RUN npm run build
 # --- Stage 2: serve with nginx ----------------------------------------------
 FROM nginx:stable-alpine
 
-ARG APP_VERSION=dev
+ARG APP_VERSION=v0.1.46
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_REPOSITORY=https://github.com/Rvs006/smart-commissioning-app
 

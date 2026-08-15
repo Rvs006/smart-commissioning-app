@@ -39,8 +39,10 @@
 
 .PARAMETER Version
     Optional release version shown in the portable README and Windows executable
-    properties (for example, ``v0.1.6``). Defaults to ``git describe`` so local
-    builds remain identifiable.
+    properties (for example, ``v0.1.46``). It must match the version packaged in
+    ``core/smart_commissioning_core/__init__.py``. When omitted, the build uses
+    that canonical version with a ``v`` prefix. Git commit and dirty-tree state
+    remain separate provenance fields.
 
 .PARAMETER SkipFrontend
     Reuse an existing frontend/dist instead of running npm ci && npm run build.
@@ -88,11 +90,17 @@ $ScriptDir = $PSScriptRoot
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $AppName   = "SmartCommissioningApp"
 $Git = Get-Command git -ErrorAction SilentlyContinue
-$BuildVersion = $Version.Trim()
-if (-not $BuildVersion -and $Git) {
-    $BuildVersion = (& $Git.Source -C $RepoRoot describe --tags --always --dirty 2>$null | Select-Object -First 1).Trim()
+$PackagedVersionPath = Join-Path $RepoRoot "core\smart_commissioning_core\__init__.py"
+$PackagedVersionSource = Get-Content -LiteralPath $PackagedVersionPath -Raw
+if ($PackagedVersionSource -notmatch '(?m)^__version__\s*=\s*["''](?<version>\d+\.\d+\.\d+)["'']\s*$') {
+    throw "Could not read a semantic package version from $PackagedVersionPath."
 }
-if ([string]::IsNullOrWhiteSpace($BuildVersion)) { $BuildVersion = "unversioned" }
+$PackagedVersion = $Matches["version"]
+$RequestedVersion = $Version.Trim()
+if ($RequestedVersion -and $RequestedVersion -notin @($PackagedVersion, "v$PackagedVersion")) {
+    throw "-Version '$RequestedVersion' must match the packaged application version 'v$PackagedVersion'."
+}
+$BuildVersion = "v$PackagedVersion"
 $SourceCommit = "unknown"
 $SourceTreeState = "unknown"
 if ($Git) {
