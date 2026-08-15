@@ -12,9 +12,14 @@ import scan_v0137_release_secrets as base
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--path", action="append", required=True)
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--path", action="append", type=Path, default=[])
     args = parser.parse_args(argv)
-    paths = [Path(value) for value in args.path]
+    paths = (
+        [path.resolve() for raw in args.path for path in base._files(raw.resolve(), explicit=True)]
+        if args.path
+        else base._files(args.root.resolve(), explicit=False)
+    )
     failures = base.scan(paths)
     if failures:
         for failure in failures:

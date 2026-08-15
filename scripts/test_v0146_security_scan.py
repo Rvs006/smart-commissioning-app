@@ -7,11 +7,36 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import scan_v0146_release_secrets as scan
 
 
 class V0146SecurityScanTests(unittest.TestCase):
+    def test_default_command_scans_the_release_source_tree(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        expected = root / "README.md"
+        with (
+            patch.object(scan.base, "_files", return_value=[expected]) as files,
+            patch.object(scan.base, "scan", return_value=[]) as scan_files,
+        ):
+            self.assertEqual(scan.main([]), 0)
+        files.assert_called_once_with(root, explicit=False)
+        scan_files.assert_called_once_with([expected])
+
+    def test_directory_path_is_expanded_before_scanning(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = root / "release-evidence.json"
+            with (
+                patch.object(scan.base, "_files", return_value=[expected]) as files,
+                patch.object(scan.base, "scan", return_value=[]) as scan_files,
+            ):
+                self.assertEqual(scan.main(["--path", str(root)]), 0)
+        files.assert_called_once_with(root.resolve(), explicit=True)
+        scanned_paths = scan_files.call_args.args[0]
+        self.assertEqual([path.name for path in scanned_paths], [expected.name])
+
     def test_rejects_seeded_private_material(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "release-notes.md"
