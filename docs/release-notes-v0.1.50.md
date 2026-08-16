@@ -18,12 +18,17 @@ ready. The portable EXE and Docker images share the same release identity.
 - Nmap guidance confirms that Built-in TCP connect is the default. Nmap is
   optional, separately installed, and unrelated to the retry and preview/live
   evidence fixes delivered in v0.1.49.
+- BACnet Foreign Device scans now use only the configured BBMD transport instead
+  of also sending a local broadcast. Register-backed directed unicast remains
+  available when expected devices require it.
 
 ## Compatibility and scope
 
-This release adds no database migration, protocol behavior change, or BACnet
-write capability. It retains the v0.1.49 run-isolation and equivalent-retry
-behavior. The product does not package, install, or download Nmap or Npcap.
+This release adds no database migration or BACnet write capability. It changes
+BACnet discovery transport selection only for configured Foreign Device scans;
+default local-broadcast scans remain unchanged. It retains the v0.1.49
+run-isolation and equivalent-retry behavior. The product does not package,
+install, or download Nmap or Npcap.
 
 ## Validation boundary
 

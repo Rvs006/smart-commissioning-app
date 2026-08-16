@@ -73,7 +73,13 @@ describe("LearningPage — operator guides", () => {
     expect(screen.getByRole("heading", { name: "Run an IP discovery" })).toBeInTheDocument();
     expect(screen.getByText(/Configure the targets and TCP ports/i)).toBeInTheDocument();
     expect(screen.getByText(/Wait until the preview succeeds and finishes sealing/i)).toBeInTheDocument();
-    expect(screen.getByText(/Create or select an approved authorization/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/An administrator must create and approve the scan authorization/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/If you are not an administrator, ask one to approve it/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/select the approved authorization already listed/i)).toBeInTheDocument();
     expect(screen.getByText(/authorization ID supplied in the approval record/i)).toBeInTheDocument();
     expect(screen.getByText(/used\/max counter shows uses consumed and maximum uses/i)).toBeInTheDocument();
     expect(screen.getByText(/limited the choices to the displayed sealed preview/i)).toBeInTheDocument();

@@ -963,11 +963,12 @@ export function LearningPage() {
                 <li>Tick Dry run and select Preview. The preview sends no network traffic.</li>
                 <li>Wait until the preview succeeds and finishes sealing.</li>
                 <li>
-                  Create or select an approved authorization for that preview. When several are
-                  enabled, select the authorization ID supplied in the approval record. The
-                  used/max counter shows uses consumed and maximum uses. The page has already
-                  limited the choices to the displayed sealed preview and disabled expired,
-                  spent or revoked entries.
+                  An administrator must create and approve the scan authorization for that sealed
+                  preview. If you are not an administrator, ask one to approve it, then select the
+                  approved authorization already listed. When several are enabled, select the
+                  authorization ID supplied in the approval record. The used/max counter shows
+                  uses consumed and maximum uses. The page has already limited the choices to the
+                  displayed sealed preview and disabled expired, spent or revoked entries.
                 </li>
                 <li>
                   Tick the authorization confirmation, select the matching sealed preview

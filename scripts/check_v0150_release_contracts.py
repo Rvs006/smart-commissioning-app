@@ -41,6 +41,8 @@ def main() -> int:
     field_checklist = (repo / "docs/v0.1.50-field-acceptance-checklist.md").read_text(
         encoding="utf-8"
     )
+    changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    release_notes = (repo / "docs/release-notes-v0.1.50.md").read_text(encoding="utf-8")
     brief = (repo / "frontend/src/features/brief/BriefPage.tsx").read_text(encoding="utf-8")
     learning = "\n".join(
         path.read_text(encoding="utf-8")
@@ -93,6 +95,8 @@ def main() -> int:
         "This release does not add BACnet write capability",
         "blank Payload type is valid",
         "does not bundle, install, or download Nmap or Npcap",
+        "An administrator must create and approve the scan authorization",
+        "If you are not an administrator, ask one to approve it",
         "Troubleshooting",
     ):
         if value not in learning_text:
@@ -109,7 +113,9 @@ def main() -> int:
     if any(pattern.search(public_guidance) for pattern in private_template_patterns):
         failures.append("public in-app guidance contains a private-looking template identifier")
     for value in (
+        "Complete an explicitly approved UDMI validation run",
         "Generate both the condensed client report and the technical report",
+        "that exact UDMI validation run and evidence set",
         "technical payload-manifest hashes",
         "expected redaction state",
         "condensed client report SHA-256",
@@ -117,6 +123,22 @@ def main() -> int:
     ):
         if value not in field_checklist_text:
             failures.append(f"v0.1.50 field checklist omits report evidence: {value}")
+    udmi_validation = field_checklist.find("Complete an explicitly approved UDMI validation run")
+    report_pair = field_checklist.find(
+        "Generate both the condensed client report and the technical report"
+    )
+    if udmi_validation < 0 or report_pair < 0 or udmi_validation >= report_pair:
+        failures.append(
+            "v0.1.50 field checklist does not complete the approved UDMI run before report generation"
+        )
+    changelog_v0150 = changelog[changelog.index("## [0.1.50]") : changelog.index("## [0.1.49]")]
+    if (
+        "BACnet Foreign Device scans now use only the configured BBMD transport"
+        not in changelog_v0150
+    ):
+        failures.append("v0.1.50 changelog omits the BACnet Foreign Device transport correction")
+    if "adds no database migration, protocol behavior change" in release_notes:
+        failures.append("v0.1.50 release notes incorrectly deny the BACnet transport behavior change")
     for value in (
         "--route '/#/brief'",
         "--route '/#/learning'",
