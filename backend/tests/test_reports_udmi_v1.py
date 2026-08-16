@@ -645,7 +645,7 @@ class UdmiV1ReportTests(ApiTestCase):
 
         provenance = validation["evidence_provenance"]["sources"][0]
         self.assertEqual(provenance["source_run_id"], source_id)
-        self.assertEqual(provenance["application_version"], "0.1.48")
+        self.assertEqual(provenance["application_version"], "0.1.49")
         self.assertEqual(provenance["source_commit"], "b" * 40)
         self.assertEqual(provenance["portable_exe_sha256"], "c" * 64)
         self.assertEqual(

@@ -43,7 +43,7 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Internal portable candidate | v0.1.48 candidate | [Release notes](release-notes-v0.1.48.md), [validation](release-validation-v0.1.48.md), and [rollback](migration-rollback-v0.1.48.md) |
+| Internal portable candidate | v0.1.49 candidate | [Release notes](release-notes-v0.1.49.md), [validation](release-validation-v0.1.49.md), and [rollback](migration-rollback-v0.1.49.md) |
 | Hosted Docker | v0.1.46 release | [Docker deployment and rollback](docker-deployment-rollback-v0.1.46.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
@@ -51,12 +51,27 @@ Status meanings:
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.48 candidate
+## v0.1.49 candidate
 
-v0.1.48 adds atomic retry handling for IP discovery. A repeat under the same
-scoped idempotency key returns the original run, while changed request data
-under that key returns HTTP 409. The portable and Docker release ship the same
-migration, and the unified Nmap workflow remains unchanged.
+v0.1.49 isolates preview/live events, evidence, and active-run downloads by
+submission epoch even when an adapter reuses a run ID. Equivalent IP retries and
+the exact v0.1.48 raw replay remain compatible. Builtin TCP stays the default;
+Nmap is opt-in and unbundled. MQTT templates leave Payload type blank and use
+`#` only as a topic filter wildcard. There are no BACnet write features.
+
+- [Release notes](release-notes-v0.1.49.md)
+- [Release validation record](release-validation-v0.1.49.md)
+- [Migration and rollback](migration-rollback-v0.1.49.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.49.md)
+- [Field acceptance checklist](v0.1.49-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.49-evidence-manifest.md)
+- [Nmap operator guide](nmap-one-click-operator-guide.md)
+
+## v0.1.48 release record
+
+v0.1.48 is the latest published release while v0.1.49 remains a candidate. Its
+field acceptance remains open until the approved IP register, BACnet segment,
+MQTT broker, and independent evidence records have passed the checklist.
 
 - [Release notes](release-notes-v0.1.48.md)
 - [Release validation record](release-validation-v0.1.48.md)
@@ -64,20 +79,6 @@ migration, and the unified Nmap workflow remains unchanged.
 - [Docker deployment and rollback](docker-deployment-rollback-v0.1.48.md)
 - [Field acceptance checklist](v0.1.48-field-acceptance-checklist.md)
 - [Evidence manifest](v0.1.48-evidence-manifest.md)
-- [Nmap operator guide](nmap-one-click-operator-guide.md)
-
-## v0.1.46 release
-
-v0.1.46 is the current GitHub release. Its field acceptance remains open until
-the approved IP register, BACnet segment, MQTT broker, and independent evidence
-records have passed the checklist.
-
-- [Release notes](release-notes-v0.1.46.md)
-- [Release validation record](release-validation-v0.1.46.md)
-- [Migration and rollback](migration-rollback-v0.1.46.md)
-- [Docker deployment and rollback](docker-deployment-rollback-v0.1.46.md)
-- [Field acceptance checklist](v0.1.46-field-acceptance-checklist.md)
-- [Evidence manifest](v0.1.44-evidence-manifest.md)
 
 ## v0.1.41 release record
 
