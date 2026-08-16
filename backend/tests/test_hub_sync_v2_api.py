@@ -1085,6 +1085,52 @@ class HubSyncV2ApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["receipts"][0]["class"], "malformed")
 
+    def test_resigned_manifest_cannot_forge_frozen_source_provenance(self) -> None:
+        run_id = self._report("project-alpha", "site-alpha", "provenance-tamper")
+        bundle = self._bundle([run_id])
+        from app.services.report_artifacts import canonical_json_bytes as artifact_json
+
+        def change_provenance(summary, item) -> None:
+            artifact_manifest = dict(summary["artifact_manifest"])
+            artifact_manifest["source_run_ids"] = ["run_forged_source"]
+            artifact_manifest["source_provenance"] = [
+                {
+                    "source_run_id": "run_forged_source",
+                    "application_version": "9.9.9",
+                    "source_commit": "a" * 40,
+                    "portable_exe_sha256": "b" * 64,
+                    "context_sha256": "c" * 64,
+                    "result_sha256": "d" * 64,
+                }
+            ]
+            unsigned = {
+                key: value
+                for key, value in artifact_manifest.items()
+                if key
+                not in {
+                    "signature_algorithm",
+                    "signature",
+                    "public_key_pem",
+                    "signed_manifest_sha256",
+                }
+            }
+            signed_body = artifact_json(unsigned)
+            artifact_manifest["signature"] = base64.b64encode(
+                self.artifact_key.sign(signed_body)
+            ).decode()
+            artifact_manifest["signed_manifest_sha256"] = sha256_bytes(signed_body)
+            summary["artifact_manifest"] = artifact_manifest
+            item["artifact_manifest"] = artifact_manifest
+
+        response = self._post(
+            _alter_terminal_summary(bundle, self.edge_key, change_provenance)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["receipts"][0]["class"],
+            "manifest_signature_failed",
+        )
+
     def test_secret_variants_and_certificate_artifact_never_cross(self) -> None:
         run_id = self._report("project-alpha", "site-alpha", "secret-variant")
         bundle = self._bundle([run_id])

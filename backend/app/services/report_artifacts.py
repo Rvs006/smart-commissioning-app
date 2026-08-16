@@ -112,6 +112,10 @@ class ReportArtifactIntegrityError(RuntimeError):
     """A report artifact is absent or no longer bound to its requested run."""
 
 
+class ReportProvenanceError(ValueError):
+    """Frozen report provenance cannot be represented by the signed schema."""
+
+
 def canonical_json_bytes(value: object) -> bytes:
     """Return the canonical UTF-8 representation used for hashes/signatures."""
 
@@ -126,6 +130,124 @@ def canonical_json_bytes(value: object) -> bytes:
 
 def snapshot_sha256(snapshot: object) -> str:
     return sha256_bytes(canonical_json_bytes(snapshot))
+
+
+def report_provenance_from_snapshot(
+    report_snapshot: Mapping[str, Any],
+    *,
+    fallback_parameters: Mapping[str, Any] | None = None,
+) -> dict[str, object]:
+    """Derive canonical signed provenance from one frozen report snapshot."""
+
+    parameters = fallback_parameters or {}
+    raw_source_ids = report_snapshot.get(
+        "source_run_ids", parameters.get("source_run_ids", [])
+    )
+    if not isinstance(raw_source_ids, list) or any(
+        not isinstance(source_id, str) or not 1 <= len(source_id) <= 64
+        for source_id in raw_source_ids
+    ):
+        raise ReportProvenanceError("Stored report source-run provenance is malformed.")
+    source_ids = list(raw_source_ids)
+    if len(source_ids) != len(set(source_ids)):
+        raise ReportProvenanceError("Stored report provenance contains duplicate source run IDs.")
+
+    raw_snapshots = report_snapshot.get(
+        "source_run_snapshots", parameters.get("source_run_snapshots", [])
+    )
+    raw_snapshots = raw_snapshots if isinstance(raw_snapshots, list) else []
+    snapshots_by_id = {
+        source["run_id"]: source
+        for source in raw_snapshots
+        if isinstance(source, Mapping) and isinstance(source.get("run_id"), str)
+    }
+    raw_contexts = report_snapshot.get("configuration_provenance", {})
+    contexts = raw_contexts if isinstance(raw_contexts, Mapping) else {}
+    raw_hashes = report_snapshot.get("source_result_hashes", {})
+    result_hashes = raw_hashes if isinstance(raw_hashes, Mapping) else {}
+    raw_seals = report_snapshot.get(
+        "source_run_seals", parameters.get("source_run_seals", {})
+    )
+    seals = raw_seals if isinstance(raw_seals, Mapping) else {}
+
+    def recorded_text(value: object, *, field: str, max_length: int) -> str | None:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise ReportProvenanceError(
+                f"Stored report provenance field '{field}' must be text."
+            )
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if len(normalized) > max_length:
+            raise ReportProvenanceError(
+                f"Stored report provenance field '{field}' exceeds {max_length} characters."
+            )
+        return normalized
+
+    def recorded_sha256(value: object, *, field: str) -> str | None:
+        normalized = recorded_text(value, field=field, max_length=64)
+        if normalized is None:
+            return None
+        normalized = normalized.casefold()
+        if not _SHA256_RE.fullmatch(normalized):
+            raise ReportProvenanceError(
+                f"Stored report provenance field '{field}' is not a SHA-256 digest."
+            )
+        return normalized
+
+    sources: list[dict[str, object]] = []
+    for source_id in source_ids:
+        source = snapshots_by_id.get(source_id, {})
+        source_parameters = source.get("parameters", {})
+        source_parameters = source_parameters if isinstance(source_parameters, Mapping) else {}
+        context = contexts.get(source_id, {})
+        context = context if isinstance(context, Mapping) else {}
+        seal = seals.get(source_id, {})
+        seal = seal if isinstance(seal, Mapping) else {}
+        sources.append(
+            {
+                "source_run_id": source_id,
+                "application_version": recorded_text(
+                    context.get("application_version") or source_parameters.get("application_version"),
+                    field="application_version",
+                    max_length=128,
+                ),
+                "source_commit": recorded_text(
+                    source_parameters.get("source_commit")
+                    or source_parameters.get("application_source_commit"),
+                    field="source_commit",
+                    max_length=128,
+                ),
+                "portable_exe_sha256": recorded_sha256(
+                    source_parameters.get("portable_exe_sha256")
+                    or source_parameters.get("exe_sha256")
+                    or source_parameters.get("portable_hash"),
+                    field="portable_exe_sha256",
+                ),
+                "context_sha256": recorded_sha256(
+                    context.get("context_sha256") or seal.get("context_sha256"),
+                    field="context_sha256",
+                ),
+                "result_sha256": recorded_sha256(
+                    result_hashes.get(source_id) or seal.get("result_sha256"),
+                    field="result_sha256",
+                ),
+            }
+        )
+
+    application_version = recorded_text(
+        report_snapshot.get("renderer_version") or parameters.get("renderer_version"),
+        field="application_version",
+        max_length=64,
+    )
+    return {
+        "schema_version": "1.0",
+        "application_version": application_version,
+        "source_run_ids": source_ids,
+        "sources": sources,
+    }
 
 
 def store_report_artifact(
@@ -227,6 +349,7 @@ def load_owned_report_artifact(
     *,
     report_id: str,
     manifest: Mapping[str, Any],
+    report_snapshot: Mapping[str, Any] | None,
     synchronized: Mapping[str, Any] | None = None,
     require_valid_signature: bool = True,
 ) -> tuple[bytes, str]:
@@ -237,7 +360,10 @@ def load_owned_report_artifact(
         raise ReportArtifactIntegrityError(
             "Stored report artifact ownership does not match the requested report."
         )
-    if require_valid_signature and not verify_signed_manifest(owned_manifest):
+    if require_valid_signature and not verify_report_manifest_binding(
+        owned_manifest,
+        report_snapshot=report_snapshot,
+    ):
         raise ReportArtifactIntegrityError(
             "Stored report artifact manifest has an invalid signature."
         )
@@ -266,8 +392,9 @@ def load_owned_report_artifact(
                 raise ReportArtifactIntegrityError(
                     "Synchronized artifact ownership does not match the requested report."
                 )
-            if require_valid_signature and not verify_signed_manifest(
-                synchronized_manifest
+            if require_valid_signature and not verify_report_manifest_binding(
+                synchronized_manifest,
+                report_snapshot=report_snapshot,
             ):
                 raise ReportArtifactIntegrityError(
                     "Synchronized artifact manifest has an invalid signature."
@@ -379,8 +506,12 @@ def load_content_addressed_artifact(
     return artifact
 
 
-def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
-    """Verify the embedded public key and detached manifest signature."""
+def verify_signed_manifest(
+    manifest: dict[str, Any],
+    *,
+    report_snapshot: Mapping[str, Any] | None = None,
+) -> bool:
+    """Verify the signature and optionally bind provenance to a frozen snapshot."""
 
     if not cryptography_available():
         return False
@@ -506,6 +637,11 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
                         not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
                     ):
                         return False
+            if report_snapshot is not None and not _manifest_matches_report_snapshot(
+                manifest,
+                report_snapshot,
+            ):
+                return False
         signed_timestamp = datetime.fromisoformat(signed_at)
         if signed_timestamp.tzinfo is None:
             return False
@@ -530,6 +666,54 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
     if fingerprint_for_pem(public_key) != signing_key_id:
         return False
     return verify_bytes(signed_body, signature, public_key)
+
+
+def verify_report_manifest_binding(
+    manifest: dict[str, Any],
+    *,
+    report_snapshot: Mapping[str, Any] | None,
+) -> bool:
+    """Verify a report manifest with mandatory snapshot binding for schema 1.2."""
+
+    return verify_signed_manifest(manifest) and report_manifest_matches_snapshot(
+        manifest,
+        report_snapshot=report_snapshot,
+    )
+
+
+def report_manifest_matches_snapshot(
+    manifest: Mapping[str, Any],
+    *,
+    report_snapshot: Mapping[str, Any] | None,
+) -> bool:
+    """Bind schema-1.2 provenance without deciding signature validity."""
+
+    if manifest.get("schema_version") != ARTIFACT_MANIFEST_SCHEMA_VERSION:
+        return True
+    if report_snapshot is None:
+        return False
+    return _manifest_matches_report_snapshot(manifest, report_snapshot)
+
+
+def _manifest_matches_report_snapshot(
+    manifest: Mapping[str, Any],
+    report_snapshot: Mapping[str, Any],
+) -> bool:
+    """Return whether schema-1.2 provenance is derived from the sealed snapshot."""
+
+    if manifest.get("snapshot_sha256") != snapshot_sha256(report_snapshot):
+        return False
+    try:
+        expected = report_provenance_from_snapshot(report_snapshot)
+    except ReportProvenanceError:
+        return False
+    return (
+        manifest.get("renderer_version") == report_snapshot.get("renderer_version")
+        and manifest.get("evidence_set_id") == report_snapshot.get("evidence_set_id")
+        and manifest.get("application_version") == expected["application_version"]
+        and manifest.get("source_run_ids") == expected["source_run_ids"]
+        and manifest.get("source_provenance") == expected["sources"]
+    )
 
 
 def _atomic_write(target: Path, artifact: bytes) -> None:

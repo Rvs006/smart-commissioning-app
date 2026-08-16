@@ -61,6 +61,11 @@ from smart_commissioning_core.sealed_run_integrity import (
 )
 from sqlalchemy.engine import make_url
 
+from app.services.report_artifacts import (
+    ARTIFACT_MANIFEST_SCHEMA_VERSION,
+    verify_report_manifest_binding,
+)
+
 # Members inside the bundle.
 _DB_MEMBER = "db/smart_commissioning.db"
 _MANIFEST_MEMBER = "manifest.json"
@@ -366,6 +371,35 @@ def _verify_sealed_runs(
                 seal=seal,
                 **projections,
             )
+            if run.get("job_type") == "report_generation":
+                summary = run.get("result_summary")
+                artifact_manifest = (
+                    summary.get("artifact_manifest")
+                    if isinstance(summary, Mapping)
+                    else None
+                )
+                report_snapshot = (
+                    parameters.get("report_snapshot_v2")
+                    if isinstance(parameters, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(artifact_manifest, Mapping)
+                    and artifact_manifest.get("schema_version")
+                    == ARTIFACT_MANIFEST_SCHEMA_VERSION
+                    and not verify_report_manifest_binding(
+                        dict(artifact_manifest),
+                        report_snapshot=(
+                            report_snapshot
+                            if isinstance(report_snapshot, Mapping)
+                            else None
+                        ),
+                    )
+                ):
+                    raise SealedRunIntegrityError(
+                        "result",
+                        "signed report provenance does not match the frozen snapshot",
+                    )
         except (SealedRunIntegrityError, TypeError, ValueError) as error:
             raise BackupError(f"Backup sealed run verification failed for run '{run_id}': {error}") from error
 

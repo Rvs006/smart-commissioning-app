@@ -32,8 +32,10 @@ from app.schemas.jobs import (
 )
 from app.services.report_artifacts import (
     ReportArtifactIntegrityError,
+    ReportProvenanceError,
     delete_report_artifact,
     load_owned_report_artifact,
+    report_provenance_from_snapshot,
     store_report_artifact,
 )
 from app.services.report_naming import build_report_file_name, report_content_disposition
@@ -60,11 +62,6 @@ service = RunService()
 # (creating a report run) is engineer+.
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
-_PROVENANCE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-
-
-class ReportProvenanceError(ValueError):
-    """Stored source identity cannot be represented in a signed report manifest."""
 
 
 def _require_scoped_report(report_id: str, principal: AuthPrincipal) -> None:
@@ -443,9 +440,12 @@ def _report_artifact_for_serving(
     )
     manifest = summary.get("artifact_manifest")
     if isinstance(manifest, dict):
+        parameters = serving_run.parameters if isinstance(serving_run.parameters, dict) else {}
+        report_snapshot = parameters.get("report_snapshot_v2")
         artifact, media_type = load_owned_report_artifact(
             report_id=run_id,
             manifest=manifest,
+            report_snapshot=report_snapshot if isinstance(report_snapshot, dict) else None,
             synchronized=SyncV2Repository(service.engine).get_artifact(run_id),
             require_valid_signature=require_valid_signature,
         )
@@ -814,110 +814,7 @@ def _report_provenance(run: object) -> dict[str, object]:
     parameters = run.parameters if isinstance(run.parameters, dict) else {}
     snapshot = parameters.get("report_snapshot_v2")
     snapshot = snapshot if isinstance(snapshot, dict) else {}
-    raw_source_ids = snapshot.get("source_run_ids", parameters.get("source_run_ids", []))
-    if not isinstance(raw_source_ids, list) or any(
-        not isinstance(source_id, str) or not 1 <= len(source_id) <= 64
-        for source_id in raw_source_ids
-    ):
-        raise ReportProvenanceError("Stored report source-run provenance is malformed.")
-    source_ids = list(raw_source_ids)
-    if len(source_ids) != len(set(source_ids)):
-        raise ReportProvenanceError("Stored report provenance contains duplicate source run IDs.")
-
-    raw_snapshots = snapshot.get(
-        "source_run_snapshots", parameters.get("source_run_snapshots", [])
-    )
-    raw_snapshots = raw_snapshots if isinstance(raw_snapshots, list) else []
-    snapshots_by_id = {
-        source["run_id"]: source
-        for source in raw_snapshots
-        if isinstance(source, dict) and isinstance(source.get("run_id"), str)
-    }
-    raw_contexts = snapshot.get("configuration_provenance", {})
-    contexts = raw_contexts if isinstance(raw_contexts, dict) else {}
-    raw_hashes = snapshot.get("source_result_hashes", {})
-    result_hashes = raw_hashes if isinstance(raw_hashes, dict) else {}
-    raw_seals = snapshot.get("source_run_seals", parameters.get("source_run_seals", {}))
-    seals = raw_seals if isinstance(raw_seals, dict) else {}
-
-    def recorded_text(value: object, *, field: str, max_length: int) -> str | None:
-        if value is None or value == "":
-            return None
-        if not isinstance(value, str):
-            raise ReportProvenanceError(
-                f"Stored report provenance field '{field}' must be text."
-            )
-        normalized = value.strip()
-        if not normalized:
-            return None
-        if len(normalized) > max_length:
-            raise ReportProvenanceError(
-                f"Stored report provenance field '{field}' exceeds {max_length} characters."
-            )
-        return normalized
-
-    def recorded_sha256(value: object, *, field: str) -> str | None:
-        normalized = recorded_text(value, field=field, max_length=64)
-        if normalized is None:
-            return None
-        normalized = normalized.casefold()
-        if not _PROVENANCE_SHA256_RE.fullmatch(normalized):
-            raise ReportProvenanceError(
-                f"Stored report provenance field '{field}' is not a SHA-256 digest."
-            )
-        return normalized
-
-    sources: list[dict[str, object]] = []
-    for source_id in source_ids:
-        source = snapshots_by_id.get(source_id, {})
-        source_parameters = source.get("parameters", {}) if isinstance(source, dict) else {}
-        source_parameters = source_parameters if isinstance(source_parameters, dict) else {}
-        context = contexts.get(source_id, {})
-        context = context if isinstance(context, dict) else {}
-        seal = seals.get(source_id, {})
-        seal = seal if isinstance(seal, dict) else {}
-        sources.append(
-            {
-                "source_run_id": source_id,
-                "application_version": recorded_text(
-                    context.get("application_version") or source_parameters.get("application_version"),
-                    field="application_version",
-                    max_length=128,
-                ),
-                "source_commit": recorded_text(
-                    source_parameters.get("source_commit")
-                    or source_parameters.get("application_source_commit"),
-                    field="source_commit",
-                    max_length=128,
-                ),
-                "portable_exe_sha256": recorded_sha256(
-                    source_parameters.get("portable_exe_sha256")
-                    or source_parameters.get("exe_sha256")
-                    or source_parameters.get("portable_hash"),
-                    field="portable_exe_sha256",
-                ),
-                "context_sha256": recorded_sha256(
-                    context.get("context_sha256") or seal.get("context_sha256"),
-                    field="context_sha256",
-                ),
-                "result_sha256": recorded_sha256(
-                    result_hashes.get(source_id) or seal.get("result_sha256"),
-                    field="result_sha256",
-                ),
-            }
-        )
-
-    application_version = recorded_text(
-        snapshot.get("renderer_version") or parameters.get("renderer_version"),
-        field="application_version",
-        max_length=64,
-    )
-    return {
-        "schema_version": "1.0",
-        "application_version": application_version,
-        "source_run_ids": source_ids,
-        "sources": sources,
-    }
+    return report_provenance_from_snapshot(snapshot, fallback_parameters=parameters)
 
 
 def _asset_topic_discovery_export(run: object) -> dict[str, object] | None:

@@ -272,6 +272,7 @@ class EvidenceVerifyApiTests(ApiTestCase):
 
         from app.services.report_artifacts import (
             canonical_json_bytes,
+            snapshot_sha256,
             verify_signed_manifest,
         )
         from app.services.reports_integrity import load_signing_key
@@ -279,8 +280,11 @@ class EvidenceVerifyApiTests(ApiTestCase):
         from smart_commissioning_core.integrity import sha256_bytes
 
         report_id = self._create_report("zip")
-        manifest = dict(RunService().get_run(report_id).result_summary["artifact_manifest"])
+        report_run = RunService().get_run(report_id)
+        manifest = dict(report_run.result_summary["artifact_manifest"])
+        report_snapshot = report_run.parameters["report_snapshot_v2"]
         self.assertTrue(verify_signed_manifest(manifest))
+        self.assertTrue(verify_signed_manifest(manifest, report_snapshot=report_snapshot))
 
         signing_key = load_signing_key()
 
@@ -304,6 +308,27 @@ class EvidenceVerifyApiTests(ApiTestCase):
             return candidate
 
         current = dict(manifest)
+        current_snapshot = copy.deepcopy(report_snapshot)
+        current_snapshot["source_run_ids"] = ["run_source_1"]
+        current_snapshot["source_run_snapshots"] = [
+            {
+                "run_id": "run_source_1",
+                "parameters": {
+                    "application_version": __version__,
+                    "source_commit": "a" * 40,
+                    "portable_exe_sha256": "b" * 64,
+                },
+            }
+        ]
+        current_snapshot["configuration_provenance"] = {
+            "run_source_1": {
+                "application_version": __version__,
+                "context_sha256": "c" * 64,
+            }
+        }
+        current_snapshot["source_result_hashes"] = {"run_source_1": "d" * 64}
+        current_snapshot["source_run_seals"] = {}
+        current["snapshot_sha256"] = snapshot_sha256(current_snapshot)
         current["source_run_ids"] = ["run_source_1"]
         current["source_provenance"] = [
             {
@@ -315,7 +340,49 @@ class EvidenceVerifyApiTests(ApiTestCase):
                 "result_sha256": "d" * 64,
             }
         ]
-        self.assertTrue(verify_signed_manifest(resign(current)))
+        self.assertTrue(verify_signed_manifest(resign(current), report_snapshot=current_snapshot))
+
+        provenance_mismatches = {
+            "snapshot hash": lambda candidate: candidate.update({"snapshot_sha256": "e" * 64}),
+            "renderer version": lambda candidate: candidate.update({"renderer_version": "9.9.9"}),
+            "evidence set": lambda candidate: candidate.update(
+                {"evidence_set_id": f"evidence_{'e' * 24}"}
+            ),
+            "application version": lambda candidate: candidate.update({"application_version": "9.9.9"}),
+            "source application version": lambda candidate: candidate["source_provenance"][0].update(
+                {"application_version": "9.9.9"}
+            ),
+            "source commit": lambda candidate: candidate["source_provenance"][0].update(
+                {"source_commit": "e" * 40}
+            ),
+            "portable executable hash": lambda candidate: candidate["source_provenance"][0].update(
+                {"portable_exe_sha256": "e" * 64}
+            ),
+            "context hash": lambda candidate: candidate["source_provenance"][0].update(
+                {"context_sha256": "e" * 64}
+            ),
+            "result hash": lambda candidate: candidate["source_provenance"][0].update(
+                {"result_sha256": "e" * 64}
+            ),
+        }
+        for case, mutate in provenance_mismatches.items():
+            with self.subTest(binding=case):
+                forged = copy.deepcopy(current)
+                mutate(forged)
+                resign(forged)
+                self.assertTrue(verify_signed_manifest(forged))
+                self.assertFalse(
+                    verify_signed_manifest(forged, report_snapshot=current_snapshot)
+                )
+
+        forged_source_id = copy.deepcopy(current)
+        forged_source_id["source_run_ids"] = ["run_forged_source"]
+        forged_source_id["source_provenance"][0]["source_run_id"] = "run_forged_source"
+        resign(forged_source_id)
+        self.assertTrue(verify_signed_manifest(forged_source_id))
+        self.assertFalse(
+            verify_signed_manifest(forged_source_id, report_snapshot=current_snapshot)
+        )
 
         malformed_current = {
             "duplicate source IDs": {
@@ -352,7 +419,9 @@ class EvidenceVerifyApiTests(ApiTestCase):
             with self.subTest(schema_version="1.2", case=case):
                 candidate = copy.deepcopy(current)
                 candidate.update(updates)
-                self.assertFalse(verify_signed_manifest(resign(candidate)))
+                self.assertFalse(
+                    verify_signed_manifest(resign(candidate), report_snapshot=current_snapshot)
+                )
 
         previous = dict(manifest)
         previous["schema_version"] = "1.1"
