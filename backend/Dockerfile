@@ -2,7 +2,7 @@
 #   docker build -f backend/Dockerfile .
 FROM python:3.12.11-slim
 
-ARG APP_VERSION=v0.1.49
+ARG APP_VERSION=v0.1.50
 ARG SOURCE_COMMIT=unknown
 ARG SOURCE_REPOSITORY=https://github.com/Rvs006/smart-commissioning-app
 

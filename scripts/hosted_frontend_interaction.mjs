@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Exercise one real React control on each hosted route through Chrome CDP. */
+/** Exercise real React controls and guidance routes through Chrome CDP. */
 
 import { writeFile } from "node:fs/promises";
 
@@ -45,6 +45,10 @@ function parseArguments(argv) {
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 const chromeTargetReadyTimeoutMs = 30_000;
 const chromeTargetPollIntervalMs = 100;
+const guidanceViewports = [
+  { name: "desktop", width: 1280, height: 900 },
+  { name: "mobile", width: 375, height: 812 },
+];
 
 async function findPageTarget(debugUrl) {
   let lastError;
@@ -151,21 +155,223 @@ async function waitFor(session, expression, description) {
   throw new Error(`Timed out waiting for ${description}`);
 }
 
-const toggleSelector = `Array.from(document.querySelectorAll("button")).find(
-  (element) => element.textContent?.includes("Review Comments")
-)`;
-
-async function exerciseRoute(session, baseUrl, route, expectedVersion) {
+async function navigateToRoute(session, baseUrl, route, readyExpression) {
   const destination = new URL(route, baseUrl).href;
   await session.send("Page.navigate", { url: destination });
   await waitFor(
     session,
     `(() => {
       const root = document.getElementById("root");
-      const toggle = ${toggleSelector};
-      return document.readyState === "complete" && Boolean(root?.textContent?.trim()) && Boolean(toggle);
+      return document.readyState === "complete" && Boolean(root?.textContent?.trim()) && (${readyExpression});
     })()`,
     `populated React route ${route}`,
+  );
+}
+
+async function visibleVersionState(session) {
+  return session.evaluate(`(() => {
+    const label = document.querySelector('[title="App version"]');
+    if (!label) return { text: null, visible: false };
+    const style = getComputedStyle(label);
+    const bounds = label.getBoundingClientRect();
+    return {
+      text: label.textContent?.trim() ?? null,
+      visible:
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity) > 0 &&
+        bounds.width > 0 &&
+        bounds.height > 0,
+    };
+  })()`);
+}
+
+async function measureGuidanceLayout(session) {
+  return session.evaluate(`(() => {
+    const clippedElements = Array.from(
+      document.querySelectorAll(
+        "h1,h2,h3,h4,h5,h6,p,li,label,button,a,input,select,textarea,code,pre",
+      ),
+    ).flatMap((element) => {
+      const style = getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      const clippingValues = new Set(["hidden", "clip"]);
+      const contentBounds = {
+        left: bounds.left,
+        right: bounds.left + Math.max(bounds.width, element.scrollWidth),
+        top: bounds.top,
+        bottom: bounds.top + Math.max(bounds.height, element.scrollHeight),
+      };
+      const visible =
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity) > 0 &&
+        bounds.width > 0 &&
+        bounds.height > 0;
+      const clippedByViewport =
+        contentBounds.left < -0.5 ||
+        contentBounds.right > document.documentElement.clientWidth + 0.5;
+      const clippedByOwnBox =
+        (clippingValues.has(style.overflowX) && element.scrollWidth > element.clientWidth + 1) ||
+        (clippingValues.has(style.overflowY) && element.scrollHeight > element.clientHeight + 1);
+      let clippedByAncestor = false;
+      for (
+        let ancestor = element.parentElement;
+        ancestor && ancestor !== document.documentElement;
+        ancestor = ancestor.parentElement
+      ) {
+        const ancestorStyle = getComputedStyle(ancestor);
+        const ancestorBounds = ancestor.getBoundingClientRect();
+        const clippedHorizontally =
+          clippingValues.has(ancestorStyle.overflowX) &&
+          (contentBounds.left < ancestorBounds.left - 0.5 ||
+            contentBounds.right > ancestorBounds.right + 0.5);
+        const clippedVertically =
+          clippingValues.has(ancestorStyle.overflowY) &&
+          (contentBounds.top < ancestorBounds.top - 0.5 ||
+            contentBounds.bottom > ancestorBounds.bottom + 0.5);
+        if (clippedHorizontally || clippedVertically) {
+          clippedByAncestor = true;
+          break;
+        }
+      }
+      if (!visible || (!clippedByViewport && !clippedByOwnBox && !clippedByAncestor)) {
+        return [];
+      }
+      return [{
+        id: element.id,
+        tag: element.tagName,
+        text: (element.textContent ?? element.getAttribute("aria-label") ?? "")
+          .trim()
+          .slice(0, 80),
+        left: Math.round(bounds.left * 10) / 10,
+        right: Math.round(bounds.right * 10) / 10,
+        clippedByViewport,
+        clippedByOwnBox,
+        clippedByAncestor,
+      }];
+    });
+    return {
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      clippedElements,
+    };
+  })()`);
+}
+
+async function assertNoHorizontalOverflow(session, route, viewport) {
+  const dimensions = await measureGuidanceLayout(session);
+  if (
+    !dimensions ||
+    dimensions.scrollWidth > dimensions.clientWidth + 1 ||
+    dimensions.clippedElements.length > 0
+  ) {
+    throw new Error(
+      `Horizontal overflow or clipped content on ${route} at ${viewport.name}: ${JSON.stringify(dimensions)}`,
+    );
+  }
+  return {
+    clientWidth: dimensions.clientWidth,
+    scrollWidth: dimensions.scrollWidth,
+    clippedElementCount: dimensions.clippedElements.length,
+  };
+}
+
+async function assertClippingDetectorCatchesFixture(session, route, viewport) {
+  const fixtureId = "release-clipping-detector-fixture";
+  const fixtureContentId = `${fixtureId}-content`;
+  await session.evaluate(`(() => {
+    document.getElementById(${JSON.stringify(fixtureId)})?.remove();
+    const fixture = document.createElement("div");
+    fixture.id = ${JSON.stringify(fixtureId)};
+    Object.assign(fixture.style, {
+      position: "fixed",
+      left: "8px",
+      top: "8px",
+      width: "80px",
+      height: "12px",
+      overflow: "hidden",
+      pointerEvents: "none",
+      zIndex: "2147483647",
+    });
+    const content = document.createElement("p");
+    content.id = ${JSON.stringify(fixtureContentId)};
+    content.textContent = "Clipping detector negative fixture must overflow this ancestor";
+    Object.assign(content.style, {
+      width: "80px",
+      margin: "0",
+      overflow: "visible",
+      whiteSpace: "nowrap",
+    });
+    fixture.append(content);
+    document.body.append(fixture);
+  })()`);
+  try {
+    const dimensions = await measureGuidanceLayout(session);
+    const fixtureDetected = dimensions?.clippedElements?.some(
+      (element) =>
+        element.id === fixtureContentId && element.clippedByAncestor === true,
+    );
+    if (!fixtureDetected) {
+      throw new Error(
+        `Clipping detector missed its DOM fixture on ${route} at ${viewport.name}: ${JSON.stringify(dimensions)}`,
+      );
+    }
+    return true;
+  } finally {
+    await session.evaluate(
+      `document.getElementById(${JSON.stringify(fixtureId)})?.remove()`,
+    );
+  }
+}
+
+async function clickPressedButton(session, selector, label, route) {
+  const clicked = await session.evaluate(`(() => {
+    const button = Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find(
+      (candidate) => candidate.textContent?.includes(${JSON.stringify(label)}),
+    );
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  if (!clicked) throw new Error(`${label} control is absent on ${route}`);
+  await waitFor(
+    session,
+    `(() => Array.from(document.querySelectorAll(${JSON.stringify(selector)})).some(
+      (candidate) => candidate.textContent?.includes(${JSON.stringify(label)}) &&
+        candidate.getAttribute("aria-pressed") === "true",
+    ))()`,
+    `${label} selected state on ${route}`,
+  );
+}
+
+async function exerciseThemeToggle(session, route) {
+  const previousThemeLabel = await session.evaluate(`(() => {
+    const button = document.querySelector('button[aria-label*="colour theme"]');
+    if (!button) return null;
+    const before = button.getAttribute("aria-label");
+    button.click();
+    return before;
+  })()`);
+  if (!previousThemeLabel) throw new Error(`Theme control is absent on ${route}`);
+  await waitFor(
+    session,
+    `document.querySelector('button[aria-label*="colour theme"]')?.getAttribute("aria-label") !== ${JSON.stringify(previousThemeLabel)}`,
+    `Theme control response on ${route}`,
+  );
+}
+
+const toggleSelector = `Array.from(document.querySelectorAll("button")).find(
+  (element) => element.textContent?.includes("Review Comments")
+)`;
+
+async function exerciseRoute(session, baseUrl, route, expectedVersion) {
+  await session.send("Emulation.clearDeviceMetricsOverride");
+  await navigateToRoute(
+    session,
+    baseUrl,
+    route,
+    `Boolean(${toggleSelector})`,
   );
   const clicked = await session.evaluate(`(() => {
     const toggle = ${toggleSelector};
@@ -199,21 +405,7 @@ async function exerciseRoute(session, baseUrl, route, expectedVersion) {
     })()`,
     `Review Comments closed state on ${route}`,
   );
-  const versionState = await session.evaluate(`(() => {
-    const label = document.querySelector('[title="App version"]');
-    if (!label) return { text: null, visible: false };
-    const style = getComputedStyle(label);
-    const bounds = label.getBoundingClientRect();
-    return {
-      text: label.textContent?.trim() ?? null,
-      visible:
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        Number(style.opacity) > 0 &&
-        bounds.width > 0 &&
-        bounds.height > 0,
-    };
-  })()`);
+  const versionState = await visibleVersionState(session);
   if (versionState?.text !== expectedVersion || versionState?.visible !== true) {
     throw new Error(
       `Visible app version label on ${route} is ${JSON.stringify(versionState)}, expected ${expectedVersion}`,
@@ -230,6 +422,138 @@ async function exerciseRoute(session, baseUrl, route, expectedVersion) {
   };
 }
 
+
+async function exerciseBriefRoute(session, baseUrl, route, expectedVersion) {
+  const tabHeadings = new Map([
+    ["Basics", "What this tool is, and the job it does on site."],
+    ["Key Features", "Nine modules, one commissioning workflow."],
+    ["Section Reference", "Every section, what it is for, and how to use it."],
+    ["Guided Tour", "Pick your role and walk a real job."],
+  ]);
+  const roleLabels = [
+    "Commissioning Engineer",
+    "BMS Designer",
+    "Project Manager",
+    "Integration Engineer",
+  ];
+  const viewports = [];
+  for (const viewport of guidanceViewports) {
+    await session.send("Emulation.setDeviceMetricsOverride", {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: 1,
+      mobile: viewport.name === "mobile",
+    });
+    await navigateToRoute(
+      session,
+      baseUrl,
+      route,
+      `Boolean(document.querySelector('nav[aria-label="Product brief sections"]'))`,
+    );
+    let dimensions;
+    for (const [label, heading] of tabHeadings) {
+      await clickPressedButton(
+        session,
+        'nav[aria-label="Product brief sections"] button[aria-pressed]',
+        label,
+        route,
+      );
+      await waitFor(
+        session,
+        `document.querySelector("h1")?.textContent?.trim() === ${JSON.stringify(heading)}`,
+        `${label} heading on ${route}`,
+      );
+      dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    }
+    for (const label of roleLabels) {
+      await clickPressedButton(session, '.dc-role-picker button[aria-pressed]', label, route);
+      dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    }
+    await exerciseThemeToggle(session, route);
+    dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    const clippingNegativeFixture = await assertClippingDetectorCatchesFixture(
+      session,
+      route,
+      viewport,
+    );
+    dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    viewports.push({
+      ...viewport,
+      heading: tabHeadings.get("Guided Tour"),
+      clicked_controls: [...tabHeadings.keys(), "Theme", ...roleLabels],
+      horizontal_overflow: dimensions.scrollWidth > dimensions.clientWidth + 1,
+      clipped_content: dimensions.clippedElementCount > 0,
+      clipping_negative_fixture: clippingNegativeFixture,
+      dimensions,
+    });
+  }
+  await session.send("Emulation.clearDeviceMetricsOverride");
+  return {
+    route,
+    control: "Brief tabs",
+    release_version: expectedVersion,
+    root_populated: true,
+    viewports,
+  };
+}
+
+
+async function exerciseLearningRoute(session, baseUrl, route, expectedVersion) {
+  const roleLabels = [
+    "Commissioning Engineer",
+    "BMS Designer",
+    "Project Manager",
+    "Integration Engineer",
+  ];
+  const viewports = [];
+  for (const viewport of guidanceViewports) {
+    await session.send("Emulation.setDeviceMetricsOverride", {
+      width: viewport.width,
+      height: viewport.height,
+      deviceScaleFactor: 1,
+      mobile: viewport.name === "mobile",
+    });
+    await navigateToRoute(
+      session,
+      baseUrl,
+      route,
+      `document.getElementById("installation-setup")?.textContent?.includes("Download and unzip") &&
+        document.getElementById("operator-guides")?.textContent?.includes("Run an IP discovery")`,
+    );
+    let dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    for (const label of roleLabels) {
+      await clickPressedButton(session, '.dc-role-picker button[aria-pressed]', label, route);
+      dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    }
+    await exerciseThemeToggle(session, route);
+    dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    const clippingNegativeFixture = await assertClippingDetectorCatchesFixture(
+      session,
+      route,
+      viewport,
+    );
+    dimensions = await assertNoHorizontalOverflow(session, route, viewport);
+    viewports.push({
+      ...viewport,
+      heading: "Get the tool running first.",
+      setup_checked: true,
+      clicked_controls: ["Theme", ...roleLabels],
+      horizontal_overflow: dimensions.scrollWidth > dimensions.clientWidth + 1,
+      clipped_content: dimensions.clippedElementCount > 0,
+      clipping_negative_fixture: clippingNegativeFixture,
+      dimensions,
+    });
+  }
+  await session.send("Emulation.clearDeviceMetricsOverride");
+  return {
+    route,
+    control: "Learning setup and roles",
+    release_version: expectedVersion,
+    root_populated: true,
+    viewports,
+  };
+}
+
 async function main() {
   const options = parseArguments(process.argv.slice(2));
   const target = await findPageTarget(options.debugUrl);
@@ -238,9 +562,13 @@ async function main() {
   try {
     const routes = [];
     for (const route of options.routes) {
-      routes.push(
-        await exerciseRoute(session, options.baseUrl, route, options.expectedVersion),
-      );
+      if (route === "/#/brief") {
+        routes.push(await exerciseBriefRoute(session, options.baseUrl, route, options.expectedVersion));
+      } else if (route === "/#/learning") {
+        routes.push(await exerciseLearningRoute(session, options.baseUrl, route, options.expectedVersion));
+      } else {
+        routes.push(await exerciseRoute(session, options.baseUrl, route, options.expectedVersion));
+      }
     }
     if (session.browserErrors.length > 0) {
       throw new Error(`Browser emitted ${session.browserErrors.length} uncaught or console errors`);

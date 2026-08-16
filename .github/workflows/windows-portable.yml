@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.49
+        default: v0.1.50
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -23,8 +23,8 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.49.md"
-      - "docs/v0.1.49-evidence-manifest.md"
+      - "docs/migration-rollback-v0.1.50.md"
+      - "docs/v0.1.50-evidence-manifest.md"
       - "AGENTS.md"
       - "CLAUDE.md"
       - ".github/workflows/windows-portable.yml"
@@ -40,8 +40,8 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.49.md"
-      - "docs/v0.1.49-evidence-manifest.md"
+      - "docs/migration-rollback-v0.1.50.md"
+      - "docs/v0.1.50-evidence-manifest.md"
       - "AGENTS.md"
       - "CLAUDE.md"
       - ".github/workflows/windows-portable.yml"
@@ -54,7 +54,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.49' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.50' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -79,8 +79,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.49') {
-            throw "This workflow is pinned to v0.1.49, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.50') {
+            throw "This workflow is pinned to v0.1.50, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -146,6 +146,36 @@ jobs:
         shell: pwsh
         run: pwsh packaging/windows_portable/build.ps1 -Version "$env:RELEASE_VERSION"
 
+      - name: Prove packaged Brief and Learning guidance
+        shell: pwsh
+        run: |
+          $assets = Join-Path $env:GITHUB_WORKSPACE 'build\Smart_Commissioning_App_Windows_Portable\frontend\dist\assets'
+          $brief = @(Get-ChildItem -LiteralPath $assets -Filter 'BriefPage-*.js')
+          $learning = @(Get-ChildItem -LiteralPath $assets -Filter 'LearningPage-*.js')
+          if ($brief.Count -ne 1 -or $learning.Count -ne 1) {
+            throw "Expected one compiled Brief chunk and one Learning chunk; found $($brief.Count) and $($learning.Count)."
+          }
+          $briefSource = [IO.File]::ReadAllText($brief[0].FullName)
+          $learningSource = [IO.File]::ReadAllText($learning[0].FullName)
+          foreach ($required in @(
+            'How a protected discovery run works',
+            'authoritatively terminal',
+            'fresh request key for every button press'
+          )) {
+            if (-not $briefSource.Contains($required)) {
+              throw "Packaged Brief guidance is missing '$required'."
+            }
+          }
+          foreach ($required in @(
+            'Operator guides for protected scans and evidence',
+            'Final evidence is synchronising',
+            'Smart_Commissioning_App_Windows_Portable.zip'
+          )) {
+            if (-not $learningSource.Contains($required)) {
+              throw "Packaged Learning guidance is missing '$required'."
+            }
+          }
+
       - name: Add exact-SHA SBOM and migration payloads
         shell: pwsh
         run: |
@@ -161,7 +191,7 @@ jobs:
               Set-Content -LiteralPath $npmSbom -Encoding utf8
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.49.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.50.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
           python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
             --sbom $pythonSbom --sbom $npmSbom
@@ -182,7 +212,7 @@ jobs:
           $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
           $env:RUN_LEASE_SECONDS = '15'
           $env:RUN_HEARTBEAT_SECONDS = '2'
-          # The one v0.1.49 portable must ignore the runner's parent Nmap
+          # The one v0.1.50 portable must ignore the runner's parent Nmap
           # setting and expose its built-in Global Admin approval capability.
           $env:SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED = '0'
           Set-Content -LiteralPath $stdin -Value '' -NoNewline
@@ -338,7 +368,7 @@ jobs:
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/validate_v0149_release_evidence.py `
+          python scripts/validate_v0150_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `
@@ -365,7 +395,7 @@ jobs:
       - name: Scan Windows portable evidence for credential material
         shell: pwsh
         run: |
-          python scripts/scan_v0149_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
+          python scripts/scan_v0150_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build and scan the exact portable release ZIP
