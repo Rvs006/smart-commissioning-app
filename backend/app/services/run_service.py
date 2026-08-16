@@ -30,7 +30,10 @@ from smart_commissioning_core.db.models import (
     SyncReceipt,
 )
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
-from smart_commissioning_core.db.run_lifecycle import RunLifecycleRepository
+from smart_commissioning_core.db.run_lifecycle import (
+    IdempotencyConflictError,
+    RunLifecycleRepository,
+)
 from smart_commissioning_core.discovery_observations import ObservationEvidenceV1
 from smart_commissioning_core.execution_context import (
     ExecutionContextIntegrityError,
@@ -67,6 +70,7 @@ from app.schemas.jobs import (
     RunRecord,
     ValidationIssueRecord,
 )
+from app.services.discovery_contract_service import normalize_ip_preview_idempotency_parameters
 from app.services.report_artifacts import (
     REPORT_SNAPSHOT_SCHEMA_VERSION,
     canonical_json_bytes,
@@ -174,24 +178,62 @@ def _idempotency_operation(job_type: JobType) -> str:
     return f"discovery.{job_type}.create"
 
 
+def _canonical_ip_idempotency_parameters(parameters: Mapping[str, object]) -> dict[str, object]:
+    """Normalize only proven-equivalent IP preview inputs without I/O or mutation."""
+
+    return normalize_ip_preview_idempotency_parameters(parameters)
+
+
+def _idempotency_request_payload(
+    request: JobCreateRequest,
+    *,
+    expected_job_type: JobType,
+    canonical_ip_parameters: bool,
+) -> dict[str, object]:
+    parameters: object = request.parameters
+    if canonical_ip_parameters and expected_job_type == "ip_discovery":
+        parameters = _canonical_ip_idempotency_parameters(request.parameters)
+    return {
+        "schema_version": "1.0",
+        "operation": _idempotency_operation(expected_job_type),
+        "project_id": request.project_id,
+        "site_id": request.site_id,
+        "job_type": expected_job_type,
+        "parameters": parameters,
+        "preview_run_id": request.preview_run_id,
+        "scan_authorization_id": request.scan_authorization_id,
+    }
+
+
+def _legacy_idempotency_request_sha256(
+    request: JobCreateRequest,
+    *,
+    expected_job_type: JobType,
+) -> str:
+    """Keep the v0.1.48 raw digest available for exact keyed retries."""
+
+    return canonical_sha256(
+        _idempotency_request_payload(
+            request,
+            expected_job_type=expected_job_type,
+            canonical_ip_parameters=False,
+        )
+    )
+
+
 def _idempotency_request_sha256(
     request: JobCreateRequest,
     *,
     expected_job_type: JobType,
 ) -> str:
-    """Hash request semantics before dynamic resolution mutates parameters."""
+    """Hash normalized IP preview semantics before dynamic resolution mutates them."""
 
     return canonical_sha256(
-        {
-            "schema_version": "1.0",
-            "operation": _idempotency_operation(expected_job_type),
-            "project_id": request.project_id,
-            "site_id": request.site_id,
-            "job_type": expected_job_type,
-            "parameters": request.parameters,
-            "preview_run_id": request.preview_run_id,
-            "scan_authorization_id": request.scan_authorization_id,
-        }
+        _idempotency_request_payload(
+            request,
+            expected_job_type=expected_job_type,
+            canonical_ip_parameters=True,
+        )
     )
 
 
@@ -406,17 +448,36 @@ class RunService:
             return None
         if request.job_type != expected_job_type:
             raise ValueError(f"Endpoint expects job_type '{expected_job_type}'.")
-        envelope = self._lifecycle.find_idempotency_replay(
-            project_id=request.project_id,
-            site_id=request.site_id,
-            requesting_principal=requesting_principal,
-            operation=_idempotency_operation(expected_job_type),
-            idempotency_key=idempotency_key,
-            request_sha256=_idempotency_request_sha256(
+        canonical_digest = _idempotency_request_sha256(
+            request,
+            expected_job_type=expected_job_type,
+        )
+        lookup = {
+            "project_id": request.project_id,
+            "site_id": request.site_id,
+            "requesting_principal": requesting_principal,
+            "operation": _idempotency_operation(expected_job_type),
+            "idempotency_key": idempotency_key,
+        }
+        try:
+            envelope = self._lifecycle.find_idempotency_replay(
+                **lookup,
+                request_sha256=canonical_digest,
+            )
+        except IdempotencyConflictError as canonical_conflict:
+            legacy_digest = _legacy_idempotency_request_sha256(
                 request,
                 expected_job_type=expected_job_type,
-            ),
-        )
+            )
+            if legacy_digest == canonical_digest:
+                raise
+            try:
+                envelope = self._lifecycle.find_idempotency_replay(
+                    **lookup,
+                    request_sha256=legacy_digest,
+                )
+            except IdempotencyConflictError as legacy_conflict:
+                raise canonical_conflict from legacy_conflict
         if envelope is None:
             return None
         return self.get_run(envelope.run_id)

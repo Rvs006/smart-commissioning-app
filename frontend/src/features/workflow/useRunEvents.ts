@@ -15,7 +15,11 @@ import type { RunRef } from "../../app/sessionScope";
 // should fall back to its existing polling (the 1.5s react-query refetch).
 export type RunEventsState = {
   event: RunEvent | null;
+  runId: string | null;
   runRef: RunRef | null;
+  // A submission-scoped owner. Run ids are not sufficient for local adapters
+  // that reuse an id for a sealed preview and its accepted live submission.
+  epoch: number | null;
   sseActive: boolean;
   // True once the SSE stream observed a terminal status for this run. The
   // caller can use this to stop polling without waiting for a poll round-trip.
@@ -36,7 +40,9 @@ export type RunEventsState = {
 
 const INITIAL_STATE: RunEventsState = {
   event: null,
+  runId: null,
   runRef: null,
+  epoch: null,
   reachedTerminal: false,
   sseActive: true,
   connectionState: "idle",
@@ -55,20 +61,21 @@ const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000] as const;
  * polling takes over and nothing regresses.
  *
  * The stream is opened only when `enabled` and a `runId` are provided, and is
- * re-opened whenever the run id changes. The disposer aborts the in-flight
- * fetch on unmount / run change, so no stream is leaked.
+ * re-opened whenever the run owner changes. The disposer aborts the in-flight
+ * fetch on unmount / owner change, so no stream is leaked.
  */
 export function useRunEvents(
   run: RunRef | string | null | undefined,
   enabled: boolean,
   apiClient?: SessionBoundApiClient,
+  epoch = 0,
 ): RunEventsState {
   const runId = typeof run === "string" ? run : run?.runId;
   const runRef = typeof run === "string" ? null : (run ?? null);
   const [state, setState] = useState<RunEventsState>(INITIAL_STATE);
-  // Track the run id this state belongs to so a stale async callback from a
-  // previous stream cannot write into the current run's state.
-  const activeRunRef = useRef<string | null>(null);
+  // Track the full owner so a stale async callback from a previous stream
+  // cannot write into a later submission that reuses the same run id.
+  const activeRunRef = useRef<{ id: string; epoch: number } | null>(null);
   const generationRef = useRef(0);
 
   useEffect(() => {
@@ -79,7 +86,8 @@ export function useRunEvents(
     }
 
     const activeRunId = runId;
-    activeRunRef.current = activeRunId;
+    const activeOwner = { id: activeRunId, epoch };
+    activeRunRef.current = activeOwner;
     const generation = ++generationRef.current;
     let disposed = false;
     let streamDispose: (() => void) | null = null;
@@ -88,11 +96,18 @@ export function useRunEvents(
     let streamGeneration = 0;
     let terminal = false;
     let closed = false;
-    setState({ ...INITIAL_STATE, connectionState: "connecting", runRef });
+    setState({
+      ...INITIAL_STATE,
+      connectionState: "connecting",
+      runId: activeRunId,
+      runRef,
+      epoch,
+    });
 
     const isCurrent = (candidateStream?: number): boolean =>
       !disposed &&
-      activeRunRef.current === activeRunId &&
+      activeRunRef.current?.id === activeOwner.id &&
+      activeRunRef.current?.epoch === activeOwner.epoch &&
       generationRef.current === generation &&
       (candidateStream === undefined || candidateStream === streamGeneration);
 
@@ -248,8 +263,11 @@ export function useRunEvents(
 
     return () => {
       disposed = true;
-      if (activeRunRef.current === activeRunId) {
-      activeRunRef.current = null;
+      if (
+        activeRunRef.current?.id === activeOwner.id &&
+        activeRunRef.current?.epoch === activeOwner.epoch
+      ) {
+        activeRunRef.current = null;
       }
       clearRetry();
       streamDispose?.();
@@ -257,7 +275,18 @@ export function useRunEvents(
       window.removeEventListener("focus", retryWhenVisible);
       document.removeEventListener("visibilitychange", retryWhenVisible);
     };
-  }, [apiClient, enabled, runId, runRef]);
+  }, [apiClient, enabled, epoch, runId, runRef]);
 
+  // React renders the new run before the effect above can reset hook state.
+  // Never expose the previous run's terminal frame during that transition: a
+  // consumer could otherwise start fetching sealed results for a live run.
+  if (!enabled || !runId || state.runId !== runId || state.epoch !== epoch) {
+    return {
+      ...INITIAL_STATE,
+      runId: enabled ? (runId ?? null) : null,
+      runRef: enabled ? runRef : null,
+      epoch: enabled ? epoch : null,
+    };
+  }
   return state;
 }

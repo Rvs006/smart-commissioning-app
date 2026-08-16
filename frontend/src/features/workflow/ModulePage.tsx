@@ -119,7 +119,7 @@ import { useRunEvents } from "./useRunEvents";
 import { LiveRunConsole } from "./LiveRunConsole";
 import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
-import type { RunRef } from "../../app/sessionScope";
+import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
 import { mutationKeys, queryKeys } from "../../api/queryKeys";
 import { isPlainObject } from "../../utils/isPlainObject";
 
@@ -201,6 +201,28 @@ type DetailItem = {
   value: string;
 };
 
+type RunEpochOwner = {
+  epoch: number;
+  runId: string;
+  sessionScopeId: SessionScopeId;
+  workspaceRef: WorkspaceRef;
+};
+
+function sameRunEpochOwner(
+  left: RunEpochOwner | null | undefined,
+  right: RunEpochOwner | null | undefined,
+): boolean {
+  return Boolean(
+    left &&
+      right &&
+      left.runId === right.runId &&
+      left.epoch === right.epoch &&
+      left.sessionScopeId === right.sessionScopeId &&
+      left.workspaceRef.projectId === right.workspaceRef.projectId &&
+      left.workspaceRef.siteId === right.workspaceRef.siteId,
+  );
+}
+
 type ScanPort = {
   port: string;
   protocol: "tcp" | "udp";
@@ -230,6 +252,7 @@ type PointValuePair = {
 // started by the operator here and now: it re-attaches the monitor and results
 // without hijacking the step the operator is looking at (see the seed effect).
 type ActiveRun = {
+  epoch: number;
   runId: string;
   kind: "discovery" | "validation";
   restored?: boolean;
@@ -256,6 +279,16 @@ const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discov
 const IMPORT_ERROR_DISPLAY_CAP = 50;
 const LONG_PAYLOAD_ISSUE_THRESHOLD = 8;
 const REPORT_PAGE_SIZE = 100;
+const TERMINAL_RUN_STATUS_RETRY_DELAYS_MS = [300, 600, 1_000] as const;
+
+function isTransientRunStatusError(error: unknown): boolean {
+  return (
+    !(error instanceof ApiError) ||
+    error.status === 408 ||
+    error.status === 429 ||
+    error.status >= 500
+  );
+}
 
 type ProjectedObservationRecord = Readonly<{
   entityKey: string;
@@ -328,10 +361,13 @@ function bacnetPointCell(value: unknown): string {
 
 function bacnetPointRow(point: DiscoveryRowRecord) {
   const attributes = isPlainObject(point.attributes) ? point.attributes : {};
-  const observedValue = isPlainObject(point.observed_value) ? point.observed_value.value : undefined;
+  const observedValue = isPlainObject(point.observed_value)
+    ? point.observed_value.value
+    : undefined;
   const readError = attributes.read_error ?? point.read_error;
   return {
-    device: attributes.device_instance ?? point.device_ref ?? point.device_instance ?? point.instance,
+    device:
+      attributes.device_instance ?? point.device_ref ?? point.device_instance ?? point.instance,
     object: point.point_name ?? point.point_id ?? point.object_key ?? point.object_name,
     outcome: readError ? "Read failed" : (point.outcome ?? point.status ?? "Read"),
     position: point.position,
@@ -495,7 +531,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Discovery/validation/report runs, imports, cancel, publish, and rollback are
   // all engineer+ mutations server-side. A viewer/reviewer sees these controls
   // disabled with an explanatory tooltip rather than letting the click 403.
-  const { apiClient, canAdmin, canEngineer, me, sessionScopeId, workspace: workspaceRef } = useSession();
+  const {
+    apiClient,
+    canAdmin,
+    canEngineer,
+    me,
+    sessionScopeId,
+    workspace: workspaceRef,
+  } = useSession();
+  const canEngineerRef = useRef(canEngineer);
+  canEngineerRef.current = canEngineer;
+  // Evidence downloads are read-only endpoints. Keep their access check
+  // separate from the engineer-only mutation/report gate so a resolved viewer
+  // session can retrieve the evidence it is allowed to inspect.
+  const hasEvidenceReadAccess = me !== null;
+  const hasEvidenceReadAccessRef = useRef(hasEvidenceReadAccess);
+  hasEvidenceReadAccessRef.current = hasEvidenceReadAccess;
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const module = getModuleByRoute(moduleRoute);
@@ -529,6 +580,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [runAttachmentNotice, setRunAttachmentNotice] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const activeRunEpochRef = useRef(0);
+  const nextActiveRunEpoch = useCallback(() => ++activeRunEpochRef.current, []);
   const [runController, dispatchRun] = useReducer(runControllerReducer, initialRunControllerState);
   const [observationFold, setObservationFold] = useState<ObservationFoldState | null>(null);
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback | null>(null);
@@ -628,6 +681,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // for UDMI rows.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
+  const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
   const [propertyPreviewRunId, setPropertyPreviewRunId] = useState<string | null>(null);
   const [propertyAuthorizationId, setPropertyAuthorizationId] = useState<string | null>(null);
@@ -672,6 +726,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     null,
   );
   const [reportIntents, setReportIntents] = useState<readonly ReportIntent[] | null>(null);
+  const reportIntentOwnerRef = useRef<RunEpochOwner | null>(null);
   const reportDialogRef = useRef<HTMLDialogElement | null>(null);
   const reportTitleInputRef = useRef<HTMLInputElement | null>(null);
   const reportDialogOpenerRef = useRef<HTMLButtonElement | null>(null);
@@ -710,6 +765,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const templateDownload = useFileDownload(apiClient);
   const reportDownload = useFileDownload(apiClient);
   const exportDownload = useFileDownload(apiClient);
+  const captureExportDownload = useFileDownload(apiClient);
   const generatedAllBundleDownload = useFileDownload(apiClient);
   const validationJsonDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
@@ -722,10 +778,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // SSE-first run progress for the active run. status/stage/progress update
   // live from the stream; on stream error/unsupported, sseActive flips false
   // and the queries below resume the proven 1.5s polling (no regression).
-  const runEvents = useRunEvents(activeRun?.ref, Boolean(activeRun), apiClient);
+  const runEvents = useRunEvents(activeRun?.ref, Boolean(activeRun), apiClient, activeRun?.epoch ?? 0);
   const runAccessClosed = runEvents.connectionState === "closed";
+  const activeRunOwner: RunEpochOwner | null = activeRun
+    ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
+    : null;
+  const activeRunOwnerRef = useRef<RunEpochOwner | null>(activeRunOwner);
+  const runAccessClosedRef = useRef(runAccessClosed);
+  activeRunOwnerRef.current = activeRunOwner;
+  runAccessClosedRef.current = runAccessClosed;
+  const ownsActiveRun = (owner: RunEpochOwner | null | undefined) =>
+    !runAccessClosedRef.current && sameRunEpochOwner(owner, activeRunOwnerRef.current);
   const sseEvent = runEvents.event;
-  const sseDriving = runEvents.sseActive && sseEvent !== null;
+  // A render can observe new active-run state before the event hook's effect
+  // disposes the previous stream. Treat an SSE frame as authoritative only
+  // when the hook owner, frame, and page state all name the same run.
+  const sseDriving =
+    runEvents.sseActive &&
+    activeRun?.runId === runEvents.runId &&
+    activeRun?.epoch === runEvents.epoch &&
+    activeRun?.runId === sseEvent?.run_id;
 
   // Validation run monitor. SSE carries scalar status/stage/progress only, so
   // the run record must keep polling while active to refresh progressive UDMI
@@ -734,8 +806,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled: !runAccessClosed && Boolean(activeRun) && activeRun?.kind === "validation",
     queryFn: ({ signal }) =>
       getValidationRun(activeRun?.runId ?? "", { client: apiClient, signal }),
-    queryKey: activeRun?.ref
-      ? queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref)
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", "closed"]
+      : activeRun?.ref
+      ? [...queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref), "epoch", activeRun.epoch]
       : [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", module.route, "none"],
     refetchInterval: (query) =>
       runAccessClosed || isTerminalStatus(query.state.data?.status) ? false : 1500,
@@ -763,7 +837,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         projectId: workspaceRef.projectId,
         siteId: workspaceRef.siteId,
         context: { client: apiClient },
-    }),
+      }),
     onSuccess: (capability) => {
       queryClient.setQueryData(nmapCapabilityQueryKey, capability);
       const permittedProfile = resolvePermittedNmapProfile(
@@ -818,7 +892,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setScanAuthorizationPurpose("");
       queryClient.setQueryData<ScanAuthorizationV1[]>(scanAuthorizationsQueryKey, (current) => [
         authorization,
-        ...(current ?? []).filter((item) => item.authorization_id !== authorization.authorization_id),
+        ...(current ?? []).filter(
+          (item) => item.authorization_id !== authorization.authorization_id,
+        ),
       ]);
     },
   });
@@ -828,8 +904,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const discoveryRunQuery = useQuery({
     enabled: !runAccessClosed && Boolean(activeRun) && activeRun?.kind === "discovery",
     queryFn: ({ signal }) => getDiscoveryRun(activeRun?.runId ?? "", { client: apiClient, signal }),
-    queryKey: activeRun?.ref
-      ? queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref)
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", "closed"]
+      : activeRun?.ref
+      ? [...queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref), "epoch", activeRun.epoch]
       : [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", module.route, "none"],
     refetchInterval: (query) => {
       if (runAccessClosed) {
@@ -844,33 +922,61 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   const propertyRunQuery = useQuery({
-    enabled: Boolean(propertyRunId),
-    queryKey: [
-      "bacnet-property-run",
-      sessionScopeId,
-      workspaceRef.projectId,
-      workspaceRef.siteId,
-      propertyRunId,
-    ],
+    enabled:
+      !runAccessClosed &&
+      Boolean(propertyRunId) &&
+      sameRunEpochOwner(propertyOwner, activeRunOwner),
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "bacnet-property-run", "closed"]
+      : propertyOwner && propertyRunId
+        ? [
+            ...queryKeys.workspace(propertyOwner.sessionScopeId, propertyOwner.workspaceRef),
+            "bacnet-property-run",
+            propertyOwner.runId,
+            "epoch",
+            propertyOwner.epoch,
+            propertyRunId,
+          ]
+        : [...queryKeys.workspace(sessionScopeId, workspaceRef), "bacnet-property-run", "none"],
     queryFn: ({ signal }) => getDiscoveryRun(propertyRunId ?? "", { client: apiClient, signal }),
-    refetchInterval: (query) => (isTerminalStatus(query.state.data?.status) ? false : 1500),
+    refetchInterval: (query) =>
+      runAccessClosed || isTerminalStatus(query.state.data?.status) ? false : 1500,
   });
 
   const propertyAuthorizationsQuery = useQuery<ScanAuthorizationV1[]>({
-    enabled: Boolean(propertyPreviewRunId),
-    queryKey: [
-      "bacnet-property-authorizations",
-      sessionScopeId,
-      workspaceRef,
-      propertyPreviewRunId,
-    ],
-    queryFn: () =>
+    enabled:
+      !runAccessClosed &&
+      Boolean(propertyPreviewRunId) &&
+      sameRunEpochOwner(propertyOwner, activeRunOwner),
+    queryKey: runAccessClosed
+      ? [
+          ...queryKeys.workspace(sessionScopeId, workspaceRef),
+          "bacnet-property-authorizations",
+          "closed",
+        ]
+      : propertyOwner && propertyPreviewRunId
+        ? [
+            ...queryKeys.workspace(propertyOwner.sessionScopeId, propertyOwner.workspaceRef),
+            "bacnet-property-authorizations",
+            propertyOwner.runId,
+            "epoch",
+            propertyOwner.epoch,
+            propertyPreviewRunId,
+          ]
+        : [
+            ...queryKeys.workspace(sessionScopeId, workspaceRef),
+            "bacnet-property-authorizations",
+            "none",
+          ],
+    queryFn: ({ signal }) =>
       listScanAuthorizations({
-        workspace: workspaceRef,
+        workspace: propertyOwner?.workspaceRef ?? workspaceRef,
         previewRunId: propertyPreviewRunId ?? undefined,
-        context: { client: apiClient },
+        context: { client: apiClient, signal },
       }),
   });
+  const propertyOwnerMatchesActiveRun = sameRunEpochOwner(propertyOwner, activeRunOwner);
+  const propertyCancellingForActiveOwner = propertyCancelling && propertyOwnerMatchesActiveRun;
 
   const activeRunRecord = runAccessClosed
     ? undefined
@@ -881,15 +987,33 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // polled record for those fields and for everything else (result_summary).
   const activeRunStatus = (sseDriving ? sseEvent?.status : undefined) ?? activeRunRecord?.status;
   const scanPreviewSealed =
-    scanPreviewActive &&
-    activeRun?.runId === scanPreviewRunId &&
-    activeRunStatus === "succeeded";
+    (scanPreviewActive &&
+      activeRun?.runId === scanPreviewRunId &&
+      activeRunStatus === "succeeded") ||
+    (scanAuthorizationsQuery.data ?? []).some(
+      (authorization) => authorization.preview_run_id === scanPreviewRunId,
+    );
   const activeRunStage = (sseDriving ? sseEvent?.stage : undefined) ?? activeRunRecord?.stage;
   const activeRunProgress =
     (sseDriving ? sseEvent?.progress_percent : undefined) ?? activeRunRecord?.progress_percent ?? 0;
   const activeRunError =
     (sseDriving ? sseEvent?.error_message : undefined) ?? activeRunRecord?.error_message;
   const activeRunTerminal = isTerminalStatus(activeRunStatus);
+  const activeRunAuthoritativelyTerminal = Boolean(
+    activeRun &&
+      activeRunRecord?.run_id === activeRun.runId &&
+      isTerminalStatus(activeRunRecord.status),
+  );
+  const activeRunAuthoritativelyTerminalRef = useRef(activeRunAuthoritativelyTerminal);
+  activeRunAuthoritativelyTerminalRef.current = activeRunAuthoritativelyTerminal;
+  const canApplyReportOwner = (owner: RunEpochOwner | null | undefined) =>
+    canEngineerRef.current &&
+    ownsActiveRun(owner) &&
+    activeRunAuthoritativelyTerminalRef.current;
+  const canReadActiveRunEvidence = (owner: RunEpochOwner | null | undefined) =>
+    hasEvidenceReadAccessRef.current && ownsActiveRun(owner);
+  const canReadTerminalActiveRunEvidence = (owner: RunEpochOwner | null | undefined) =>
+    canReadActiveRunEvidence(owner) && activeRunAuthoritativelyTerminalRef.current;
   const propertyCeiling = useMemo<BacnetPropertyName[]>(() => {
     const contract = activeRunRecord?.parameters?.scan_contract_v1;
     if (!isPlainObject(contract) || !isPlainObject(contract.bacnet)) {
@@ -915,11 +1039,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     ) {
       return "authorization-expired";
     }
-    if (propertyCancelling) {
+    if (propertyCancellingForActiveOwner) {
       return "cancelling";
     }
     return record.status;
-  }, [propertyCancelling, propertyRunId, propertyRunQuery.data]);
+  }, [propertyCancellingForActiveOwner, propertyRunId, propertyRunQuery.data]);
 
   // IP and BACnet rows are reconstructed from durable observation pages while
   // the run is active. MQTT retains its established topic-snapshot path. A
@@ -931,8 +1055,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     (activeRun.ref.jobType === "ip_discovery" || activeRun.ref.jobType === "bacnet_discovery")
       ? activeRun
       : null;
+  const progressiveObservationOwner = progressiveObservationRun
+    ? { runId: progressiveObservationRun.runId, epoch: progressiveObservationRun.epoch }
+    : null;
   const currentObservationFold =
-    observationFold?.runId === progressiveObservationRun?.runId ? observationFold : null;
+    observationFold?.owner.runId === progressiveObservationRun?.runId &&
+    observationFold?.owner.epoch === progressiveObservationRun?.epoch
+      ? observationFold
+      : null;
   const observationTerminalSynchronized = currentObservationFold
     ? isObservationTerminalSynchronized(currentObservationFold)
     : false;
@@ -954,15 +1084,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       progressiveObservationEnabled &&
       !observationTerminalSynchronized &&
       !currentObservationFold?.resnapshotRequired,
-    queryFn: ({ signal }) =>
-      getDiscoveryObservations(progressiveObservationRun?.runId ?? "", observationAfter, 100, {
+    queryFn: async ({ signal }) => {
+      const owner = progressiveObservationOwner;
+      if (!owner) {
+        throw new Error("No active observation owner.");
+      }
+      const page = await getDiscoveryObservations(owner.runId, observationAfter, 100, {
         client: apiClient,
         signal,
-      }),
+      });
+      // The API does not carry a client submission generation. Keep the owner
+      // that requested this page with the response so a same-ID preview page
+      // can never be folded into its accepted live successor.
+      return { owner, page };
+    },
     queryKey: progressiveObservationRun
       ? [
           ...queryKeys.run(sessionScopeId, workspaceRef, progressiveObservationRun.ref),
           "observations",
+          "epoch",
+          progressiveObservationRun.epoch,
           runEvents.observationAttempt ?? "unknown-attempt",
           observationAfter,
         ]
@@ -980,22 +1121,38 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // server's latest_cursor and the SSE high-water are hints only; neither is
   // acknowledged until the corresponding complete page folds successfully.
   useEffect(() => {
-    const page = discoveryObservationQuery.data;
+    const observationResponse = discoveryObservationQuery.data;
+    const page = observationResponse?.page;
     const run = progressiveObservationRun;
-    if (runAccessClosed || !page || !run || page.run_id !== run.runId) {
+    if (
+      runAccessClosed ||
+      !page ||
+      !run ||
+      page.run_id !== run.runId ||
+      observationResponse.owner.runId !== run.runId ||
+      observationResponse.owner.epoch !== run.epoch
+    ) {
       return;
     }
     setObservationFold((current) => {
-      if (current && current.runId === run.runId && current.attempt !== page.attempt) {
+      if (
+        current &&
+        current.owner.runId === run.runId &&
+        current.owner.epoch === run.epoch &&
+        current.attempt !== page.attempt
+      ) {
         // A retry attempt starts a new namespace. Refetch from cursor zero before
         // accepting any row from it; never apply a page requested after the old
         // attempt's cursor.
-        return createObservationFoldState(run.runId, page.attempt);
+        return createObservationFoldState({ runId: run.runId, epoch: run.epoch }, page.attempt);
       }
       const base =
-        current && current.runId === run.runId
+        current && current.owner.runId === run.runId && current.owner.epoch === run.epoch
           ? current
-          : createObservationFoldState(run.runId, runEvents.observationAttempt ?? page.attempt);
+          : createObservationFoldState(
+              { runId: run.runId, epoch: run.epoch },
+              runEvents.observationAttempt ?? page.attempt,
+            );
       return foldObservationPage(base, page);
     });
   }, [
@@ -1007,7 +1164,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   useEffect(() => {
     setObservationFold(null);
-  }, [activeRun?.runId, detailRow?.Instance]);
+  }, [activeRun?.epoch, activeRun?.runId, detailRow?.Instance]);
 
   useEffect(() => {
     if (
@@ -1016,7 +1173,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       currentObservationFold.attempt !== runEvents.observationAttempt
     ) {
       setObservationFold(
-        createObservationFoldState(currentObservationFold.runId, runEvents.observationAttempt),
+        createObservationFoldState(currentObservationFold.owner, runEvents.observationAttempt),
       );
     }
   }, [currentObservationFold, runEvents.observationAttempt]);
@@ -1036,12 +1193,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     dispatchRun({
       type: "observation-cursor-acknowledged",
       runId: run.runId,
+      epoch: run.epoch,
       cursor: folded.acknowledgedCursor,
     });
     if (folded.terminal) {
       dispatchRun({
         type: "terminal-observed",
         runId: run.runId,
+        epoch: run.epoch,
         terminalCursor: folded.terminal.terminal_cursor,
       });
     }
@@ -1052,12 +1211,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   useEffect(() => {
     const terminalCatchUpKey =
       activeRunTerminal && progressiveObservationRun && !currentObservationFold?.terminal
-        ? `${progressiveObservationRun.runId}:${observationAfter}`
+        ? `${progressiveObservationRun.runId}:${progressiveObservationRun.epoch}:${observationAfter}`
         : null;
     const terminalCatchUpRequired =
       terminalCatchUpKey !== null &&
       !discoveryObservationQuery.isFetching &&
-      !discoveryObservationQuery.data?.terminal &&
+      !discoveryObservationQuery.data?.page.terminal &&
       terminalObservationCatchUpRef.current !== terminalCatchUpKey;
     if (
       progressiveObservationEnabled &&
@@ -1073,7 +1232,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [
     activeRunTerminal,
     currentObservationFold?.terminal,
-    discoveryObservationQuery.data?.terminal,
+    discoveryObservationQuery.data?.page.terminal,
     discoveryObservationQuery.isFetching,
     observationAfter,
     progressiveObservationEnabled,
@@ -1084,26 +1243,75 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   useEffect(() => {
     if (runAccessClosed) {
-      const runRef = activeRun?.ref;
-      if (runRef) {
-        const runQueryKey = queryKeys.run(sessionScopeId, workspaceRef, runRef);
-        const evidenceQueryKeys = [
-          queryKeys.results(sessionScopeId, workspaceRef, runRef),
-          queryKeys.issues(sessionScopeId, workspaceRef, runRef),
-          queryKeys.topics(sessionScopeId, workspaceRef, runRef),
+      const run = activeRun;
+      if (run) {
+        const runQueryKey = queryKeys.run(sessionScopeId, workspaceRef, run.ref);
+        const resultsQueryKey = [
+          ...queryKeys.results(sessionScopeId, workspaceRef, run.ref),
+          "epoch",
+          run.epoch,
         ] as const;
-        void (async () => {
-          await Promise.all([
-            queryClient.cancelQueries({ queryKey: runQueryKey }),
-            ...evidenceQueryKeys.map((queryKey) =>
-              queryClient.cancelQueries({ exact: true, queryKey }),
-            ),
-          ]);
-          queryClient.removeQueries({ queryKey: runQueryKey });
-          for (const queryKey of evidenceQueryKeys) {
-            queryClient.removeQueries({ exact: true, queryKey });
-          }
-        })();
+        const issuesQueryKey = [
+          ...queryKeys.issues(sessionScopeId, workspaceRef, run.ref),
+          "epoch",
+          run.epoch,
+        ] as const;
+        const pointsQueryKey = [
+          ...queryKeys.run(sessionScopeId, workspaceRef, run.ref),
+          "bacnet-points",
+          "epoch",
+          run.epoch,
+        ] as const;
+        const comparisonQueryKey = [
+          ...queryKeys.run(sessionScopeId, workspaceRef, run.ref),
+          "discovery-comparison",
+          "epoch",
+          run.epoch,
+        ] as const;
+        const activeComparisonQueryKey = comparisonRunId
+          ? [...comparisonQueryKey, comparisonRunId]
+          : null;
+        const topicsQueryKey = [...queryKeys.topics(sessionScopeId, workspaceRef, run.ref), "epoch", run.epoch] as const;
+        const propertyRunQueryPrefix = [
+          ...queryKeys.workspace(sessionScopeId, workspaceRef),
+          "bacnet-property-run",
+          run.runId,
+          "epoch",
+          run.epoch,
+        ] as const;
+        const propertyAuthorizationsQueryPrefix = [
+          ...queryKeys.workspace(sessionScopeId, workspaceRef),
+          "bacnet-property-authorizations",
+          run.runId,
+          "epoch",
+          run.epoch,
+        ] as const;
+        void queryClient.cancelQueries({ queryKey: runQueryKey });
+        void queryClient.cancelQueries({ exact: true, queryKey: resultsQueryKey });
+        void queryClient.cancelQueries({ exact: true, queryKey: issuesQueryKey });
+        void queryClient.cancelQueries({ queryKey: pointsQueryKey });
+        void queryClient.cancelQueries({ queryKey: comparisonQueryKey });
+        if (activeComparisonQueryKey) {
+          void queryClient.cancelQueries({ exact: true, queryKey: activeComparisonQueryKey });
+        }
+        void queryClient.cancelQueries({ exact: true, queryKey: topicsQueryKey });
+        void queryClient.cancelQueries({ queryKey: propertyRunQueryPrefix });
+        void queryClient.cancelQueries({ queryKey: propertyAuthorizationsQueryPrefix });
+        queryClient.removeQueries({ queryKey: runQueryKey });
+        queryClient.removeQueries({ exact: true, queryKey: resultsQueryKey });
+        queryClient.removeQueries({ exact: true, queryKey: issuesQueryKey });
+        queryClient.removeQueries({ queryKey: pointsQueryKey });
+        queryClient.removeQueries({ queryKey: comparisonQueryKey });
+        if (activeComparisonQueryKey) {
+          queryClient.removeQueries({ exact: true, queryKey: activeComparisonQueryKey });
+        }
+        queryClient.removeQueries({ exact: true, queryKey: topicsQueryKey });
+        queryClient.removeQueries({ queryKey: propertyRunQueryPrefix });
+        queryClient.removeQueries({ queryKey: propertyAuthorizationsQueryPrefix });
+        queryClient.removeQueries({
+          exact: true,
+          queryKey: queryKeys.topics(sessionScopeId, workspaceRef, run.ref),
+        });
       }
       setObservationFold(null);
       setSelectedResultId(null);
@@ -1111,7 +1319,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       dispatchRun({ type: "reset" });
       pageHeadingRef.current?.focus();
     }
-  }, [activeRun?.ref, queryClient, runAccessClosed, sessionScopeId, workspaceRef]);
+  }, [activeRun, comparisonRunId, queryClient, runAccessClosed, sessionScopeId, workspaceRef]);
 
   // Elapsed timer + progress presentation for the active run (ITEM-6). The run
   // monitor renders live now that a run is started in the background (ITEM-4), so
@@ -1154,7 +1362,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled: !runAccessClosed && Boolean(activeRun) && activeRun?.kind === "validation",
     queryFn: ({ signal }) =>
       getValidationIssues(activeRun?.runId ?? "", { client: apiClient, signal }),
-    queryKey: queryKeys.issues(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "issues", "closed"]
+      : activeRun?.ref
+        ? [
+          ...queryKeys.issues(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
+          "epoch",
+          activeRun.epoch,
+        ]
+        : [...queryKeys.workspace(sessionScopeId, workspaceRef), "issues", "none"],
     refetchInterval: () =>
       runAccessClosed || isTerminalStatus(validationRunQuery.data?.status) ? false : 1500,
   });
@@ -1165,10 +1381,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       !runAccessClosed &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery" &&
-      isTerminalStatus(discoveryRunQuery.data?.status),
+      runController.phase === "settled" &&
+      runController.runRef?.runId === activeRun?.runId &&
+      runController.epoch === activeRun?.epoch,
     queryFn: ({ signal }) =>
       getDiscoveryResults(activeRun?.runId ?? "", { client: apiClient, signal }),
-    queryKey: queryKeys.results(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "results", "closed"]
+      : activeRun?.ref
+        ? [
+          ...queryKeys.results(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
+          "epoch",
+          activeRun.epoch,
+        ]
+        : [...queryKeys.workspace(sessionScopeId, workspaceRef), "results", "none"],
   });
 
   const bacnetPointsQuery = useQuery({
@@ -1177,16 +1403,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       module.route === "bacnet-discovery" &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery" &&
-      activeRunTerminal,
-    queryKey: [
+      activeRunAuthoritativelyTerminal,
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "bacnet-points", "closed"]
+      : activeRun?.ref
+      ? [
+      ...queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref),
       "bacnet-points",
-      sessionScopeId,
-      workspaceRef.projectId,
-      workspaceRef.siteId,
-      activeRun?.runId,
+      "epoch",
+      activeRun.epoch,
       bacnetPointsCursor,
       bacnetPointsSearch,
-    ],
+        ]
+      : [...queryKeys.workspace(sessionScopeId, workspaceRef), "bacnet-points", "none"],
     queryFn: ({ signal }) =>
       getDiscoveryPoints(activeRun?.runId ?? "", {
         after: bacnetPointsCursor,
@@ -1199,32 +1428,105 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   useEffect(() => {
     setBacnetPointsCursor(null);
     setBacnetPointsSearch("");
-  }, [activeRun?.runId]);
+  }, [activeRun?.epoch, activeRun?.runId]);
+
+  useEffect(() => {
+    setCaptureTopicFilter("");
+  }, [activeRun?.epoch, activeRun?.runId]);
 
   useEffect(() => {
     setPropertyRunId(null);
     setPropertyPreviewRunId(null);
+    setPropertyOwner(null);
     setPropertyAuthorizationId(null);
     setPropertyRequestedReadSet([]);
     setPropertyRequest(null);
     setPropertyExpansionNotice(null);
     setPropertyCancelling(false);
-  }, [activeRun?.runId, detailRow?.Instance]);
+  }, [activeRun?.epoch, activeRun?.runId, detailRow?.Instance]);
+
+  const resetGeneratedAllBundleDownloadForActiveRun = generatedAllBundleDownload.reset;
+  useEffect(() => {
+    setSelectedResultId(null);
+    setDetailRow(null);
+    setReportToast(null);
+    setReportToastWarning(false);
+    setGeneratedAllReportIds(null);
+    resetGeneratedAllBundleDownloadForActiveRun();
+    setReportDialogOpen(false);
+    setReportScopeSnapshot(null);
+    setReportIntents(null);
+    reportIntentOwnerRef.current = null;
+  }, [
+    activeRun?.epoch,
+    activeRun?.runId,
+    canEngineer,
+    resetGeneratedAllBundleDownloadForActiveRun,
+    runAccessClosed,
+    sessionScopeId,
+    workspaceRef.projectId,
+    workspaceRef.siteId,
+  ]);
+
+  const resetCaptureExportDownloadForEvidenceOwner = captureExportDownload.reset;
+  const resetValidationJsonDownloadForEvidenceOwner = validationJsonDownload.reset;
+  useEffect(() => {
+    resetCaptureExportDownloadForEvidenceOwner();
+    resetValidationJsonDownloadForEvidenceOwner();
+  }, [
+    activeRun?.epoch,
+    activeRun?.runId,
+    hasEvidenceReadAccess,
+    resetCaptureExportDownloadForEvidenceOwner,
+    resetValidationJsonDownloadForEvidenceOwner,
+    runAccessClosed,
+    sessionScopeId,
+    workspaceRef.projectId,
+    workspaceRef.siteId,
+  ]);
+
+  useEffect(() => {
+    if (!propertyOwner) {
+      return;
+    }
+    const owner = propertyOwner;
+    const propertyRunQueryPrefix = [
+      ...queryKeys.workspace(owner.sessionScopeId, owner.workspaceRef),
+      "bacnet-property-run",
+      owner.runId,
+      "epoch",
+      owner.epoch,
+    ] as const;
+    const propertyAuthorizationsQueryPrefix = [
+      ...queryKeys.workspace(owner.sessionScopeId, owner.workspaceRef),
+      "bacnet-property-authorizations",
+      owner.runId,
+      "epoch",
+      owner.epoch,
+    ] as const;
+    return () => {
+      if (ownsActiveRun(owner)) {
+        return;
+      }
+      void queryClient.cancelQueries({ queryKey: propertyRunQueryPrefix });
+      void queryClient.cancelQueries({ queryKey: propertyAuthorizationsQueryPrefix });
+      queryClient.removeQueries({ queryKey: propertyRunQueryPrefix });
+      queryClient.removeQueries({ queryKey: propertyAuthorizationsQueryPrefix });
+    };
+  }, [propertyOwner, queryClient]);
 
   const discoveryComparisonQuery = useQuery({
     enabled:
       Boolean(comparisonRunId) &&
+      !runAccessClosed &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery" &&
-      isTerminalStatus(discoveryRunQuery.data?.status),
-    queryKey: [
-      "discovery-comparison",
-      sessionScopeId,
-      workspaceRef.projectId,
-      workspaceRef.siteId,
-      activeRun?.runId,
-      comparisonRunId,
-    ],
+      activeRunAuthoritativelyTerminal,
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "discovery-comparison", "closed"]
+      : activeRun?.ref
+      ? [...queryKeys.run(sessionScopeId, workspaceRef, activeRun.ref), "discovery-comparison", "epoch", activeRun.epoch, comparisonRunId]
+      : [...queryKeys.workspace(sessionScopeId, workspaceRef), "discovery-comparison", "none"],
     queryFn: ({ signal }) =>
       getDiscoveryComparison(activeRun?.runId ?? "", comparisonRunId ?? "", {
         client: apiClient,
@@ -1243,7 +1545,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       activeRun?.kind === "discovery",
     queryFn: ({ signal }) =>
       getDiscoveryTopics(activeRun?.runId ?? "", { client: apiClient, signal }),
-    queryKey: queryKeys.topics(sessionScopeId, workspaceRef, activeRun?.ref ?? null),
+    queryKey: runAccessClosed
+      ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "topics", "closed"]
+      : activeRun?.ref
+      ? [...queryKeys.topics(sessionScopeId, workspaceRef, activeRun.ref), "epoch", activeRun.epoch]
+      : [...queryKeys.workspace(sessionScopeId, workspaceRef), "topics", "none"],
     // Poll while the run is active so the table refreshes the instant the run
     // goes terminal (topics persist at run end), then stop polling (mq9nhbzu).
     refetchInterval: () =>
@@ -1385,14 +1691,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // response succeeds and confirms the same run identity.
   useEffect(() => {
     if (activeRun && activeRunTerminal) {
-      dispatchRun({ type: "terminal-observed", runId: activeRun.runId });
+      dispatchRun({ type: "terminal-observed", runId: activeRun.runId, epoch: activeRun.epoch });
     }
   }, [activeRun, activeRunTerminal]);
 
-  const evidenceSyncRef = useRef<string | null>(null);
+  const evidenceSyncRef = useRef<number | null>(null);
   useEffect(() => {
     evidenceSyncRef.current = null;
-  }, [activeRun?.runId]);
+  }, [activeRun?.epoch]);
 
   const refetchValidationRun = validationRunQuery.refetch;
   const refetchDiscoveryRun = discoveryRunQuery.refetch;
@@ -1405,28 +1711,74 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       !run ||
       runController.phase !== "terminal-sync" ||
       runController.runRef?.runId !== run.runId ||
-      evidenceSyncRef.current === run.runId
+      runController.epoch !== run.epoch ||
+      evidenceSyncRef.current === run.epoch
     ) {
       return;
     }
-    evidenceSyncRef.current = run.runId;
+    evidenceSyncRef.current = run.epoch;
     let disposed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let resolveRetry: (() => void) | null = null;
+
+    const waitForRunStatusRetry = (delay: number) =>
+      new Promise<void>((resolve) => {
+        resolveRetry = resolve;
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          resolveRetry = null;
+          resolve();
+        }, delay);
+      });
 
     void (async () => {
       try {
-        const runResult =
-          run.kind === "discovery" ? await refetchDiscoveryRun() : await refetchValidationRun();
-        if (runResult.isError || runResult.data?.run_id !== run.runId) {
-          throw runResult.error ?? new Error("Final run evidence did not match the active run.");
+        let terminalRunConfirmed = false;
+        for (let attempt = 0; attempt <= TERMINAL_RUN_STATUS_RETRY_DELAYS_MS.length; attempt += 1) {
+          const runResult =
+            run.kind === "discovery" ? await refetchDiscoveryRun() : await refetchValidationRun();
+          if (disposed) {
+            return;
+          }
+          if (runResult.data?.run_id && runResult.data.run_id !== run.runId) {
+            throw new Error("Final run evidence did not match the active run.");
+          }
+          if (!runResult.isError && runResult.data?.run_id === run.runId) {
+            if (isTerminalStatus(runResult.data.status)) {
+              terminalRunConfirmed = true;
+              break;
+            }
+          } else if (!isTransientRunStatusError(runResult.error)) {
+            throw runResult.error ?? new Error("Final run status could not be refreshed.");
+          }
+
+          const delay = TERMINAL_RUN_STATUS_RETRY_DELAYS_MS[attempt];
+          if (delay === undefined) {
+            throw runResult.error ?? new Error("Final run status did not reach a terminal state.");
+          }
+          await waitForRunStatusRetry(delay);
+          if (disposed) {
+            return;
+          }
+        }
+
+        if (!terminalRunConfirmed || disposed) {
+          return;
         }
 
         if (run.kind === "validation") {
           const issues = await refetchValidationIssues();
+          if (disposed) {
+            return;
+          }
           if (issues.isError || issues.data?.run_id !== run.runId) {
             throw issues.error ?? new Error("Final issues did not match the active run.");
           }
         } else {
           const results = await refetchDiscoveryResults();
+          if (disposed) {
+            return;
+          }
           if (results.isError || results.data?.run_id !== run.runId) {
             throw new Error("Final discovery evidence did not match the active run.");
           }
@@ -1436,10 +1788,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           dispatchRun({
             type: "evidence-succeeded",
             runId: run.runId,
-            requirements:
-              run.kind === "validation"
-                ? ["run", "issues"]
-                : ["run", "results"],
+            epoch: run.epoch,
+            requirements: run.kind === "validation" ? ["run", "issues"] : ["run", "results"],
           });
         }
       } catch (cause) {
@@ -1447,6 +1797,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           dispatchRun({
             type: "evidence-failed",
             runId: run.runId,
+            epoch: run.epoch,
             error: cause instanceof Error ? cause.message : "Final evidence refresh failed.",
           });
         }
@@ -1455,6 +1806,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
     return () => {
       disposed = true;
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      resolveRetry?.();
+      resolveRetry = null;
     };
   }, [
     activeRun,
@@ -1464,6 +1821,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     refetchValidationRun,
     runAccessClosed,
     runController.phase,
+    runController.epoch,
     runController.runRef?.runId,
   ]);
 
@@ -1473,10 +1831,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const finalEvidenceReady =
     runController.phase === "settled" &&
     runController.runRef?.runId === activeRun?.runId &&
+    runController.epoch === activeRun?.epoch &&
     (!observationBarrierRequired || observationTerminalSynchronized);
   const resetTemplateDownload = templateDownload.reset;
   const resetReportDownload = reportDownload.reset;
   const resetExportDownload = exportDownload.reset;
+  const resetCaptureExportDownload = captureExportDownload.reset;
   const resetGeneratedAllBundleDownload = generatedAllBundleDownload.reset;
   const resetValidationJsonDownload = validationJsonDownload.reset;
 
@@ -1522,6 +1882,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetTemplateDownload();
     resetReportDownload();
     resetExportDownload();
+    resetCaptureExportDownload();
     resetGeneratedAllBundleDownload();
     resetValidationJsonDownload();
   }, [
@@ -1530,6 +1891,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetTemplateDownload,
     resetReportDownload,
     resetExportDownload,
+    resetCaptureExportDownload,
     resetGeneratedAllBundleDownload,
     resetValidationJsonDownload,
     sessionScopeId,
@@ -1574,13 +1936,21 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return;
     }
     const ref = toRunRef(sessionScopeId, workspaceRef, module.route, run, "restored");
-    setActiveRun({ kind: action.kind, ref, restored: true, runId: run.run_id });
-    dispatchRun({ type: "restored", runRef: ref, status: run.status });
+    const epoch = nextActiveRunEpoch();
+    setActiveRun({
+      epoch,
+      kind: action.kind,
+      ref,
+      restored: true,
+      runId: run.run_id,
+    });
+    dispatchRun({ type: "restored", runRef: ref, status: run.status, epoch });
   }, [
     activeRun,
     lastRunQuery.data,
     module.route,
     module.runActions,
+    nextActiveRunEpoch,
     requestedRunAction,
     requestedRunId,
     requestedRunQuery.data,
@@ -1878,7 +2248,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
     onError: () => {
       if (activeRun) {
-        dispatchRun({ type: "accepted", runRef: activeRun.ref });
+        dispatchRun({ type: "accepted", runRef: activeRun.ref, epoch: activeRun.epoch });
       } else {
         dispatchRun({ type: "reset" });
       }
@@ -1887,8 +2257,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
       if ("run_id" in result) {
         const requiresSealedPreview =
-          action?.kind === "discovery" &&
-          (action.runKind === "ip" || action.runKind === "bacnet");
+          action?.kind === "discovery" && (action.runKind === "ip" || action.runKind === "bacnet");
         if (requiresSealedPreview && variables.dryRun) {
           setScanPreviewRunId(result.run_id);
           setScanAuthorizationId(null);
@@ -1901,12 +2270,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         setLastReport(null);
         if (action?.kind === "discovery") {
           const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
-          setActiveRun({ kind: "discovery", ref, runId: result.run_id });
-          dispatchRun({ type: "accepted", runRef: ref });
+          const epoch = nextActiveRunEpoch();
+          setActiveRun({ epoch, kind: "discovery", ref, runId: result.run_id });
+          dispatchRun({ type: "accepted", runRef: ref, epoch });
         } else if (action?.kind === "validation") {
           const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
-          setActiveRun({ kind: "validation", ref, runId: result.run_id });
-          dispatchRun({ type: "accepted", runRef: ref });
+          const epoch = nextActiveRunEpoch();
+          setActiveRun({ epoch, kind: "validation", ref, runId: result.run_id });
+          dispatchRun({ type: "accepted", runRef: ref, epoch });
         }
       } else {
         setLastReport(result);
@@ -1925,10 +2296,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
   const propertyExpansionMutation = useMutation({
     mutationFn: ({
+      owner,
       row,
       parentRunId,
       requestedReadSet,
     }: {
+      owner: RunEpochOwner;
       row: Record<string, string>;
       parentRunId: string;
       requestedReadSet: BacnetPropertyName[];
@@ -1943,10 +2316,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         deviceInstance,
         destination: row["IP Address"] || undefined,
         requestedReadSet,
-        workspace: workspaceRef,
+        workspace: owner.workspaceRef,
       });
     },
-    onMutate: ({ row, parentRunId, requestedReadSet }) => {
+    onMutate: ({ owner, row, parentRunId, requestedReadSet }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
+      setPropertyOwner(owner);
       setPropertyRequest({
         parentRunId,
         deviceInstance: Number(row.Instance),
@@ -1956,12 +2333,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setPropertyExpansionNotice(null);
       setPropertyAuthorizationId(null);
     },
-    onSuccess: (result) => {
+    onSuccess: (result, { owner }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
       setPropertyPreviewRunId(result.run_id);
       setPropertyRunId(result.run_id);
       setPropertyExpansionNotice(`Property preview ${result.run_id} was created.`);
     },
-    onError: (error) => {
+    onError: (error, { owner }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
       setPropertyExpansionNotice(
         error instanceof Error ? error.message : "Property preview failed.",
       );
@@ -1969,26 +2352,42 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   const propertyLiveMutation = useMutation({
-    mutationFn: () => {
-      if (!propertyRequest || !propertyPreviewRunId || !propertyAuthorizationId) {
-        throw new Error("Select a property preview and authorization before starting.");
-      }
+    mutationFn: ({
+      authorizationId,
+      owner,
+      previewRunId,
+      request,
+    }: {
+      authorizationId: string;
+      owner: RunEpochOwner;
+      previewRunId: string;
+      request: NonNullable<typeof propertyRequest>;
+    }) => {
       return startBacnetPropertyRun({
-        ...propertyRequest,
-        previewRunId: propertyPreviewRunId,
-        scanAuthorizationId: propertyAuthorizationId,
-        workspace: workspaceRef,
+        ...request,
+        previewRunId,
+        scanAuthorizationId: authorizationId,
+        workspace: owner.workspaceRef,
       });
     },
-    onMutate: () => {
+    onMutate: ({ owner }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
       setPropertyExpansionNotice(null);
       setPropertyCancelling(false);
     },
-    onSuccess: (result) => {
+    onSuccess: (result, { owner }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
       setPropertyRunId(result.run_id);
       setPropertyExpansionNotice(`Property child ${result.run_id} was accepted.`);
     },
-    onError: (error) => {
+    onError: (error, { owner }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
       setPropertyExpansionNotice(
         error instanceof Error ? error.message : "Property child start failed.",
       );
@@ -1996,18 +2395,40 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   });
 
   const propertyCancelMutation = useMutation({
-    mutationFn: () => {
-      if (!propertyRunId) {
-        throw new Error("No property child run is active.");
-      }
-      return cancelRun(propertyRunId, { client: apiClient });
+    mutationFn: ({ runId }: { owner: RunEpochOwner; runId: string }) => {
+      return cancelRun(runId, { client: apiClient });
     },
-    onMutate: () => setPropertyCancelling(true),
-    onSuccess: () => {
+    onMutate: ({ owner }) => {
+      if (ownsActiveRun(owner)) {
+        setPropertyCancelling(true);
+      }
+    },
+    onSuccess: (_result, { owner }) => {
+      if (!ownsActiveRun(owner)) {
+        return;
+      }
       void propertyRunQuery.refetch();
     },
-    onError: () => setPropertyCancelling(false),
+    onError: (_error, { owner }) => {
+      if (ownsActiveRun(owner)) {
+        setPropertyCancelling(false);
+      }
+    },
+    onSettled: (_result, _error, { owner }) => {
+      if (ownsActiveRun(owner)) {
+        setPropertyCancelling(false);
+      }
+    },
   });
+  const propertyExpansionPending =
+    propertyExpansionMutation.isPending &&
+    sameRunEpochOwner(propertyExpansionMutation.variables?.owner, activeRunOwner);
+  const propertyLivePending =
+    propertyLiveMutation.isPending &&
+    sameRunEpochOwner(propertyLiveMutation.variables?.owner, activeRunOwner);
+  const propertyCancelPending =
+    propertyCancelMutation.isPending &&
+    sameRunEpochOwner(propertyCancelMutation.variables?.owner, activeRunOwner);
 
   const publishMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "mqtt-config.publish"),
@@ -2043,8 +2464,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     onSuccess: (result) => {
       setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
       const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
-      setActiveRun({ kind: "validation", ref, runId: result.run_id });
-      dispatchRun({ type: "accepted", runRef: ref });
+      const epoch = nextActiveRunEpoch();
+      setActiveRun({ epoch, kind: "validation", ref, runId: result.run_id });
+      dispatchRun({ type: "accepted", runRef: ref, epoch });
     },
   });
 
@@ -2075,15 +2497,20 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),
     mutationFn: async ({
       intents,
+      owner,
       reportTitle: title,
     }: {
       intents: readonly ReportIntent[];
+      owner: RunEpochOwner;
       reportTitle: string;
     }) => {
       const reports: ReportSummary[] = [];
       const failedFormats: ReportFormat[] = [];
       let firstFailure: unknown;
       for (const intent of intents) {
+        if (!canApplyReportOwner(owner)) {
+          return { failedFormats, ownerLost: true, reports, requestedCount: intents.length };
+        }
         try {
           reports.push(
             await createReport({
@@ -2094,10 +2521,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               sourceRunIds: [intent.runId],
               udmiReportVariant: intent.udmiReportVariant,
               udmiScope: intent.udmiScope,
-              workspace: workspaceRef,
+              workspace: owner.workspaceRef,
             }),
           );
         } catch (error) {
+          if (!canApplyReportOwner(owner)) {
+            return { failedFormats, ownerLost: true, reports, requestedCount: intents.length };
+          }
           firstFailure ??= error;
           failedFormats.push(intent.format);
         }
@@ -2105,9 +2535,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       if (reports.length === 0) {
         throw firstFailure instanceof Error ? firstFailure : new Error("Report generation failed.");
       }
-      return { failedFormats, reports, requestedCount: intents.length };
+      return { failedFormats, ownerLost: false, reports, requestedCount: intents.length };
     },
-    onSuccess: ({ failedFormats, reports, requestedCount }) => {
+    onSuccess: ({ failedFormats, ownerLost, reports, requestedCount }, { owner }) => {
+      if (ownerLost || !canApplyReportOwner(owner)) {
+        return;
+      }
       const allFormatsSucceeded =
         requestedCount === ALL_REPORT_FORMATS.length &&
         failedFormats.length === 0 &&
@@ -2118,6 +2551,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       setReportDialogOpen(false);
       setReportScopeSnapshot(null);
       setReportIntents(null);
+      reportIntentOwnerRef.current = null;
       window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
       if (failedFormats.length > 0) {
         setReportToastWarning(true);
@@ -2141,10 +2575,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       // stale. The reports query is disabled off the reports route, so this
       // marks it stale and it refetches when that route enables it.
       void queryClient.invalidateQueries({
-        queryKey: queryKeys.reports(sessionScopeId, workspaceRef),
+        queryKey: queryKeys.reports(owner.sessionScopeId, owner.workspaceRef),
       });
     },
   });
+  const reportMutationOwned = sameRunEpochOwner(
+    reportFromRunMutation.variables?.owner,
+    activeRunOwner,
+  );
+  const reportMutationPending = reportMutationOwned && reportFromRunMutation.isPending;
+  const reportMutationError = reportMutationOwned ? reportFromRunMutation.error : null;
 
   const deleteReportsMutation = useMutation({
     mutationKey: mutationKeys.reports(sessionScopeId, workspaceRef),
@@ -3355,11 +3795,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!exportReport) {
       return;
     }
-    void exportDownload.download(
-      "export",
-      getReportDownloadPath(exportReport.report_id),
-      exportReport.file_name || `${exportReport.report_id}.${exportReport.output_format}`,
-    );
+    void exportDownload.download({
+      fallbackFilename:
+        exportReport.file_name || `${exportReport.report_id}.${exportReport.output_format}`,
+      key: "export",
+      path: getReportDownloadPath(exportReport.report_id),
+    });
   };
 
   // All reports remain selectable for deletion. Export derives its own subset
@@ -3394,34 +3835,45 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     if (chosen.length === 1) {
       const [report] = chosen;
-      await exportDownload.download(
-        `selected-${report.report_id}`,
-        getReportDownloadPath(report.report_id),
-        report.file_name || `${report.report_id}.${report.output_format}`,
-      );
+      await exportDownload.download({
+        fallbackFilename: report.file_name || `${report.report_id}.${report.output_format}`,
+        key: `selected-${report.report_id}`,
+        path: getReportDownloadPath(report.report_id),
+      });
       return;
     }
-    await exportDownload.download("selected-zip", REPORTS_EXPORT_PATH, "reports_export.zip", {
-      body: JSON.stringify({ report_ids: chosen.map((report) => report.report_id) }),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
+    await exportDownload.download({
+      fallbackFilename: "reports_export.zip",
+      init: {
+        body: JSON.stringify({ report_ids: chosen.map((report) => report.report_id) }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      },
+      key: "selected-zip",
+      path: REPORTS_EXPORT_PATH,
     });
   };
 
   const handleDownloadGeneratedAllReports = () => {
-    if (generatedAllReportIds?.length !== ALL_REPORT_FORMATS.length) {
+    const owner = activeRunOwner;
+    if (
+      generatedAllReportIds?.length !== ALL_REPORT_FORMATS.length ||
+      !owner ||
+      !canApplyReportOwner(owner)
+    ) {
       return;
     }
-    void generatedAllBundleDownload.download(
-      "generated-all-zip",
-      REPORTS_EXPORT_PATH,
-      "reports_export.zip",
-      {
+    void generatedAllBundleDownload.download({
+      fallbackFilename: "reports_export.zip",
+      init: {
         body: JSON.stringify({ report_ids: generatedAllReportIds }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       },
-    );
+      isCurrent: () => canApplyReportOwner(owner),
+      key: "generated-all-zip",
+      path: REPORTS_EXPORT_PATH,
+    });
   };
 
   const handleDeleteReports = (
@@ -3451,7 +3903,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // source_run_ids so the report traces back to it.
   const handleGenerateReportFromRun = (opener: HTMLButtonElement) => {
     const runId = activeRun?.runId;
-    if (!runId) {
+    if (!canEngineer || runAccessClosed || !runId || !activeRunAuthoritativelyTerminal) {
       return;
     }
     setReportToast(null);
@@ -3515,6 +3967,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         }),
       ),
     );
+    reportIntentOwnerRef.current = activeRun
+      ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
+      : null;
     reportDialogOpenerRef.current = opener;
     setReportTitle(defaultReportTitle(activeRunRecord));
     reportFromRunMutation.reset();
@@ -3525,31 +3980,54 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReportDialogOpen(false);
     setReportScopeSnapshot(null);
     setReportIntents(null);
+    reportIntentOwnerRef.current = null;
     window.requestAnimationFrame(() => reportDialogOpenerRef.current?.focus());
   };
 
   const handleReportDialogSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const title = reportTitle.trim();
-    if (!reportIntents || !title || title.length > 160) {
+    const owner = reportIntentOwnerRef.current;
+    if (
+      !reportIntents ||
+      !title ||
+      title.length > 160 ||
+      !canEngineer ||
+      runAccessClosed ||
+      !activeRunAuthoritativelyTerminal ||
+      !activeRun ||
+      !owner ||
+      !sameRunEpochOwner(owner, activeRunOwner)
+    ) {
       return;
     }
     reportFromRunMutation.mutate({
       intents: reportIntents,
+      owner,
       reportTitle: title,
     });
   };
 
   const handleValidationJsonDownload = () => {
     const run = validationRunQuery.data;
-    if (!run || run.job_type !== "udmi_validation" || !isTerminalStatus(run.status)) {
+    const owner = activeRunOwner;
+    if (
+      !owner ||
+      !canDownloadValidationJson ||
+      !canReadTerminalActiveRunEvidence(owner) ||
+      !run ||
+      run.run_id !== owner.runId ||
+      run.job_type !== "udmi_validation" ||
+      !isTerminalStatus(run.status)
+    ) {
       return;
     }
-    void validationJsonDownload.download(
-      "validation-json",
-      getValidationJsonExportPath(run.run_id),
-      `udmi-validation-${run.run_id}.json`,
-    );
+    void validationJsonDownload.download({
+      fallbackFilename: `udmi-validation-${run.run_id}.json`,
+      isCurrent: () => canReadTerminalActiveRunEvidence(owner),
+      key: "validation-json",
+      path: getValidationJsonExportPath(run.run_id),
+    });
   };
 
   const renderGeneratedAllReportDownload = () => {
@@ -3604,14 +4082,22 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // as reports/templates) and pulled through the authenticated download helper,
   // scoped to the active run and the current topic filter.
   const handleCaptureExportXlsx = () => {
-    if (captureRows.length === 0 || !activeRun?.runId) {
+    const owner = activeRunOwner;
+    if (
+      captureRows.length === 0 ||
+      !owner ||
+      !canReadActiveRunEvidence(owner) ||
+      activeRun?.kind !== "discovery" ||
+      module.route !== "mqtt-discovery"
+    ) {
       return;
     }
-    void exportDownload.download(
-      "capture-xlsx",
-      getDiscoveryTopicsXlsxPath(activeRun.runId, captureTopicFilter),
-      `mqtt-capture-${Date.now()}.xlsx`,
-    );
+    void captureExportDownload.download({
+      fallbackFilename: `mqtt-capture-${Date.now()}.xlsx`,
+      isCurrent: () => canReadActiveRunEvidence(owner),
+      key: "capture-xlsx",
+      path: getDiscoveryTopicsXlsxPath(owner.runId, captureTopicFilter),
+    });
   };
 
   const handleCopyPayload = async (payload: string, label: string) => {
@@ -3856,7 +4342,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         )}
       </section>
 
-      {comparisonRunId && activeRun?.kind === "discovery" && (
+      {!runAccessClosed && comparisonRunId && activeRun?.kind === "discovery" && (
         <section className="surface run-comparison-panel" aria-label="Sealed run comparison">
           <div className="surface-heading">
             <div>
@@ -4000,11 +4486,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           className="secondary-button compact"
                           disabled={templateDownload.pendingKey !== null}
                           onClick={() =>
-                            void templateDownload.download(
-                              "template-xlsx",
-                              getImportTemplatePath(selectedImportType, "xlsx"),
-                              `${selectedImportType}_template.xlsx`,
-                            )
+                            void templateDownload.download({
+                              fallbackFilename: `${selectedImportType}_template.xlsx`,
+                              key: "template-xlsx",
+                              path: getImportTemplatePath(selectedImportType, "xlsx"),
+                            })
                           }
                           type="button"
                         >
@@ -4016,11 +4502,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           className="secondary-button compact"
                           disabled={templateDownload.pendingKey !== null}
                           onClick={() =>
-                            void templateDownload.download(
-                              "template-csv",
-                              getImportTemplatePath(selectedImportType, "csv"),
-                              `${selectedImportType}_template.csv`,
-                            )
+                            void templateDownload.download({
+                              fallbackFilename: `${selectedImportType}_template.csv`,
+                              key: "template-csv",
+                              path: getImportTemplatePath(selectedImportType, "csv"),
+                            })
                           }
                           type="button"
                         >
@@ -4190,7 +4676,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                             </option>
                             {(scanAuthorizationsQuery.data ?? []).map((authorization) => (
                               <option
-                                disabled={!isUsableScanAuthorization(authorization, authorizationNow)}
+                                disabled={
+                                  !isUsableScanAuthorization(authorization, authorizationNow)
+                                }
                                 key={authorization.authorization_id}
                                 value={authorization.authorization_id}
                               >
@@ -4208,15 +4696,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           </span>
                           {scanPreviewSealed &&
                             !scanAuthorizationsQuery.isLoading &&
-                            !hasUsableScanAuthorization && (
-                            canAdmin ? (
+                            !hasUsableScanAuthorization &&
+                            (canAdmin ? (
                               <div className="form-stack">
                                 <strong>Approve this preview</strong>
                                 <label>
                                   Change ticket
                                   <input
                                     disabled={createScanAuthorizationMutation.isPending}
-                                    onChange={(event) => setScanAuthorizationTicket(event.target.value)}
+                                    onChange={(event) =>
+                                      setScanAuthorizationTicket(event.target.value)
+                                    }
                                     value={scanAuthorizationTicket}
                                   />
                                 </label>
@@ -4224,7 +4714,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                   Approval purpose
                                   <input
                                     disabled={createScanAuthorizationMutation.isPending}
-                                    onChange={(event) => setScanAuthorizationPurpose(event.target.value)}
+                                    onChange={(event) =>
+                                      setScanAuthorizationPurpose(event.target.value)
+                                    }
                                     value={scanAuthorizationPurpose}
                                   />
                                 </label>
@@ -4236,7 +4728,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                                       const selectedWindow = SCAN_AUTHORIZATION_WINDOW_HOURS.find(
                                         (windowHours) => windowHours === event.target.value,
                                       );
-                                      if (selectedWindow) setScanAuthorizationWindowHours(selectedWindow);
+                                      if (selectedWindow)
+                                        setScanAuthorizationWindowHours(selectedWindow);
                                     }}
                                     value={scanAuthorizationWindowHours}
                                   >
@@ -4273,8 +4766,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               <span className="field-note">
                                 An admin must approve this preview before an engineer can run it.
                               </span>
-                            )
-                          )}
+                            ))}
                         </div>
                       )}
                     </>
@@ -4312,9 +4804,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       ? ENGINEER_REQUIRED_TOOLTIP
                       : nmapSelectionBlocked
                         ? "Operator-managed Nmap is not confirmed and available for this site."
-                          : startedRunActive
-                            ? "A run is already in progress. Stop it before starting another."
-                            : scanBlocked
+                        : startedRunActive
+                          ? "A run is already in progress. Stop it before starting another."
+                          : scanBlocked
                             ? isSealedNetworkDiscoveryModule
                               ? "Confirm scan authorization and select a sealed preview (or enable dry run) before starting a real scan."
                               : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
@@ -4388,12 +4880,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       className="secondary-button compact inline-link-button"
                       disabled={reportDownload.pendingKey !== null}
                       onClick={() =>
-                        void reportDownload.download(
-                          "report",
-                          getReportDownloadPath(lastReport.report_id),
-                          lastReport.file_name ||
+                        void reportDownload.download({
+                          fallbackFilename:
+                            lastReport.file_name ||
                             `${lastReport.report_id}.${lastReport.output_format}`,
-                        )
+                          key: "report",
+                          path: getReportDownloadPath(lastReport.report_id),
+                        })
                       }
                       type="button"
                     >
@@ -4574,7 +5067,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           {rollbackMutation.isPending ? "Rolling back..." : "Roll back publish"}
                         </button>
                       )}
-                    {canEngineer && activeRunTerminal && (
+                    {canEngineer &&
+                      activeRunAuthoritativelyTerminal &&
+                      runController.phase !== "submitting" && (
                       <ReportFromRunControls
                         format={reportExportFormat}
                         isUdmiRun={
@@ -4585,7 +5080,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         onUdmiVariantChange={setUdmiReportVariant}
                         onFormatChange={setReportExportFormat}
                         onGenerate={handleGenerateReportFromRun}
-                        pending={reportFromRunMutation.isPending}
+                        pending={reportMutationPending}
                       />
                     )}
                   </div>
@@ -4603,8 +5098,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                       {renderGeneratedAllReportDownload()}
                     </>
                   )}
-                  {reportFromRunMutation.isError && (
-                    <span className="error-text">{reportFromRunMutation.error.message}</span>
+                  {reportMutationError && (
+                    <span className="error-text">{reportMutationError.message}</span>
                   )}
                   {validationJsonDownload.error && (
                     <span className="error-text">
@@ -4925,7 +5420,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </button>
                 <button
                   className="secondary-button compact"
-                  disabled={captureRows.length === 0 || exportDownload.pendingKey !== null}
+                  disabled={captureRows.length === 0 || captureExportDownload.pendingKey !== null}
                   onClick={handleCaptureExportXlsx}
                   title={
                     captureRows.length === 0
@@ -4934,7 +5429,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   }
                   type="button"
                 >
-                  {exportDownload.pendingKey === "capture-xlsx" ? "Exporting..." : "Export to XLSX"}
+                  {captureExportDownload.pendingKey === "capture-xlsx"
+                    ? "Exporting..."
+                    : "Export to XLSX"}
                 </button>
               </div>
             </div>
@@ -5076,11 +5573,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 className="secondary-button"
                 disabled={schemaTemplateDownload.pendingKey !== null}
                 onClick={() =>
-                  void schemaTemplateDownload.download(
-                    "udmi-schema-template",
-                    getUdmiSchemaTemplatePath(),
-                    "udmi-schema-template-1.5.2.zip",
-                  )
+                  void schemaTemplateDownload.download({
+                    fallbackFilename: "udmi-schema-template-1.5.2.zip",
+                    key: "udmi-schema-template",
+                    path: getUdmiSchemaTemplatePath(),
+                  })
                 }
                 type="button"
               >
@@ -5773,11 +6270,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               className="secondary-button compact"
                               disabled={!downloadable || exportDownload.pendingKey !== null}
                               onClick={() =>
-                                void exportDownload.download(
-                                  `row-${report.report_id}`,
-                                  getReportDownloadPath(report.report_id),
-                                  report.file_name || `${report.report_id}.${report.output_format}`,
-                                )
+                                void exportDownload.download({
+                                  fallbackFilename:
+                                    report.file_name ||
+                                    `${report.report_id}.${report.output_format}`,
+                                  key: `row-${report.report_id}`,
+                                  path: getReportDownloadPath(report.report_id),
+                                })
                               }
                               title={
                                 downloadable
@@ -6241,7 +6740,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </article>
 
-            {module.route === "bacnet-discovery" && activeRunTerminal && (
+            {module.route === "bacnet-discovery" && !runAccessClosed && activeRunAuthoritativelyTerminal && (
               <section className="surface" aria-labelledby="bacnet-points-heading">
                 <div className="surface-heading">
                   <div>
@@ -6427,7 +6926,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </div>
                     <button
                       className="secondary-button compact"
-                      disabled={propertyExpansionMutation.isPending || propertyCeiling.length === 0}
+                      disabled={propertyExpansionPending || propertyCeiling.length === 0}
                       onClick={() => {
                         const requestedReadSet = propertyRequestedReadSet.filter((property) =>
                           propertyCeiling.includes(property),
@@ -6438,15 +6937,18 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         }
                         setPropertyPreviewRunId(null);
                         setPropertyRunId(null);
-                        propertyExpansionMutation.mutate({
-                          parentRunId: activeRun.runId,
-                          requestedReadSet,
-                          row: detailRow,
-                        });
+                        if (activeRunOwner) {
+                          propertyExpansionMutation.mutate({
+                            owner: activeRunOwner,
+                            parentRunId: activeRun.runId,
+                            requestedReadSet,
+                            row: detailRow,
+                          });
+                        }
                       }}
                       type="button"
                     >
-                      {propertyExpansionMutation.isPending
+                      {propertyExpansionPending
                         ? "Creating property preview..."
                         : "Read more properties"}
                     </button>
@@ -6478,14 +6980,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         <button
                           className="secondary-button compact"
                           disabled={
-                            propertyLiveMutation.isPending ||
+                            propertyLivePending ||
                             !propertyAuthorizationId ||
                             propertyRunState !== "sealed"
                           }
-                          onClick={() => propertyLiveMutation.mutate()}
+                          onClick={() => {
+                            if (
+                              activeRunOwner &&
+                              propertyOwner &&
+                              propertyRequest &&
+                              propertyPreviewRunId &&
+                              propertyAuthorizationId &&
+                              sameRunEpochOwner(propertyOwner, activeRunOwner)
+                            ) {
+                              propertyLiveMutation.mutate({
+                                authorizationId: propertyAuthorizationId,
+                                owner: activeRunOwner,
+                                previewRunId: propertyPreviewRunId,
+                                request: propertyRequest,
+                              });
+                            }
+                          }}
                           type="button"
                         >
-                          {propertyLiveMutation.isPending
+                          {propertyLivePending
                             ? "Starting child..."
                             : "Start child read"}
                         </button>
@@ -6494,11 +7012,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                           !isTerminalStatus(propertyRunQuery.data?.status) && (
                             <button
                               className="secondary-button compact"
-                              disabled={propertyCancelling || propertyCancelMutation.isPending}
-                              onClick={() => propertyCancelMutation.mutate()}
+                              disabled={propertyCancellingForActiveOwner || propertyCancelPending}
+                              onClick={() => {
+                                if (
+                                  activeRunOwner &&
+                                  propertyOwner &&
+                                  propertyRunId &&
+                                  sameRunEpochOwner(propertyOwner, activeRunOwner)
+                                ) {
+                                  propertyCancelMutation.mutate({
+                                    owner: activeRunOwner,
+                                    runId: propertyRunId,
+                                  });
+                                }
+                              }}
                               type="button"
                             >
-                              {propertyCancelling ? "Cancelling..." : "Stop child read"}
+                              {propertyCancellingForActiveOwner ? "Cancelling..." : "Stop child read"}
                             </button>
                           )}
                         {propertyRunId && propertyRunId !== propertyPreviewRunId && (
@@ -6784,7 +7314,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           attach itself to the monitor, this card would toast twice on one
           screen. Cheap insurance, unreachable today; don't read it as evidence
           the case exists. */}
-        {module.route !== "reports" && canEngineer && activeRun && activeRunTerminal && (
+        {module.route !== "reports" &&
+          canEngineer &&
+          activeRun &&
+          activeRunAuthoritativelyTerminal &&
+          runController.phase !== "submitting" && (
           <section className="surface" data-stepgroup="results">
             <div className="surface-heading">
               <div>
@@ -6802,7 +7336,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 onUdmiVariantChange={setUdmiReportVariant}
                 onFormatChange={setReportExportFormat}
                 onGenerate={handleGenerateReportFromRun}
-                pending={reportFromRunMutation.isPending}
+                pending={reportMutationPending}
               />
             </div>
             {reportToast && (
@@ -6821,8 +7355,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 {renderGeneratedAllReportDownload()}
               </div>
             )}
-            {reportFromRunMutation.isError && (
-              <span className="error-text">{reportFromRunMutation.error.message}</span>
+            {reportMutationError && (
+              <span className="error-text">{reportMutationError.message}</span>
             )}
           </section>
         )}
@@ -6881,15 +7415,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 />
               </label>
               <small>{reportTitle.length}/160 characters</small>
-              {reportFromRunMutation.isError && (
+              {reportMutationError && (
                 <span className="error-text" role="alert">
-                  {reportFromRunMutation.error.message}
+                  {reportMutationError.message}
                 </span>
               )}
               <div className="inline-actions report-title-dialog-actions">
                 <button
                   className="secondary-button compact"
-                  disabled={reportFromRunMutation.isPending}
+                  disabled={reportMutationPending}
                   onClick={closeReportDialog}
                   type="button"
                 >
@@ -6897,10 +7431,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </button>
                 <button
                   className="primary-button compact"
-                  disabled={reportFromRunMutation.isPending || reportTitle.trim().length === 0}
+                  disabled={reportMutationPending || reportTitle.trim().length === 0}
                   type="submit"
                 >
-                  {reportFromRunMutation.isPending ? "Generating..." : "Generate report"}
+                  {reportMutationPending ? "Generating..." : "Generate report"}
                 </button>
               </div>
             </form>
@@ -8886,24 +9420,66 @@ function captureRowsToCsv(rows: CaptureRow[]): string {
 function useFileDownload(apiClient: SessionBoundApiClient) {
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const generationRef = useRef(0);
+  const controllerRef = useRef<AbortController | null>(null);
+
+  useEffect(
+    () => () => {
+      generationRef.current += 1;
+      controllerRef.current?.abort();
+      controllerRef.current = null;
+    },
+    [],
+  );
 
   const download = useCallback(
-    async (key: string, path: string, fallbackFilename: string, init?: RequestInit) => {
+    async ({
+      fallbackFilename,
+      init,
+      isCurrent = () => true,
+      key,
+      path,
+    }: {
+      fallbackFilename: string;
+      init?: RequestInit;
+      isCurrent?: () => boolean;
+      key: string;
+      path: string;
+    }) => {
+      controllerRef.current?.abort();
+      const controller = new AbortController();
+      controllerRef.current = controller;
+      const generation = generationRef.current + 1;
+      generationRef.current = generation;
       setPendingKey(key);
       setError(null);
       try {
-        const { blob, filename } = await downloadFile(path, init, { client: apiClient });
+        const { blob, filename } = await downloadFile(path, init, {
+          client: apiClient,
+          signal: controller.signal,
+        });
+        if (generation !== generationRef.current || !isCurrent()) {
+          return;
+        }
         triggerBlobDownload(blob, filename ?? fallbackFilename);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : "Download failed.");
+        if (generation === generationRef.current && !controller.signal.aborted && isCurrent()) {
+          setError(cause instanceof Error ? cause.message : "Download failed.");
+        }
       } finally {
-        setPendingKey(null);
+        if (generation === generationRef.current) {
+          controllerRef.current = null;
+          setPendingKey(null);
+        }
       }
     },
     [apiClient],
   );
 
   const reset = useCallback(() => {
+    generationRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
     setPendingKey(null);
     setError(null);
   }, []);

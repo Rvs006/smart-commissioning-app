@@ -135,6 +135,141 @@ class ImportAuthorityRepository(Protocol):
     def get(self, import_id: str) -> dict[str, object]: ...
 
 
+def is_ip_dry_run_preview(parameters: Mapping[str, object]) -> bool:
+    """Match the route's accepted dry-run forms without resolving a request."""
+
+    value = parameters.get("dry_run")
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def normalize_ip_preview_idempotency_parameters(
+    parameters: Mapping[str, object],
+) -> dict[str, object]:
+    """Return pure request-shape equivalences used before IP preview creation.
+
+    This deliberately mirrors only coercions and defaults already applied while
+    building the IP scan contract. Target expressions, exclusions, provider
+    selection, Nmap profile selection, and unknown fields stay untouched.
+    Invalid input is returned unchanged so normal route validation owns its
+    error response.
+    """
+
+    original = copy.deepcopy(dict(parameters))
+    if not is_ip_dry_run_preview(original):
+        return original
+
+    canonical = copy.deepcopy(original)
+    provider = canonical.get("provider") or "builtin_tcp_connect"
+    if provider not in {"builtin_tcp_connect", "operator_managed_nmap"}:
+        return original
+    profile = str(canonical.get("profile") or "gentle").strip().casefold()
+    limits = _IP_PROFILE_LIMITS.get(profile)
+    if limits is None:
+        return original
+    nmap_profile = canonical.get("nmap_profile") or NmapProfileName.TCP_CONNECT_INVENTORY.value
+    if provider == "operator_managed_nmap":
+        try:
+            nmap_profile = NmapProfileName(str(nmap_profile)).value
+        except ValueError:
+            return original
+
+    try:
+        max_hosts = min(
+            _bounded_positive_int(
+                canonical.get("max_hosts"),
+                default=MAX_IPV4_HOSTS,
+                ceiling=MAX_IPV4_HOSTS,
+                label="max_hosts",
+            ),
+            int(limits["max_hosts"]),
+        )
+        max_ports = min(
+            _bounded_positive_int(
+                canonical.get("max_ports"),
+                default=MAX_PROTOCOL_PORTS,
+                ceiling=MAX_PROTOCOL_PORTS,
+                label="max_ports",
+            ),
+            int(limits["max_ports"]),
+        )
+        policy = _ip_policy(
+            canonical,
+            profile=profile,
+            max_hosts=max_hosts,
+            max_ports=max_ports,
+        )
+        requested_concurrency = _policy_positive_int(
+            canonical.get("scan_max_concurrency"),
+            default=int(limits["max_concurrency"]),
+            ceiling=2_147_483_647,
+            label="scan_max_concurrency",
+        )
+        requested_rate = _finite_nonnegative_float(
+            canonical.get("scan_rate_limit_per_sec")
+            if canonical.get("scan_rate_limit_per_sec") not in (None, "")
+            else float(limits["max_rate_limit_per_sec"]),
+            label="scan_rate_limit_per_sec",
+        )
+        requested_timeout = _finite_positive_float(
+            canonical.get("scan_connect_timeout_s")
+            if canonical.get("scan_connect_timeout_s") not in (None, "")
+            else (3.0 if profile == "gentle" else 5.0),
+            label="scan_connect_timeout_s",
+        )
+        ports = (
+            ()
+            if provider == "operator_managed_nmap"
+            and nmap_profile == NmapProfileName.HOST_DISCOVERY.value
+            else _request_ports(canonical, max_ports=max_ports)
+        )
+    except (OverflowError, TypeError, ValueError, ValidationError):
+        return original
+
+    canonical["dry_run"] = True
+    canonical["provider"] = provider
+    canonical["profile"] = profile
+    canonical["use_register_addresses"] = canonical.get("use_register_addresses") is True
+    # The route suppresses DNS enrichment for every IP request before resolving.
+    canonical["reverse_dns"] = False
+    canonical["max_hosts"] = max_hosts
+    canonical["max_ports"] = max_ports
+    canonical["max_dispatch_attempts"] = policy.total_dispatch_attempt_ceiling
+    canonical["scan_retries"] = policy.retries
+    canonical["scan_target_spacing_ms"] = policy.min_target_spacing_ms
+    canonical["scan_retry_backoff_ms"] = policy.retry_backoff_ms
+    canonical["scan_dispatch_phase_seconds"] = policy.dispatch_phase_seconds
+    canonical["scan_cleanup_margin_seconds"] = policy.cleanup_margin_seconds
+    canonical["scan_run_deadline_seconds"] = policy.run_deadline_seconds
+    canonical["scan_per_target_concurrency"] = policy.per_target_concurrency
+    canonical["scan_max_concurrency"] = min(
+        requested_concurrency,
+        policy.profile_max_concurrency,
+    )
+    canonical["scan_rate_limit_per_sec"] = min(
+        requested_rate or policy.profile_max_rate_limit_per_sec,
+        policy.profile_max_rate_limit_per_sec,
+    )
+    canonical["scan_connect_timeout_s"] = min(
+        requested_timeout,
+        3.0 if profile == "gentle" else 5.0,
+    )
+    canonical["planned_extended_risk_acknowledged"] = policy.risk_acknowledged
+    canonical["ports"] = (
+        []
+        if not ports
+        else [
+            item.model_dump(mode="json")
+            for item in normalize_protocol_ports(ports, max_ports=max_ports)
+        ]
+    )
+    canonical.pop("port_specification", None)
+    if provider == "operator_managed_nmap":
+        canonical["nmap_profile"] = nmap_profile
+    return canonical
+
+
 def resolve_ip_discovery_parameters(
     parameters: Mapping[str, Any],
     *,
@@ -2113,7 +2248,7 @@ def _request_ports(
                 parsed.extend(parse_protocol_port_spec(value, max_ports=max_ports))
             else:
                 parsed.append(ProtocolPortV1(port=int(value), protocol="tcp"))
-    except (TypeError, ValueError, ValidationError) as error:
+    except (OverflowError, TypeError, ValueError, ValidationError) as error:
         raise ValueError(f"invalid protocol-aware ports: {error}") from error
     return normalize_protocol_ports(parsed, max_ports=max_ports)
 

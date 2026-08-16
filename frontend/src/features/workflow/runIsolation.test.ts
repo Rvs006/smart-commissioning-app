@@ -363,14 +363,69 @@ describe("frontend run and session isolation", () => {
     const started = runControllerReducer(initialRunControllerState, {
       type: "accepted",
       runRef: active,
+      epoch: 1,
     });
     const unchanged = runControllerReducer(started, {
       type: "terminal-observed",
       runId: "run-a",
+      epoch: 1,
     });
 
     expect(unchanged).toBe(started);
     expect(unchanged.phase).toBe("active");
+  });
+
+  it("keeps a same-ID preview terminal cursor out of the next submission epoch", () => {
+    const preview = foldObservationPage(
+      createObservationFoldState({ runId: "shared-run", epoch: 1 }, 2),
+      observationPage([], {
+        run_id: "shared-run",
+        next_cursor: 7,
+        latest_cursor: 7,
+        terminal: { status: "succeeded", terminal_cursor: 7 },
+      }),
+    );
+    const live = createObservationFoldState({ runId: "shared-run", epoch: 2 }, 2);
+
+    expect(preview.owner).toEqual({ runId: "shared-run", epoch: 1 });
+    expect(preview.acknowledgedCursor).toBe(7);
+    expect(preview.terminal).toEqual({ status: "succeeded", terminal_cursor: 7 });
+    expect(live.owner).toEqual({ runId: "shared-run", epoch: 2 });
+    expect(live.acknowledgedCursor).toBe(0);
+    expect(live.terminal).toBeNull();
+  });
+
+  it("ignores delayed terminal and evidence actions from a preview epoch that reused the live run id", () => {
+    const scope = createSessionScopeId();
+    const shared = toRunRef(
+      scope,
+      DEFAULT_WORKSPACE,
+      "ip-scanner",
+      run({ job_type: "ip_discovery", run_id: "shared-run", status: "running" }),
+    );
+    const live = runControllerReducer(
+      runControllerReducer(initialRunControllerState, {
+        type: "accepted",
+        runRef: shared,
+        epoch: 1,
+      }),
+      { type: "accepted", runRef: shared, epoch: 2 },
+    );
+    const afterPreviewTerminal = runControllerReducer(live, {
+      type: "terminal-observed",
+      runId: shared.runId,
+      epoch: 1,
+    });
+    const afterPreviewEvidence = runControllerReducer(afterPreviewTerminal, {
+      type: "evidence-succeeded",
+      runId: shared.runId,
+      epoch: 1,
+      requirements: ["run", "results"],
+    });
+
+    expect(afterPreviewTerminal).toBe(live);
+    expect(afterPreviewEvidence).toBe(live);
+    expect(afterPreviewEvidence).toMatchObject({ epoch: 2, phase: "active" });
   });
 
   it("settles MQTT from the terminal result snapshot without a live topics refresh", () => {
@@ -388,14 +443,16 @@ describe("frontend run and session isolation", () => {
     let state = runControllerReducer(initialRunControllerState, {
       type: "accepted",
       runRef: active,
+      epoch: 1,
     });
-    state = runControllerReducer(state, { type: "terminal-observed", runId: "run-mqtt" });
+    state = runControllerReducer(state, { type: "terminal-observed", runId: "run-mqtt", epoch: 1 });
     expect(state.phase).toBe("terminal-sync");
     expect(evidenceRequirementsFor(active)).toEqual(["run", "results"]);
 
     state = runControllerReducer(state, {
       type: "evidence-succeeded",
       runId: "run-mqtt",
+      epoch: 1,
       requirements: ["run", "results"],
     });
     expect(state.phase).toBe("settled");
@@ -416,19 +473,23 @@ describe("frontend run and session isolation", () => {
     let state = runControllerReducer(initialRunControllerState, {
       type: "accepted",
       runRef: active,
+      epoch: 1,
     });
     state = runControllerReducer(state, {
       type: "terminal-observed",
       runId: "run-ip",
+      epoch: 1,
       terminalCursor: 5,
     });
     state = runControllerReducer(state, {
       type: "terminal-observed",
       runId: "run-ip",
+      epoch: 1,
     });
     state = runControllerReducer(state, {
       type: "evidence-succeeded",
       runId: "run-ip",
+      epoch: 1,
       requirements: ["run", "results"],
     });
 
@@ -436,6 +497,7 @@ describe("frontend run and session isolation", () => {
     state = runControllerReducer(state, {
       type: "observation-cursor-acknowledged",
       runId: "run-ip",
+      epoch: 1,
       cursor: 4,
     });
     expect(state.phase).toBe("terminal-sync");
@@ -443,12 +505,14 @@ describe("frontend run and session isolation", () => {
       runControllerReducer(state, {
         type: "observation-cursor-acknowledged",
         runId: "run-ip",
+        epoch: 1,
         cursor: 4,
       }),
     ).toBe(state);
     state = runControllerReducer(state, {
       type: "observation-cursor-acknowledged",
       runId: "run-ip",
+      epoch: 1,
       cursor: 5,
     });
     expect(state.phase).toBe("settled");
@@ -469,14 +533,17 @@ describe("frontend run and session isolation", () => {
     let state = runControllerReducer(initialRunControllerState, {
       type: "accepted",
       runRef: active,
+      epoch: 1,
     });
     state = runControllerReducer(state, {
       type: "terminal-observed",
       runId: active.runId,
+      epoch: 1,
     });
     state = runControllerReducer(state, {
       type: "evidence-succeeded",
       runId: active.runId,
+      epoch: 1,
       requirements: ["run", "results"],
     });
     expect(state.phase).toBe("settled");
@@ -484,6 +551,7 @@ describe("frontend run and session isolation", () => {
     state = runControllerReducer(state, {
       type: "terminal-observed",
       runId: active.runId,
+      epoch: 1,
       terminalCursor: 6,
     });
     expect(state).toMatchObject({
