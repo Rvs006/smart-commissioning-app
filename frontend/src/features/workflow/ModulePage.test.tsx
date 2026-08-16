@@ -155,6 +155,16 @@ function jsonResponse(payload: unknown): Response {
   } as unknown as Response;
 }
 
+function errorResponse(payload: unknown, status: number): Response {
+  return {
+    ok: false,
+    status,
+    statusText: "Conflict",
+    json: async () => payload,
+    text: async () => JSON.stringify(payload),
+  } as unknown as Response;
+}
+
 function controlledSseStream() {
   const encoder = new TextEncoder();
   const queued: Array<{ done: boolean; value?: Uint8Array }> = [];
@@ -1168,9 +1178,16 @@ describe("ModulePage discovery wiring", () => {
 
   it("fences same-ID preview MQTT topics from the accepted live epoch", async () => {
     const sharedRunId = "run-mqtt-reused";
-    let liveAccepted = false;
+    let liveSubmissionStarted = false;
+    let liveResponseResolved = false;
     let previewTopicsSignal: AbortSignal | null = null;
+    let previewExportSignal: AbortSignal | null = null;
+    let previewTopicsRequests = 0;
     let liveTopicsRequests = 0;
+    let resolveLivePost!: (response: Response) => void;
+    const livePost = new Promise<Response>((resolve) => {
+      resolveLivePost = resolve;
+    });
     const terminal = { ...mqttTerminal, run_id: sharedRunId };
     vi.stubGlobal(
       "fetch",
@@ -1181,17 +1198,34 @@ describe("ModulePage discovery wiring", () => {
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
           const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
-          liveAccepted ||= !body.parameters.dry_run;
+          if (!body.parameters.dry_run) {
+            liveSubmissionStarted = true;
+            return livePost;
+          }
           return jsonResponse({ ...mqttAccepted, run_id: sharedRunId });
         }
         if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) return jsonResponse(terminal);
         if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
           return jsonResponse({ ...resultsPayload, run_id: sharedRunId, discovered_assets: [] });
         }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics.xlsx`)) {
+          previewExportSignal = init?.signal ?? null;
+          return new Promise<Response>(() => {});
+        }
         if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics`)) {
-          if (!liveAccepted) {
+          if (!liveSubmissionStarted) {
+            previewTopicsRequests += 1;
+            if (previewTopicsRequests === 1) {
+              return jsonResponse({
+                run_id: sharedRunId,
+                topics: [{ topic: "preview/site/device/events", last_payload: { preview: true } }],
+              });
+            }
             previewTopicsSignal = init?.signal ?? null;
             return new Promise<Response>(() => {});
+          }
+          if (!liveResponseResolved) {
+            throw new Error("Live MQTT topics were requested before the submission response resolved.");
           }
           liveTopicsRequests += 1;
           return jsonResponse({
@@ -1203,9 +1237,23 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    const view = renderModule("mqtt-discovery");
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Export to XLSX" }));
+    await waitFor(() => expect(previewExportSignal).not.toBeNull());
+    const previewTopicsKey = view.queryClient
+      .getQueryCache()
+      .findAll()
+      .find(
+        (query) =>
+          Array.isArray(query.queryKey) &&
+          query.queryKey.includes("topics") &&
+          query.queryKey.includes(sharedRunId),
+      )?.queryKey;
+    expect(previewTopicsKey).toBeDefined();
+    void view.queryClient.invalidateQueries({ queryKey: previewTopicsKey });
     await waitFor(() => expect(previewTopicsSignal).not.toBeNull());
     fireEvent.click(screen.getByLabelText(/Dry run/i));
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
@@ -1213,9 +1261,124 @@ describe("ModulePage discovery wiring", () => {
     await waitFor(() => expect(runButton).toBeEnabled());
     fireEvent.click(runButton);
     await waitFor(() => expect(previewTopicsSignal?.aborted).toBe(true));
+    await waitFor(() => expect(previewExportSignal?.aborted).toBe(true));
+    expect(liveTopicsRequests).toBe(0);
+    liveResponseResolved = true;
+    resolveLivePost(jsonResponse({ ...mqttAccepted, run_id: sharedRunId }));
     await waitFor(() => expect(liveTopicsRequests).toBeGreaterThan(0));
     expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
     expect(await screen.findByText("live/site/device/events")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["transport", () => Promise.reject(new Error("live MQTT response lost"))],
+    ["HTTP 408", () => Promise.resolve(errorResponse({ detail: "Request timed out." }, 408))],
+    ["HTTP 429", () => Promise.resolve(errorResponse({ detail: "Too many requests." }, 429))],
+    ["HTTP 500", () => Promise.resolve(errorResponse({ detail: "Server error." }, 500))],
+  ])("re-reserves a definitively rejected same-ID MQTT live retry before an ambiguous %s failure", async (_kind, ambiguousResponse) => {
+    const sharedRunId = "run-mqtt-retry-fence";
+    let liveAttempts = 0;
+    let statusRequests = 0;
+    let streamRequests = 0;
+    let liveTopicRequests = 0;
+    let resultsRequests = 0;
+    let exportRequests = 0;
+    const stream = controlledSseStream();
+    const terminal = { ...mqttTerminal, run_id: sharedRunId };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
+          if (body.parameters.dry_run) {
+            return jsonResponse({ ...mqttAccepted, run_id: sharedRunId });
+          }
+          liveAttempts += 1;
+          if (liveAttempts === 1) {
+            return errorResponse({ detail: "Authorization expired." }, 409);
+          }
+          return ambiguousResponse();
+        }
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          streamRequests += 1;
+          return stream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          resultsRequests += 1;
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, discovered_assets: [] });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics.xlsx`)) {
+          exportRequests += 1;
+          return new Promise<Response>(() => {});
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics`)) {
+          liveTopicRequests += 1;
+          return jsonResponse({
+            run_id: sharedRunId,
+            topics: [{ topic: "preview/site/device/events", last_payload: { preview: true } }],
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Export to XLSX" }));
+    await waitFor(() => expect(exportRequests).toBe(1));
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    await screen.findByText(/Run request failed/i);
+    await waitFor(() => expect(runButton).toBeEnabled());
+    expect(liveAttempts).toBe(1);
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled();
+    const evidenceRequestsAfterRejection = {
+      exportRequests,
+      liveTopicRequests,
+      resultsRequests,
+      statusRequests,
+      streamRequests,
+    };
+    expect(evidenceRequestsAfterRejection.statusRequests).toBeGreaterThan(0);
+    expect(evidenceRequestsAfterRejection.streamRequests).toBeGreaterThan(0);
+    expect(evidenceRequestsAfterRejection.liveTopicRequests).toBeGreaterThan(0);
+    expect(evidenceRequestsAfterRejection.resultsRequests).toBeGreaterThan(0);
+
+    // Install the fake clock while the definitive-rejection state is quiet so
+    // any polling a regression starts for the second submission is owned by it.
+    vi.useFakeTimers();
+    fireEvent.click(runButton);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(liveAttempts).toBe(2);
+    expect(runButton).toBeDisabled();
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect({ exportRequests, liveTopicRequests, resultsRequests, statusRequests, streamRequests }).toEqual(
+      evidenceRequestsAfterRejection,
+    );
+    expect(runButton).toBeDisabled();
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled();
   });
 
   it("lets a viewer download MQTT XLSX evidence", async () => {
@@ -2573,7 +2736,60 @@ describe("ModulePage BACnet backend provenance", () => {
     expect(statusRequests).toBe(statusRequestsAtLivePost);
     expect(resultsRequests).toBe(resultsRequestsAtLivePost);
     expect(streamRequests).toBe(streamRequestsAtLivePost);
+    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     expect(screen.queryAllByRole("button", { name: /Generate report from this run/i })).toHaveLength(0);
+  });
+
+  it("releases a definitively rejected same-ID BACnet live submission for retry without reusing preview evidence", async () => {
+    const sharedRunId = "run-bacnet-definitive-rejection";
+    let livePosts = 0;
+    let statusRequests = 0;
+    const terminal = { ...terminalRun, run_id: sharedRunId, job_type: "bacnet_discovery" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { preview_run_id?: string };
+          if (body.preview_run_id) {
+            livePosts += 1;
+            return errorResponse({ detail: "Authorization has already been consumed." }, 409);
+          }
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await screen.findAllByRole("button", { name: /Generate report from this run/i });
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    fireEvent.click(runButton);
+
+    await screen.findByText(/Run request failed/i);
+    await waitFor(() => expect(runButton).toBeEnabled());
+    expect(livePosts).toBe(1);
+    expect(screen.queryAllByRole("button", { name: /Generate report from this run/i })).toHaveLength(0);
+    expect(statusRequests).toBeGreaterThan(0);
+    fireEvent.click(runButton);
+    await waitFor(() => expect(livePosts).toBe(2));
   });
 
   it("discards a held authorized BACnet response after its active owner is replaced", async () => {

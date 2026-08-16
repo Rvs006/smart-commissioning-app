@@ -316,6 +316,16 @@ function isTransientRunStatusError(error: unknown): boolean {
   );
 }
 
+function isDefinitiveLiveSubmissionRejection(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  );
+}
+
 type ProjectedObservationRecord = Readonly<{
   entityKey: string;
   observation: DiscoveryObservationRecord;
@@ -608,6 +618,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
   const [reservedLiveSubmissionOwner, setReservedLiveSubmissionOwner] =
     useState<RunEpochOwner | null>(null);
+  const [definitiveLiveRejectionOwner, setDefinitiveLiveRejectionOwner] =
+    useState<RunEpochOwner | null>(null);
   const reservedLiveSubmissionOwnerRef = useRef<RunEpochOwner | null>(null);
   const activeRunEpochRef = useRef(0);
   const nextActiveRunEpoch = useCallback(() => ++activeRunEpochRef.current, []);
@@ -805,6 +817,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         reservedLiveSubmissionOwner,
       ),
   );
+  const activeRunMatchesDefinitiveLiveRejection = Boolean(
+    activeRun &&
+      sameRunEpochOwner(
+        { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef },
+        definitiveLiveRejectionOwner,
+      ),
+  );
 
   const profilesQuery = useQuery({
     queryFn: ({ signal }) => listImportProfiles({ client: apiClient, signal }),
@@ -818,7 +837,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     activeRun?.ref,
     Boolean(activeRun) &&
       runController.phase !== "submitting" &&
-      !activeRunMatchesReservedLiveSubmission,
+      !activeRunMatchesReservedLiveSubmission &&
+      !activeRunMatchesDefinitiveLiveRejection,
     apiClient,
     activeRun?.epoch ?? 0,
   );
@@ -878,6 +898,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       !runAccessClosed &&
       runController.phase !== "submitting" &&
       !activeRunMatchesReservedLiveSubmission &&
+      !activeRunMatchesDefinitiveLiveRejection &&
       Boolean(activeRun) &&
       activeRun?.kind === "validation",
     queryFn: ({ signal }) =>
@@ -981,6 +1002,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     enabled:
       !runAccessClosed &&
       runController.phase !== "submitting" &&
+      !activeRunMatchesDefinitiveLiveRejection &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery",
     queryFn: ({ signal }) => getDiscoveryRun(activeRun?.runId ?? "", { client: apiClient, signal }),
@@ -1081,6 +1103,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const activeRunTerminal = isTerminalStatus(activeRunStatus);
   const activeRunAuthoritativelyTerminal = Boolean(
     activeRun &&
+      !activeRunMatchesDefinitiveLiveRejection &&
       activeRunRecord?.run_id === activeRun.runId &&
       runController.phase !== "submitting" &&
       runController.runRef?.runId === activeRun.runId &&
@@ -1412,7 +1435,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // claiming 100% before the terminal flip); an indefinite/unknown run shows an
   // active sweep. Clock source is the polled run record, not the SSE frame (the
   // frame carries no created_at).
-  const runIsActive = Boolean(activeRun) && !runAccessClosed && !activeRunTerminal;
+  const runIsActive =
+    Boolean(activeRun) &&
+    !runAccessClosed &&
+    !activeRunTerminal &&
+    !activeRunMatchesDefinitiveLiveRejection;
   const activeRunElapsedSeconds = useElapsedSeconds(
     activeRunRecord?.created_at,
     runIsActive,
@@ -1623,6 +1650,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const captureTopicsQuery = useQuery({
     enabled:
       !runAccessClosed &&
+      !activeRunMatchesReservedLiveSubmission &&
+      !activeRunMatchesDefinitiveLiveRejection &&
       module.route === "mqtt-discovery" &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery",
@@ -1932,6 +1961,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setLastReport(null);
     setActiveRun(null);
     setReservedLiveSubmissionOwner(null);
+    setDefinitiveLiveRejectionOwner(null);
     reservedLiveSubmissionOwnerRef.current = null;
     runAccessClosedScopeRef.current = null;
     setScanPreviewActive(false);
@@ -2370,10 +2400,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
       const reservesAuthorizedLiveEpoch =
         action?.kind === "discovery" &&
-        (action.runKind === "ip" || action.runKind === "bacnet") &&
         !variables.dryRun &&
         activeRun?.kind === "discovery" &&
-        activeRun.runId === scanPreviewRunId;
+        (((action.runKind === "ip" || action.runKind === "bacnet") &&
+          activeRun.runId === scanPreviewRunId) ||
+          (action.runKind === "mqtt" &&
+            (scanPreviewActive || activeRunMatchesDefinitiveLiveRejection)));
       if (reservesAuthorizedLiveEpoch && activeRun) {
         const reservedRun = { ...activeRun, epoch: nextActiveRunEpoch(), restored: false };
         const reservedOwner: RunEpochOwner = {
@@ -2390,15 +2422,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           reservedLiveSubmissionOwnerRef.current = reservedOwner;
           setActiveRun(reservedRun);
           setReservedLiveSubmissionOwner(reservedOwner);
+          setDefinitiveLiveRejectionOwner(null);
           dispatchRun({ type: "submitting" });
           setScanPreviewActive(false);
         });
+        if (action.runKind === "mqtt") {
+          captureExportDownload.reset();
+        }
         fenceRunEvidence(activeRun);
         return { reservedOwner, reservedRun };
       }
       if (
         action?.kind === "discovery" &&
-        (action.runKind === "ip" || action.runKind === "bacnet")
+        (action.runKind === "ip" || action.runKind === "bacnet" || action.runKind === "mqtt")
       ) {
         setScanPreviewActive(variables.dryRun);
       }
@@ -2408,6 +2444,19 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     onError: (_error, _variables, context) => {
       const reservedOwner = context?.reservedOwner ?? reservedLiveSubmissionOwnerRef.current;
       if (reservedOwner) {
+        if (!canApplyReservedLiveSubmission(reservedOwner)) {
+          return;
+        }
+        if (isDefinitiveLiveSubmissionRejection(_error)) {
+          // The server definitely rejected this live start. Leave the reserved
+          // epoch unreadable so a terminal preview cannot reattach, but release
+          // the controller for a fresh authorized attempt.
+          reservedLiveSubmissionOwnerRef.current = null;
+          setReservedLiveSubmissionOwner(null);
+          setDefinitiveLiveRejectionOwner(reservedOwner);
+          dispatchRun({ type: "reset" });
+          return;
+        }
         // A transport failure is ambiguous: the server may already have
         // accepted the live start. Keep its reserved owner in submitting so
         // the terminal preview cannot re-attach as a readable live run.
@@ -2450,6 +2499,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           if (context?.reservedRun) {
             setReservedLiveSubmissionOwner(null);
             reservedLiveSubmissionOwnerRef.current = null;
+            setDefinitiveLiveRejectionOwner(null);
             evidenceSyncRef.current = null;
             activeRunOwnerRef.current = { epoch, runId: result.run_id, sessionScopeId, workspaceRef };
           }
@@ -4269,6 +4319,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       captureRows.length === 0 ||
       !owner ||
       !canReadActiveRunEvidence(owner) ||
+      activeRunMatchesReservedLiveSubmission ||
+      activeRunMatchesDefinitiveLiveRejection ||
       activeRun?.kind !== "discovery" ||
       module.route !== "mqtt-discovery"
     ) {
@@ -4276,7 +4328,10 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     void captureExportDownload.download({
       fallbackFilename: `mqtt-capture-${Date.now()}.xlsx`,
-      isCurrent: () => canReadActiveRunEvidence(owner),
+      isCurrent: () =>
+        !activeRunMatchesReservedLiveSubmission &&
+        !activeRunMatchesDefinitiveLiveRejection &&
+        canReadActiveRunEvidence(owner),
       key: "capture-xlsx",
       path: getDiscoveryTopicsXlsxPath(owner.runId, captureTopicFilter),
     });
