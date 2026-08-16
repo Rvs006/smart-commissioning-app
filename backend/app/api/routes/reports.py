@@ -32,8 +32,10 @@ from app.schemas.jobs import (
 )
 from app.services.report_artifacts import (
     ReportArtifactIntegrityError,
+    ReportProvenanceError,
     delete_report_artifact,
     load_owned_report_artifact,
+    report_provenance_from_snapshot,
     store_report_artifact,
 )
 from app.services.report_naming import build_report_file_name, report_content_disposition
@@ -162,6 +164,16 @@ def create_report(
         if not isinstance(snapshot_hash, str) or not isinstance(generated_at, str):
             raise RuntimeError("Report snapshot provenance is incomplete.")
         content, media_type = _build_report_artifact(render_run, report.output_format)
+        provenance = _report_provenance(render_run)
+        application_version = provenance.get("application_version")
+        source_run_ids = provenance.get("source_run_ids")
+        source_provenance = provenance.get("sources")
+        if (
+            not isinstance(application_version, str)
+            or not isinstance(source_run_ids, list)
+            or not isinstance(source_provenance, list)
+        ):
+            raise RuntimeError("Report build provenance is incomplete.")
         manifest = store_report_artifact(
             report_id=run.run_id,
             snapshot_hash=snapshot_hash,
@@ -171,6 +183,9 @@ def create_report(
             origin=str(run.edge_id or "api"),
             signed_at=generated_at,
             evidence_set_id=report.evidence_set_id,
+            application_version=application_version,
+            source_run_ids=source_run_ids,
+            source_provenance=source_provenance,
         )
         service.complete_report_run(run.run_id, manifest)
     except Exception as error:
@@ -191,6 +206,8 @@ def create_report(
                 delete_report_artifact(manifest, report_id=run.run_id)
             except (OSError, RuntimeError, ValueError):
                 pass
+        if isinstance(error, ReportProvenanceError):
+            raise HTTPException(status_code=422, detail=str(error)) from error
         raise HTTPException(status_code=500, detail="Report artifact materialization failed.") from error
     return _to_report_summary(render_run)
 
@@ -423,9 +440,12 @@ def _report_artifact_for_serving(
     )
     manifest = summary.get("artifact_manifest")
     if isinstance(manifest, dict):
+        parameters = serving_run.parameters if isinstance(serving_run.parameters, dict) else {}
+        report_snapshot = parameters.get("report_snapshot_v2")
         artifact, media_type = load_owned_report_artifact(
             report_id=run_id,
             manifest=manifest,
+            report_snapshot=report_snapshot if isinstance(report_snapshot, dict) else None,
             synchronized=SyncV2Repository(service.engine).get_artifact(run_id),
             require_valid_signature=require_valid_signature,
         )
@@ -786,6 +806,15 @@ def _source_runs(run: object) -> list[object]:
         # report's evidence scope.
         sources.append(service.get_run(key))
     return sources
+
+
+def _report_provenance(run: object) -> dict[str, object]:
+    """Return source and build identity from the report's frozen snapshot."""
+
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    snapshot = parameters.get("report_snapshot_v2")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    return report_provenance_from_snapshot(snapshot, fallback_parameters=parameters)
 
 
 def _asset_topic_discovery_export(run: object) -> dict[str, object] | None:
@@ -2862,6 +2891,10 @@ def _build_udmi_client_zip_report(run: object, data: dict[str, object]) -> bytes
     buffer = BytesIO()
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
+            "provenance.json",
+            json.dumps(_report_provenance(run), indent=2, sort_keys=True),
+        )
+        archive.writestr(
             "summary.json",
             json.dumps(dict(_report_rows(run, udmi_data=data)), indent=2),
         )
@@ -2893,6 +2926,10 @@ def _build_zip_report(run: object) -> bytes:
         udmi = _udmi_report_data(run)
         if udmi is not None and _udmi_report_variant(run) == "client":
             return _build_udmi_client_zip_report(run, udmi)
+        archive.writestr(
+            "provenance.json",
+            json.dumps(_report_provenance(run), indent=2, sort_keys=True),
+        )
         archive.writestr(
             "summary.json",
             json.dumps(dict(_report_rows(run, udmi_data=udmi)), indent=2),

@@ -1,8 +1,7 @@
 import { useEffect, useMemo } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
-  createReport,
   getHealth,
   getValidationIssues,
   listImportProfiles,
@@ -22,8 +21,8 @@ import {
   toHealthState,
 } from "./runFormat";
 import { useRunEvents } from "./useRunEvents";
-import { ENGINEER_REQUIRED_TOOLTIP, useSession } from "../../app/sessionContext";
-import { mutationKeys, queryKeys } from "../../api/queryKeys";
+import { useSession } from "../../app/sessionContext";
+import { queryKeys } from "../../api/queryKeys";
 import { toRunRef } from "./runIsolation";
 
 const briefSteps = [
@@ -117,9 +116,7 @@ function parseBlockingFinding(issue: ValidationIssueRecord): ParsedFinding {
 }
 
 export function DashboardPage() {
-  // Queueing an evidence pack is a report-create (engineer+). A viewer/reviewer
-  // sees the button disabled with an explanatory tooltip rather than a 403.
-  const { apiClient, canEngineer, sessionScopeId, workspace } = useSession();
+  const { apiClient, sessionScopeId, workspace } = useSession();
   const healthQuery = useQuery({
     queryFn: ({ signal }) => getHealth({ client: apiClient, signal }),
     queryKey: queryKeys.health(sessionScopeId, workspace),
@@ -200,19 +197,6 @@ export function DashboardPage() {
     ),
   });
 
-  const reportMutation = useMutation({
-    mutationKey: mutationKeys.reports(sessionScopeId, workspace),
-    mutationFn: () =>
-      createReport({
-        context: { client: apiClient },
-        reportType: "evidence_pack",
-        workspace,
-      }),
-    onSuccess: () => {
-      void reportsQuery.refetch();
-    },
-  });
-
   const runs = runsQuery.data?.runs ?? [];
   const recentRuns = runs.slice(0, 4);
   const reports = reportsQuery.data?.reports ?? [];
@@ -285,15 +269,6 @@ export function DashboardPage() {
         </div>
       </section>
 
-      {reportMutation.isSuccess && (
-        <div className="state-panel success">
-          <strong>Evidence pack queued</strong>
-          <span>
-            {reportMutation.data.report_id} will create {reportMutation.data.file_name}.
-          </span>
-        </div>
-      )}
-
       <section className="home-actions">
         <Link className="primary-button" to="/udmi-validation">
           Continue UDMI validation
@@ -301,15 +276,6 @@ export function DashboardPage() {
         <Link className="secondary-button" to="/ip-scanner">
           Review discovery
         </Link>
-        <button
-          className="secondary-button"
-          disabled={reportMutation.isPending || !canEngineer}
-          onClick={() => reportMutation.mutate()}
-          title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
-          type="button"
-        >
-          {reportMutation.isPending ? "Queueing..." : "Queue evidence pack"}
-        </button>
       </section>
 
       <section className="kpi-strip compact-kpis">

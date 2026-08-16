@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from typing import Any
 
 from smart_commissioning_core.db.repositories import ImportRepository
@@ -44,6 +45,37 @@ _SENSITIVE_KEYS = {
 }
 _MQTT_JOBS = {"mqtt_discovery", "udmi_validation", "mqtt_config_publish"}
 _BACNET_JOBS = {"bacnet_discovery"}
+_RUNTIME_PROVENANCE_ENVIRONMENT = {
+    "source_commit": "SMART_COMMISSIONING_SOURCE_COMMIT",
+    "portable_exe_sha256": "SMART_COMMISSIONING_PORTABLE_EXE_SHA256",
+}
+_RUNTIME_PROVENANCE_ALIASES = {
+    "application_source_commit",
+    "exe_sha256",
+    "portable_hash",
+}
+_PORTABLE_EXE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_COMMIT_MAX_LENGTH = 128
+
+
+def _runtime_build_provenance() -> dict[str, str]:
+    provenance: dict[str, str] = {}
+    for parameter_name, environment_name in _RUNTIME_PROVENANCE_ENVIRONMENT.items():
+        runtime_value = os.environ.get(environment_name, "").strip()
+        if not runtime_value or runtime_value.casefold() == "unknown":
+            continue
+        if parameter_name == "portable_exe_sha256":
+            runtime_value = runtime_value.casefold()
+            if not _PORTABLE_EXE_SHA256_RE.fullmatch(runtime_value):
+                raise ValueError(
+                    f"{environment_name} must be a 64-character hexadecimal SHA-256 digest."
+                )
+        elif len(runtime_value) > _SOURCE_COMMIT_MAX_LENGTH:
+            raise ValueError(
+                f"{environment_name} must be at most {_SOURCE_COMMIT_MAX_LENGTH} characters."
+            )
+        provenance[parameter_name] = runtime_value
+    return provenance
 
 
 def build_run_context(
@@ -56,6 +88,7 @@ def build_run_context(
     requesting_principal: str,
 ) -> RunContextV1:
     application_version = effective_application_version()
+    runtime_provenance = _runtime_build_provenance()
     configuration = ConfigurationService(engine).load(
         project_id, site_id, mask_secrets=False
     ).model_dump(mode="json")
@@ -70,13 +103,16 @@ def build_run_context(
         references=references,
         path=("engine_parameters",),
     )
-    for parameter_name, environment_name in (
-        ("source_commit", "SMART_COMMISSIONING_SOURCE_COMMIT"),
-        ("portable_exe_sha256", "SMART_COMMISSIONING_PORTABLE_EXE_SHA256"),
-    ):
-        runtime_value = os.environ.get(environment_name, "").strip()
-        if runtime_value and runtime_value.casefold() != "unknown":
-            frozen_parameters.setdefault(parameter_name, runtime_value)
+    # Build identity is runtime-owned evidence. A scan request must not be able
+    # to override it and then have that caller-controlled value signed into a
+    # report. Historical aliases remain readable in old snapshots, but new run
+    # contexts never persist them from request parameters.
+    for parameter_name in {
+        *_RUNTIME_PROVENANCE_ENVIRONMENT,
+        *_RUNTIME_PROVENANCE_ALIASES,
+    }:
+        frozen_parameters.pop(parameter_name, None)
+    frozen_parameters.update(runtime_provenance)
     configuration_digest = hashlib.sha256(
         canonical_json_bytes(frozen_configuration)
     ).hexdigest()

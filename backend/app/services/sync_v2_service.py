@@ -29,7 +29,7 @@ from app.core.sync_auth import SyncPrincipal
 from app.services.report_artifacts import (
     canonical_json_bytes,
     store_content_addressed_artifact,
-    verify_signed_manifest,
+    verify_report_manifest_binding,
 )
 
 
@@ -195,7 +195,11 @@ def _verify_artifact(
         return None, None
     if not isinstance(manifest, dict) or descriptor.artifact_member is None:
         return "missing_artifact", None
-    if not verify_signed_manifest(manifest):
+    report_snapshot = item.get("report_snapshot")
+    if not verify_report_manifest_binding(
+        manifest,
+        report_snapshot=report_snapshot if isinstance(report_snapshot, dict) else None,
+    ):
         return "manifest_signature_failed", None
     if manifest.get("origin") != opened.manifest.edge_id:
         return "malformed", None

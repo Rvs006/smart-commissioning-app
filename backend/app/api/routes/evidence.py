@@ -39,7 +39,7 @@ from app.services.backup_service import (
 )
 from app.services.report_artifacts import (
     ReportArtifactIntegrityError,
-    verify_signed_manifest,
+    verify_report_manifest_binding,
 )
 from app.services.reports_integrity import (
     INTEGRITY_KEY,
@@ -123,6 +123,8 @@ def verify_report(
         computed_hash = sha256_bytes(artifact)
         stored_hash = manifest.get("artifact_sha256")
         stored_key_id = manifest.get("signing_key_id")
+        parameters = run.parameters if isinstance(run.parameters, dict) else {}
+        report_snapshot = parameters.get("report_snapshot_v2")
         try:
             current_key_id = load_signing_key().public_key_fingerprint()
         except Exception:
@@ -130,7 +132,10 @@ def verify_report(
         return ReportVerifyResponse(
             report_id=report_id,
             hash_matches=isinstance(stored_hash, str) and stored_hash == computed_hash,
-            signature_valid=verify_signed_manifest(manifest),
+            signature_valid=verify_report_manifest_binding(
+                manifest,
+                report_snapshot=report_snapshot if isinstance(report_snapshot, dict) else None,
+            ),
             key_matches_current=(
                 stored_key_id == current_key_id
                 if isinstance(stored_key_id, str) and isinstance(current_key_id, str)

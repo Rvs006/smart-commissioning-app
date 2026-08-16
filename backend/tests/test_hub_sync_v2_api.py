@@ -464,7 +464,11 @@ class HubSyncV2ApiTests(ApiTestCase):
         output_format: str = "pdf",
     ) -> str:
         from app.schemas.jobs import ReportRequest
-        from app.services.report_artifacts import REPORT_RENDERER_VERSION
+        from app.services.report_artifacts import (
+            ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            REPORT_RENDERER_VERSION,
+            effective_report_renderer_version,
+        )
         from app.services.report_artifacts import canonical_json_bytes as artifact_json
         from app.services.run_service import RunService
 
@@ -488,7 +492,7 @@ class HubSyncV2ApiTests(ApiTestCase):
             "zip": "application/zip",
         }
         unsigned = {
-            "schema_version": "1.1",
+            "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
             "report_id": run.run_id,
             "snapshot_sha256": run.parameters["report_snapshot_sha256"],
             "file_name": f"public-sync-{marker}.{output_format}",
@@ -504,6 +508,9 @@ class HubSyncV2ApiTests(ApiTestCase):
             "signing_key_id": cls.artifact_key.public_key_fingerprint(),
             "signed_at": run.parameters["report_generated_at"],
             "evidence_set_id": run.parameters["evidence_set_id"],
+            "application_version": effective_report_renderer_version(),
+            "source_run_ids": [],
+            "source_provenance": [],
         }
         signed_body = artifact_json(unsigned)
         manifest = {
@@ -1077,6 +1084,52 @@ class HubSyncV2ApiTests(ApiTestCase):
         response = self._post(_alter_terminal_summary(bundle, self.edge_key, change_origin))
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["receipts"][0]["class"], "malformed")
+
+    def test_resigned_manifest_cannot_forge_frozen_source_provenance(self) -> None:
+        run_id = self._report("project-alpha", "site-alpha", "provenance-tamper")
+        bundle = self._bundle([run_id])
+        from app.services.report_artifacts import canonical_json_bytes as artifact_json
+
+        def change_provenance(summary, item) -> None:
+            artifact_manifest = dict(summary["artifact_manifest"])
+            artifact_manifest["source_run_ids"] = ["run_forged_source"]
+            artifact_manifest["source_provenance"] = [
+                {
+                    "source_run_id": "run_forged_source",
+                    "application_version": "9.9.9",
+                    "source_commit": "a" * 40,
+                    "portable_exe_sha256": "b" * 64,
+                    "context_sha256": "c" * 64,
+                    "result_sha256": "d" * 64,
+                }
+            ]
+            unsigned = {
+                key: value
+                for key, value in artifact_manifest.items()
+                if key
+                not in {
+                    "signature_algorithm",
+                    "signature",
+                    "public_key_pem",
+                    "signed_manifest_sha256",
+                }
+            }
+            signed_body = artifact_json(unsigned)
+            artifact_manifest["signature"] = base64.b64encode(
+                self.artifact_key.sign(signed_body)
+            ).decode()
+            artifact_manifest["signed_manifest_sha256"] = sha256_bytes(signed_body)
+            summary["artifact_manifest"] = artifact_manifest
+            item["artifact_manifest"] = artifact_manifest
+
+        response = self._post(
+            _alter_terminal_summary(bundle, self.edge_key, change_provenance)
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.json()["receipts"][0]["class"],
+            "manifest_signature_failed",
+        )
 
     def test_secret_variants_and_certificate_artifact_never_cross(self) -> None:
         run_id = self._report("project-alpha", "site-alpha", "secret-variant")

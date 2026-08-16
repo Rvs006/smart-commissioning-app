@@ -215,6 +215,9 @@ class EdgeFixture:
             "origin": self.identity.edge_id,
             "signing_key_id": self.artifact_key.public_key_fingerprint(),
             "signed_at": run.parameters["report_generated_at"],
+            "application_version": APPLICATION_VERSION,
+            "source_run_ids": [],
+            "source_provenance": [],
         }
         body = artifact_json_bytes(unsigned)
         manifest = {

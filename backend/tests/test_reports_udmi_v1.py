@@ -6,6 +6,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import unittest
 import xml.etree.ElementTree as ElementTree
 import zipfile
@@ -615,33 +616,43 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(validation["filter_provenance"]["text"], "")
 
     def test_technical_report_preserves_run_provenance_and_register_digest(self) -> None:
-        source_id = self._seed_run(
-            parameters={
-                "register_import_id": "imp-provenance-1",
-                "register_import_filename": "approved-register.csv",
-                "register_revision": "rev-2026-08-06",
-                "register_sha256": "a" * 64,
-                "source_commit": "b" * 40,
-                "portable_exe_sha256": "c" * 64,
-                "machine_reference": "commissioning-laptop-01",
-                "broker_reference": "broker-profile-01",
-                "operator_reference": "operator-01",
-                "topic_filter": "demo-site/#",
+        from app.services.report_artifacts import verify_signed_manifest
+        from app.services.run_service import RunService
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SMART_COMMISSIONING_SOURCE_COMMIT": "b" * 40,
+                "SMART_COMMISSIONING_PORTABLE_EXE_SHA256": "c" * 64,
             },
-            result_summary_extra={
-                "broker_capture_attempted": True,
-                "capture_mode": "bounded",
-                "capture_window_seconds": 3600,
-                "capture_started_at": "2026-08-05T08:00:00+00:00",
-                "capture_ended_at": "2026-08-05T09:00:00+00:00",
-                "capture_duration_seconds": 3600.0,
-                "window_completed": True,
-                "termination_reason": "window_elapsed",
-            },
-        )
+        ):
+            source_id = self._seed_run(
+                parameters={
+                    "register_import_id": "imp-provenance-1",
+                    "register_import_filename": "approved-register.csv",
+                    "register_revision": "rev-2026-08-06",
+                    "register_sha256": "a" * 64,
+                    "machine_reference": "commissioning-laptop-01",
+                    "broker_reference": "broker-profile-01",
+                    "operator_reference": "operator-01",
+                    "topic_filter": "demo-site/#",
+                },
+                result_summary_extra={
+                    "broker_capture_attempted": True,
+                    "capture_mode": "bounded",
+                    "capture_window_seconds": 3600,
+                    "capture_started_at": "2026-08-05T08:00:00+00:00",
+                    "capture_ended_at": "2026-08-05T09:00:00+00:00",
+                    "capture_duration_seconds": 3600.0,
+                    "window_completed": True,
+                    "termination_reason": "window_elapsed",
+                },
+            )
         report = self._create_report("zip", [source_id])
         with zipfile.ZipFile(io.BytesIO(self._download(report["report_id"]).content)) as archive:
             validation = json.loads(archive.read("validation_summary.json"))
+            portable_provenance = json.loads(archive.read("provenance.json"))
+            raw_manifest = json.loads(archive.read("raw_evidence/manifest.json"))
 
         provenance = validation["evidence_provenance"]["sources"][0]
         self.assertEqual(provenance["source_run_id"], source_id)
@@ -659,6 +670,108 @@ class UdmiV1ReportTests(ApiTestCase):
         )
         self.assertEqual(provenance["capture"]["termination_reason"], "window_elapsed")
         self.assertEqual(provenance["scope"]["topic_filter"], "demo-site/#")
+
+        self.assertEqual(report["source_run_ids"], [source_id])
+        self.assertEqual(portable_provenance["schema_version"], "1.0")
+        health = self.client.get("/api/v1/health")
+        self.assertEqual(health.status_code, 200, health.text)
+        self.assertEqual(portable_provenance["application_version"], health.json()["version"])
+        self.assertEqual(portable_provenance["source_run_ids"], [source_id])
+        self.assertEqual(portable_provenance["sources"][0]["source_run_id"], source_id)
+        self.assertEqual(portable_provenance["sources"][0]["application_version"], "0.1.50")
+        self.assertEqual(portable_provenance["sources"][0]["source_commit"], "b" * 40)
+        self.assertEqual(portable_provenance["sources"][0]["portable_exe_sha256"], "c" * 64)
+        self.assertEqual(
+            [source["source_run_id"] for source in raw_manifest["source_runs"]],
+            [source_id],
+        )
+
+        listed = self.client.get("/api/v1/reports")
+        self.assertEqual(listed.status_code, 200, listed.text)
+        listed_report = next(
+            candidate
+            for candidate in listed.json()["reports"]
+            if candidate["report_id"] == report["report_id"]
+        )
+        self.assertEqual(listed_report["source_run_ids"], [source_id])
+
+        manifest = RunService().get_run(report["report_id"]).result_summary["artifact_manifest"]
+        self.assertEqual(manifest["schema_version"], "1.2")
+        self.assertEqual(manifest["application_version"], health.json()["version"])
+        self.assertEqual(manifest["source_run_ids"], [source_id])
+        self.assertEqual(manifest["source_provenance"], portable_provenance["sources"])
+        self.assertTrue(verify_signed_manifest(manifest))
+        tampered = copy.deepcopy(manifest)
+        tampered["source_provenance"][0]["source_commit"] = "d" * 40
+        self.assertFalse(verify_signed_manifest(tampered))
+
+    def test_historical_report_provenance_normalizes_valid_legacy_hashes(self) -> None:
+        from types import SimpleNamespace
+
+        from app.api.routes.reports import ReportProvenanceError, _report_provenance
+
+        source_id = "run_historical_source"
+        report_run = SimpleNamespace(
+            parameters={
+                "report_snapshot_v2": {
+                    "renderer_version": "0.1.50",
+                    "source_run_ids": [source_id],
+                    "source_run_snapshots": [
+                        {
+                            "run_id": source_id,
+                            "parameters": {
+                                "application_version": "0.1.49",
+                                "application_source_commit": "legacy-commit",
+                                "exe_sha256": "A" * 64,
+                            },
+                        }
+                    ],
+                    "configuration_provenance": {},
+                    "source_result_hashes": {},
+                    "source_run_seals": {},
+                }
+            }
+        )
+
+        provenance = _report_provenance(report_run)
+        self.assertEqual(provenance["source_run_ids"], [source_id])
+        self.assertEqual(provenance["sources"][0]["portable_exe_sha256"], "a" * 64)
+
+        report_run.parameters["report_snapshot_v2"]["source_run_snapshots"][0]["parameters"][
+            "application_source_commit"
+        ] = "x" * 129
+        with self.assertRaisesRegex(ReportProvenanceError, "source_commit"):
+            _report_provenance(report_run)
+
+    def test_malformed_stored_provenance_returns_422_without_publishing_a_report(self) -> None:
+        from app.api.routes.reports import ReportProvenanceError
+
+        before = {
+            report["report_id"] for report in self.client.get("/api/v1/reports").json()["reports"]
+        }
+        with mock.patch(
+            "app.api.routes.reports._report_provenance",
+            side_effect=ReportProvenanceError(
+                "Stored report provenance field 'source_commit' exceeds 128 characters."
+            ),
+        ):
+            response = self.client.post(
+                "/api/v1/reports",
+                json={
+                    "project_id": "demo-project",
+                    "site_id": "demo-site",
+                    "report_type": "evidence_pack",
+                    "output_format": "zip",
+                    "source_run_ids": [],
+                },
+            )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("source_commit", response.json()["detail"])
+        after = {
+            report["report_id"] for report in self.client.get("/api/v1/reports").json()["reports"]
+        }
+        self.assertEqual(after, before)
 
     def test_client_report_product_is_metrics_only_and_uses_same_evidence_set(self) -> None:
         source_id = self._seed_run(
@@ -690,7 +803,10 @@ class UdmiV1ReportTests(ApiTestCase):
         with zipfile.ZipFile(io.BytesIO(self._download(client["report_id"]).content)) as archive:
             names = set(archive.namelist())
             client_metrics = json.loads(archive.read("client_metrics.json"))
+            provenance = json.loads(archive.read("provenance.json"))
         self.assertIn("client_metrics.json", names)
+        self.assertEqual(provenance["source_run_ids"], [source_id])
+        self.assertEqual(provenance["sources"][0]["source_run_id"], source_id)
         self.assertNotIn("fault_details.json", names)
         self.assertNotIn("raw_evidence/records.jsonl", names)
         self.assertEqual(client_metrics["report_product"], "client_metrics")

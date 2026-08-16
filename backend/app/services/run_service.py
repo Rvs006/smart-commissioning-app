@@ -72,11 +72,13 @@ from app.schemas.jobs import (
 )
 from app.services.discovery_contract_service import normalize_ip_preview_idempotency_parameters
 from app.services.report_artifacts import (
+    ARTIFACT_MANIFEST_SCHEMA_VERSION,
     REPORT_SNAPSHOT_SCHEMA_VERSION,
     canonical_json_bytes,
     effective_report_renderer_version,
+    report_manifest_matches_snapshot,
     snapshot_sha256,
-    verify_signed_manifest,
+    verify_report_manifest_binding,
 )
 from app.services.report_naming import build_report_file_name
 from app.services.run_context_builder import build_run_context
@@ -299,6 +301,32 @@ def _project_verified_report_record(
             "result_summary": sealed_summary,
         }
     )
+
+
+def _verify_report_manifest_provenance(run: Mapping[str, object]) -> None:
+    """Bind schema-1.2 provenance to the same snapshot as the report seal."""
+
+    if run.get("job_type") != "report_generation":
+        return
+    parameters = run.get("parameters")
+    summary = run.get("result_summary")
+    if not isinstance(parameters, Mapping) or not isinstance(summary, Mapping):
+        return
+    manifest = summary.get("artifact_manifest")
+    if (
+        not isinstance(manifest, Mapping)
+        or manifest.get("schema_version") != ARTIFACT_MANIFEST_SCHEMA_VERSION
+    ):
+        return
+    report_snapshot = parameters.get("report_snapshot_v2")
+    if not report_manifest_matches_snapshot(
+        manifest,
+        report_snapshot=report_snapshot if isinstance(report_snapshot, Mapping) else None,
+    ):
+        raise SealedRunIntegrityError(
+            "result",
+            "signed report provenance does not match the frozen snapshot",
+        )
 
 
 def _report_record_from_row(run: Run, issues: list[RunIssue]) -> RunRecord:
@@ -703,7 +731,7 @@ class RunService:
                 verifier = verify_sealed_run
 
         try:
-            return verifier(
+            verified = verifier(
                 run_id=run_id,
                 run=run_projection,
                 context=context_projection,
@@ -711,6 +739,8 @@ class RunService:
                 seal=seal_projection,
                 **projection_rows,
             )
+            _verify_report_manifest_provenance(run_projection)
+            return verified
         except SealedRunIntegrityError as error:
             if source_job_type == "report_generation":
                 raise ValueError(
@@ -1685,6 +1715,7 @@ class RunService:
                     },
                     **projection_rows,
                 )
+                _verify_report_manifest_provenance(run_projection)
                 issue_rows = projections["issues"].get(run.id, [])
                 report = _project_verified_report_record(
                     _report_record_from_row(run, issue_rows),
@@ -1872,8 +1903,6 @@ class RunService:
     def complete_report_run(self, run_id: str, manifest: dict[str, object]) -> None:
         """Publish one immutable artifact manifest and terminal status atomically."""
 
-        if not verify_signed_manifest(manifest):
-            raise ValueError("Report artifact manifest is not a supported valid signature.")
         if manifest.get("report_id") != run_id:
             raise ValueError("Report artifact manifest identifies a different run.")
         now = datetime.now(UTC)
@@ -1884,6 +1913,12 @@ class RunService:
                 raise FileNotFoundError(run_id)
             if row.job_type != "report_generation":
                 raise ValueError(f"Run '{run_id}' is not a report-generation run.")
+            report_snapshot = row.parameters.get("report_snapshot_v2")
+            if not verify_report_manifest_binding(
+                manifest,
+                report_snapshot=report_snapshot if isinstance(report_snapshot, dict) else None,
+            ):
+                raise ValueError("Report artifact manifest is not a supported valid signature.")
             current = row.result_summary if isinstance(row.result_summary, dict) else {}
             existing = current.get("artifact_manifest")
             if existing is not None:

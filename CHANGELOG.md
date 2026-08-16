@@ -7,6 +7,15 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Fixed
+
+- Signed report manifests and ZIP exports now retain the selected source-run
+  IDs and frozen build provenance while remaining compatible with manifest
+  schemas 1.0 and 1.1.
+- The Dashboard no longer offers an evidence-pack action without a selected
+  source run, and hosted pages now declare the existing Electracom browser
+  icon instead of requesting a missing favicon.
+
 ## [0.1.50] - 2026-08-16
 
 ### Fixed

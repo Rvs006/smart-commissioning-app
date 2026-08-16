@@ -116,11 +116,25 @@ The result payload is parsed through `TerminalResultV1`. Its calculated digest,
 run status, stage, summary, issues, result envelope, and seal must agree. One
 disagreement makes that item `malformed`.
 
-The signed artifact manifest is an exact-field object containing report ID,
-snapshot SHA-256, filename, media type, byte size, renderer version, artifact
-SHA-256, edge-relative source path, origin, signing-key ID, signing time,
-algorithm, signature, public key, and signed-body SHA-256. Only Ed25519 is
-accepted. The filename must be a basename, not a path.
+The current signed artifact manifest schema is `1.2`. Its signed body is an
+exact-field object containing report ID, snapshot SHA-256, filename, media
+type, byte size, renderer version, artifact SHA-256, edge-relative source path,
+origin, signing-key ID, signing time, evidence-set ID, application version, the
+ordered source-run IDs, and one source-provenance record per source run. Each
+source record retains the source run ID plus any application version, source
+commit, portable EXE SHA-256, context SHA-256, and result SHA-256 frozen with
+that run. Values that were not recorded remain null.
+
+The signature algorithm, signature, public key, and signed-body SHA-256 complete
+the manifest. Only Ed25519 is accepted. The filename must be a basename, not a
+path. Readers continue to accept exact schema `1.1` manifests without the
+application/source provenance fields and exact schema `1.0` manifests that also
+predate the evidence-set ID.
+
+ZIP report products also contain `provenance.json`. Because that member is part
+of the exact artifact bytes whose SHA-256 appears in the signed manifest, its
+contents are covered by the artifact signature without copying mutable runtime
+identity into the report at download time.
 
 ## Canonical hashes and signatures
 
