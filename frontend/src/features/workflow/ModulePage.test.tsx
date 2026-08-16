@@ -3,11 +3,15 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, useLocation } from "react-router";
 import {
   clearApiKey,
+  createSessionBoundApiClient,
   setApiKey,
   type DiscoveryObservationRecord,
   type ReportFormat,
 } from "../../api/client";
+import { queryKeys } from "../../api/queryKeys";
 import { SessionProvider } from "../../app/session";
+import { SessionContext, type SessionContextValue } from "../../app/sessionContext";
+import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
 import { ModulePage } from "./ModulePage";
 import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 
@@ -151,6 +155,16 @@ function jsonResponse(payload: unknown): Response {
   } as unknown as Response;
 }
 
+function errorResponse(payload: unknown, status: number): Response {
+  return {
+    ok: false,
+    status,
+    statusText: "Conflict",
+    json: async () => payload,
+    text: async () => JSON.stringify(payload),
+  } as unknown as Response;
+}
+
 function controlledSseStream() {
   const encoder = new TextEncoder();
   const queued: Array<{ done: boolean; value?: Uint8Array }> = [];
@@ -204,6 +218,7 @@ function renderModule(
   route: string,
   initialEntry = "/",
   scanAuthorizations: ReadonlyArray<typeof previewAuthorization> = [previewAuthorization],
+  useScanAuthorizationFallback = true,
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -211,17 +226,22 @@ function renderModule(
   // A key is set so the SessionProvider fetches /me; the stubs below return an
   // engineer role, matching the pre-RBAC behaviour these wiring tests assert.
   setApiKey("engineer-key");
-  stubScanAuthorizationFallback(scanAuthorizations);
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <SessionProvider>
-        <MemoryRouter initialEntries={[initialEntry]}>
-          <LocationProbe />
-          <ModulePage moduleRoute={route} />
-        </MemoryRouter>
-      </SessionProvider>
-    </QueryClientProvider>,
-  );
+  if (useScanAuthorizationFallback) {
+    stubScanAuthorizationFallback(scanAuthorizations);
+  }
+  return {
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <SessionProvider>
+          <MemoryRouter initialEntries={[initialEntry]}>
+            <LocationProbe />
+            <ModulePage moduleRoute={route} />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>,
+    ),
+    queryClient,
+  };
 }
 
 function stubScanAuthorizationFallback(
@@ -482,6 +502,212 @@ describe("ModulePage discovery wiring", () => {
     await waitFor(() =>
       expect(document.querySelector(".module-steps")).toHaveAttribute("data-step", "results"),
     );
+  });
+
+  it("fences a terminal preview when an adapter reuses its id for the accepted live run", async () => {
+    const sharedRunId = "run-ip-reused-events";
+    const previewStream = controlledSseStream();
+    const liveStream = controlledSseStream();
+    let eventStreamRequests = 0;
+    let liveSubmissionAccepted = false;
+    let previewTerminalSignalReceived = false;
+    let liveTerminal = false;
+    let liveRunStatusRequests = 0;
+    let terminalBarrierStatusRequests = 0;
+    let liveTerminalSignalReceived = false;
+    let liveResultsRequests = 0;
+    let resolvePreviewEvidence: (() => void) | null = null;
+    let resolveFirstTerminalBarrier: (() => void) | null = null;
+    const previewRun = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      status: "running",
+      progress_percent: 25,
+      result_summary: { dry_run: true },
+    };
+    const liveRun = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      status: "running",
+      progress_percent: 25,
+      result_summary: {},
+    };
+    const terminalPreviewRun = { ...previewRun, status: "succeeded" };
+    const terminalLiveRun = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      result_summary: {
+        observation_evidence_v1: {
+          attempt: 1,
+          observation_count: 0,
+          terminal_cursor: 0,
+        },
+      },
+    };
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { parameters?: { dry_run?: boolean } };
+          if (body.parameters?.dry_run) {
+            return jsonResponse({ ...acceptedRun, run_id: sharedRunId, message: "IP preview accepted." });
+          }
+          liveSubmissionAccepted = true;
+          return jsonResponse({ ...acceptedRun, run_id: sharedRunId, message: "IP discovery accepted." });
+        }
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          eventStreamRequests += 1;
+          return eventStreamRequests === 1 ? previewStream.response : liveStream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          if (!liveSubmissionAccepted) {
+            return new Promise<Response>((resolve) => {
+              resolvePreviewEvidence = () =>
+                resolve(
+                  jsonResponse({
+                    ...resultsPayload,
+                    run_id: sharedRunId,
+                    result_summary: { dry_run: true },
+                  }),
+                );
+            });
+          }
+          liveResultsRequests += 1;
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: sharedRunId,
+            discovered_assets: [
+              { ...resultsPayload.discovered_assets[0], hostname: "live-event-controller" },
+            ],
+          });
+        }
+        if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/observations?`)) {
+          if (!liveSubmissionAccepted) {
+            return jsonResponse({
+              run_id: sharedRunId,
+              attempt: 1,
+              observations: [],
+              next_cursor: 7,
+              latest_cursor: 7,
+              has_more: false,
+              terminal: { status: "succeeded", terminal_cursor: 7 },
+              observations_pruned: false,
+            });
+          }
+          return jsonResponse({
+            run_id: sharedRunId,
+            attempt: 1,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: liveTerminal ? { status: "succeeded", terminal_cursor: 0 } : null,
+            observations_pruned: false,
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          if (!liveSubmissionAccepted) {
+            return jsonResponse(previewTerminalSignalReceived ? terminalPreviewRun : previewRun);
+          }
+          liveRunStatusRequests += 1;
+          if (!liveTerminalSignalReceived) {
+            return jsonResponse(liveRun);
+          }
+          terminalBarrierStatusRequests += 1;
+          if (terminalBarrierStatusRequests === 1) {
+            return new Promise<Response>((resolve) => {
+              resolveFirstTerminalBarrier = () => resolve(jsonResponse(liveRun));
+            });
+          }
+          if (terminalBarrierStatusRequests < 4) {
+            return jsonResponse(liveRun);
+          }
+          liveTerminal = true;
+          return jsonResponse(terminalLiveRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await waitFor(() =>
+      expect(screen.getByText(new RegExp(`Run ID: ${sharedRunId}`))).toBeInTheDocument(),
+    );
+
+    previewTerminalSignalReceived = true;
+    await act(async () => {
+      previewStream.push(
+        `event: terminal\ndata: ${JSON.stringify({ run_id: sharedRunId, status: "succeeded" })}\n\n`,
+      );
+    });
+    await waitFor(() => expect(resolvePreviewEvidence).not.toBeNull());
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", {
+      name: /Sealed preview authorization/i,
+    });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    const runButton = screen.getByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    await waitFor(() =>
+      expect(screen.getByText(new RegExp(`Run ID: ${sharedRunId}`))).toBeInTheDocument(),
+    );
+    await waitFor(() => expect(liveRunStatusRequests).toBe(1));
+    expect(liveResultsRequests).toBe(0);
+
+    // The preview evidence request resolves after the new submission has been
+    // accepted. It must not settle the reused live run's controller.
+    await act(async () => {
+      resolvePreviewEvidence?.();
+    });
+    expect(liveResultsRequests).toBe(0);
+
+    // The old stream may still complete after the live run is accepted. That
+    // stale terminal must neither drive live status nor fetch live results.
+    await act(async () => {
+      previewStream.push(
+        `event: terminal\ndata: ${JSON.stringify({ run_id: sharedRunId, status: "succeeded" })}\n\n`,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(liveResultsRequests).toBe(0);
+
+    liveTerminalSignalReceived = true;
+    await act(async () => {
+      liveStream.push(
+        `event: terminal\ndata: ${JSON.stringify({ run_id: sharedRunId, status: "succeeded" })}\n\n`,
+      );
+    });
+
+    // The live stream can report terminal slightly ahead of the durable record.
+    // The bounded status barrier gets all four attempts (initial plus three
+    // delays) before the terminal record allows any live results request.
+    await waitFor(() => expect(resolveFirstTerminalBarrier).not.toBeNull());
+    expect(
+      screen.queryAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(0);
+    expect(liveResultsRequests).toBe(0);
+    await act(async () => {
+      resolveFirstTerminalBarrier?.();
+    });
+    await waitFor(() => expect(liveResultsRequests).toBeGreaterThan(0), { timeout: 4_000 });
+    expect(
+      await screen.findAllByRole("button", { name: /Generate report from this run/i }),
+    ).toHaveLength(2);
+    expect(terminalBarrierStatusRequests).toBe(4);
+    expect(liveRunStatusRequests).toBeGreaterThanOrEqual(5);
   });
 
   it("renders import warnings as a non-blocking amber panel distinct from errors", async () => {
@@ -949,6 +1175,364 @@ describe("ModulePage discovery wiring", () => {
       (postedBody as unknown as { parameters: Record<string, unknown> }).parameters.dry_run,
     ).toBe(true);
   });
+
+  it("fences same-ID preview MQTT topics from the accepted live epoch", async () => {
+    const sharedRunId = "run-mqtt-reused";
+    let liveSubmissionStarted = false;
+    let liveResponseResolved = false;
+    let previewTopicsSignal: AbortSignal | null = null;
+    let previewExportSignal: AbortSignal | null = null;
+    let previewTopicsRequests = 0;
+    let liveTopicsRequests = 0;
+    let resolveLivePost!: (response: Response) => void;
+    const livePost = new Promise<Response>((resolve) => {
+      resolveLivePost = resolve;
+    });
+    const terminal = { ...mqttTerminal, run_id: sharedRunId };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
+          if (!body.parameters.dry_run) {
+            liveSubmissionStarted = true;
+            return livePost;
+          }
+          return jsonResponse({ ...mqttAccepted, run_id: sharedRunId });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) return jsonResponse(terminal);
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, discovered_assets: [] });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics.xlsx`)) {
+          previewExportSignal = init?.signal ?? null;
+          return new Promise<Response>(() => {});
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics`)) {
+          if (!liveSubmissionStarted) {
+            previewTopicsRequests += 1;
+            if (previewTopicsRequests === 1) {
+              return jsonResponse({
+                run_id: sharedRunId,
+                topics: [{ topic: "preview/site/device/events", last_payload: { preview: true } }],
+              });
+            }
+            previewTopicsSignal = init?.signal ?? null;
+            return new Promise<Response>(() => {});
+          }
+          if (!liveResponseResolved) {
+            throw new Error("Live MQTT topics were requested before the submission response resolved.");
+          }
+          liveTopicsRequests += 1;
+          return jsonResponse({
+            run_id: sharedRunId,
+            topics: [{ topic: "live/site/device/events", last_payload: { live: true } }],
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const view = renderModule("mqtt-discovery");
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Export to XLSX" }));
+    await waitFor(() => expect(previewExportSignal).not.toBeNull());
+    const previewTopicsKey = view.queryClient
+      .getQueryCache()
+      .findAll()
+      .find(
+        (query) =>
+          Array.isArray(query.queryKey) &&
+          query.queryKey.includes("topics") &&
+          query.queryKey.includes(sharedRunId),
+      )?.queryKey;
+    expect(previewTopicsKey).toBeDefined();
+    void view.queryClient.invalidateQueries({ queryKey: previewTopicsKey });
+    await waitFor(() => expect(previewTopicsSignal).not.toBeNull());
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    await waitFor(() => expect(previewTopicsSignal?.aborted).toBe(true));
+    await waitFor(() => expect(previewExportSignal?.aborted).toBe(true));
+    expect(liveTopicsRequests).toBe(0);
+    liveResponseResolved = true;
+    resolveLivePost(jsonResponse({ ...mqttAccepted, run_id: sharedRunId }));
+    await waitFor(() => expect(liveTopicsRequests).toBeGreaterThan(0));
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(await screen.findByText("live/site/device/events")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["transport", () => Promise.reject(new Error("live MQTT response lost"))],
+    ["HTTP 408", () => Promise.resolve(errorResponse({ detail: "Request timed out." }, 408))],
+    ["HTTP 429", () => Promise.resolve(errorResponse({ detail: "Too many requests." }, 429))],
+    ["HTTP 500", () => Promise.resolve(errorResponse({ detail: "Server error." }, 500))],
+  ])("re-reserves a definitively rejected same-ID MQTT live retry before an ambiguous %s failure", async (_kind, ambiguousResponse) => {
+    const sharedRunId = "run-mqtt-retry-fence";
+    let liveAttempts = 0;
+    let statusRequests = 0;
+    let streamRequests = 0;
+    let liveTopicRequests = 0;
+    let resultsRequests = 0;
+    let exportRequests = 0;
+    const stream = controlledSseStream();
+    const terminal = { ...mqttTerminal, run_id: sharedRunId };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
+          if (body.parameters.dry_run) {
+            return jsonResponse({ ...mqttAccepted, run_id: sharedRunId });
+          }
+          liveAttempts += 1;
+          if (liveAttempts === 1) {
+            return errorResponse({ detail: "Authorization expired." }, 409);
+          }
+          return ambiguousResponse();
+        }
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          streamRequests += 1;
+          return stream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          resultsRequests += 1;
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, discovered_assets: [] });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics.xlsx`)) {
+          exportRequests += 1;
+          return new Promise<Response>(() => {});
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics`)) {
+          liveTopicRequests += 1;
+          return jsonResponse({
+            run_id: sharedRunId,
+            topics: [{ topic: "preview/site/device/events", last_payload: { preview: true } }],
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Export to XLSX" }));
+    await waitFor(() => expect(exportRequests).toBe(1));
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    await screen.findByText(/Run request failed/i);
+    await waitFor(() => expect(runButton).toBeEnabled());
+    expect(liveAttempts).toBe(1);
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled();
+    const evidenceRequestsAfterRejection = {
+      exportRequests,
+      liveTopicRequests,
+      resultsRequests,
+      statusRequests,
+      streamRequests,
+    };
+    expect(evidenceRequestsAfterRejection.statusRequests).toBeGreaterThan(0);
+    expect(evidenceRequestsAfterRejection.streamRequests).toBeGreaterThan(0);
+    expect(evidenceRequestsAfterRejection.liveTopicRequests).toBeGreaterThan(0);
+    expect(evidenceRequestsAfterRejection.resultsRequests).toBeGreaterThan(0);
+
+    // Install the fake clock while the definitive-rejection state is quiet so
+    // any polling a regression starts for the second submission is owned by it.
+    vi.useFakeTimers();
+    fireEvent.click(runButton);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(liveAttempts).toBe(2);
+    expect(runButton).toBeDisabled();
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect({ exportRequests, liveTopicRequests, resultsRequests, statusRequests, streamRequests }).toEqual(
+      evidenceRequestsAfterRejection,
+    );
+    expect(runButton).toBeDisabled();
+    expect(screen.queryByText("preview/site/device/events")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled();
+  });
+
+  it("lets a viewer download MQTT XLSX evidence", async () => {
+    const runId = "run-mqtt-viewer-export";
+    const terminal = {
+      ...mqttTerminal,
+      run_id: runId,
+      result_summary: { topics_discovered: 1, messages_captured: 1 },
+    };
+    const createObjectURL = vi.fn(() => "blob:mqtt-viewer-export");
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=mqtt_discovery") ? [{ ...terminal, edge_id: null }] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({ username: "viewer-1", role: "viewer", source: "user_key" });
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith(`/api/v1/runs/${runId}/events`)) return controlledSseStream().response;
+        if (url.endsWith(`/api/v1/discovery/runs/${runId}/topics`)) {
+          return jsonResponse({
+            run_id: runId,
+            topics: [{ topic: "viewer/site/device/events", last_payload: { temperature: 22 } }],
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${runId}/results`)) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: runId,
+            job_type: "mqtt_discovery",
+            result_summary: terminal.result_summary,
+            discovered_assets: [],
+            topics: [],
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${runId}`)) return jsonResponse(terminal);
+        if (url.endsWith(`/api/v1/discovery/runs/${runId}/topics.xlsx`)) {
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["viewer MQTT export"]),
+            headers: { get: () => 'attachment; filename="viewer-topics.xlsx"' },
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+    const downloadButton = await screen.findByRole("button", { name: "Export to XLSX" });
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    anchorClick.mockRestore();
+  });
+
+  it.each(["resolve", "reject"])(
+    "aborts a deferred MQTT XLSX export on access closure (%s late response)",
+    async (settlement) => {
+      const stream = controlledSseStream();
+      const runId = "run-mqtt-xlsx-closed";
+      const terminal = {
+        ...mqttTerminal,
+        run_id: runId,
+        result_summary: { topics_discovered: 1, messages_captured: 1 },
+      };
+      let downloadSignal: AbortSignal | null = null;
+      let resolveDownload!: (response: Response) => void;
+      let rejectDownload!: (error: Error) => void;
+      const deferredDownload = new Promise<Response>((resolve, reject) => {
+        resolveDownload = resolve;
+        rejectDownload = reject;
+      });
+      const createObjectURL = vi.fn(() => "blob:stale-mqtt-xlsx");
+      vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+      const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/api/v1/runs?")) {
+            return jsonResponse({
+              runs: url.includes("job_type=mqtt_discovery") ? [{ ...terminal, edge_id: null }] : [],
+            });
+          }
+          if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+          if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+          if (url.endsWith(`/api/v1/runs/${runId}/events`)) return stream.response;
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}/topics.xlsx`)) {
+            downloadSignal = init?.signal ?? null;
+            return deferredDownload;
+          }
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}/topics`)) {
+            return jsonResponse({
+              run_id: runId,
+              topics: [{ topic: "live/site/device/events", last_payload: { temperature: 22 } }],
+            });
+          }
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}/results`)) {
+            return jsonResponse({
+              ...resultsPayload,
+              run_id: runId,
+              job_type: "mqtt_discovery",
+              result_summary: terminal.result_summary,
+              discovered_assets: [],
+              topics: [],
+            });
+          }
+          if (url.endsWith(`/api/v1/discovery/runs/${runId}`)) return jsonResponse(terminal);
+          throw new Error(`Unexpected fetch in test: ${url}`);
+        }),
+      );
+
+      renderModule("mqtt-discovery");
+      const downloadButton = await screen.findByRole("button", { name: "Export to XLSX" });
+      await waitFor(() => expect(downloadButton).toBeEnabled());
+      fireEvent.click(downloadButton);
+      await waitFor(() => expect(downloadSignal).not.toBeNull());
+      expect(screen.getByRole("button", { name: "Exporting..." })).toBeDisabled();
+
+      stream.push(`event: closed\ndata: ${JSON.stringify({ run_id: runId, status: "closed" })}\n\n`);
+      await waitFor(() => expect(downloadSignal?.aborted).toBe(true));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Export to XLSX" })).toBeDisabled());
+      await act(async () => {
+        if (settlement === "resolve") {
+          resolveDownload({
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["stale MQTT export"]),
+            headers: { get: () => 'attachment; filename="stale.xlsx"' },
+          } as unknown as Response);
+        } else {
+          rejectDownload(new Error("late MQTT export failure"));
+        }
+      });
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(anchorClick).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Export to XLSX" })).not.toHaveTextContent(
+        "Exporting...",
+      );
+      anchorClick.mockRestore();
+      stream.close();
+    },
+  );
 
   it("converts an hours capture duration to seconds on the MQTT discovery wire", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
@@ -1988,6 +2572,415 @@ describe("ModulePage BACnet backend provenance", () => {
       preview_run_id: previewRunId,
       scan_authorization_id: previewAuthorization.authorization_id,
     });
+  });
+
+  it("fences same-ID preview BACnet points and comparison evidence from the live epoch", async () => {
+    const sharedRunId = "run-bacnet-reused";
+    let liveSubmissionStarted = false;
+    let liveResponseResolved = false;
+    let previewPointsSignal: AbortSignal | null = null;
+    let previewComparisonSignal: AbortSignal | null = null;
+    let livePointsRequests = 0;
+    let liveComparisonRequests = 0;
+    let statusRequests = 0;
+    let streamRequests = 0;
+    let statusRequestsAtLivePost = 0;
+    let streamRequestsAtLivePost = 0;
+    const runStream = controlledSseStream();
+    let resolveLivePost!: (response: Response) => void;
+    const livePost = new Promise<Response>((resolve) => {
+      resolveLivePost = resolve;
+    });
+    const terminal = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      job_type: "bacnet_discovery",
+      result_summary: {},
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
+          if (!body.parameters.dry_run) {
+            liveSubmissionStarted = true;
+            statusRequestsAtLivePost = statusRequests;
+            streamRequestsAtLivePost = streamRequests;
+            return livePost;
+          }
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          streamRequests += 1;
+          return runStream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/points`)) {
+          if (!liveSubmissionStarted) {
+            previewPointsSignal = init?.signal ?? null;
+            return new Promise<Response>(() => {});
+          }
+          if (!liveResponseResolved) {
+            throw new Error("Live BACnet points were requested before the submission response resolved.");
+          }
+          livePointsRequests += 1;
+          return jsonResponse({ run_id: sharedRunId, points: [{ point_name: "live-point" }], total: 1, has_more: false, next_cursor: null });
+        }
+        if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/comparison?`)) {
+          if (!liveSubmissionStarted) {
+            previewComparisonSignal = init?.signal ?? null;
+            return new Promise<Response>(() => {});
+          }
+          if (!liveResponseResolved) {
+            throw new Error("Live BACnet comparison was requested before the submission response resolved.");
+          }
+          liveComparisonRequests += 1;
+          return jsonResponse({ compatible: true, additions: [], removals: [], changes: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+    renderModule("bacnet-discovery", "/?compare=prior-run", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(previewPointsSignal).not.toBeNull());
+    await waitFor(() => expect(previewComparisonSignal).not.toBeNull());
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    await waitFor(() => expect(liveSubmissionStarted).toBe(true));
+    await waitFor(() => expect(previewPointsSignal?.aborted).toBe(true));
+    await waitFor(() => expect(previewComparisonSignal?.aborted).toBe(true));
+    expect(livePointsRequests).toBe(0);
+    expect(liveComparisonRequests).toBe(0);
+    expect(statusRequests).toBe(statusRequestsAtLivePost);
+    expect(streamRequests).toBe(streamRequestsAtLivePost);
+    liveResponseResolved = true;
+    resolveLivePost(jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" }));
+    await waitFor(() => expect(livePointsRequests).toBeGreaterThan(0));
+    await waitFor(() => expect(liveComparisonRequests).toBeGreaterThan(0));
+    expect(statusRequests).toBeGreaterThan(statusRequestsAtLivePost);
+    expect(streamRequests).toBeGreaterThan(streamRequestsAtLivePost);
+    expect(screen.queryByText("preview-point")).not.toBeInTheDocument();
+    expect(await screen.findByText("live-point")).toBeInTheDocument();
+  });
+
+  it("keeps a failed same-ID BACnet live submission fenced from terminal preview evidence", async () => {
+    const sharedRunId = "run-bacnet-rejected-live";
+    let statusRequests = 0;
+    let resultsRequests = 0;
+    let streamRequests = 0;
+    let statusRequestsAtLivePost = 0;
+    let resultsRequestsAtLivePost = 0;
+    let streamRequestsAtLivePost = 0;
+    const previewStream = controlledSseStream();
+    const terminal = { ...terminalRun, run_id: sharedRunId, job_type: "bacnet_discovery" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { preview_run_id?: string };
+          if (body.preview_run_id) {
+            statusRequestsAtLivePost = statusRequests;
+            resultsRequestsAtLivePost = resultsRequests;
+            streamRequestsAtLivePost = streamRequests;
+            throw new Error("live response lost");
+          }
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          streamRequests += 1;
+          return previewStream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          resultsRequests += 1;
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(resultsRequests).toBeGreaterThan(0));
+    await screen.findAllByRole("button", { name: /Generate report from this run/i });
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    expect(await screen.findByText(/Run request failed/i)).toBeInTheDocument();
+    expect(statusRequests).toBe(statusRequestsAtLivePost);
+    expect(resultsRequests).toBe(resultsRequestsAtLivePost);
+    expect(streamRequests).toBe(streamRequestsAtLivePost);
+    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
+    expect(screen.queryAllByRole("button", { name: /Generate report from this run/i })).toHaveLength(0);
+  });
+
+  it("releases a definitively rejected same-ID BACnet live submission for retry without reusing preview evidence", async () => {
+    const sharedRunId = "run-bacnet-definitive-rejection";
+    let livePosts = 0;
+    let statusRequests = 0;
+    const terminal = { ...terminalRun, run_id: sharedRunId, job_type: "bacnet_discovery" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { preview_run_id?: string };
+          if (body.preview_run_id) {
+            livePosts += 1;
+            return errorResponse({ detail: "Authorization has already been consumed." }, 409);
+          }
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await screen.findAllByRole("button", { name: /Generate report from this run/i });
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    fireEvent.click(runButton);
+
+    await screen.findByText(/Run request failed/i);
+    await waitFor(() => expect(runButton).toBeEnabled());
+    expect(livePosts).toBe(1);
+    expect(screen.queryAllByRole("button", { name: /Generate report from this run/i })).toHaveLength(0);
+    expect(statusRequests).toBeGreaterThan(0);
+    fireEvent.click(runButton);
+    await waitFor(() => expect(livePosts).toBe(2));
+  });
+
+  it("discards a held authorized BACnet response after its active owner is replaced", async () => {
+    const sharedRunId = "run-bacnet-late-owner";
+    let resolveLivePost!: (response: Response) => void;
+    const livePost = new Promise<Response>((resolve) => {
+      resolveLivePost = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { preview_run_id?: string };
+          if (body.preview_run_id) return livePost;
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          return jsonResponse({ ...terminalRun, run_id: sharedRunId, job_type: "bacnet_discovery" });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const view = renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await screen.findAllByRole("button", { name: /Generate report from this run/i });
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <SessionProvider>
+          <MemoryRouter initialEntries={["/"]}>
+            <LocationProbe />
+            <ModulePage moduleRoute="mqtt-discovery" />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "MQTT Discovery" });
+    await act(async () => {
+      resolveLivePost(jsonResponse({ run_id: "run-bacnet-foreign", job_type: "bacnet_discovery", status: "queued" }));
+    });
+    expect(screen.queryByText(/run-bacnet-foreign/)).not.toBeInTheDocument();
+  });
+
+  it("fences a delayed preview property mutation when the same run ID enters a new epoch", async () => {
+    const sharedRunId = "run-bacnet-property-reused";
+    let liveAccepted = false;
+    let propertyPosts = 0;
+    let propertyAuthorizationSignal: AbortSignal | null = null;
+    let resolveStaleProperty!: (response: Response) => void;
+    const staleProperty = new Promise<Response>((resolve) => {
+      resolveStaleProperty = resolve;
+    });
+    const previewDevice = {
+      name: "Preview controller",
+      address: "10.0.0.11",
+      vendor: "Preview vendor",
+      attributes: { device_instance: 1101, ip_address: "10.0.0.11" },
+    };
+    const liveDevice = {
+      name: "Live controller",
+      address: "10.0.0.12",
+      vendor: "Live vendor",
+      attributes: { device_instance: 1201, ip_address: "10.0.0.12" },
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
+          liveAccepted ||= !body.parameters.dry_run;
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith("/api/v1/discovery/bacnet/property-runs") && init?.method === "POST") {
+          propertyPosts += 1;
+          return propertyPosts === 1
+            ? jsonResponse({
+                run_id: "preview-property-child",
+                job_type: "bacnet_property",
+                status: "queued",
+              })
+            : staleProperty;
+        }
+        if (url.includes("/api/v1/discovery/scan-authorizations?")) {
+          if (url.includes("preview_run_id=preview-property-child")) {
+            propertyAuthorizationSignal = init?.signal ?? null;
+            return new Promise<Response>(() => {});
+          }
+          return jsonResponse([{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/preview-property-child")) {
+          return jsonResponse({
+            ...terminalRun,
+            run_id: "preview-property-child",
+            job_type: "bacnet_property",
+            result_summary: {},
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          return jsonResponse({
+            ...terminalRun,
+            run_id: sharedRunId,
+            job_type: "bacnet_discovery",
+            parameters: {
+              scan_contract_v1: { bacnet: { authorized_property_ceiling: ["object_name"] } },
+            },
+            result_summary: {},
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: sharedRunId,
+            job_type: "bacnet_discovery",
+            result_summary: {},
+            discovered_assets: [],
+            devices: [liveAccepted ? liveDevice : previewDevice],
+            points: [],
+            topics: [],
+          });
+        }
+        if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/points`)) {
+          return jsonResponse({ run_id: sharedRunId, points: [], total: 0, has_more: false, next_cursor: null });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const { queryClient } = renderModule(
+      "bacnet-discovery",
+      "/",
+      [{ ...previewAuthorization, preview_run_id: sharedRunId }],
+      false,
+    );
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    const detail = await screen.findByRole("dialog", { name: "Result detail" });
+    fireEvent.click(within(detail).getByLabelText("object_name"));
+    fireEvent.click(within(detail).getByRole("button", { name: "Read more properties" }));
+    await waitFor(() => expect(within(detail).getByText(/Preview: preview-property-child/i)).toBeInTheDocument());
+    await waitFor(() => expect(propertyAuthorizationSignal).not.toBeNull());
+    fireEvent.click(within(detail).getByRole("button", { name: "Read more properties" }));
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    expect((await screen.findAllByText("Live controller")).length).toBeGreaterThan(0);
+    await waitFor(() => expect(propertyAuthorizationSignal?.aborted).toBe(true));
+    expect(screen.queryByRole("dialog", { name: "Result detail" })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    const liveDetail = await screen.findByRole("dialog", { name: "Result detail" });
+    expect(within(liveDetail).getByRole("button", { name: "Read more properties" })).toBeEnabled();
+
+    await act(async () => {
+      resolveStaleProperty(
+        jsonResponse({ run_id: "preview-property-child", job_type: "bacnet_property", status: "queued" }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryCache().findAll({
+          predicate: (query) =>
+            query.queryKey.includes("bacnet-property-run") && query.queryKey.includes(sharedRunId),
+        }),
+      ).toHaveLength(0),
+    );
+    expect(screen.queryByText(/Property preview preview-property-child was created/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Preview controller")).not.toBeInTheDocument();
   });
 
   // Drives a BACnet discovery run to a terminal, succeeded state whose results
@@ -3391,6 +4384,7 @@ describe("ModulePage UDMI workbench live results", () => {
     issuesResponse?: () => Response | Promise<Response>,
     runPayload = udmiTerminalRun,
   ) {
+    const captured = { issuesRequests: 0, requests: [] as string[], runStatusRequests: 0 };
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -3413,14 +4407,19 @@ describe("ModulePage UDMI workbench live results", () => {
           return jsonResponse(udmiAccepted);
         }
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          captured.issuesRequests += 1;
+          captured.requests.push("issues");
           return issuesResponse ? issuesResponse() : jsonResponse(issuesPayload);
         }
         if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) {
+          captured.runStatusRequests += 1;
+          captured.requests.push("run");
           return jsonResponse(runPayload);
         }
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
+    return captured;
   }
 
   it("integrates the Workbench title and compact metric cards in one page header", async () => {
@@ -3440,6 +4439,21 @@ describe("ModulePage UDMI workbench live results", () => {
     fireEvent.click(runButton);
     await screen.findByText(/Live validation results/i);
     expect(await within(hero).findByText("Issues")).toBeInTheDocument();
+  });
+
+  it("requires matching validation issues after authoritative terminal status before settling", async () => {
+    const captured = stubUdmiRunFetch({ run_id: "wrong-run", issues: [] });
+    renderModule("udmi-validation");
+
+    const runButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
+    expect(captured.runStatusRequests).toBeGreaterThan(0);
+    expect(captured.issuesRequests).toBeGreaterThan(0);
+    expect(captured.requests.lastIndexOf("issues")).toBeGreaterThan(
+      captured.requests.lastIndexOf("run"),
+    );
   });
 
   it("shades live UDMI rows amber on non-compliant and green on pass (RAG)", async () => {
@@ -6445,6 +7459,202 @@ describe("ModulePage UDMI workbench live results", () => {
     expect(postedUrl as unknown as string).toContain("/api/v1/validation/bacnet/runs");
     expect((postedBody as unknown as Record<string, unknown>).job_type).toBe("bacnet_validation");
   });
+
+  it("lets a viewer download terminal validation JSON evidence", async () => {
+    const createObjectURL = vi.fn(() => "blob:validation-viewer-export");
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=udmi_validation") ? [{ ...udmiTerminalRun, edge_id: null }] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) {
+          return jsonResponse({ username: "viewer-1", role: "viewer", source: "user_key" });
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/runs/run-udmi-1/events")) return controlledSseStream().response;
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) {
+          return jsonResponse(udmiIssuesPayload);
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(udmiTerminalRun);
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-1/export.json")) {
+          return {
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["viewer validation export"]),
+            headers: { get: () => 'attachment; filename="viewer-validation.json"' },
+          } as unknown as Response;
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+    const [downloadButton] = await screen.findAllByRole("button", { name: "Download raw JSON" });
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    expect(anchorClick).toHaveBeenCalledTimes(1);
+    anchorClick.mockRestore();
+  });
+
+  it("aborts a validation JSON download when a same-ID submission enters a new epoch", async () => {
+    const runId = "run-udmi-reused-export";
+    const terminal = { ...udmiTerminalRun, run_id: runId };
+    const firstStream = controlledSseStream();
+    const secondStream = controlledSseStream();
+    let eventStreamRequests = 0;
+    let downloadSignal: AbortSignal | null = null;
+    let resolveDownload!: (response: Response) => void;
+    const deferredDownload = new Promise<Response>((resolve) => {
+      resolveDownload = resolve;
+    });
+    const createObjectURL = vi.fn(() => "blob:stale-validation-epoch");
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({
+            runs: url.includes("job_type=udmi_validation") ? [{ ...terminal, edge_id: null }] : [],
+          });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith(`/api/v1/runs/${runId}/events`)) {
+          eventStreamRequests += 1;
+          return eventStreamRequests === 1 ? firstStream.response : secondStream.response;
+        }
+        if (url.endsWith(`/api/v1/validation/runs/${runId}/issues`)) {
+          return jsonResponse({ ...udmiIssuesPayload, run_id: runId });
+        }
+        if (url.endsWith(`/api/v1/validation/runs/${runId}`)) return jsonResponse(terminal);
+        if (url.endsWith("/api/v1/validation/udmi/runs") && init?.method === "POST") {
+          return jsonResponse({ ...udmiAccepted, run_id: runId });
+        }
+        if (url.endsWith(`/api/v1/validation/runs/${runId}/export.json`)) {
+          downloadSignal = init?.signal ?? null;
+          return deferredDownload;
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("udmi-validation");
+    const [downloadButton] = await screen.findAllByRole("button", { name: "Download raw JSON" });
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
+    await waitFor(() => expect(downloadSignal).not.toBeNull());
+
+    const executeButton = await screen.findByRole("button", { name: "Execute capture" });
+    await waitFor(() => expect(executeButton).toBeEnabled());
+    fireEvent.click(executeButton);
+    await waitFor(() => expect(downloadSignal?.aborted).toBe(true));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("button", { name: "Download raw JSON" })
+          .some((button) => !(button as HTMLButtonElement).disabled),
+      ).toBe(true),
+    );
+
+    await act(async () => {
+      resolveDownload({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        blob: async () => new Blob(["stale validation epoch export"]),
+        headers: { get: () => 'attachment; filename="stale.json"' },
+      } as unknown as Response);
+    });
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Raw JSON download failed/i)).not.toBeInTheDocument();
+    expect(
+      screen
+        .getAllByRole("button", { name: "Download raw JSON" })
+        .some((button) => !(button as HTMLButtonElement).disabled),
+    ).toBe(true);
+    anchorClick.mockRestore();
+    await act(async () => {
+      firstStream.close();
+      secondStream.close();
+    });
+  });
+
+  it.each(["resolve", "reject"])(
+    "aborts a deferred validation JSON download on access closure (%s late response)",
+    async (settlement) => {
+      const stream = controlledSseStream();
+      let downloadSignal: AbortSignal | null = null;
+      let resolveDownload!: (response: Response) => void;
+      let rejectDownload!: (error: Error) => void;
+      const deferredDownload = new Promise<Response>((resolve, reject) => {
+        resolveDownload = resolve;
+        rejectDownload = reject;
+      });
+      const createObjectURL = vi.fn(() => "blob:stale-validation-json");
+      vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+      const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/api/v1/runs?")) {
+            return jsonResponse({
+              runs: url.includes("job_type=udmi_validation") ? [{ ...udmiTerminalRun, edge_id: null }] : [],
+            });
+          }
+          if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+          if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+          if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+          if (url.endsWith("/api/v1/runs/run-udmi-1/events")) return stream.response;
+          if (url.endsWith("/api/v1/validation/runs/run-udmi-1/issues")) return jsonResponse(udmiIssuesPayload);
+          if (url.endsWith("/api/v1/validation/runs/run-udmi-1")) return jsonResponse(udmiTerminalRun);
+          if (url.endsWith("/api/v1/validation/runs/run-udmi-1/export.json")) {
+            downloadSignal = init?.signal ?? null;
+            return deferredDownload;
+          }
+          throw new Error(`Unexpected fetch in test: ${url}`);
+        }),
+      );
+
+      renderModule("udmi-validation");
+      const [downloadButton] = await screen.findAllByRole("button", { name: "Download raw JSON" });
+      fireEvent.click(downloadButton);
+      await waitFor(() => expect(downloadSignal).not.toBeNull());
+      stream.push(`event: closed\ndata: ${JSON.stringify({ run_id: "run-udmi-1", status: "closed" })}\n\n`);
+      await waitFor(() => expect(downloadSignal?.aborted).toBe(true));
+      await act(async () => {
+        if (settlement === "resolve") {
+          resolveDownload({
+            ok: true,
+            status: 200,
+            statusText: "OK",
+            blob: async () => new Blob(["stale validation"]),
+            headers: { get: () => 'attachment; filename="stale.json"' },
+          } as unknown as Response);
+        } else {
+          rejectDownload(new Error("late validation download failure"));
+        }
+      });
+      expect(createObjectURL).not.toHaveBeenCalled();
+      expect(anchorClick).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Raw JSON download failed/i)).not.toBeInTheDocument();
+      anchorClick.mockRestore();
+      stream.close();
+    },
+  );
 });
 
 describe("ModulePage UDMI schema set uploads", () => {
@@ -8092,6 +9302,119 @@ describe("ModulePage progressive discovery observations", () => {
     expect(screen.getAllByRole("status", { name: "Discovery connection" })).toHaveLength(1);
     const heading = screen.getByRole("heading", { name: "IP Discovery", level: 2 });
     expect(heading).toHaveFocus();
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    const previewButton = screen.getByRole("button", { name: "Preview" });
+    expect(previewButton).toBeDisabled();
+    expect(previewButton).toHaveAttribute(
+      "title",
+      "Run access for this workspace is closed. Reopen the module before starting another run.",
+    );
+  });
+
+  it("preserves colliding evidence when moving away from a closed workspace scope", async () => {
+    const sessionScopeId = "session-workspace-transition" as SessionScopeId;
+    const firstWorkspace: WorkspaceRef = { projectId: "project-a", siteId: "site-a" };
+    const secondWorkspace: WorkspaceRef = { projectId: "project-b", siteId: "site-b" };
+    const sharedRunId = "run-ip-workspace-collision";
+    const runningRun = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      status: "running",
+      stage: "probing",
+      progress_percent: 30,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) return stream.response;
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          return jsonResponse(runningRun);
+        }
+        if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/observations?`)) {
+          return jsonResponse({
+            run_id: sharedRunId,
+            attempt: 1,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const sessionValue = (workspace: WorkspaceRef): SessionContextValue => ({
+      apiClient: createSessionBoundApiClient(sessionScopeId, workspace, "engineer-key"),
+      canAdmin: false,
+      canEngineer: true,
+      error: null,
+      hasApiKey: true,
+      isLoading: false,
+      me: {
+        effective_scopes: [],
+        global_scope: true,
+        role: "engineer",
+        source: "user_key",
+        username: "engineer-1",
+      },
+      role: "engineer",
+      sessionScopeId,
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+      workspace,
+    });
+    const tree = (workspace: WorkspaceRef) => (
+      <QueryClientProvider client={queryClient}>
+        <SessionContext.Provider value={sessionValue(workspace)}>
+          <MemoryRouter initialEntries={["/"]}>
+            <ModulePage moduleRoute="ip-scanner" />
+          </MemoryRouter>
+        </SessionContext.Provider>
+      </QueryClientProvider>
+    );
+    const view = render(tree(firstWorkspace));
+    await screen.findByText(/Discovery run monitor/i);
+    await waitFor(() => expect(screen.getAllByText(sharedRunId).length).toBeGreaterThan(0));
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({ run_id: sharedRunId, status: "closed" })}\n\n`,
+    );
+    stream.close();
+    await screen.findByRole("status", { name: "Discovery connection" });
+
+    const collidingRunRef: RunRef = {
+      family: "discovery",
+      jobType: "ip_discovery",
+      module: "ip-scanner",
+      origin: "restored",
+      runId: sharedRunId,
+      sessionScopeId,
+      workspace: secondWorkspace,
+    };
+    const collidingKey = [
+      ...queryKeys.run(sessionScopeId, secondWorkspace, collidingRunRef),
+      "epoch",
+      777,
+    ] as const;
+    const collidingEvidence = { marker: "new-workspace-evidence" };
+    queryClient.setQueryData(collidingKey, collidingEvidence);
+
+    view.rerender(tree(secondWorkspace));
+    await waitFor(() =>
+      expect(queryClient.getQueryData(collidingKey)).toEqual(collidingEvidence),
+    );
   });
 
   it("fences a delayed observation page after scoped access closes", async () => {
@@ -8199,10 +9522,11 @@ describe("ModulePage progressive discovery observations", () => {
       result_summary: {},
     };
     const stream = controlledSseStream();
+    let resultsSignal: AbortSignal | null = null;
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/v1/runs?")) {
           return jsonResponse({ runs: [{ ...sealedRun, edge_id: null }] });
@@ -8211,16 +9535,9 @@ describe("ModulePage progressive discovery observations", () => {
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.endsWith("/api/v1/runs/run-ip-terminal-closed/events")) return stream.response;
         if (url.endsWith("/api/v1/discovery/runs/run-ip-terminal-closed/results")) {
-          return jsonResponse({
-            ...resultsPayload,
-            run_id: "run-ip-terminal-closed",
-            discovered_assets: [
-              {
-                ...resultsPayload.discovered_assets[0],
-                hostname: "terminal-private-controller",
-                ip_address: "192.0.2.72",
-              },
-            ],
+          resultsSignal = init?.signal ?? null;
+          return new Promise<Response>(() => {
+            // Access closure must abort and evict this epoch-scoped request.
           });
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-terminal-closed")) {
@@ -8230,8 +9547,32 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
-    expect((await screen.findAllByText("terminal-private-controller")).length).toBeGreaterThan(0);
+    const { queryClient } = renderModule("ip-scanner");
+    await waitFor(() => expect(resultsSignal).not.toBeNull());
+    let activeResultsQueryKey: readonly unknown[] = [];
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryCache()
+          .findAll({
+            predicate: (query) =>
+              query.queryKey.includes("results") && query.queryKey.includes("epoch"),
+          }),
+      ).toHaveLength(1),
+    );
+    activeResultsQueryKey = queryClient
+      .getQueryCache()
+      .findAll({
+        predicate: (query) =>
+          query.queryKey.includes("results") && query.queryKey.includes("epoch"),
+      })[0].queryKey;
+    const otherScopeResultsQueryKey = activeResultsQueryKey.map((part, index) => {
+      if (index === 1) return "other-session";
+      if (index === 4) return "other-project";
+      if (index === 5) return "other-site";
+      return part;
+    });
+    queryClient.setQueryData(otherScopeResultsQueryKey, { source: "other-workspace" });
 
     stream.push(
       `event: closed\ndata: ${JSON.stringify({
@@ -8240,11 +9581,140 @@ describe("ModulePage progressive discovery observations", () => {
       })}\n\n`,
     );
 
+    await waitFor(() => expect(resultsSignal?.aborted).toBe(true));
     await waitFor(() =>
-      expect(screen.queryByText("terminal-private-controller")).not.toBeInTheDocument(),
+      expect(
+        queryClient
+          .getQueryCache()
+          .find({ exact: true, queryKey: activeResultsQueryKey }),
+      ).toBeUndefined(),
     );
+    expect(
+      queryClient.getQueryData(otherScopeResultsQueryKey),
+    ).toEqual({ source: "other-workspace" });
     expect(screen.getByRole("status", { name: "Discovery connection" })).toHaveTextContent(
       "Access changed. Live run evidence is no longer available in this workspace.",
+    );
+    stream.close();
+  });
+
+  it("evicts and hides active BACnet points and comparison evidence on scoped closure only", async () => {
+    const run = {
+      ...terminalRun,
+      run_id: "run-bacnet-closed",
+      job_type: "bacnet_discovery",
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    let pointsSignal: AbortSignal | null = null;
+    let comparisonSignal: AbortSignal | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: url.includes("job_type=bacnet_discovery") ? [run] : [] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-bacnet-closed/events")) return stream.response;
+        if (url.includes("/api/v1/discovery/runs/run-bacnet-closed/points")) {
+          pointsSignal = init?.signal ?? null;
+          return new Promise<Response>(() => {});
+        }
+        if (url.includes("/api/v1/discovery/runs/run-bacnet-closed/comparison?")) {
+          comparisonSignal = init?.signal ?? null;
+          return new Promise<Response>(() => {});
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-bacnet-closed/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: "run-bacnet-closed", points: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-bacnet-closed")) return jsonResponse(run);
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const { queryClient } = renderModule("bacnet-discovery", "/?compare=prior-run");
+    await waitFor(() => expect(pointsSignal).not.toBeNull());
+    await waitFor(() => expect(comparisonSignal).not.toBeNull());
+    const activeAuxiliaryKeys = queryClient
+      .getQueryCache()
+      .findAll({ predicate: (query) => query.queryKey.includes("epoch") && query.queryKey.includes("run-bacnet-closed") })
+      .map((query) => query.queryKey)
+      .filter((key) => key.includes("bacnet-points") || key.includes("discovery-comparison"));
+    expect(activeAuxiliaryKeys).toHaveLength(2);
+    const foreignKey = activeAuxiliaryKeys[0].map((part, index) =>
+      index === 1 ? "foreign-session" : index === 4 ? "foreign-project" : index === 5 ? "foreign-site" : part,
+    );
+    queryClient.setQueryData(foreignKey, { source: "foreign" });
+
+    stream.push(`event: closed\ndata: ${JSON.stringify({ run_id: run.run_id, status: "closed" })}\n\n`);
+    await waitFor(() => expect(pointsSignal?.aborted).toBe(true));
+    await waitFor(() => expect(comparisonSignal?.aborted).toBe(true));
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryCache().findAll({ predicate: (query) => activeAuxiliaryKeys.some((key) => JSON.stringify(key) === JSON.stringify(query.queryKey)) }),
+      ).toHaveLength(0),
+    );
+    expect(queryClient.getQueryData(foreignKey)).toEqual({ source: "foreign" });
+    expect(screen.queryByRole("heading", { name: "Points / Live Data" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Sealed run against prior-run/i })).not.toBeInTheDocument();
+    stream.close();
+  });
+
+  it("aborts and evicts epoch-scoped validation issues when scoped access closes", async () => {
+    const runningRun = {
+      ...terminalRun,
+      run_id: "run-udmi-issues-closed",
+      job_type: "udmi_validation",
+      status: "running",
+      stage: "capturing_live_mqtt",
+      progress_percent: 25,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    let issuesSignal: AbortSignal | null = null;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: url.includes("job_type=udmi_validation") ? [runningRun] : [] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/udmi/schemas")) return jsonResponse([]);
+        if (url.endsWith("/api/v1/runs/run-udmi-issues-closed/events")) return stream.response;
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-issues-closed/issues")) {
+          issuesSignal = init?.signal ?? null;
+          return new Promise<Response>(() => {
+            // Access closure must cancel this epoch-specific issues request.
+          });
+        }
+        if (url.endsWith("/api/v1/validation/runs/run-udmi-issues-closed")) {
+          return jsonResponse(runningRun);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const { queryClient } = renderModule("udmi-validation");
+    await waitFor(() => expect(issuesSignal).not.toBeNull());
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({
+        run_id: "run-udmi-issues-closed",
+        status: "closed",
+      })}\n\n`,
+    );
+
+    await waitFor(() => expect(issuesSignal?.aborted).toBe(true));
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryCache()
+          .findAll({ predicate: (query) => query.queryKey.includes("issues") && query.queryKey.includes("epoch") }),
+      ).toHaveLength(0),
     );
     stream.close();
   });
@@ -8379,6 +9849,113 @@ describe("ModulePage progressive discovery observations", () => {
     await act(async () => new Promise((resolve) => setTimeout(resolve, 2_250)));
     expect(runRequests).toBe(closedRunRequests);
     expect(topicRequests).toBe(closedTopicRequests);
+    stream.close();
+  });
+
+  it("clears a report dialog intent and blocks a held submission after access closes", async () => {
+    const run = { ...terminalRun, run_id: "run-report-closed", result_summary: {} };
+    const stream = controlledSseStream();
+    let reportPosts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: url.includes("job_type=ip_discovery") ? [{ ...run, edge_id: null }] : [] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-report-closed/events")) return stream.response;
+        if (url.endsWith("/api/v1/discovery/runs/run-report-closed")) return jsonResponse(run);
+        if (url.endsWith("/api/v1/discovery/runs/run-report-closed/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: run.run_id, result_summary: {} });
+        }
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
+          reportPosts += 1;
+          return jsonResponse({ report_id: "unexpected", status: "succeeded" });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("ip-scanner");
+    const [reportButton] = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    fireEvent.click(reportButton);
+    const dialog = await screen.findByRole("dialog", { name: "Name this validation report" });
+    const form = dialog.querySelector("form");
+    expect(form).not.toBeNull();
+
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({ run_id: run.run_id, status: "closed" })}\n\n`,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Name this validation report" })).not.toBeInTheDocument());
+    fireEvent.submit(form as HTMLFormElement);
+    expect(reportPosts).toBe(0);
+    stream.close();
+  });
+
+  it("stops a deferred Generate All mutation when access closes", async () => {
+    const run = { ...terminalRun, run_id: "run-report-deferred-closed", result_summary: {} };
+    const stream = controlledSseStream();
+    let reportPosts = 0;
+    let releaseFirstReport!: (response: Response) => void;
+    const firstReport = new Promise<Response>((resolve) => {
+      releaseFirstReport = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: url.includes("job_type=ip_discovery") ? [{ ...run, edge_id: null }] : [] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/runs/run-report-deferred-closed/events")) return stream.response;
+        if (url.endsWith("/api/v1/discovery/runs/run-report-deferred-closed")) return jsonResponse(run);
+        if (url.endsWith("/api/v1/discovery/runs/run-report-deferred-closed/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: run.run_id, result_summary: {} });
+        }
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
+          reportPosts += 1;
+          return firstReport;
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const { queryClient } = renderModule("ip-scanner");
+    const invalidateReports = vi.spyOn(queryClient, "invalidateQueries");
+    const [formatPicker] = await screen.findAllByLabelText("Report format");
+    fireEvent.change(formatPicker, { target: { value: "all" } });
+    const [reportButton] = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    fireEvent.click(reportButton);
+    const dialog = await screen.findByRole("dialog", { name: "Name this validation report" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Generate report" }));
+    await waitFor(() => expect(reportPosts).toBe(1));
+
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({ run_id: run.run_id, status: "closed" })}\n\n`,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Name this validation report" })).not.toBeInTheDocument());
+    await act(async () => {
+      releaseFirstReport(
+        jsonResponse({
+          file_name: "stale.pdf",
+          output_format: "pdf",
+          report_id: "stale-report",
+          report_type: "ip_discovery",
+          status: "succeeded",
+        }),
+      );
+    });
+    await waitFor(() => expect(reportPosts).toBe(1));
+    expect(invalidateReports).not.toHaveBeenCalled();
+    expect(screen.queryByText(/reports generated from this run|Report generated from this run/i)).not.toBeInTheDocument();
     stream.close();
   });
 });
@@ -8577,6 +10154,8 @@ describe("ModulePage report controls placement", () => {
       role?: string;
       lastRun?: boolean;
       finalEvidenceFails?: boolean;
+      finalRun?: typeof terminalRun;
+      runStatusError?: number;
       failReportFormats?: readonly ReportFormat[];
     } = {},
   ) {
@@ -8584,6 +10163,8 @@ describe("ModulePage report controls placement", () => {
       role = "engineer",
       lastRun = true,
       finalEvidenceFails = false,
+      finalRun = terminalRun,
+      runStatusError,
       failReportFormats = [],
     } = options;
     const failedReportFormats = new Set(failReportFormats);
@@ -8593,12 +10174,16 @@ describe("ModulePage report controls placement", () => {
       exportBodies: Array<{ report_ids: string[] }>;
       activeReportRequests: number;
       maxActiveReportRequests: number;
+      discoveryResultsRequests: number;
+      discoveryRunStatusRequests: number;
     } = {
       reportBodies: [],
       reportBody: null,
       exportBodies: [],
       activeReportRequests: 0,
       maxActiveReportRequests: 0,
+      discoveryResultsRequests: 0,
+      discoveryRunStatusRequests: 0,
     };
     vi.stubGlobal(
       "fetch",
@@ -8616,6 +10201,7 @@ describe("ModulePage report controls placement", () => {
           return jsonResponse(profilesPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) {
+          captured.discoveryResultsRequests += 1;
           if (finalEvidenceFails) {
             return {
               ok: false,
@@ -8627,7 +10213,16 @@ describe("ModulePage report controls placement", () => {
           return jsonResponse(resultsPayload);
         }
         if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) {
-          return jsonResponse(terminalRun);
+          captured.discoveryRunStatusRequests += 1;
+          if (runStatusError) {
+            return {
+              ok: false,
+              status: runStatusError,
+              statusText: "Rejected",
+              json: async () => ({ detail: "final run status rejected" }),
+            } as unknown as Response;
+          }
+          return jsonResponse(finalRun);
         }
         if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
           const reportBody = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -8711,6 +10306,35 @@ describe("ModulePage report controls placement", () => {
     expect(
       await screen.findAllByRole("button", { name: /Generate report from this run/i }),
     ).toHaveLength(2);
+  });
+
+  it("rejects a mismatched final run before requesting discovery results", async () => {
+    const captured = stubTerminalRun({ finalRun: { ...terminalRun, run_id: "wrong-run" } });
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
+    expect(captured.discoveryResultsRequests).toBe(0);
+    expect(captured.discoveryRunStatusRequests).toBeLessThanOrEqual(2);
+  });
+
+  it("does not retry a nontransient final-run status error or request discovery results", async () => {
+    const captured = stubTerminalRun({ runStatusError: 400 });
+    renderModule("ip-scanner");
+
+    expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
+    expect(captured.discoveryResultsRequests).toBe(0);
+    expect(captured.discoveryRunStatusRequests).toBeLessThanOrEqual(2);
+  });
+
+  it("fails terminal sync after the four bounded nonterminal status attempts without fetching results", async () => {
+    const captured = stubTerminalRun({ finalRun: { ...terminalRun, status: "running" } });
+    renderModule("ip-scanner");
+
+    expect(
+      await screen.findByText("Final evidence unavailable", {}, { timeout: 4_000 }),
+    ).toBeInTheDocument();
+    expect(captured.discoveryRunStatusRequests).toBeGreaterThanOrEqual(4);
+    expect(captured.discoveryResultsRequests).toBe(0);
   });
 
   // The gate is `.module-steps > [data-stepgroup]` — a DIRECT child selector. A
@@ -8873,6 +10497,128 @@ describe("ModulePage report controls placement", () => {
     );
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
+
+  it.each(["resolve", "reject"])(
+    "clears completed Generate All feedback when the same run ID enters a new epoch (%s late export)",
+    async (settlement) => {
+    const sharedRunId = "run-report-feedback-reused";
+    const terminal = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      job_type: "mqtt_discovery",
+      stage: "capture",
+      result_summary: {},
+    };
+    const reportBodies: Record<string, unknown>[] = [];
+    let exportRequests = 0;
+    let exportSignal: AbortSignal | null = null;
+    let releaseExport!: (response: Response) => void;
+    let rejectExport!: (error: Error) => void;
+    const deferredExport = new Promise<Response>((resolve, reject) => {
+      releaseExport = resolve;
+      rejectExport = reject;
+    });
+    const createObjectURL = vi.fn(() => "blob:stale-report-bundle");
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: url.includes("job_type=mqtt_discovery") ? [{ ...terminal, edge_id: null }] : [] });
+        }
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt/runs") && init?.method === "POST") {
+          return jsonResponse({
+            run_id: sharedRunId,
+            job_type: "mqtt_discovery",
+            status: "queued",
+            message: "MQTT discovery accepted.",
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) return jsonResponse(terminal);
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({
+            ...resultsPayload,
+            run_id: sharedRunId,
+            job_type: "mqtt_discovery",
+            discovered_assets: [],
+            devices: [],
+            points: [],
+            topics: [],
+          });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/topics`)) {
+          return jsonResponse({ run_id: sharedRunId, topics: [] });
+        }
+        if (url.split("?")[0].endsWith("/api/v1/reports") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+          const reportNumber = reportBodies.push(body);
+          return jsonResponse({
+            file_name: `report-${reportNumber}.${body.output_format}`,
+            output_format: body.output_format,
+            report_id: `report-${reportNumber}`,
+            report_type: "mqtt_discovery",
+            status: "succeeded",
+          });
+        }
+        if (url.endsWith("/api/v1/reports/export") && init?.method === "POST") {
+          exportRequests += 1;
+          exportSignal = init.signal ?? null;
+          return deferredExport;
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("mqtt-discovery");
+    const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
+    fireEvent.change(pickers[0], { target: { value: "all" } });
+    const [reportButton] = await screen.findAllByRole("button", {
+      name: /Generate report from this run/i,
+    });
+    await submitReportDialog(reportButton, "Stale feedback regression");
+    await waitFor(() => expect(reportBodies).toHaveLength(4));
+    const staleDownloadButtons = await screen.findAllByRole("button", {
+      name: "Download all reports (.zip)",
+    });
+    expect(staleDownloadButtons).toHaveLength(2);
+    expect(await screen.findAllByText(/4 reports generated from this run/i)).toHaveLength(2);
+    fireEvent.click(staleDownloadButtons[0]);
+    await waitFor(() => expect(exportSignal).not.toBeNull());
+
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() =>
+      expect(screen.queryAllByRole("button", { name: "Download all reports (.zip)" })).toHaveLength(0),
+    );
+    await waitFor(() => expect(exportSignal?.aborted).toBe(true));
+    expect(screen.queryByText(/4 reports generated from this run/i)).not.toBeInTheDocument();
+    await act(async () => {
+      if (settlement === "resolve") {
+        releaseExport({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          blob: async () => new Blob(["stale export"]),
+          headers: { get: () => 'attachment; filename="stale-reports.zip"' },
+        } as unknown as Response);
+      } else {
+        rejectExport(new Error("late export failure"));
+      }
+    });
+    await waitFor(() => expect(exportRequests).toBe(1));
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(anchorClick).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Combined report download failed/i)).not.toBeInTheDocument();
+    anchorClick.mockRestore();
+    },
+  );
 
   it("renders no report controls until a run exists", async () => {
     stubTerminalRun({ lastRun: false });

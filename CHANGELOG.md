@@ -13,6 +13,28 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
 
+## [0.1.49] - 2026-08-16
+
+### Fixed
+
+- Preview-to-live run ownership now includes a submission epoch. A delayed
+  terminal preview event, auxiliary evidence request, property action, report,
+  or active-run download cannot settle a later accepted run that reuses the same
+  run ID.
+- IP discovery retains equivalent-request retries and continues to accept the
+  exact v0.1.48 raw idempotency replay.
+
+### Changed
+
+- MQTT templates keep Payload type blank; `#` is a topic-filter wildcard only.
+  Builtin TCP remains the default discovery provider. Nmap is explicit opt-in,
+  locally installed, and never bundled.
+
+### Compatibility
+
+- This release adds no database migration and no BACnet write feature. Existing
+  BACnet discovery and validation remain read-only.
+
 ## [0.1.48] - 2026-08-15
 
 ### Fixed

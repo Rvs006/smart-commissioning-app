@@ -70,22 +70,21 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-15. The v0.1.48 candidate adds
-  atomic IP-discovery idempotency: the same scoped `Idempotency-Key` and request
-  return the canonical run, while conflicting reuse returns HTTP 409. The core
-  migration records that retry authority with the run, including across a
-  consumed scan authorization. It retains one fail-closed runtime identity and
-  concise Nmap operator guidance in the Brief, Learning path, README, and
-  `docs/nmap-one-click-operator-guide.md`. The unified portable keeps its
-  one-click Nmap approval route: a global administrator records a detected local
-  installation once, then engineers select only an approved fixed profile.
+- **Current handoff**: status as of 2026-08-16. The v0.1.49 candidate fences
+  preview-to-live run events and evidence by submission epoch, including
+  auxiliary BACnet/MQTT evidence and active-run downloads, so an adapter that
+  reuses a run ID cannot settle or export from its preview epoch. IP retries
+  remain idempotent for an equivalent request, while the exact v0.1.48 raw
+  replay remains compatible. MQTT templates use a blank Payload type and reserve
+  `#` for the topic filter only; keep corrected local copies private unless an
+  approved asset list says they ship. Builtin TCP remains the default, with Nmap
+  opt-in, locally installed, and unbundled. There are no BACnet write features.
   Field acceptance remains open until the approved register, applicability
   matrix, paired collector evidence, and complete cadence run pass
-  `docs/v0.1.48-field-acceptance-checklist.md`.
-  A one-minute operator Stop is cancellation evidence, not cadence evidence.
-  The latest public release is v0.1.47; v0.1.48 is the current candidate. Keep
-  source, raw evidence, report bytes, EXE identity, Docker labels, and release
-  SHA bound to the same run or commit.
+  `docs/v0.1.49-field-acceptance-checklist.md`. A one-minute operator Stop is
+  cancellation evidence, not cadence evidence. The latest public release is v0.1.48;
+  v0.1.49 is the current candidate. Keep source, raw evidence, report bytes, EXE
+  identity, Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the

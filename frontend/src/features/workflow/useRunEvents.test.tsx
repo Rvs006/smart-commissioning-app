@@ -1,4 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { useRunEvents } from "./useRunEvents";
 
 // Build a streaming Response whose ReadableStream reader yields the given SSE
@@ -480,6 +481,106 @@ describe("useRunEvents", () => {
     expect(removeWindowListener).toHaveBeenCalledWith("online", expect.any(Function));
     expect(removeWindowListener).toHaveBeenCalledWith("focus", expect.any(Function));
     expect(removeDocumentListener).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+  });
+
+  it("never exposes the previous run's terminal state during reattachment", async () => {
+    vi.useFakeTimers();
+    const runA = controlledSseStream();
+    const runB = controlledSseStream();
+    const observations: Array<{
+      eventRunId: string | null;
+      reachedTerminal: boolean;
+      runId: string;
+    }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) =>
+        String(url).includes("run-a") ? runA.response : runB.response,
+      ),
+    );
+
+    const { result, rerender, unmount } = renderHook(
+      ({ runId }) => {
+        const state = useRunEvents(runId, true);
+        useEffect(() => {
+          observations.push({
+            eventRunId: state.event?.run_id ?? null,
+            reachedTerminal: state.reachedTerminal,
+            runId,
+          });
+        }, [runId, state.event?.run_id, state.reachedTerminal]);
+        return state;
+      },
+      { initialProps: { runId: "run-a" } },
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await act(async () => {
+      runA.push(sseFrame({ run_id: "run-a", status: "succeeded" }, "terminal"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.reachedTerminal).toBe(true);
+
+    observations.length = 0;
+    rerender({ runId: "run-b" });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+
+    expect(observations.filter((entry) => entry.runId === "run-b")).toEqual([
+      { eventRunId: null, reachedTerminal: false, runId: "run-b" },
+    ]);
+    unmount();
+  });
+
+  it("fences a sealed preview when an adapter reuses its run id for the live submission", async () => {
+    vi.useFakeTimers();
+    const previewStream = controlledSseStream();
+    const liveStream = controlledSseStream();
+    const signals: AbortSignal[] = [];
+    let streamCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+        if (init?.signal) {
+          signals.push(init.signal);
+        }
+        streamCount += 1;
+        return streamCount === 1 ? previewStream.response : liveStream.response;
+      }),
+    );
+
+    const { result, rerender, unmount } = renderHook(
+      ({ epoch }) => useRunEvents("shared-run", true, undefined, epoch),
+      { initialProps: { epoch: 1 } },
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await act(async () => {
+      previewStream.push(sseFrame({ run_id: "shared-run", status: "succeeded" }, "terminal"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.reachedTerminal).toBe(true);
+
+    rerender({ epoch: 2 });
+    expect(result.current).toMatchObject({
+      epoch: 2,
+      event: null,
+      reachedTerminal: false,
+      runId: "shared-run",
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    expect(signals[0].aborted).toBe(true);
+
+    await act(async () => {
+      previewStream.push(sseFrame({ run_id: "shared-run", status: "failed" }, "terminal"));
+      liveStream.push(sseFrame({ run_id: "shared-run", status: "running", stage: "live" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current).toMatchObject({
+      epoch: 2,
+      event: { run_id: "shared-run", stage: "live" },
+      reachedTerminal: false,
+    });
+
+    unmount();
+    expect(signals[1].aborted).toBe(true);
   });
 
   it("clears a scheduled retry when the active run changes", async () => {

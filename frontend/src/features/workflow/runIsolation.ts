@@ -19,6 +19,7 @@ export type EvidenceRequirement = "run" | "issues" | "results" | "topics";
 export type RunControllerState = Readonly<{
   phase: RunControllerPhase;
   runRef: RunRef | null;
+  epoch: number | null;
   requiredEvidence: readonly EvidenceRequirement[];
   completedEvidence: readonly EvidenceRequirement[];
   evidenceError: string | null;
@@ -29,6 +30,7 @@ export type RunControllerState = Readonly<{
 export const initialRunControllerState: RunControllerState = Object.freeze({
   phase: "idle",
   runRef: null,
+  epoch: null,
   requiredEvidence: [],
   completedEvidence: [],
   evidenceError: null,
@@ -47,8 +49,13 @@ export type ObservationEventIdentity = Readonly<{
   payloadSha256: string;
 }>;
 
-export type ObservationFoldState = Readonly<{
+export type RunEpochOwner = Readonly<{
   runId: string;
+  epoch: number;
+}>;
+
+export type ObservationFoldState = Readonly<{
+  owner: RunEpochOwner;
   attempt: number;
   acknowledgedCursor: number;
   latestCursor: number;
@@ -63,12 +70,14 @@ export type ObservationFoldState = Readonly<{
 }>;
 
 export function createObservationFoldState(
-  runId: string,
+  owner: RunEpochOwner | string,
   attempt: number,
   acknowledgedCursor = 0,
 ): ObservationFoldState {
+  const normalizedOwner =
+    typeof owner === "string" ? { runId: owner, epoch: 0 } : Object.freeze({ ...owner });
   return {
-    runId,
+    owner: normalizedOwner,
     attempt,
     acknowledgedCursor,
     latestCursor: acknowledgedCursor,
@@ -123,7 +132,7 @@ export function foldObservationPage(
   if (state.resnapshotRequired) {
     return state;
   }
-  if (page.run_id !== state.runId) {
+  if (page.run_id !== state.owner.runId) {
     return requireObservationResnapshot(state, "run_mismatch");
   }
   if (page.attempt !== state.attempt) {
@@ -174,13 +183,13 @@ export function foldObservationPage(
   let entities: Map<string, DiscoveryObservationRecord> | null = null;
 
   for (const observation of page.observations) {
-    if (observation.run_id !== state.runId) {
+    if (observation.run_id !== state.owner.runId) {
       return requireObservationResnapshot(state, "run_mismatch");
     }
     if (observation.attempt !== state.attempt) {
       return requireObservationResnapshot(state, "attempt_mismatch");
     }
-    const eventKey = observationNamespace(state.runId, state.attempt, observation.event_key);
+    const eventKey = observationNamespace(state.owner.runId, state.attempt, observation.event_key);
     const priorEvent = (events ?? state.events).get(eventKey);
     if (
       (observation.cursor < state.acknowledgedCursor && !priorEvent) ||
@@ -199,7 +208,7 @@ export function foldObservationPage(
       cursor: observation.cursor,
       payloadSha256: observation.payload_sha256,
     });
-    const entityKey = observationEntityKey(state.runId, state.attempt, observation);
+    const entityKey = observationEntityKey(state.owner.runId, state.attempt, observation);
     const current = (entities ?? state.entities).get(entityKey);
     if (!current || observation.entity_version > current.entity_version) {
       entities ??= new Map(state.entities);
@@ -237,16 +246,17 @@ export function foldObservationPage(
 export type RunControllerAction =
   | { type: "reset" }
   | { type: "submitting" }
-  | { type: "accepted"; runRef: RunRef }
-  | { type: "restored"; runRef: RunRef; status: JobStatus }
-  | { type: "terminal-observed"; runId: string; terminalCursor?: number | null }
-  | { type: "observation-cursor-acknowledged"; runId: string; cursor: number }
+  | { type: "accepted"; runRef: RunRef; epoch: number }
+  | { type: "restored"; runRef: RunRef; status: JobStatus; epoch: number }
+  | { type: "terminal-observed"; runId: string; epoch: number; terminalCursor?: number | null }
+  | { type: "observation-cursor-acknowledged"; runId: string; epoch: number; cursor: number }
   | {
       type: "evidence-succeeded";
       runId: string;
+      epoch: number;
       requirements: readonly EvidenceRequirement[];
     }
-  | { type: "evidence-failed"; runId: string; error: string };
+  | { type: "evidence-failed"; runId: string; epoch: number; error: string };
 
 export function evidenceRequirementsFor(runRef: RunRef): readonly EvidenceRequirement[] {
   if (runRef.family === "validation") {
@@ -285,6 +295,7 @@ export function runControllerReducer(
     return {
       phase: "active",
       runRef: action.runRef,
+      epoch: action.epoch,
       requiredEvidence: evidenceRequirementsFor(action.runRef),
       completedEvidence: [],
       evidenceError: null,
@@ -297,6 +308,7 @@ export function runControllerReducer(
     return {
       phase: isTerminal(action.status) ? "terminal-sync" : "active",
       runRef: action.runRef,
+      epoch: action.epoch,
       requiredEvidence,
       completedEvidence: [],
       evidenceError: null,
@@ -304,7 +316,11 @@ export function runControllerReducer(
       terminalObservationCursor: null,
     };
   }
-  if (!state.runRef || action.runId !== state.runRef.runId) {
+  if (
+    !state.runRef ||
+    action.runId !== state.runRef.runId ||
+    action.epoch !== state.epoch
+  ) {
     return state;
   }
   if (action.type === "terminal-observed") {

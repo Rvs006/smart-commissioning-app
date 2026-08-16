@@ -22,6 +22,11 @@ from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from unittest.mock import patch
 
+from app.schemas.jobs import JobCreateRequest
+from app.services.run_service import (
+    _idempotency_request_sha256,
+    _legacy_idempotency_request_sha256,
+)
 from harness import ApiTestCase
 from smart_commissioning_core.engines.bacnet_params import (
     MODE_FOREIGN_DEVICE,
@@ -138,6 +143,173 @@ class _EngineApiTestCase(ApiTestCase):
 
 
 class IpDiscoveryApiTests(_EngineApiTestCase):
+    def test_idempotency_hash_keeps_nmap_host_discovery_ports_empty(self) -> None:
+        request = JobCreateRequest(
+            project_id="demo-project",
+            site_id="demo-site",
+            job_type="ip_discovery",
+            parameters={
+                "dry_run": True,
+                "provider": "operator_managed_nmap",
+                "nmap_profile": "host_discovery",
+                "ports": [],
+            },
+        )
+        ignored_ports = request.model_copy(
+            update={
+                "parameters": {
+                    **request.parameters,
+                    "ports": [{"port": 443, "protocol": "tcp"}],
+                }
+            }
+        )
+
+        self.assertEqual(
+            _idempotency_request_sha256(request, expected_job_type="ip_discovery"),
+            _idempotency_request_sha256(ignored_ports, expected_job_type="ip_discovery"),
+        )
+        inventory = request.model_copy(
+            update={
+                "parameters": {
+                    "dry_run": True,
+                    "provider": "operator_managed_nmap",
+                    "ports": [80],
+                }
+            }
+        )
+        null_inventory_profile = inventory.model_copy(
+            update={"parameters": {**inventory.parameters, "nmap_profile": None}}
+        )
+
+        self.assertEqual(
+            _idempotency_request_sha256(inventory, expected_job_type="ip_discovery"),
+            _idempotency_request_sha256(null_inventory_profile, expected_job_type="ip_discovery"),
+        )
+        self.assertNotEqual(
+            _idempotency_request_sha256(inventory, expected_job_type="ip_discovery"),
+            _idempotency_request_sha256(request, expected_job_type="ip_discovery"),
+        )
+
+    def test_idempotency_fingerprint_preserves_live_ids_and_meaningful_fields(self) -> None:
+        preview = JobCreateRequest(
+            project_id="demo-project",
+            site_id="demo-site",
+            job_type="ip_discovery",
+            parameters={"cidr": "10.99.0.0/30", "ports": [443, 80], "dry_run": True},
+        )
+        equivalent_ports = preview.model_copy(
+            update={
+                "parameters": {
+                    "cidr": "10.99.0.0/30",
+                    "ports": [{"port": 80, "protocol": "tcp"}, "443/tcp"],
+                    "dry_run": True,
+                }
+            }
+        )
+        unknown_field = preview.model_copy(
+            update={"parameters": {**preview.parameters, "operator_note": "retain-me"}}
+        )
+        omitted_defaults = preview.model_copy(
+            update={"parameters": {"cidr": "10.99.0.0/30", "dry_run": True}}
+        )
+        explicit_defaults = preview.model_copy(
+            update={
+                "parameters": {
+                    "cidr": "10.99.0.0/30",
+                    "ports": [80, 443, 1883, 502],
+                    "dry_run": True,
+                    "provider": "builtin_tcp_connect",
+                    "profile": "gentle",
+                    "reverse_dns": False,
+                    "use_register_addresses": False,
+                }
+            }
+        )
+        live = preview.model_copy(
+            update={"parameters": {}, "preview_run_id": "run_preview_a", "scan_authorization_id": "auth_a"}
+        )
+
+        def fingerprint(request: JobCreateRequest) -> str:
+            return _idempotency_request_sha256(request, expected_job_type="ip_discovery")
+
+        self.assertEqual(fingerprint(preview), fingerprint(equivalent_ports))
+        self.assertEqual(fingerprint(omitted_defaults), fingerprint(explicit_defaults))
+        self.assertNotEqual(fingerprint(preview), fingerprint(unknown_field))
+        self.assertNotEqual(fingerprint(live), fingerprint(live.model_copy(update={"preview_run_id": "run_preview_b"})))
+        self.assertNotEqual(
+            fingerprint(live),
+            fingerprint(live.model_copy(update={"scan_authorization_id": "auth_b"})),
+        )
+
+    def test_idempotency_fingerprint_matches_resolver_equivalences_and_conflicts(self) -> None:
+        baseline = JobCreateRequest(
+            project_id="demo-project",
+            site_id="demo-site",
+            job_type="ip_discovery",
+            parameters={"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+        )
+
+        def fingerprint(request: JobCreateRequest) -> str:
+            return _idempotency_request_sha256(request, expected_job_type="ip_discovery")
+
+        equivalent_parameters = {
+            "profile whitespace and case": {"profile": " GENTLE "},
+            "truthy dry-run string": {"dry_run": " yes "},
+            "nullable defaults": {
+                "provider": None,
+                "profile": None,
+                "max_hosts": None,
+                "max_ports": None,
+                "max_dispatch_attempts": None,
+                "scan_retries": None,
+                "scan_target_spacing_ms": None,
+                "scan_retry_backoff_ms": None,
+                "scan_dispatch_phase_seconds": None,
+                "scan_cleanup_margin_seconds": None,
+                "scan_run_deadline_seconds": None,
+            },
+            "false register flag": {"use_register_addresses": "false"},
+            "numeric policy values": {
+                "max_hosts": "256",
+                "max_ports": "64",
+                "max_dispatch_attempts": "6000",
+                "scan_retries": "0",
+                "scan_target_spacing_ms": "100",
+                "scan_retry_backoff_ms": "250",
+                "scan_dispatch_phase_seconds": "2400",
+                "scan_cleanup_margin_seconds": "300",
+                "scan_run_deadline_seconds": "2700",
+                "scan_per_target_concurrency": 999,
+                "scan_max_concurrency": "8",
+                "scan_rate_limit_per_sec": "10",
+                "scan_connect_timeout_s": "3",
+            },
+        }
+        for label, overrides in equivalent_parameters.items():
+            with self.subTest(label=label):
+                request = baseline.model_copy(
+                    update={"parameters": {**baseline.parameters, **overrides}}
+                )
+                self.assertEqual(fingerprint(baseline), fingerprint(request))
+
+        conflicts = {
+            "target": {"cidr": "10.99.1.0/30"},
+            "exclusion": {"exclusions": [{"kind": "address", "address": "10.99.0.1"}]},
+            "provider": {"provider": "operator_managed_nmap"},
+            "profile": {
+                "profile": "planned_extended",
+                "planned_extended_risk_acknowledged": True,
+            },
+            "register flag": {"use_register_addresses": True},
+            "policy": {"max_dispatch_attempts": 5_999},
+        }
+        for label, overrides in conflicts.items():
+            with self.subTest(label=label):
+                request = baseline.model_copy(
+                    update={"parameters": {**baseline.parameters, **overrides}}
+                )
+                self.assertNotEqual(fingerprint(baseline), fingerprint(request))
+
     def test_inline_processor_receives_a_strict_import_loader(self) -> None:
         from app.api.routes import discovery as discovery_routes
         from smart_commissioning_core.db.repositories import ImportRepository
@@ -287,6 +459,165 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
 
+    def test_idempotency_key_replays_a_v0148_raw_digest_for_an_exact_retry(self) -> None:
+        from app.core.db import get_engine
+        from smart_commissioning_core.db.models import RunIdempotencyKey
+        from sqlalchemy import update
+
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+        }
+        request = JobCreateRequest.model_validate(payload)
+        legacy_digest = _legacy_idempotency_request_sha256(
+            request,
+            expected_job_type="ip_discovery",
+        )
+        self.assertNotEqual(
+            legacy_digest,
+            _idempotency_request_sha256(request, expected_job_type="ip_discovery"),
+        )
+        headers = {"Idempotency-Key": "ip-v0148-exact-replay"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        self.assertEqual(first.status_code, 200, first.text)
+        with get_engine().begin() as connection:
+            updated = connection.execute(
+                update(RunIdempotencyKey)
+                .where(RunIdempotencyKey.run_id == first.json()["run_id"])
+                .values(request_sha256=legacy_digest)
+            )
+        self.assertEqual(updated.rowcount, 1)
+
+        replay = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_idempotency_key_replays_ip_preview_with_reordered_ports(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [443, 80], "dry_run": True},
+        }
+        headers = {"Idempotency-Key": "ip-reordered-ports"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        replay = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            json={**payload, "parameters": {"cidr": "10.99.0.0/30", "ports": [80, 443], "dry_run": True}},
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_idempotency_key_replays_ip_preview_with_duplicate_ports(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {"cidr": "10.99.0.0/30", "ports": [80, 443, 80], "dry_run": True},
+        }
+        headers = {"Idempotency-Key": "ip-duplicate-ports"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        replay = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            json={**payload, "parameters": {"cidr": "10.99.0.0/30", "ports": [443, 80], "dry_run": True}},
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_idempotency_key_replays_ip_preview_when_reverse_dns_false_is_omitted(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {
+                "cidr": "10.99.0.0/30",
+                "ports": [80],
+                "reverse_dns": False,
+                "dry_run": True,
+            },
+        }
+        headers = {"Idempotency-Key": "ip-reverse-dns-default"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        replay = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            json={**payload, "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True}},
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_idempotency_key_replays_ip_preview_with_ignored_reverse_dns_and_defaults(self) -> None:
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "parameters": {
+                "cidr": "10.99.0.0/30",
+                "ports": [80],
+                "dry_run": True,
+                "provider": "builtin_tcp_connect",
+                "profile": "gentle",
+                "reverse_dns": True,
+                "use_register_addresses": False,
+            },
+        }
+        headers = {"Idempotency-Key": "ip-effective-defaults"}
+
+        first = self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+        replay = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            json={
+                **payload,
+                "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
+            },
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_keyed_ip_preview_rejects_extreme_port_with_a_validation_response(self) -> None:
+        response = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            content=(
+                '{"project_id":"demo-project","site_id":"demo-site","job_type":"ip_discovery",'
+                '"parameters":{"cidr":"10.99.0.0/30","ports":[1e1000],"dry_run":true}}'
+            ),
+            headers={**self.client_headers, "Content-Type": "application/json", "Idempotency-Key": "ip-extreme-port"},
+        )
+
+        self.assertGreaterEqual(response.status_code, 400, response.text)
+        self.assertLess(response.status_code, 500, response.text)
+
+    def test_unkeyed_ip_preview_rejects_extreme_port_with_a_validation_response(self) -> None:
+        response = self.client.post(
+            "/api/v1/discovery/ip/runs",
+            content=(
+                '{"project_id":"demo-project","site_id":"demo-site","job_type":"ip_discovery",'
+                '"parameters":{"cidr":"10.99.0.0/30","ports":[1e1000],"dry_run":true}}'
+            ),
+            headers={**self.client_headers, "Content-Type": "application/json"},
+        )
+
+        self.assertGreaterEqual(response.status_code, 400, response.text)
+        self.assertLess(response.status_code, 500, response.text)
+
     def test_idempotency_key_rejects_a_conflicting_ip_request(self) -> None:
         payload = {
             "project_id": "demo-project",
@@ -325,21 +656,29 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertNotEqual(second.json()["run_id"], first.json()["run_id"])
 
     def test_concurrent_idempotency_key_replays_one_canonical_ip_preview(self) -> None:
-        payload = {
-            "project_id": "demo-project",
-            "site_id": "demo-site",
-            "job_type": "ip_discovery",
-            "parameters": {"cidr": "10.99.0.0/30", "ports": [80], "dry_run": True},
-        }
+        payloads = (
+            {
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "job_type": "ip_discovery",
+                "parameters": {"cidr": "10.99.0.0/30", "ports": [443, 80], "dry_run": True},
+            },
+            {
+                "project_id": "demo-project",
+                "site_id": "demo-site",
+                "job_type": "ip_discovery",
+                "parameters": {"cidr": "10.99.0.0/30", "ports": [80, 443], "dry_run": True},
+            },
+        )
         headers = {"Idempotency-Key": "ip-concurrent-replay"}
         barrier = Barrier(2)
 
-        def submit() -> object:
+        def submit(index: int) -> object:
             barrier.wait()
-            return self.client.post("/api/v1/discovery/ip/runs", json=payload, headers=headers)
+            return self.client.post("/api/v1/discovery/ip/runs", json=payloads[index], headers=headers)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            first, second = list(executor.map(lambda _index: submit(), range(2)))
+            first, second = list(executor.map(submit, range(2)))
 
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(second.status_code, 200, second.text)
@@ -380,6 +719,55 @@ class IpDiscoveryApiTests(_EngineApiTestCase):
         self.assertEqual(first.status_code, 200, first.text)
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json()["run_id"], first.json()["run_id"])
+
+    def test_concurrent_idempotency_key_replays_one_authorized_ip_run_and_consumes_once(self) -> None:
+        preview = self._post(
+            "/api/v1/discovery/ip/runs",
+            {"cidr": "127.0.0.1/32", "ports": [9], "dry_run": True},
+            "ip_discovery",
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        now = datetime.now(UTC)
+        authorization = self.client.post(
+            "/api/v1/discovery/scan-authorizations",
+            json={
+                "preview_run_id": preview.json()["run_id"],
+                "ticket": "CHG-IDEMPOTENCY-CONCURRENT-LIVE",
+                "purpose": "Verify concurrent authorized replay",
+                "not_before": (now - timedelta(minutes=1)).isoformat(),
+                "not_after": (now + timedelta(hours=1)).isoformat(),
+            },
+        )
+        self.assertEqual(authorization.status_code, 201, authorization.text)
+        authorization_id = authorization.json()["authorization_id"]
+        payload = {
+            "project_id": "demo-project",
+            "site_id": "demo-site",
+            "job_type": "ip_discovery",
+            "preview_run_id": preview.json()["run_id"],
+            "scan_authorization_id": authorization_id,
+            "parameters": {},
+        }
+        barrier = Barrier(2)
+
+        def submit() -> object:
+            barrier.wait()
+            return self.client.post(
+                "/api/v1/discovery/ip/runs",
+                json=payload,
+                headers={"Idempotency-Key": "ip-concurrent-live-replay"},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first, second = list(executor.map(lambda _index: submit(), range(2)))
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(first.json()["run_id"], second.json()["run_id"])
+        authorization_state = self.client.get(f"/api/v1/discovery/scan-authorizations/{authorization_id}")
+        self.assertEqual(authorization_state.status_code, 200, authorization_state.text)
+        self.assertEqual(authorization_state.json()["use_count"], 1)
+        self.assertEqual(authorization_state.json()["consumed_run_id"], first.json()["run_id"])
 
     def test_dry_run_persists_the_normalized_multi_target_contract(self) -> None:
         response = self._post(
