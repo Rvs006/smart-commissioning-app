@@ -7,11 +7,28 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.50] - 2026-08-16
+
 ### Fixed
 
 - BACnet Foreign Device scans now use only the configured BBMD transport instead
   of also sending a local broadcast. Register-backed directed unicast remains
   available when expected devices require it.
+
+### Changed
+
+- The in-app Brief now explains dry previews, sealing, approval timing,
+  authorization selection, live scans, terminal evidence, failures, and safe
+  equivalent retries.
+- Learning now includes numbered IP procedures, scan-state definitions,
+  BACnet/MQTT/UDMI/Nmap boundaries, report and export timing, and practical
+  troubleshooting.
+
+### Compatibility
+
+- This release adds no database migration, protocol behavior change, customer
+  template asset, or BACnet write capability. Nmap remains optional, separately
+  installed, and unbundled.
 
 ## [0.1.49] - 2026-08-16
 

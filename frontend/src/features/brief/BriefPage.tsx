@@ -56,7 +56,7 @@ const walks: Record<RoleId, { num: string; title: string; rows: { lab: string; t
       title: "Confirm the network is reachable",
       rows: [
         { lab: "Go to", text: "IP Discovery and load the expected host list for the site." },
-        { lab: "Do", text: "Run a scan across the commissioning subnet to find reachable, missing and unexpected hosts." },
+        { lab: "Do", text: "Preview the targets, wait for sealing, approve that plan, then run the authorized live scan." },
         { lab: "See", text: "A red flag on any missing controller before you waste an afternoon chasing it on BACnet." },
       ],
     },
@@ -324,6 +324,59 @@ export function BriefPage() {
                 You do not have to run the steps in one sitting. Each run is recorded, so you
                 can scan today, validate tomorrow, and still produce one coherent evidence
                 pack at the end.
+              </p>
+
+              <h2>How a protected discovery run works</h2>
+              <p>
+                A dry-run preview creates a scan plan without network I/O. It checks the
+                targets, ports, provider and safety limits, but it does not contact the
+                network and it does not need authorization. Use the preview to confirm that
+                the planned scope is exactly what you intend to scan.
+              </p>
+              <ol>
+                <li>Run the dry preview and wait for a completed and sealed preview.</li>
+                <li>
+                  Create an approval for the displayed preview, or select an enabled approval
+                  already listed for it.
+                </li>
+                <li>Confirm that you are authorized to scan the network.</li>
+                <li>Select the matching sealed preview authorization from the dropdown.</li>
+                <li>
+                  Select <strong>Run</strong>. The app submits that approved plan as a live
+                  scan and opens the run monitor.
+                </li>
+              </ol>
+              <p>
+                The authorization dropdown stays unavailable while the preview is sealing.
+                Approval becomes available only after the preview succeeds and its sealed
+                plan is ready. The list is already limited to the displayed preview, and
+                expired, spent or revoked entries are disabled. If several approvals are
+                enabled, select the authorization ID supplied in the approval record. The
+                counter beside it shows uses consumed and maximum uses as used/max.
+              </p>
+
+              <h2>When evidence and reports are ready</h2>
+              <p>
+                Follow progress in the Run console or Run History. Accepted by API means the
+                request was admitted; Running means network work is still active. Engine
+                complete means scanning has stopped, but the final evidence may still be
+                synchronizing. Report generation is available for the selected run as soon as
+                its status is authoritatively terminal. Results, issues and comparison evidence
+                refresh separately, so those views may still be synchronizing or may fail to
+                refresh without removing the report controls for the terminal run. Leave the
+                page open or return through Run History while the evidence refresh is pending.
+              </p>
+
+              <h2>Failures and safe retries</h2>
+              <p>
+                If a run fails or is rejected, read its failure detail before trying again.
+                Correct the target, connection, policy or authorization named there. When the
+                request still describes the same scan, the same scan can be retried safely,
+                including an equivalent port order or an omitted default. If you change what
+                will be scanned, create a new preview and approval. The page creates a fresh
+                request key for every button press. API integrations may reuse a key only when
+                replaying the same request; using it for different work is rejected to prevent
+                an accidental duplicate scan.
               </p>
             </div>
 
@@ -607,11 +660,11 @@ export function BriefPage() {
                 </ul>
                 <div className="dc-callout warn">
                   <span className="dc-callout-icon">⚠</span>
-                  <span>A host that pings is not the same as a host talking BACnet. Reachable means routable, not commissioned.</span>
+                  <span>A response on a scanned TCP port is not the same as a device talking BACnet. It proves that service answered, not that the device is commissioned.</span>
                 </div>
                 <p className="dc-try">
                   <span className="dc-try-lab">Try it yourself</span>
-                  Scan the subnet and check whether every controller on your panel schedule shows as reachable.
+                  Preview the subnet and ports, approve the sealed plan, run it live, then compare the result with the panel schedule.
                 </p>
               </div>
 

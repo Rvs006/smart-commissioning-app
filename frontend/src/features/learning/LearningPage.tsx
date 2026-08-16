@@ -55,7 +55,7 @@ const ROLES: Role[] = [
           { lab: "Go to", text: "IP Discovery" },
           {
             lab: "Do",
-            text: "Run a scan across the site subnet and sort hosts into reachable, missing and unexpected against your device schedule.",
+            text: "Preview the planned targets, wait for sealing, approve that plan, then run the authorized live scan and sort the result against your device schedule.",
           },
           {
             lab: "See",
@@ -180,7 +180,7 @@ const ROLES: Role[] = [
           { lab: "Go to", text: "IP Discovery" },
           {
             lab: "Do",
-            text: "Scan and compare reachable hosts against your device schedule to spot missing controllers and unexpected extras.",
+            text: "Preview and approve the planned scope, then compare the authorized live result with your device schedule to spot missing controllers and unexpected extras.",
           },
           {
             lab: "See",
@@ -411,7 +411,7 @@ const ROLES: Role[] = [
           { lab: "Go to", text: "IP Discovery" },
           {
             lab: "Do",
-            text: "Scan to confirm the edge gateway and the BACnet side of the network respond at the addresses you configured.",
+            text: "Preview and approve the planned scope, then scan the configured addresses and ports from the live run.",
           },
           {
             lab: "See",
@@ -536,7 +536,7 @@ const SETUP_PATHS: SetupPath[] = [
             lab: "Get",
             text: (
               <>
-                <code>SmartCommissioningApp_Windows_Portable.zip</code> from the latest GitHub
+                <code>Smart_Commissioning_App_Windows_Portable.zip</code> from the latest GitHub
                 release — ask your project lead if you don&apos;t have the link.
               </>
             ),
@@ -659,7 +659,7 @@ const FIRST_RUN: Lesson[] = [
       },
       {
         lab: "Why",
-        text: 'A dry-run proves the whole workflow end to end without touching a live BMS network. Real scans stay locked behind the explicit "I am authorized" tick.',
+        text: 'A dry-run proves the planned scope without touching a live BMS network. A real scan also needs the completed sealed preview, its approved authorization, the explicit "I am authorized" tick, and selection of the matching approval.',
       },
     ],
   },
@@ -683,6 +683,119 @@ const FIRST_RUN: Lesson[] = [
     ],
   },
 ];
+
+const SCAN_PHASES = [
+  {
+    name: "Preview",
+    detail: "The app is checking the planned targets, ports and safety limits without network I/O.",
+  },
+  {
+    name: "Sealing",
+    detail: "The successful preview is being finalized so an approval can be bound to that exact plan.",
+  },
+  {
+    name: "Authorization pending",
+    detail: "The sealed plan exists, but an approved authorization has not yet been created or selected.",
+  },
+  {
+    name: "Accepted by API",
+    detail: "The live request was admitted. This is an acknowledgement, not a completed result.",
+  },
+  {
+    name: "Running",
+    detail: "The scan engine is actively working. Follow progress in the run console.",
+  },
+  {
+    name: "Engine complete",
+    detail: "Network work has stopped. Final records may still need confirmation before results are authoritative.",
+  },
+  {
+    name: "Final evidence is synchronising",
+    detail: "The app is confirming results, issues and evidence. Keep the current run selected while this phase is active.",
+  },
+  {
+    name: "Results ready",
+    detail: "Terminal status and final evidence agree. Results, comparisons and eligible report controls can now be used.",
+  },
+  {
+    name: "Failed or rejected",
+    detail: "Open the run detail, read the stated cause, correct it, and preview again if the requested scan scope changes.",
+  },
+  {
+    name: "Final evidence unavailable",
+    detail: "Final confirmation did not complete. Read the stated cause, reload once, then rerun only when the failure detail calls for a new run.",
+  },
+] as const;
+
+const PERSISTED_RUN_STATUSES = [
+  {
+    name: "Queued",
+    detail: "The request is stored and waiting for engine capacity.",
+  },
+  {
+    name: "Running",
+    detail: "The engine is actively processing the stored run.",
+  },
+  {
+    name: "Succeeded",
+    detail: "Engine work finished successfully. Final evidence can still be synchronising before Results ready appears.",
+  },
+  {
+    name: "Failed",
+    detail: "The run ended with a recorded failure. Read the failure detail before deciding whether to rerun.",
+  },
+  {
+    name: "Cancelled",
+    detail: "The run was stopped before successful completion and will not publish new results.",
+  },
+] as const;
+
+const TROUBLESHOOTING = [
+  {
+    problem: "Empty authorization dropdown",
+    action: "Check that a dry preview exists for the current targets. The list is intentionally empty until that preview succeeds and seals.",
+  },
+  {
+    problem: "Preview still sealing",
+    action: "Wait for the preview to reach succeeded and sealed. Approval is unavailable while sealing is in progress.",
+  },
+  {
+    problem: "Live Run button disabled",
+    action: 'Tick "I am authorized" and select an enabled approval already listed for the displayed preview. If none is enabled, an administrator must approve that preview.',
+  },
+  {
+    problem: "Results not ready",
+    action: "Check the persisted status in the run console or Run History. Wait while it is Queued or Running; after a terminal status, reload once and read any stated cause before rerunning.",
+  },
+  {
+    problem: "Terminal discovery results not ready",
+    action: "The engine has stopped but final result data is not confirmed yet. Reload once. If Final evidence unavailable appears, read the stated cause and rerun only when the failure detail requires it.",
+  },
+  {
+    problem: "Nmap unavailable",
+    action: "Use Built-in TCP connect, or ask an administrator to confirm the separately installed Nmap copy for this project and site.",
+  },
+  {
+    problem: "Authorization mismatch",
+    action: "Use an enabled authorization already listed for the displayed preview. If the targets or ports changed, create a new preview and approval.",
+  },
+  {
+    problem: "Idempotency conflict",
+    action: "The request key was already used for genuinely different work. Check Run History, then create a new preview and approval for the changed scan. The page supplies a fresh key when you press Run; API integrations must supply their own new key.",
+  },
+  {
+    problem: "Scan accepted but still running",
+    action: "Accepted by API only confirms admission. Leave the run to finish and watch its stage and progress in the run console.",
+  },
+  {
+    problem: "Evidence synchronization still pending",
+    action: "Keep the current run selected while Final evidence is synchronising. If it changes to Final evidence unavailable, read the cause, reload once, and rerun only when instructed by the failure detail.",
+  },
+  {
+    problem: "Failed scan or rejected authorization",
+    action: "Open the failure detail, correct the named network, policy, expiry or scope problem, and run a new preview when the plan changes.",
+  },
+] as const;
 
 // One guided walkthrough block; used by both the setup paths and the role paths.
 function WalkSteps({ lessons }: { lessons: Lesson[] }) {
@@ -827,6 +940,183 @@ export function LearningPage() {
                 runs. Now pick your role below and learn the modules you&apos;ll use on site.
               </p>
             </div>
+          </div>
+        </section>
+
+        <section className="dc-panel" id="operator-guides">
+          <div className="dc-intro">
+            <h1 className="dc-h1">Operator guides for protected scans and evidence.</h1>
+            <p className="dc-lead">
+              These procedures describe the current application workflow. Essential steps are
+              visible here without opening another control.
+            </p>
+          </div>
+
+          <div className="dc-ref">
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">Run an IP discovery</h2>
+                <span className="dc-guidance-meta">Seven steps</span>
+              </div>
+              <ol className="dc-numbered">
+                <li>Configure the targets and TCP ports, then confirm the correct source interface.</li>
+                <li>Tick Dry run and select Preview. The preview sends no network traffic.</li>
+                <li>Wait until the preview succeeds and finishes sealing.</li>
+                <li>
+                  An administrator must create and approve the scan authorization for that sealed
+                  preview. If you are not an administrator, ask one to approve it, then select the
+                  approved authorization already listed. When several are enabled, select the
+                  authorization ID supplied in the approval record. The used/max counter shows
+                  uses consumed and maximum uses. The page has already limited the choices to the
+                  displayed sealed preview and disabled expired, spent or revoked entries.
+                </li>
+                <li>
+                  Tick the authorization confirmation, select the matching sealed preview
+                  authorization, then select Run to start the live scan.
+                </li>
+                <li>Wait for confirmed terminal completion in the run console or Run History.</li>
+                <li>Open Results, then generate the required report from the completed run.</li>
+              </ol>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">Retry an IP discovery safely</h2>
+                <span className="dc-guidance-meta">Equivalent requests only</span>
+              </div>
+              <ol className="dc-numbered">
+                <li>
+                  When no response reaches the page, check Run History before pressing Preview or
+                  Run again. The first request may already have been accepted.
+                </li>
+                <li>
+                  Same-key replay is an API or automatic transport behaviour. Equivalent API
+                  retries are supported: reordered ports describe the same scan, and omitted
+                  default values describe the same scan. The page creates a fresh request key for
+                  each button press, so operators do not copy or reuse one.
+                </li>
+                <li>
+                  A genuinely different request still conflicts when an API integration reuses a
+                  key. Check Run History for the original work. If the targets, ports or options
+                  changed, create a new preview and approval before submitting the changed scan.
+                </li>
+              </ol>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">Understand scan status</h2>
+                <span className="dc-guidance-meta">What to do next</span>
+              </div>
+              <p className="dc-ref-lead">
+                Workflow phases describe what the page is doing. They are separate from the stored
+                run status shown in Run History.
+              </p>
+              <h3>Workflow phases</h3>
+              <dl className="dc-guidance-list">
+                {SCAN_PHASES.map((status) => (
+                  <div key={status.name}>
+                    <dt>{status.name}</dt>
+                    <dd>{status.detail}</dd>
+                  </div>
+                ))}
+              </dl>
+              <h3>Persisted run statuses</h3>
+              <dl className="dc-guidance-list">
+                {PERSISTED_RUN_STATUSES.map((status) => (
+                  <div key={status.name}>
+                    <dt>{status.name}</dt>
+                    <dd>{status.detail}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">BACnet discovery</h2>
+                <span className="dc-guidance-meta">Read only</span>
+              </div>
+              <p className="dc-ref-lead">
+                Configure the BACnet interface and range, preview the plan, approve the sealed
+                preview, then run live discovery. The app records devices, objects and readable
+                properties. Comparison evidence is generated from the discovered points after the
+                run is confirmed complete. This release does not add BACnet write capability.
+              </p>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">MQTT and UDMI templates</h2>
+                <span className="dc-guidance-meta">Reference input</span>
+              </div>
+              <p className="dc-ref-lead">
+                Templates describe expected devices, topics and payload facets for comparison and
+                foreign-device detection. They do not make the network scan run. A blank Payload
+                type is valid where no payload class is required. The wildcard <code>#</code>{" "}
+                belongs in a topic or topic-filter field, never in Payload type. Private customer
+                MQTT and BACnet templates stay outside public releases unless they are explicitly
+                approved as release assets.
+              </p>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">Nmap on this application</h2>
+                <span className="dc-guidance-meta">Optional</span>
+              </div>
+              <ul className="dc-caps">
+                <li><strong>Built-in TCP connect is the default</strong> and needs no Nmap installation.</li>
+                <li><strong>Nmap is optional</strong> and must be installed separately on this machine.</li>
+                <li><strong>The portable EXE does not bundle, install, or download Nmap or Npcap.</strong></li>
+                <li>
+                  <strong>Check availability in IP Discovery.</strong> The provider list and the
+                  Nmap capability message show whether a detected installation is approved.
+                </li>
+                <li>
+                  <strong>If unavailable,</strong> Operator-managed Nmap remains disabled or the
+                  request is rejected with the availability reason. Use Built-in TCP connect or
+                  ask an administrator to approve the local installation.
+                </li>
+              </ul>
+              <p className="dc-ref-lead">
+                The equivalent-retry and preview/live fixes are unrelated to Nmap. They apply to
+                request identity and to keeping each submitted run&apos;s evidence separate.
+              </p>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">Reports and exports</h2>
+                <span className="dc-guidance-meta">Terminal runs</span>
+              </div>
+              <p className="dc-ref-lead">
+                Report controls appear only when the selected run has confirmed terminal status.
+                Waiting prevents a report from being built from partial results. Depending on the
+                module, available outputs include PDF, Word, Excel, an evidence pack, Generate All,
+                Validation JSON and MQTT XLSX.
+              </p>
+              <p className="dc-ref-lead">
+                Closing access, changing the selected run, or replacing a run cancels or ignores
+                work owned by the old selection. A stale export cannot finish against another scan
+                or present its file as evidence for the wrong run.
+              </p>
+            </article>
+
+            <article className="dc-ref-card">
+              <div className="dc-ref-head">
+                <h2 className="dc-ref-title">Troubleshooting</h2>
+                <span className="dc-guidance-meta">Plain fixes</span>
+              </div>
+              <dl className="dc-guidance-list">
+                {TROUBLESHOOTING.map((item) => (
+                  <div key={item.problem}>
+                    <dt>{item.problem}</dt>
+                    <dd>{item.action}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
           </div>
         </section>
 

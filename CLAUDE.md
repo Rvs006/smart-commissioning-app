@@ -70,21 +70,19 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-16. The v0.1.49 candidate fences
-  preview-to-live run events and evidence by submission epoch, including
-  auxiliary BACnet/MQTT evidence and active-run downloads, so an adapter that
-  reuses a run ID cannot settle or export from its preview epoch. IP retries
-  remain idempotent for an equivalent request, while the exact v0.1.48 raw
-  replay remains compatible. MQTT templates use a blank Payload type and reserve
-  `#` for the topic filter only; keep corrected local copies private unless an
-  approved asset list says they ship. Builtin TCP remains the default, with Nmap
-  opt-in, locally installed, and unbundled. There are no BACnet write features.
-  Field acceptance remains open until the approved register, applicability
-  matrix, paired collector evidence, and complete cadence run pass
-  `docs/v0.1.49-field-acceptance-checklist.md`. A one-minute operator Stop is
-  cancellation evidence, not cadence evidence. The latest public release is v0.1.48;
-  v0.1.49 is the current candidate. Keep source, raw evidence, report bytes, EXE
-  identity, Docker labels, and release SHA bound to the same run or commit.
+- **Current handoff**: status as of 2026-08-16. The latest public release is
+  v0.1.49; v0.1.50 is the current candidate. The candidate updates the bundled
+  Brief and Learning pages with the sealed-preview authorization flow,
+  equivalent-retry rules, terminal evidence states, protocol and Nmap
+  boundaries, exports, and troubleshooting. It retains v0.1.49 run isolation
+  and idempotency behavior and adds no database migration or BACnet write
+  capability. Built-in TCP connect remains the default. Nmap stays optional,
+  locally installed, and unbundled. MQTT templates use a blank Payload type
+  where appropriate and reserve `#` for topic filters; private customer copies
+  do not ship. Field acceptance remains open until
+  `docs/v0.1.50-field-acceptance-checklist.md` is recorded privately. Keep
+  source, raw evidence, report bytes, EXE identity, Docker labels, and release
+  SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the

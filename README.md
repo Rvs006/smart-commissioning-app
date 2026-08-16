@@ -34,7 +34,7 @@ executable. In Windows, right-click `SmartCommissioningApp.exe` → **Properties
 **Details** to see the product name, file description, and version. These should
 match the version on the GitHub release page you downloaded.
 
-For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#mqttudmi-field-check-v0124-or-later) after startup. The **latest release** link above is the single supported download location; confirm that its tag and bundled `README_FIRST.txt` both name the same release before using this checklist. The [v0.1.49 field acceptance checklist](docs/v0.1.49-field-acceptance-checklist.md) covers the IP-register, BACnet/IP, MQTT, and UDMI checks.
+For the MQTT/UDMI field check, follow [the portable field checklist](docs/field-quickstart.md#mqttudmi-field-check-v0124-or-later) after startup. The **latest release** link above is the single supported download location; confirm that its tag and bundled `README_FIRST.txt` both name the same release before using this checklist. The [v0.1.50 field acceptance checklist](docs/v0.1.50-field-acceptance-checklist.md) covers the bundled guidance, protected IP flow, BACnet/IP, MQTT, and UDMI checks.
 
 > ⚠️ **Windows SmartScreen may warn** - this is an internal unsigned build. Choose
 > **More info → Run anyway**, only if you got the zip from the project owner or the releases page
@@ -154,10 +154,11 @@ The console is branded in the **Electracom** theme with a **light/dark toggle** 
 ships two standalone onboarding surfaces (linked from the header, or reachable directly):
 
 - **Product Brief** - `/#/brief` - what the tool is and how it works, in four tabs: Basics, Key
-  Features, Section Reference, and a role-based **Guided Tour**.
-- **Learning** - `/#/learning` - an **Installation & Setup** guide (both install paths plus
-  first-run steps, including one-click Nmap use) and pick-your-role walkthroughs of the exact modules each role (Commissioning
-  Engineer, BMS Designer, Project Manager, Integration Engineer) touches on site.
+  Features, Section Reference, and a role-based **Guided Tour**. Basics includes the protected
+  preview, approval, live-run, terminal-evidence, failure, and retry sequence.
+- **Learning** - `/#/learning` - Windows portable setup, numbered IP procedures, scan-state and
+  troubleshooting references, protocol/Nmap boundaries, report/export timing, and role-based
+  walkthroughs for Commissioning Engineers, BMS Designers, Project Managers, and Integration Engineers.
 
 The module tabs are grouped by workflow stage - **Configure → Discover → Validate → Report →
 Operate** - so the navigation mirrors the order of the job rather than presenting a flat row of equal
@@ -283,8 +284,9 @@ small set below instead of guessing from filenames.
   (`viewer < reviewer < engineer < admin`) gates every route, with a race-safe last-admin guard.
 - **Secrets at rest** - broker passwords and TLS keys are Fernet-encrypted (`0600`), masked on read,
   and redacted from API responses; never returned to clients.
-- **Scan safety** - live scans are **dry-run by default**, require an explicit authorization flag,
-  are rate-throttled, and support cooperative cancellation. No packets leave without consent.
+- **Scan safety** - a dry preview sends no network traffic. Live scans require a completed sealed
+  preview, its approved authorization, the explicit authorization confirmation, and the matching
+  dropdown selection; they are rate-throttled and support cooperative cancellation.
 - **Evidence integrity** - reports and backups are hashed (SHA-256) and signed (detached Ed25519);
   restores verify before writing (with a zip-slip guard).
 - **Sealed execution** - one database owner may execute a run, and completed
