@@ -3,11 +3,15 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, useLocation } from "react-router";
 import {
   clearApiKey,
+  createSessionBoundApiClient,
   setApiKey,
   type DiscoveryObservationRecord,
   type ReportFormat,
 } from "../../api/client";
+import { queryKeys } from "../../api/queryKeys";
 import { SessionProvider } from "../../app/session";
+import { SessionContext, type SessionContextValue } from "../../app/sessionContext";
+import type { RunRef, SessionScopeId, WorkspaceRef } from "../../app/sessionScope";
 import { ModulePage } from "./ModulePage";
 import { resolvePermittedNmapProfile } from "./nmapProfileSelection";
 
@@ -2409,11 +2413,21 @@ describe("ModulePage BACnet backend provenance", () => {
 
   it("fences same-ID preview BACnet points and comparison evidence from the live epoch", async () => {
     const sharedRunId = "run-bacnet-reused";
-    let liveAccepted = false;
+    let liveSubmissionStarted = false;
+    let liveResponseResolved = false;
     let previewPointsSignal: AbortSignal | null = null;
     let previewComparisonSignal: AbortSignal | null = null;
     let livePointsRequests = 0;
     let liveComparisonRequests = 0;
+    let statusRequests = 0;
+    let streamRequests = 0;
+    let statusRequestsAtLivePost = 0;
+    let streamRequestsAtLivePost = 0;
+    const runStream = controlledSseStream();
+    let resolveLivePost!: (response: Response) => void;
+    const livePost = new Promise<Response>((resolve) => {
+      resolveLivePost = resolve;
+    });
     const terminal = {
       ...terminalRun,
       run_id: sharedRunId,
@@ -2429,23 +2443,41 @@ describe("ModulePage BACnet backend provenance", () => {
         if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
         if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
           const body = JSON.parse(String(init.body)) as { parameters: { dry_run?: boolean } };
-          liveAccepted ||= !body.parameters.dry_run;
+          if (!body.parameters.dry_run) {
+            liveSubmissionStarted = true;
+            statusRequestsAtLivePost = statusRequests;
+            streamRequestsAtLivePost = streamRequests;
+            return livePost;
+          }
           return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
         }
-        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) return jsonResponse(terminal);
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          streamRequests += 1;
+          return runStream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
         if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
         if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/points`)) {
-          if (!liveAccepted) {
+          if (!liveSubmissionStarted) {
             previewPointsSignal = init?.signal ?? null;
             return new Promise<Response>(() => {});
+          }
+          if (!liveResponseResolved) {
+            throw new Error("Live BACnet points were requested before the submission response resolved.");
           }
           livePointsRequests += 1;
           return jsonResponse({ run_id: sharedRunId, points: [{ point_name: "live-point" }], total: 1, has_more: false, next_cursor: null });
         }
         if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/comparison?`)) {
-          if (!liveAccepted) {
+          if (!liveSubmissionStarted) {
             previewComparisonSignal = init?.signal ?? null;
             return new Promise<Response>(() => {});
+          }
+          if (!liveResponseResolved) {
+            throw new Error("Live BACnet comparison was requested before the submission response resolved.");
           }
           liveComparisonRequests += 1;
           return jsonResponse({ compatible: true, additions: [], removals: [], changes: [] });
@@ -2464,12 +2496,140 @@ describe("ModulePage BACnet backend provenance", () => {
     await waitFor(() => expect(authorization).toBeEnabled());
     fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
     fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+    await waitFor(() => expect(liveSubmissionStarted).toBe(true));
     await waitFor(() => expect(previewPointsSignal?.aborted).toBe(true));
     await waitFor(() => expect(previewComparisonSignal?.aborted).toBe(true));
+    expect(livePointsRequests).toBe(0);
+    expect(liveComparisonRequests).toBe(0);
+    expect(statusRequests).toBe(statusRequestsAtLivePost);
+    expect(streamRequests).toBe(streamRequestsAtLivePost);
+    liveResponseResolved = true;
+    resolveLivePost(jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" }));
     await waitFor(() => expect(livePointsRequests).toBeGreaterThan(0));
     await waitFor(() => expect(liveComparisonRequests).toBeGreaterThan(0));
+    expect(statusRequests).toBeGreaterThan(statusRequestsAtLivePost);
+    expect(streamRequests).toBeGreaterThan(streamRequestsAtLivePost);
     expect(screen.queryByText("preview-point")).not.toBeInTheDocument();
     expect(await screen.findByText("live-point")).toBeInTheDocument();
+  });
+
+  it("keeps a failed same-ID BACnet live submission fenced from terminal preview evidence", async () => {
+    const sharedRunId = "run-bacnet-rejected-live";
+    let statusRequests = 0;
+    let resultsRequests = 0;
+    let streamRequests = 0;
+    let statusRequestsAtLivePost = 0;
+    let resultsRequestsAtLivePost = 0;
+    let streamRequestsAtLivePost = 0;
+    const previewStream = controlledSseStream();
+    const terminal = { ...terminalRun, run_id: sharedRunId, job_type: "bacnet_discovery" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { preview_run_id?: string };
+          if (body.preview_run_id) {
+            statusRequestsAtLivePost = statusRequests;
+            resultsRequestsAtLivePost = resultsRequests;
+            streamRequestsAtLivePost = streamRequests;
+            throw new Error("live response lost");
+          }
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) {
+          streamRequests += 1;
+          return previewStream.response;
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          statusRequests += 1;
+          return jsonResponse(terminal);
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          resultsRequests += 1;
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await waitFor(() => expect(resultsRequests).toBeGreaterThan(0));
+    await screen.findAllByRole("button", { name: /Generate report from this run/i });
+
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    expect(await screen.findByText(/Run request failed/i)).toBeInTheDocument();
+    expect(statusRequests).toBe(statusRequestsAtLivePost);
+    expect(resultsRequests).toBe(resultsRequestsAtLivePost);
+    expect(streamRequests).toBe(streamRequestsAtLivePost);
+    expect(screen.queryAllByRole("button", { name: /Generate report from this run/i })).toHaveLength(0);
+  });
+
+  it("discards a held authorized BACnet response after its active owner is replaced", async () => {
+    const sharedRunId = "run-bacnet-late-owner";
+    let resolveLivePost!: (response: Response) => void;
+    const livePost = new Promise<Response>((resolve) => {
+      resolveLivePost = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/bacnet/runs") && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { preview_run_id?: string };
+          if (body.preview_run_id) return livePost;
+          return jsonResponse({ run_id: sharedRunId, job_type: "bacnet_discovery", status: "queued" });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          return jsonResponse({ ...terminalRun, run_id: sharedRunId, job_type: "bacnet_discovery" });
+        }
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}/results`)) {
+          return jsonResponse({ ...resultsPayload, run_id: sharedRunId, devices: [] });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const view = renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    fireEvent.click(await screen.findByLabelText(/Dry run/i));
+    fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
+    await screen.findAllByRole("button", { name: /Generate report from this run/i });
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const authorization = await screen.findByRole("combobox", { name: /Sealed preview authorization/i });
+    await waitFor(() => expect(authorization).toBeEnabled());
+    fireEvent.change(authorization, { target: { value: previewAuthorization.authorization_id } });
+    fireEvent.click(await screen.findByRole("button", { name: "Run" }));
+
+    view.rerender(
+      <QueryClientProvider client={view.queryClient}>
+        <SessionProvider>
+          <MemoryRouter initialEntries={["/"]}>
+            <LocationProbe />
+            <ModulePage moduleRoute="mqtt-discovery" />
+          </MemoryRouter>
+        </SessionProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "MQTT Discovery" });
+    await act(async () => {
+      resolveLivePost(jsonResponse({ run_id: "run-bacnet-foreign", job_type: "bacnet_discovery", status: "queued" }));
+    });
+    expect(screen.queryByText(/run-bacnet-foreign/)).not.toBeInTheDocument();
   });
 
   it("fences a delayed preview property mutation when the same run ID enters a new epoch", async () => {
@@ -8926,6 +9086,119 @@ describe("ModulePage progressive discovery observations", () => {
     expect(screen.getAllByRole("status", { name: "Discovery connection" })).toHaveLength(1);
     const heading = screen.getByRole("heading", { name: "IP Discovery", level: 2 });
     expect(heading).toHaveFocus();
+    fireEvent.click(screen.getByLabelText(/Dry run/i));
+    const previewButton = screen.getByRole("button", { name: "Preview" });
+    expect(previewButton).toBeDisabled();
+    expect(previewButton).toHaveAttribute(
+      "title",
+      "Run access for this workspace is closed. Reopen the module before starting another run.",
+    );
+  });
+
+  it("preserves colliding evidence when moving away from a closed workspace scope", async () => {
+    const sessionScopeId = "session-workspace-transition" as SessionScopeId;
+    const firstWorkspace: WorkspaceRef = { projectId: "project-a", siteId: "site-a" };
+    const secondWorkspace: WorkspaceRef = { projectId: "project-b", siteId: "site-b" };
+    const sharedRunId = "run-ip-workspace-collision";
+    const runningRun = {
+      ...terminalRun,
+      run_id: sharedRunId,
+      status: "running",
+      stage: "probing",
+      progress_percent: 30,
+      result_summary: {},
+    };
+    const stream = controlledSseStream();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) {
+          return jsonResponse({ runs: [{ ...runningRun, edge_id: null }] });
+        }
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith(`/api/v1/runs/${sharedRunId}/events`)) return stream.response;
+        if (url.endsWith(`/api/v1/discovery/runs/${sharedRunId}`)) {
+          return jsonResponse(runningRun);
+        }
+        if (url.includes(`/api/v1/discovery/runs/${sharedRunId}/observations?`)) {
+          return jsonResponse({
+            run_id: sharedRunId,
+            attempt: 1,
+            observations: [],
+            next_cursor: 0,
+            latest_cursor: 0,
+            has_more: false,
+            terminal: null,
+            observations_pruned: false,
+          });
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+
+    const queryClient = new QueryClient({
+      defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+    });
+    const sessionValue = (workspace: WorkspaceRef): SessionContextValue => ({
+      apiClient: createSessionBoundApiClient(sessionScopeId, workspace, "engineer-key"),
+      canAdmin: false,
+      canEngineer: true,
+      error: null,
+      hasApiKey: true,
+      isLoading: false,
+      me: {
+        effective_scopes: [],
+        global_scope: true,
+        role: "engineer",
+        source: "user_key",
+        username: "engineer-1",
+      },
+      role: "engineer",
+      sessionScopeId,
+      signIn: vi.fn(),
+      signOut: vi.fn(),
+      workspace,
+    });
+    const tree = (workspace: WorkspaceRef) => (
+      <QueryClientProvider client={queryClient}>
+        <SessionContext.Provider value={sessionValue(workspace)}>
+          <MemoryRouter initialEntries={["/"]}>
+            <ModulePage moduleRoute="ip-scanner" />
+          </MemoryRouter>
+        </SessionContext.Provider>
+      </QueryClientProvider>
+    );
+    const view = render(tree(firstWorkspace));
+    await screen.findByText(/Discovery run monitor/i);
+    await waitFor(() => expect(screen.getAllByText(sharedRunId).length).toBeGreaterThan(0));
+    stream.push(
+      `event: closed\ndata: ${JSON.stringify({ run_id: sharedRunId, status: "closed" })}\n\n`,
+    );
+    stream.close();
+    await screen.findByRole("status", { name: "Discovery connection" });
+
+    const collidingRunRef: RunRef = {
+      family: "discovery",
+      jobType: "ip_discovery",
+      module: "ip-scanner",
+      origin: "restored",
+      runId: sharedRunId,
+      sessionScopeId,
+      workspace: secondWorkspace,
+    };
+    const collidingKey = [
+      ...queryKeys.run(sessionScopeId, secondWorkspace, collidingRunRef),
+      "epoch",
+      777,
+    ] as const;
+    const collidingEvidence = { marker: "new-workspace-evidence" };
+    queryClient.setQueryData(collidingKey, collidingEvidence);
+
+    view.rerender(tree(secondWorkspace));
+    await waitFor(() =>
+      expect(queryClient.getQueryData(collidingKey)).toEqual(collidingEvidence),
+    );
   });
 
   it("fences a delayed observation page after scoped access closes", async () => {

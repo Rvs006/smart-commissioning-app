@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
 import {
@@ -208,6 +209,12 @@ type RunEpochOwner = {
   workspaceRef: WorkspaceRef;
 };
 
+type RunAccessScope = {
+  moduleRoute: string;
+  sessionScopeId: SessionScopeId;
+  workspaceRef: WorkspaceRef;
+};
+
 function sameRunEpochOwner(
   left: RunEpochOwner | null | undefined,
   right: RunEpochOwner | null | undefined,
@@ -217,6 +224,20 @@ function sameRunEpochOwner(
       right &&
       left.runId === right.runId &&
       left.epoch === right.epoch &&
+      left.sessionScopeId === right.sessionScopeId &&
+      left.workspaceRef.projectId === right.workspaceRef.projectId &&
+      left.workspaceRef.siteId === right.workspaceRef.siteId,
+  );
+}
+
+function sameRunAccessScope(
+  left: RunAccessScope | null | undefined,
+  right: RunAccessScope | null | undefined,
+): boolean {
+  return Boolean(
+    left &&
+      right &&
+      left.moduleRoute === right.moduleRoute &&
       left.sessionScopeId === right.sessionScopeId &&
       left.workspaceRef.projectId === right.workspaceRef.projectId &&
       left.workspaceRef.siteId === right.workspaceRef.siteId,
@@ -257,6 +278,11 @@ type ActiveRun = {
   kind: "discovery" | "validation";
   restored?: boolean;
   ref: RunRef;
+};
+
+type RunSubmissionContext = {
+  reservedRun?: ActiveRun;
+  reservedOwner?: RunEpochOwner;
 };
 
 // The module page is split into three stages so the operator works one screen
@@ -580,6 +606,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [runAttachmentNotice, setRunAttachmentNotice] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<ReportSummary | null>(null);
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const [reservedLiveSubmissionOwner, setReservedLiveSubmissionOwner] =
+    useState<RunEpochOwner | null>(null);
+  const reservedLiveSubmissionOwnerRef = useRef<RunEpochOwner | null>(null);
   const activeRunEpochRef = useRef(0);
   const nextActiveRunEpoch = useCallback(() => ++activeRunEpochRef.current, []);
   const [runController, dispatchRun] = useReducer(runControllerReducer, initialRunControllerState);
@@ -769,6 +798,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const generatedAllBundleDownload = useFileDownload(apiClient);
   const validationJsonDownload = useFileDownload(apiClient);
   const schemaTemplateDownload = useFileDownload(apiClient);
+  const activeRunMatchesReservedLiveSubmission = Boolean(
+    activeRun &&
+      sameRunEpochOwner(
+        { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef },
+        reservedLiveSubmissionOwner,
+      ),
+  );
 
   const profilesQuery = useQuery({
     queryFn: ({ signal }) => listImportProfiles({ client: apiClient, signal }),
@@ -778,17 +814,52 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // SSE-first run progress for the active run. status/stage/progress update
   // live from the stream; on stream error/unsupported, sseActive flips false
   // and the queries below resume the proven 1.5s polling (no regression).
-  const runEvents = useRunEvents(activeRun?.ref, Boolean(activeRun), apiClient, activeRun?.epoch ?? 0);
-  const runAccessClosed = runEvents.connectionState === "closed";
+  const runEvents = useRunEvents(
+    activeRun?.ref,
+    Boolean(activeRun) &&
+      runController.phase !== "submitting" &&
+      !activeRunMatchesReservedLiveSubmission,
+    apiClient,
+    activeRun?.epoch ?? 0,
+  );
+  // A disabled stream returns to its neutral `idle` state. Preserve a closed
+  // access boundary across submission fencing so a reserved epoch cannot make
+  // an already-denied workspace readable again.
+  const currentRunAccessScope: RunAccessScope = {
+    moduleRoute: module.route,
+    sessionScopeId,
+    workspaceRef,
+  };
+  const currentRunAccessScopeRef = useRef(currentRunAccessScope);
+  currentRunAccessScopeRef.current = currentRunAccessScope;
+  const runAccessClosedScopeRef = useRef<RunAccessScope | null>(null);
+  const runEventAccessScope: RunAccessScope | null = runEvents.runRef
+    ? {
+        moduleRoute: runEvents.runRef.module,
+        sessionScopeId: runEvents.runRef.sessionScopeId,
+        workspaceRef: runEvents.runRef.workspace,
+      }
+    : null;
+  if (
+    runEvents.connectionState === "closed" &&
+    sameRunAccessScope(runEventAccessScope, currentRunAccessScope)
+  ) {
+    runAccessClosedScopeRef.current = runEventAccessScope;
+  }
+  const runAccessClosed = sameRunAccessScope(
+    runAccessClosedScopeRef.current,
+    currentRunAccessScope,
+  );
   const activeRunOwner: RunEpochOwner | null = activeRun
     ? { epoch: activeRun.epoch, runId: activeRun.runId, sessionScopeId, workspaceRef }
     : null;
   const activeRunOwnerRef = useRef<RunEpochOwner | null>(activeRunOwner);
-  const runAccessClosedRef = useRef(runAccessClosed);
   activeRunOwnerRef.current = activeRunOwner;
-  runAccessClosedRef.current = runAccessClosed;
   const ownsActiveRun = (owner: RunEpochOwner | null | undefined) =>
-    !runAccessClosedRef.current && sameRunEpochOwner(owner, activeRunOwnerRef.current);
+    !sameRunAccessScope(runAccessClosedScopeRef.current, currentRunAccessScopeRef.current) &&
+    sameRunEpochOwner(owner, activeRunOwnerRef.current);
+  const canApplyReservedLiveSubmission = (owner: RunEpochOwner | null | undefined) =>
+    canEngineerRef.current && ownsActiveRun(owner);
   const sseEvent = runEvents.event;
   // A render can observe new active-run state before the event hook's effect
   // disposes the previous stream. Treat an SSE frame as authoritative only
@@ -803,7 +874,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // the run record must keep polling while active to refresh progressive UDMI
   // payload views, metrics, and issue counts.
   const validationRunQuery = useQuery({
-    enabled: !runAccessClosed && Boolean(activeRun) && activeRun?.kind === "validation",
+    enabled:
+      !runAccessClosed &&
+      runController.phase !== "submitting" &&
+      !activeRunMatchesReservedLiveSubmission &&
+      Boolean(activeRun) &&
+      activeRun?.kind === "validation",
     queryFn: ({ signal }) =>
       getValidationRun(activeRun?.runId ?? "", { client: apiClient, signal }),
     queryKey: runAccessClosed
@@ -902,7 +978,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Discovery run monitor — same polling contract, against the discovery
   // status endpoint, so queued/running discovery runs update live.
   const discoveryRunQuery = useQuery({
-    enabled: !runAccessClosed && Boolean(activeRun) && activeRun?.kind === "discovery",
+    enabled:
+      !runAccessClosed &&
+      runController.phase !== "submitting" &&
+      Boolean(activeRun) &&
+      activeRun?.kind === "discovery",
     queryFn: ({ signal }) => getDiscoveryRun(activeRun?.runId ?? "", { client: apiClient, signal }),
     queryKey: runAccessClosed
       ? [...queryKeys.workspace(sessionScopeId, workspaceRef), "run", "closed"]
@@ -1002,6 +1082,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const activeRunAuthoritativelyTerminal = Boolean(
     activeRun &&
       activeRunRecord?.run_id === activeRun.runId &&
+      runController.phase !== "submitting" &&
+      runController.runRef?.runId === activeRun.runId &&
+      runController.epoch === activeRun.epoch &&
       isTerminalStatus(activeRunRecord.status),
   );
   const activeRunAuthoritativelyTerminalRef = useRef(activeRunAuthoritativelyTerminal);
@@ -1848,6 +1931,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setRunAttachmentNotice(null);
     setLastReport(null);
     setActiveRun(null);
+    setReservedLiveSubmissionOwner(null);
+    reservedLiveSubmissionOwnerRef.current = null;
+    runAccessClosedScopeRef.current = null;
     setScanPreviewActive(false);
     setObservationFold(null);
     setCopyFeedback(null);
@@ -1895,6 +1981,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     resetGeneratedAllBundleDownload,
     resetValidationJsonDownload,
     sessionScopeId,
+    workspaceRef.projectId,
+    workspaceRef.siteId,
   ]);
 
   // Re-attach an explicitly linked run first. Without a usable ?run= link,
@@ -2131,6 +2219,48 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
+  const fenceRunEvidence = useCallback(
+    (run: ActiveRun) => {
+      const pointsQueryKey = [
+        ...queryKeys.run(sessionScopeId, workspaceRef, run.ref),
+        "bacnet-points",
+        "epoch",
+        run.epoch,
+      ] as const;
+      const comparisonQueryKey = [
+        ...queryKeys.run(sessionScopeId, workspaceRef, run.ref),
+        "discovery-comparison",
+        "epoch",
+        run.epoch,
+      ] as const;
+      const observationsQueryKey = [
+        ...queryKeys.run(sessionScopeId, workspaceRef, run.ref),
+        "observations",
+        "epoch",
+        run.epoch,
+      ] as const;
+      const topicsQueryKey = [
+        ...queryKeys.topics(sessionScopeId, workspaceRef, run.ref),
+        "epoch",
+        run.epoch,
+      ] as const;
+      const queryKeysToFence = [
+        pointsQueryKey,
+        comparisonQueryKey,
+        observationsQueryKey,
+        topicsQueryKey,
+      ];
+
+      // cancelQueries aborts its current fetch synchronously. Keep the old
+      // epoch cache until observers move to the reserved epoch; removing an
+      // active query here would let its still-terminal observer recreate it.
+      queryKeysToFence.forEach((queryKey) => {
+        void queryClient.cancelQueries({ queryKey });
+      });
+    },
+    [queryClient, sessionScopeId, workspaceRef],
+  );
+
   const runMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, `${module.route}.run`),
     mutationFn: async ({ actionId, dryRun }: { actionId: string; dryRun: boolean }) => {
@@ -2232,12 +2362,40 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         workspace: workspaceRef,
       });
     },
-    onMutate: (variables) => {
+    onMutate: (variables): RunSubmissionContext => {
       // A preview and its authorized live run can share an id in local/test
       // adapters. Treat each submission as a fresh evidence barrier even when
       // the backend reuses that identifier.
       evidenceSyncRef.current = null;
       const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
+      const reservesAuthorizedLiveEpoch =
+        action?.kind === "discovery" &&
+        (action.runKind === "ip" || action.runKind === "bacnet") &&
+        !variables.dryRun &&
+        activeRun?.kind === "discovery" &&
+        activeRun.runId === scanPreviewRunId;
+      if (reservesAuthorizedLiveEpoch && activeRun) {
+        const reservedRun = { ...activeRun, epoch: nextActiveRunEpoch(), restored: false };
+        const reservedOwner: RunEpochOwner = {
+          epoch: reservedRun.epoch,
+          runId: reservedRun.runId,
+          sessionScopeId,
+          workspaceRef,
+        };
+        // `onMutate` completes before mutationFn starts. Canceling the prior
+        // epoch here fences same-ID preview evidence even when the adapter has
+        // applied the live start but has not returned its HTTP response yet.
+        flushSync(() => {
+          activeRunOwnerRef.current = reservedOwner;
+          reservedLiveSubmissionOwnerRef.current = reservedOwner;
+          setActiveRun(reservedRun);
+          setReservedLiveSubmissionOwner(reservedOwner);
+          dispatchRun({ type: "submitting" });
+          setScanPreviewActive(false);
+        });
+        fenceRunEvidence(activeRun);
+        return { reservedOwner, reservedRun };
+      }
       if (
         action?.kind === "discovery" &&
         (action.runKind === "ip" || action.runKind === "bacnet")
@@ -2245,15 +2403,30 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         setScanPreviewActive(variables.dryRun);
       }
       dispatchRun({ type: "submitting" });
+      return {};
     },
-    onError: () => {
+    onError: (_error, _variables, context) => {
+      const reservedOwner = context?.reservedOwner ?? reservedLiveSubmissionOwnerRef.current;
+      if (reservedOwner) {
+        // A transport failure is ambiguous: the server may already have
+        // accepted the live start. Keep its reserved owner in submitting so
+        // the terminal preview cannot re-attach as a readable live run.
+        return;
+      }
       if (activeRun) {
         dispatchRun({ type: "accepted", runRef: activeRun.ref, epoch: activeRun.epoch });
       } else {
         dispatchRun({ type: "reset" });
       }
     },
-    onSuccess: (result, variables) => {
+    onSuccess: (result, variables, context) => {
+      const reservedOwner = context?.reservedOwner;
+      if (
+        reservedOwner &&
+        !canApplyReservedLiveSubmission(reservedOwner)
+      ) {
+        return;
+      }
       const action = module.runActions.find((candidate) => candidate.id === variables.actionId);
       if ("run_id" in result) {
         const requiresSealedPreview =
@@ -2269,8 +2442,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         setRunOutcome(`${result.message} Run ID: ${result.run_id}`);
         setLastReport(null);
         if (action?.kind === "discovery") {
-          const ref = toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
-          const epoch = nextActiveRunEpoch();
+          const ref =
+            context?.reservedRun?.runId === result.run_id
+              ? context.reservedRun.ref
+              : toRunRef(sessionScopeId, workspaceRef, module.route, result, "submitted");
+          const epoch = context?.reservedRun?.epoch ?? nextActiveRunEpoch();
+          if (context?.reservedRun) {
+            setReservedLiveSubmissionOwner(null);
+            reservedLiveSubmissionOwnerRef.current = null;
+            evidenceSyncRef.current = null;
+            activeRunOwnerRef.current = { epoch, runId: result.run_id, sessionScopeId, workspaceRef };
+          }
           setActiveRun({ epoch, kind: "discovery", ref, runId: result.run_id });
           dispatchRun({ type: "accepted", runRef: ref, epoch });
         } else if (action?.kind === "validation") {
@@ -4797,11 +4979,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     // restored run blocks another start exactly like one submitted
                     // in this session.
                     const blocked =
-                      scanBlocked || !canEngineer || overCapBlocked || startedRunActive;
+                      scanBlocked ||
+                      !canEngineer ||
+                      overCapBlocked ||
+                      startedRunActive ||
+                      runAccessClosed;
                     // Role gate takes priority in the tooltip; otherwise the existing
                     // scan-authorization hint is shown for a blocked real scan.
                     const blockedTooltip = !canEngineer
                       ? ENGINEER_REQUIRED_TOOLTIP
+                      : runAccessClosed
+                        ? "Run access for this workspace is closed. Reopen the module before starting another run."
                       : nmapSelectionBlocked
                         ? "Operator-managed Nmap is not confirmed and available for this site."
                         : startedRunActive
