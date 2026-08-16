@@ -12,6 +12,7 @@ Two layers, all in-process with tmp SQLite / tmp dirs (no live infra):
 """
 
 import atexit
+import copy
 import io
 import json
 import os
@@ -169,6 +170,9 @@ class ReportArtifactStorageTests(unittest.TestCase):
                     artifact=b"report-bytes",
                     origin="test",
                     signed_at="2026-08-10T12:00:00+00:00",
+                    application_version=__version__,
+                    source_run_ids=[],
+                    source_provenance=[],
                 )
 
             self.assertEqual(list(artifacts_root.iterdir()), [])
@@ -263,7 +267,7 @@ class EvidenceVerifyApiTests(ApiTestCase):
                 self.assertIsNotNone(body["public_key_fingerprint"])
                 self.assertEqual(body["stored_hash"], body["computed_hash"])
 
-    def test_manifest_verifier_accepts_legacy_and_rejects_bad_evidence_id(self) -> None:
+    def test_manifest_verifier_enforces_exact_versioned_provenance_shapes(self) -> None:
         import base64
 
         from app.services.report_artifacts import (
@@ -278,25 +282,102 @@ class EvidenceVerifyApiTests(ApiTestCase):
         manifest = dict(RunService().get_run(report_id).result_summary["artifact_manifest"])
         self.assertTrue(verify_signed_manifest(manifest))
 
-        legacy = dict(manifest)
+        signing_key = load_signing_key()
+
+        def resign(candidate: dict[str, object]) -> dict[str, object]:
+            unsigned = {
+                key: value
+                for key, value in candidate.items()
+                if key
+                not in {
+                    "signature_algorithm",
+                    "signature",
+                    "public_key_pem",
+                    "signed_manifest_sha256",
+                }
+            }
+            signed_body = canonical_json_bytes(unsigned)
+            candidate["signature"] = base64.b64encode(signing_key.sign(signed_body)).decode("ascii")
+            candidate["public_key_pem"] = signing_key.public_key_pem()
+            candidate["signing_key_id"] = signing_key.public_key_fingerprint()
+            candidate["signed_manifest_sha256"] = sha256_bytes(signed_body)
+            return candidate
+
+        current = dict(manifest)
+        current["source_run_ids"] = ["run_source_1"]
+        current["source_provenance"] = [
+            {
+                "source_run_id": "run_source_1",
+                "application_version": __version__,
+                "source_commit": "a" * 40,
+                "portable_exe_sha256": "b" * 64,
+                "context_sha256": "c" * 64,
+                "result_sha256": "d" * 64,
+            }
+        ]
+        self.assertTrue(verify_signed_manifest(resign(current)))
+
+        malformed_current = {
+            "duplicate source IDs": {
+                "source_run_ids": ["run_source_1", "run_source_1"],
+                "source_provenance": current["source_provenance"] * 2,
+            },
+            "missing provenance row": {"source_provenance": []},
+            "mismatched provenance ID": {
+                "source_provenance": [
+                    {
+                        **current["source_provenance"][0],
+                        "source_run_id": "run_other",
+                    }
+                ]
+            },
+            "extra provenance field": {
+                "source_provenance": [
+                    {
+                        **current["source_provenance"][0],
+                        "unexpected": "value",
+                    }
+                ]
+            },
+            "noncanonical executable hash": {
+                "source_provenance": [
+                    {
+                        **current["source_provenance"][0],
+                        "portable_exe_sha256": "B" * 64,
+                    }
+                ]
+            },
+        }
+        for case, updates in malformed_current.items():
+            with self.subTest(schema_version="1.2", case=case):
+                candidate = copy.deepcopy(current)
+                candidate.update(updates)
+                self.assertFalse(verify_signed_manifest(resign(candidate)))
+
+        previous = dict(manifest)
+        previous["schema_version"] = "1.1"
+        previous.pop("application_version")
+        previous.pop("source_run_ids")
+        previous.pop("source_provenance")
+        self.assertTrue(verify_signed_manifest(resign(previous)))
+
+        legacy = dict(previous)
         legacy["schema_version"] = "1.0"
         legacy.pop("evidence_set_id")
-        unsigned = {
-            key: value
-            for key, value in legacy.items()
-            if key not in {"signature_algorithm", "signature", "public_key_pem", "signed_manifest_sha256"}
-        }
-        signing_key = load_signing_key()
-        signed_body = canonical_json_bytes(unsigned)
-        legacy["signature"] = base64.b64encode(signing_key.sign(signed_body)).decode("ascii")
-        legacy["public_key_pem"] = signing_key.public_key_pem()
-        legacy["signing_key_id"] = signing_key.public_key_fingerprint()
-        legacy["signed_manifest_sha256"] = sha256_bytes(signed_body)
+        resign(legacy)
         self.assertTrue(verify_signed_manifest(legacy))
 
         malformed = dict(manifest)
         malformed["evidence_set_id"] = "evidence_invalid"
-        self.assertFalse(verify_signed_manifest(malformed))
+        self.assertFalse(verify_signed_manifest(resign(malformed)))
+
+        previous_with_new_field = dict(previous)
+        previous_with_new_field["application_version"] = __version__
+        self.assertFalse(verify_signed_manifest(resign(previous_with_new_field)))
+
+        legacy_with_new_field = dict(legacy)
+        legacy_with_new_field["evidence_set_id"] = manifest["evidence_set_id"]
+        self.assertFalse(verify_signed_manifest(resign(legacy_with_new_field)))
 
     def test_unscoped_evidence_pack_labels_source_runs_honestly(self) -> None:
         # Audit fix: an evidence pack generated with no selected source runs must
@@ -306,7 +387,11 @@ class EvidenceVerifyApiTests(ApiTestCase):
         self.assertEqual(download.status_code, 200, download.text)
         with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
             summary = json.loads(archive.read("summary.json"))
+            provenance = json.loads(archive.read("provenance.json"))
         self.assertEqual(summary["Source runs"], "None selected (no run findings included)")
+        self.assertEqual(provenance["application_version"], __version__)
+        self.assertEqual(provenance["source_run_ids"], [])
+        self.assertEqual(provenance["sources"], [])
 
     def test_download_is_byte_reproducible(self) -> None:
         report_id = self._create_report("xlsx")

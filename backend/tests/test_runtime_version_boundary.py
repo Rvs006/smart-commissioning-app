@@ -103,6 +103,102 @@ class RuntimeVersionBoundaryTests(unittest.TestCase):
                     requesting_principal="version-boundary-test",
                 )
 
+    def test_run_context_uses_runtime_build_provenance_not_request_values(self) -> None:
+        from app.services.run_context_builder import build_run_context
+
+        configuration = mock.Mock()
+        configuration.model_dump.return_value = {}
+        runtime_provenance = {
+            "SMART_COMMISSIONING_SOURCE_COMMIT": "a" * 40,
+            "SMART_COMMISSIONING_PORTABLE_EXE_SHA256": "B" * 64,
+        }
+        with (
+            mock.patch(
+                "app.services.run_context_builder.ConfigurationService.load",
+                return_value=configuration,
+            ),
+            mock.patch.dict(os.environ, runtime_provenance),
+        ):
+            context = build_run_context(
+                engine=None,
+                project_id="version-boundary-project",
+                site_id="version-boundary-site",
+                job_type="ip_discovery",
+                parameters={
+                    "source_commit": "caller-controlled",
+                    "application_source_commit": "legacy-caller-controlled",
+                    "portable_exe_sha256": "c" * 64,
+                    "exe_sha256": "d" * 64,
+                    "portable_hash": "e" * 64,
+                },
+                requesting_principal="version-boundary-test",
+            )
+
+        self.assertEqual(context.engine_parameters["source_commit"], "a" * 40)
+        self.assertEqual(context.engine_parameters["portable_exe_sha256"], "b" * 64)
+        for alias in ("application_source_commit", "exe_sha256", "portable_hash"):
+            self.assertNotIn(alias, context.engine_parameters)
+
+    def test_run_context_drops_request_build_provenance_without_runtime_values(self) -> None:
+        from app.services.run_context_builder import build_run_context
+
+        configuration = mock.Mock()
+        configuration.model_dump.return_value = {}
+        with (
+            mock.patch(
+                "app.services.run_context_builder.ConfigurationService.load",
+                return_value=configuration,
+            ),
+            mock.patch.dict(os.environ, {}, clear=True),
+        ):
+            context = build_run_context(
+                engine=None,
+                project_id="version-boundary-project",
+                site_id="version-boundary-site",
+                job_type="ip_discovery",
+                parameters={
+                    "source_commit": "caller-controlled",
+                    "application_source_commit": "legacy-caller-controlled",
+                    "portable_exe_sha256": "a" * 64,
+                    "exe_sha256": "b" * 64,
+                    "portable_hash": "c" * 64,
+                },
+                requesting_principal="version-boundary-test",
+            )
+
+        for parameter_name in (
+            "source_commit",
+            "application_source_commit",
+            "portable_exe_sha256",
+            "exe_sha256",
+            "portable_hash",
+        ):
+            self.assertNotIn(parameter_name, context.engine_parameters)
+
+    def test_run_context_rejects_invalid_runtime_build_provenance_early(self) -> None:
+        from app.services.run_context_builder import build_run_context
+
+        invalid_values = {
+            "SMART_COMMISSIONING_PORTABLE_EXE_SHA256": "not-a-sha256",
+            "SMART_COMMISSIONING_SOURCE_COMMIT": "a" * 129,
+        }
+        for environment_name, value in invalid_values.items():
+            with self.subTest(environment_name=environment_name):
+                with (
+                    mock.patch.dict(os.environ, {environment_name: value}, clear=True),
+                    mock.patch("app.services.run_context_builder.ConfigurationService.load") as load_configuration,
+                ):
+                    with self.assertRaisesRegex(ValueError, environment_name):
+                        build_run_context(
+                            engine=None,
+                            project_id="version-boundary-project",
+                            site_id="version-boundary-site",
+                            job_type="ip_discovery",
+                            parameters={},
+                            requesting_principal="version-boundary-test",
+                        )
+                    load_configuration.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

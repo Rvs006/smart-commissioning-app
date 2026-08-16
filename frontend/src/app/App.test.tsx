@@ -260,6 +260,20 @@ describe("App shell", () => {
     );
   });
 
+  it("does not offer an evidence pack without a selected source run", async () => {
+    stubDashboardFetch();
+    renderApp();
+
+    expect(await screen.findByText("ok")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Queue evidence pack" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open reports" })).toHaveAttribute(
+      "href",
+      "/reports",
+    );
+  });
+
   it("shows the recent-runs empty state when no runs exist", async () => {
     stubDashboardFetch(emptyRunsPayload);
     renderApp();

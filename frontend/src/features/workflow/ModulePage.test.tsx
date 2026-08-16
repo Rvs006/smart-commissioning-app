@@ -3230,6 +3230,15 @@ describe("ModulePage reports wiring", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Export selected" })).toBeDisabled();
     });
+    expect(
+      screen.queryByRole("button", { name: "Generate Excel Report" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Generate Word Report" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Every report generated here is stored against its source run/),
+    ).toBeInTheDocument();
   });
 
   it("lists generated reports with per-report selection and an Export selected action", async () => {

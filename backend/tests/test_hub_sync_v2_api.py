@@ -464,7 +464,11 @@ class HubSyncV2ApiTests(ApiTestCase):
         output_format: str = "pdf",
     ) -> str:
         from app.schemas.jobs import ReportRequest
-        from app.services.report_artifacts import REPORT_RENDERER_VERSION
+        from app.services.report_artifacts import (
+            ARTIFACT_MANIFEST_SCHEMA_VERSION,
+            REPORT_RENDERER_VERSION,
+            effective_report_renderer_version,
+        )
         from app.services.report_artifacts import canonical_json_bytes as artifact_json
         from app.services.run_service import RunService
 
@@ -488,7 +492,7 @@ class HubSyncV2ApiTests(ApiTestCase):
             "zip": "application/zip",
         }
         unsigned = {
-            "schema_version": "1.1",
+            "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
             "report_id": run.run_id,
             "snapshot_sha256": run.parameters["report_snapshot_sha256"],
             "file_name": f"public-sync-{marker}.{output_format}",
@@ -504,6 +508,9 @@ class HubSyncV2ApiTests(ApiTestCase):
             "signing_key_id": cls.artifact_key.public_key_fingerprint(),
             "signed_at": run.parameters["report_generated_at"],
             "evidence_set_id": run.parameters["evidence_set_id"],
+            "application_version": effective_report_renderer_version(),
+            "source_run_ids": [],
+            "source_provenance": [],
         }
         signed_body = artifact_json(unsigned)
         manifest = {

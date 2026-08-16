@@ -23,7 +23,7 @@ from app.services.reports_integrity import fingerprint_for_pem, load_signing_key
 from app.versioning import effective_application_version, validate_packaged_application_version
 
 REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
-ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.1"
+ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.2"
 # Compatibility constant for existing manifest readers. The core package owns
 # the canonical source version; runtime stamps are validated below.
 REPORT_RENDERER_VERSION = "0.1.50"
@@ -52,9 +52,17 @@ _SIGNED_MANIFEST_FIELDS = (
     "signing_key_id",
     "signed_at",
     "evidence_set_id",
+    "application_version",
+    "source_run_ids",
+    "source_provenance",
 )
-_LEGACY_SIGNED_MANIFEST_FIELDS = tuple(
-    field for field in _SIGNED_MANIFEST_FIELDS if field != "evidence_set_id"
+_V1_1_SIGNED_MANIFEST_FIELDS = tuple(
+    field
+    for field in _SIGNED_MANIFEST_FIELDS
+    if field not in {"application_version", "source_run_ids", "source_provenance"}
+)
+_V1_0_SIGNED_MANIFEST_FIELDS = tuple(
+    field for field in _V1_1_SIGNED_MANIFEST_FIELDS if field != "evidence_set_id"
 )
 _COMPLETE_MANIFEST_FIELDS = frozenset(
     {
@@ -65,9 +73,18 @@ _COMPLETE_MANIFEST_FIELDS = frozenset(
         "signed_manifest_sha256",
     }
 )
-_LEGACY_COMPLETE_MANIFEST_FIELDS = frozenset(
+_V1_1_COMPLETE_MANIFEST_FIELDS = frozenset(
     {
-        *_LEGACY_SIGNED_MANIFEST_FIELDS,
+        *_V1_1_SIGNED_MANIFEST_FIELDS,
+        "signature_algorithm",
+        "signature",
+        "public_key_pem",
+        "signed_manifest_sha256",
+    }
+)
+_V1_0_COMPLETE_MANIFEST_FIELDS = frozenset(
+    {
+        *_V1_0_SIGNED_MANIFEST_FIELDS,
         "signature_algorithm",
         "signature",
         "public_key_pem",
@@ -76,6 +93,16 @@ _LEGACY_COMPLETE_MANIFEST_FIELDS = frozenset(
 )
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _KEY_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{16}$")
+_SOURCE_PROVENANCE_FIELDS = frozenset(
+    {
+        "source_run_id",
+        "application_version",
+        "source_commit",
+        "portable_exe_sha256",
+        "context_sha256",
+        "result_sha256",
+    }
+)
 _MEDIA_TYPE_RE = re.compile(
     r"^[A-Za-z0-9!#$&^_.+\-]+/[A-Za-z0-9!#$&^_.+\-]+$"
 )
@@ -111,6 +138,9 @@ def store_report_artifact(
     origin: str,
     signed_at: str,
     evidence_set_id: str | None = None,
+    application_version: str,
+    source_run_ids: list[str],
+    source_provenance: list[dict[str, object]],
 ) -> dict[str, Any]:
     """Durably store exact bytes and return a signed ArtifactManifestV1.
 
@@ -151,6 +181,9 @@ def store_report_artifact(
         "signing_key_id": key.public_key_fingerprint(),
         "signed_at": signed_at,
         "evidence_set_id": evidence_set_id,
+        "application_version": application_version,
+        "source_run_ids": list(source_run_ids),
+        "source_provenance": [dict(source) for source in source_provenance],
     }
     signed_body = canonical_json_bytes(manifest)
     manifest.update(
@@ -354,18 +387,22 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
     manifest_fields = (
         _SIGNED_MANIFEST_FIELDS
         if set(manifest) == _COMPLETE_MANIFEST_FIELDS
-        else _LEGACY_SIGNED_MANIFEST_FIELDS
-        if set(manifest) == _LEGACY_COMPLETE_MANIFEST_FIELDS
+        else _V1_1_SIGNED_MANIFEST_FIELDS
+        if set(manifest) == _V1_1_COMPLETE_MANIFEST_FIELDS
+        else _V1_0_SIGNED_MANIFEST_FIELDS
+        if set(manifest) == _V1_0_COMPLETE_MANIFEST_FIELDS
         else None
     )
     if manifest_fields is None:
         return False
     schema_version = manifest.get("schema_version")
-    if schema_version not in {"1.0", ARTIFACT_MANIFEST_SCHEMA_VERSION}:
+    if schema_version not in {"1.0", "1.1", ARTIFACT_MANIFEST_SCHEMA_VERSION}:
         return False
     if schema_version == ARTIFACT_MANIFEST_SCHEMA_VERSION and manifest_fields != _SIGNED_MANIFEST_FIELDS:
         return False
-    if schema_version == "1.0" and manifest_fields != _LEGACY_SIGNED_MANIFEST_FIELDS:
+    if schema_version == "1.1" and manifest_fields != _V1_1_SIGNED_MANIFEST_FIELDS:
+        return False
+    if schema_version == "1.0" and manifest_fields != _V1_0_SIGNED_MANIFEST_FIELDS:
         return False
     if manifest.get("signature_algorithm") != "ed25519":
         return False
@@ -382,6 +419,9 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
         signing_key_id = manifest["signing_key_id"]
         signed_at = manifest["signed_at"]
         evidence_set_id = manifest.get("evidence_set_id")
+        application_version = manifest.get("application_version")
+        source_run_ids = manifest.get("source_run_ids")
+        source_provenance = manifest.get("source_provenance")
         if not isinstance(report_id, str) or not 1 <= len(report_id) <= 64:
             return False
         if not isinstance(snapshot_hash, str) or not _SHA256_RE.fullmatch(snapshot_hash):
@@ -429,6 +469,43 @@ def verify_signed_manifest(manifest: dict[str, Any]) -> bool:
             or not re.fullmatch(r"evidence_[0-9a-f]{24}", evidence_set_id)
         ):
             return False
+        if schema_version == ARTIFACT_MANIFEST_SCHEMA_VERSION:
+            if (
+                not isinstance(application_version, str)
+                or not 1 <= len(application_version) <= 64
+                or not isinstance(source_run_ids, list)
+                or not isinstance(source_provenance, list)
+            ):
+                return False
+            if (
+                any(
+                    not isinstance(source_id, str) or not 1 <= len(source_id) <= 64
+                    for source_id in source_run_ids
+                )
+                or len(source_run_ids) != len(set(source_run_ids))
+                or len(source_provenance) != len(source_run_ids)
+            ):
+                return False
+            for source_id, provenance in zip(source_run_ids, source_provenance, strict=True):
+                if (
+                    not isinstance(provenance, dict)
+                    or set(provenance) != _SOURCE_PROVENANCE_FIELDS
+                ):
+                    return False
+                if provenance.get("source_run_id") != source_id:
+                    return False
+                for field in ("application_version", "source_commit"):
+                    value = provenance.get(field)
+                    if value is not None and (
+                        not isinstance(value, str) or not 1 <= len(value) <= 128
+                    ):
+                        return False
+                for field in ("portable_exe_sha256", "context_sha256", "result_sha256"):
+                    value = provenance.get(field)
+                    if value is not None and (
+                        not isinstance(value, str) or not _SHA256_RE.fullmatch(value)
+                    ):
+                        return False
         signed_timestamp = datetime.fromisoformat(signed_at)
         if signed_timestamp.tzinfo is None:
             return False

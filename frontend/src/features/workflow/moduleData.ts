@@ -184,27 +184,10 @@ const modules: ModuleDefinition[] = [
     route: "reports",
     title: "Reports",
     summary:
-      "Generates evidence packs and issue reports for discovery and validation workflows, including JSON, CSV, XLSX, and formal downloadable outputs.",
+      "Lists and exports evidence packs and issue reports generated from completed discovery and validation runs.",
     backendService: "Reports API",
     importTypes: [],
-    runActions: [
-      {
-        id: "reports.xlsx",
-        kind: "report",
-        label: "Generate Excel Report",
-        helper: "Generates an XLSX report for review, filtering, and issue handover; it then appears in the Reports list below.",
-        format: "xlsx",
-        reportType: "issue_report"
-      },
-      {
-        id: "reports.docx",
-        kind: "report",
-        label: "Generate Word Report",
-        helper: "Generates a DOCX report for formal commissioning handover; it then appears in the Reports list below.",
-        format: "docx",
-        reportType: "evidence_pack"
-      }
-    ]
+    runActions: []
   }
 ];
 

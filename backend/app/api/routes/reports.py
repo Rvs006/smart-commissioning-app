@@ -60,6 +60,11 @@ service = RunService()
 # (creating a report run) is engineer+.
 require_viewer = require_role(Role.VIEWER)
 require_engineer = require_role(Role.ENGINEER)
+_PROVENANCE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ReportProvenanceError(ValueError):
+    """Stored source identity cannot be represented in a signed report manifest."""
 
 
 def _require_scoped_report(report_id: str, principal: AuthPrincipal) -> None:
@@ -162,6 +167,16 @@ def create_report(
         if not isinstance(snapshot_hash, str) or not isinstance(generated_at, str):
             raise RuntimeError("Report snapshot provenance is incomplete.")
         content, media_type = _build_report_artifact(render_run, report.output_format)
+        provenance = _report_provenance(render_run)
+        application_version = provenance.get("application_version")
+        source_run_ids = provenance.get("source_run_ids")
+        source_provenance = provenance.get("sources")
+        if (
+            not isinstance(application_version, str)
+            or not isinstance(source_run_ids, list)
+            or not isinstance(source_provenance, list)
+        ):
+            raise RuntimeError("Report build provenance is incomplete.")
         manifest = store_report_artifact(
             report_id=run.run_id,
             snapshot_hash=snapshot_hash,
@@ -171,6 +186,9 @@ def create_report(
             origin=str(run.edge_id or "api"),
             signed_at=generated_at,
             evidence_set_id=report.evidence_set_id,
+            application_version=application_version,
+            source_run_ids=source_run_ids,
+            source_provenance=source_provenance,
         )
         service.complete_report_run(run.run_id, manifest)
     except Exception as error:
@@ -191,6 +209,8 @@ def create_report(
                 delete_report_artifact(manifest, report_id=run.run_id)
             except (OSError, RuntimeError, ValueError):
                 pass
+        if isinstance(error, ReportProvenanceError):
+            raise HTTPException(status_code=422, detail=str(error)) from error
         raise HTTPException(status_code=500, detail="Report artifact materialization failed.") from error
     return _to_report_summary(render_run)
 
@@ -786,6 +806,118 @@ def _source_runs(run: object) -> list[object]:
         # report's evidence scope.
         sources.append(service.get_run(key))
     return sources
+
+
+def _report_provenance(run: object) -> dict[str, object]:
+    """Return source and build identity from the report's frozen snapshot."""
+
+    parameters = run.parameters if isinstance(run.parameters, dict) else {}
+    snapshot = parameters.get("report_snapshot_v2")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    raw_source_ids = snapshot.get("source_run_ids", parameters.get("source_run_ids", []))
+    if not isinstance(raw_source_ids, list) or any(
+        not isinstance(source_id, str) or not 1 <= len(source_id) <= 64
+        for source_id in raw_source_ids
+    ):
+        raise ReportProvenanceError("Stored report source-run provenance is malformed.")
+    source_ids = list(raw_source_ids)
+    if len(source_ids) != len(set(source_ids)):
+        raise ReportProvenanceError("Stored report provenance contains duplicate source run IDs.")
+
+    raw_snapshots = snapshot.get(
+        "source_run_snapshots", parameters.get("source_run_snapshots", [])
+    )
+    raw_snapshots = raw_snapshots if isinstance(raw_snapshots, list) else []
+    snapshots_by_id = {
+        source["run_id"]: source
+        for source in raw_snapshots
+        if isinstance(source, dict) and isinstance(source.get("run_id"), str)
+    }
+    raw_contexts = snapshot.get("configuration_provenance", {})
+    contexts = raw_contexts if isinstance(raw_contexts, dict) else {}
+    raw_hashes = snapshot.get("source_result_hashes", {})
+    result_hashes = raw_hashes if isinstance(raw_hashes, dict) else {}
+    raw_seals = snapshot.get("source_run_seals", parameters.get("source_run_seals", {}))
+    seals = raw_seals if isinstance(raw_seals, dict) else {}
+
+    def recorded_text(value: object, *, field: str, max_length: int) -> str | None:
+        if value is None or value == "":
+            return None
+        if not isinstance(value, str):
+            raise ReportProvenanceError(
+                f"Stored report provenance field '{field}' must be text."
+            )
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if len(normalized) > max_length:
+            raise ReportProvenanceError(
+                f"Stored report provenance field '{field}' exceeds {max_length} characters."
+            )
+        return normalized
+
+    def recorded_sha256(value: object, *, field: str) -> str | None:
+        normalized = recorded_text(value, field=field, max_length=64)
+        if normalized is None:
+            return None
+        normalized = normalized.casefold()
+        if not _PROVENANCE_SHA256_RE.fullmatch(normalized):
+            raise ReportProvenanceError(
+                f"Stored report provenance field '{field}' is not a SHA-256 digest."
+            )
+        return normalized
+
+    sources: list[dict[str, object]] = []
+    for source_id in source_ids:
+        source = snapshots_by_id.get(source_id, {})
+        source_parameters = source.get("parameters", {}) if isinstance(source, dict) else {}
+        source_parameters = source_parameters if isinstance(source_parameters, dict) else {}
+        context = contexts.get(source_id, {})
+        context = context if isinstance(context, dict) else {}
+        seal = seals.get(source_id, {})
+        seal = seal if isinstance(seal, dict) else {}
+        sources.append(
+            {
+                "source_run_id": source_id,
+                "application_version": recorded_text(
+                    context.get("application_version") or source_parameters.get("application_version"),
+                    field="application_version",
+                    max_length=128,
+                ),
+                "source_commit": recorded_text(
+                    source_parameters.get("source_commit")
+                    or source_parameters.get("application_source_commit"),
+                    field="source_commit",
+                    max_length=128,
+                ),
+                "portable_exe_sha256": recorded_sha256(
+                    source_parameters.get("portable_exe_sha256")
+                    or source_parameters.get("exe_sha256")
+                    or source_parameters.get("portable_hash"),
+                    field="portable_exe_sha256",
+                ),
+                "context_sha256": recorded_sha256(
+                    context.get("context_sha256") or seal.get("context_sha256"),
+                    field="context_sha256",
+                ),
+                "result_sha256": recorded_sha256(
+                    result_hashes.get(source_id) or seal.get("result_sha256"),
+                    field="result_sha256",
+                ),
+            }
+        )
+
+    application_version = recorded_text(
+        snapshot.get("renderer_version") or parameters.get("renderer_version"),
+        field="application_version",
+        max_length=64,
+    )
+    return {
+        "schema_version": "1.0",
+        "application_version": application_version,
+        "source_run_ids": source_ids,
+        "sources": sources,
+    }
 
 
 def _asset_topic_discovery_export(run: object) -> dict[str, object] | None:
@@ -2862,6 +2994,10 @@ def _build_udmi_client_zip_report(run: object, data: dict[str, object]) -> bytes
     buffer = BytesIO()
     with ZipFile(buffer, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
+            "provenance.json",
+            json.dumps(_report_provenance(run), indent=2, sort_keys=True),
+        )
+        archive.writestr(
             "summary.json",
             json.dumps(dict(_report_rows(run, udmi_data=data)), indent=2),
         )
@@ -2893,6 +3029,10 @@ def _build_zip_report(run: object) -> bytes:
         udmi = _udmi_report_data(run)
         if udmi is not None and _udmi_report_variant(run) == "client":
             return _build_udmi_client_zip_report(run, udmi)
+        archive.writestr(
+            "provenance.json",
+            json.dumps(_report_provenance(run), indent=2, sort_keys=True),
+        )
         archive.writestr(
             "summary.json",
             json.dumps(dict(_report_rows(run, udmi_data=udmi)), indent=2),
