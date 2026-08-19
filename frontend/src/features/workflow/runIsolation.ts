@@ -523,7 +523,12 @@ export function resultIdentity(route: string, row: Readonly<Record<string, strin
 
 function isDiscoveryJob(jobType: JobType | string): boolean {
   return (
-    jobType === "ip_discovery" || jobType === "bacnet_discovery" || jobType === "mqtt_discovery"
+    jobType === "ip_discovery" ||
+    jobType === "bacnet_discovery" ||
+    jobType === "mqtt_discovery" ||
+    jobType === "ip_scanner" ||
+    jobType === "bacnet_scanner" ||
+    jobType === "mqtt_scanner"
   );
 }
 

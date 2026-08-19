@@ -148,7 +148,14 @@ export function RunHistoryPage() {
         (run) =>
           isTerminalStatus(run.status) &&
           run.status === "succeeded" &&
-          ["ip_discovery", "bacnet_discovery", "mqtt_discovery"].includes(run.job_type),
+          [
+            "ip_discovery",
+            "bacnet_discovery",
+            "mqtt_discovery",
+            "ip_scanner",
+            "bacnet_scanner",
+            "mqtt_scanner",
+          ].includes(run.job_type),
       ),
     [visibleRuns],
   );
@@ -182,9 +189,9 @@ export function RunHistoryPage() {
   };
 
   const comparisonModulePath = (jobTypeValue: JobType | undefined): string =>
-    jobTypeValue === "ip_discovery"
+    jobTypeValue === "ip_discovery" || jobTypeValue === "ip_scanner"
       ? "/ip-scanner"
-      : jobTypeValue === "bacnet_discovery"
+      : jobTypeValue === "bacnet_discovery" || jobTypeValue === "bacnet_scanner"
         ? "/bacnet-scanner"
         : "/mqtt-scanner";
 

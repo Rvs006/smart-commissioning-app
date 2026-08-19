@@ -1345,7 +1345,7 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
         run_id = str(source.run_id)
         summary = source.result_summary if isinstance(source.result_summary, dict) else {}
 
-        if source.job_type == "ip_discovery":
+        if source.job_type in ("ip_discovery", "ip_scanner"):
             has_ip = True
             devices = [
                 device
@@ -1361,15 +1361,23 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
                         "Hostname": _inv_cell(device.get("name")),
                         "MAC": _inv_cell(attributes.get("mac_address")),
                         "Open Ports": _inv_ports(attributes.get("open_ports")),
+                        # ip_scanner persists no forbidden-port list at all -> blank.
                         "Forbidden Open": _inv_ports(attributes.get("forbidden_open_ports")),
-                        "Unexpected Open": _inv_ports(attributes.get("unexpected_open_ports")),
-                        "Missing Expected": _inv_ports(attributes.get("missing_expected_ports")),
+                        # ip_scanner names the port diffs extra_ports / missing_ports;
+                        # ip_discovery uses the *_open_ports / *_expected_ports names.
+                        # Read whichever key the source engine actually wrote.
+                        "Unexpected Open": _inv_ports(
+                            attributes.get("unexpected_open_ports") or attributes.get("extra_ports")
+                        ),
+                        "Missing Expected": _inv_ports(
+                            attributes.get("missing_expected_ports") or attributes.get("missing_ports")
+                        ),
                     }
                 )
             counts = f"{_inv_count(summary.get('hosts_scanned'))} hosts scanned, "
             counts += f"{_inv_count(summary.get('hosts_responsive'))} responsive"
 
-        elif source.job_type == "bacnet_discovery":
+        elif source.job_type in ("bacnet_discovery", "bacnet_scanner"):
             has_bacnet = True
             devices = [
                 device
@@ -1383,7 +1391,13 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
                 points_by_asset[point.get("device_ref")] = points_by_asset.get(point.get("device_ref"), 0) + 1
             for device in devices:
                 attributes = device.get("attributes") or {}
-                register = attributes.get("register_asset_name") or attributes.get("register_asset_id")
+                # bacnet_discovery writes register_asset_name/_id; bacnet_scanner
+                # writes register_state (the RAG match string). Prefer the name.
+                register = (
+                    attributes.get("register_asset_name")
+                    or attributes.get("register_asset_id")
+                    or attributes.get("register_state")
+                )
                 device_rows.append(
                     {
                         "Source Run": run_id,
@@ -1450,10 +1464,12 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
                             )
                         )
 
-        else:  # mqtt_discovery
+        else:  # mqtt_discovery / mqtt_scanner (topic rows are shape-identical)
             has_mqtt = True
+            messages_here = 0
             for topic in discovery_rows(source.run_id, "topics"):
                 attributes = topic.get("attributes") or {}
+                messages_here += _int_or_none(topic.get("message_count")) or 0
                 # last_payload is deliberately excluded — non-tabular, and a
                 # signed shareable artifact should not embed captured payloads.
                 topic_rows.append(
@@ -1465,7 +1481,13 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
                     }
                 )
             counts = f"{_inv_count(summary.get('topics_discovered'))} topics, "
-            counts += f"{_inv_count(summary.get('messages_captured'))} messages"
+            # mqtt_discovery persists messages_captured; mqtt_scanner does not, so
+            # fall back to the summed per-topic message_count (counts only, still
+            # byte-reproducible — derived from the frozen rows, no wall-clock).
+            captured = summary.get("messages_captured")
+            if captured is None:
+                captured = messages_here
+            counts += f"{_inv_count(captured)} messages"
 
         summary_rows.append(
             {
