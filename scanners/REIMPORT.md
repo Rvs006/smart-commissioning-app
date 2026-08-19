@@ -14,8 +14,8 @@ Vendor trees: `scanners/vendor/<app>/`. Three apps, `<app>` = one of:
 | `<app>`               | sidecar   | port  | contract test suite                          |
 |-----------------------|-----------|-------|----------------------------------------------|
 | `network-ip-scanner`  | server.js | :3777 | `tests/test_ip_scanner_contract.py`          |
-| `bacnet-scanner`      | bacnet.js | :3778 | `tests/test_bacnet_scanner_contract.py`      |
-| `mqtt-discovery`      | server.js | :3799 | `tests/test_mqtt_discovery_contract.py`      |
+| `bacnet-scanner`      | server.js | :3778 | `tests/test_bacnet_scanner_contract.py`      |
+| `mqtt-discovery`      | server.js | :3799 | `tests/test_mqtt_scanner_contract.py`        |
 
 Run every step below once per app you are re-importing.
 
@@ -83,9 +83,10 @@ bundle). Copy the source tree, not a built drop with deps committed.
 
 ### 4. Contract test = the gate
 Each app has its own contract suite (see the table above); together the three
-suites are the re-import gate. Run the one for the app you dropped:
+suites are the re-import gate. Run the one for the app you dropped (CI uses
+`unittest`, so that is the source of truth):
 ```
-cd backend && python -m pytest tests/test_<app>_contract.py -q
+cd backend && python -m unittest tests.<suite>   # <suite> from the table, e.g. test_ip_scanner_contract
 ```
 - **Green** = done. The adapter still talks to the sidecar and every persisted
   record is json-safe.
@@ -103,7 +104,7 @@ The contract test is the honesty and safety boundary. It asserts:
 ### 5. Node smoke
 Confirm the sidecar itself still starts and answers:
 ```
-cd scanners/vendor/<app> && npm ci && node <entry>   # entry = server.js, or bacnet.js for bacnet-scanner
+cd scanners/vendor/<app> && node server.js   # all three start via server.js; zero runtime deps, no npm install needed
 ```
 Hit `/api/health` on the app's port (see table) and confirm it responds and reports a version (see standing
 agreements). Ctrl-C when green.

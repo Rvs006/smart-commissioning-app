@@ -352,6 +352,46 @@ if (Test-Path -LiteralPath (Join-Path $OutputDir "frontend")) {
 New-Item -ItemType Directory -Path (Join-Path $OutputDir "frontend") -Force | Out-Null
 Copy-Item -Path $FrontendDistSrc -Destination $FrontendDistDst -Recurse -Force
 
+# 3d-2. vendored Node scanner sidecars (IP / BACnet / MQTT)
+# Each app is dependency-free: build-bundle.js inlines its modules + base64
+# assets into a self-contained dist/bundle.js the supervisor prefers over
+# server.js. Ship source + dist/bundle.js (NOT node_modules) plus ONE stock
+# signed node.exe, so the supervisor's shutil.which("node") runs a signed
+# interpreter (ThreatLocker allows signed node/python/git).
+Write-Host "    build + copy vendored Node scanner sidecars"
+$ScannersSrc = Join-Path $RepoRoot "scanners\vendor"
+$ScannersDst = Join-Path $OutputDir "scanners"
+New-Item -ItemType Directory -Path $ScannersDst -Force | Out-Null
+
+$ScannerApps = @("network-ip-scanner", "bacnet-scanner", "mqtt-discovery")
+$ScannerHashes = [ordered]@{}
+foreach ($app in $ScannerApps) {
+    $appSrc = Join-Path $ScannersSrc $app
+    if (-not (Test-Path -LiteralPath (Join-Path $appSrc "build-bundle.js"))) {
+        throw "Scanner sidecar '$app' is missing build-bundle.js at $appSrc."
+    }
+    Invoke-Native -File "node" -Arguments @("build-bundle.js") -WorkingDirectory $appSrc
+    $bundleJs = Join-Path $appSrc "dist\bundle.js"
+    if (-not (Test-Path -LiteralPath $bundleJs)) {
+        throw "Scanner sidecar '$app' did not emit dist/bundle.js."
+    }
+    $appDst = Join-Path $ScannersDst $app
+    if (Test-Path -LiteralPath $appDst) { Remove-Item -LiteralPath $appDst -Recurse -Force }
+    Copy-Item -Path $appSrc -Destination $appDst -Recurse -Force
+    $appNodeModules = Join-Path $appDst "node_modules"
+    if (Test-Path -LiteralPath $appNodeModules) { Remove-Item -LiteralPath $appNodeModules -Recurse -Force }
+    $ScannerHashes["scanners/$app/dist/bundle.js"] =
+        (Get-FileHash -LiteralPath (Join-Path $appDst "dist\bundle.js") -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+# One shared, Authenticode-signed node.exe. The CI runner's setup-node node.exe
+# is the official OpenJS Foundation signed binary from nodejs.org; copy that.
+$NodeExe = (Get-Command node -ErrorAction Stop).Source
+Copy-Item -LiteralPath $NodeExe -Destination (Join-Path $ScannersDst "node.exe") -Force
+$ScannerHashes["scanners/node.exe"] =
+    (Get-FileHash -LiteralPath (Join-Path $ScannersDst "node.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+$BuildProvenance.scanner_components_sha256 = $ScannerHashes
+
 # 3e. operator note (unsigned tester build)
 $ReadmePath = Join-Path $OutputDir "README_FIRST.txt"
 $NmapProfileNote = @"
@@ -382,6 +422,11 @@ To run:
 This build is UNSIGNED. On first launch Windows SmartScreen / antivirus may
 warn ("Windows protected your PC"). Choose More info -> Run anyway, or have
 your administrator allow it.
+
+This build bundles scanners\node.exe, the official OpenJS Foundation
+Node.js runtime (Authenticode-signed), used only to run the three local
+scanner helpers on 127.0.0.1. If ThreatLocker/WDAC prompts, approve
+scanners\node.exe by its hash the same way you approve the signed exe.
 
 Local-only profile: binds 127.0.0.1, SQLite, jobs run inline, no broker /
 Postgres / Redis / network required. SQLite, imports, encrypted secrets,
