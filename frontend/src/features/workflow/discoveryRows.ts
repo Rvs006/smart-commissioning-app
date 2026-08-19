@@ -439,10 +439,10 @@ export function discoveryViewFor(
   if (route === "ip-scanner" || route === "ip-scanner-sct") {
     return { columns: ipResultColumns, rows: ipRowsFromResults(results) };
   }
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     return { columns: bacnetResultColumns, rows: bacnetRowsFromResults(results) };
   }
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     return { columns: mqttResultColumns, rows: mqttRowsFromResults(results) };
   }
   return null;
@@ -574,7 +574,7 @@ export function discoveryMetrics(
       secondaryLabel: "hosts scanned",
     };
   }
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     const devices = num("device_count") ?? results.devices.length;
     const points = num("point_count") ?? results.points.length;
     return {
@@ -584,7 +584,7 @@ export function discoveryMetrics(
       secondaryLabel: "points indexed",
     };
   }
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     const topics = num("topics_discovered") ?? results.topics.length;
     const messages = num("messages_captured") ?? 0;
     return {
@@ -779,7 +779,7 @@ export function discoveryEmptyStateFor(
     return { title: "Scan complete — no responsive hosts found", detail };
   }
 
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     const title = "Discovery complete — no BACnet devices responded";
 
     // The engine authors empty_scan_hint from what the run ACTUALLY did: which
@@ -811,7 +811,7 @@ export function discoveryEmptyStateFor(
     };
   }
 
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     // Defensive only: the engine currently stamps a zero-message capture as
     // FAILED (capture_window_empty, mqtt_discovery.py:447-461), so this arm is
     // unreachable today and must not be described as fixing an observable case.

@@ -383,16 +383,40 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
     evidence: [],
   },
-  "bacnet-discovery": {
-    route: "bacnet-discovery",
+  "bacnet-scanner": {
+    route: "bacnet-scanner",
+    // Must stay in step with the "bacnet-scanner" title in moduleData.ts.
+    // moduleTitles.test.ts guards the pair against drifting apart.
     title: "BACnet Discovery",
     headline: "Discover BACnet devices, object lists, and property health before validation.",
     tableTitle: "BACnet Devices",
     columns: ["Device", "Instance", "IP Address", "Network Number", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
     evidence: ["Who-Is/I-Am capture", "Device object index", "Property read sample"],
   },
-  "mqtt-discovery": {
-    route: "mqtt-discovery",
+  // Built-in BACnet engine, relocated off the primary nav to /bacnet-discovery-sct
+  // when the sidecar took the /bacnet-scanner slug. Same BACnet results chrome.
+  "bacnet-discovery-sct": {
+    route: "bacnet-discovery-sct",
+    title: "BACnet Discovery",
+    headline: "Discover BACnet devices, object lists, and property health before validation.",
+    tableTitle: "BACnet Devices",
+    columns: ["Device", "Instance", "IP Address", "Network Number", "Objects", "Device Last Discovered", "Detailed Status", "Result"],
+    evidence: ["Who-Is/I-Am capture", "Device object index", "Property read sample"],
+  },
+  "mqtt-scanner": {
+    route: "mqtt-scanner",
+    // Must stay in step with the "mqtt-scanner" title in moduleData.ts.
+    // moduleTitles.test.ts guards the pair against drifting apart.
+    title: "MQTT Discovery",
+    headline: "Subscribe to broker topics, capture payloads, and compare telemetry to the register.",
+    tableTitle: "MQTT Topic Observations",
+    columns: ["Topic", "Asset", "Payload Last Seen", "Message Count", "Detailed Connection Status", "Raw Payload", "Result"],
+    evidence: ["Broker subscription log", "Payload samples", "Topic register comparison"],
+  },
+  // Built-in MQTT engine, relocated off the primary nav to /mqtt-discovery-sct
+  // when the sidecar took the /mqtt-scanner slug. Same MQTT results chrome.
+  "mqtt-discovery-sct": {
+    route: "mqtt-discovery-sct",
     title: "MQTT Discovery",
     headline: "Subscribe to broker topics, capture payloads, and compare telemetry to the register.",
     tableTitle: "MQTT Topic Observations",

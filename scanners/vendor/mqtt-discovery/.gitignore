@@ -1,0 +1,4 @@
+# Vendored source only. Node runs server.js directly; the portable build
+# regenerates dist/bundle.js. Never commit the dev deps or the unsigned exe.
+node_modules/
+dist/

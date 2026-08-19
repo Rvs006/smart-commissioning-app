@@ -30,14 +30,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Frozen sidecar name (the scanners route + adapter resolve the port by it).
+# Frozen sidecar names (the scanners route + adapters resolve the port by name).
 IP_SCANNER = "network-ip-scanner"
+BACNET_SCANNER = "bacnet-scanner"
+MQTT_SCANNER = "mqtt-discovery"
 
 # Repo root: backend/app/services/sidecar_supervisor.py -> parents[3].
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_IP_SCANNER_DIR = Path(
-    os.getenv("SMART_COMMISSIONING_IP_SCANNER_DIR", str(_REPO_ROOT / "scanners" / "vendor" / IP_SCANNER))
-).expanduser()
+
+
+def _sidecar_dir(name: str, env_var: str) -> Path:
+    """Vendored app directory for a sidecar, overridable by env var."""
+    return Path(os.getenv(env_var, str(_REPO_ROOT / "scanners" / "vendor" / name))).expanduser()
+
+
+# The managed sidecars start_all spawns, as (name, vendored-app-dir). Each is a
+# Node app serving a loopback HTTP API with a GET /api/health probe.
+_MANAGED_SIDECARS: tuple[tuple[str, Path], ...] = (
+    (IP_SCANNER, _sidecar_dir(IP_SCANNER, "SMART_COMMISSIONING_IP_SCANNER_DIR")),
+    (BACNET_SCANNER, _sidecar_dir(BACNET_SCANNER, "SMART_COMMISSIONING_BACNET_SCANNER_DIR")),
+    (MQTT_SCANNER, _sidecar_dir(MQTT_SCANNER, "SMART_COMMISSIONING_MQTT_SCANNER_DIR")),
+)
 
 # How long to wait for the child to answer /api/health before giving up.
 _HEALTH_TIMEOUT_S = float(os.getenv("SMART_COMMISSIONING_SIDECAR_HEALTH_TIMEOUT_S", "15"))
@@ -88,7 +101,8 @@ class SidecarSupervisor:
 
     async def start_all(self) -> None:
         """Start every managed sidecar. Never raises — failures mark unavailable."""
-        self._start_ip_scanner()
+        for name, sidecar_dir in _MANAGED_SIDECARS:
+            self._start_sidecar(name, sidecar_dir)
 
     async def stop_all(self) -> None:
         """Terminate every spawned child so nothing is orphaned."""
@@ -116,16 +130,15 @@ class SidecarSupervisor:
 
     # -- internals ---------------------------------------------------------
 
-    def _start_ip_scanner(self) -> None:
-        name = IP_SCANNER
+    def _start_sidecar(self, name: str, sidecar_dir: Path) -> None:
         try:
             node = shutil.which("node")
             if node is None:
-                logger.warning("IP scanner sidecar unavailable: 'node' is not on PATH.")
+                logger.warning("Sidecar '%s' unavailable: 'node' is not on PATH.", name)
                 self._sidecars[name] = _Sidecar(name, 0, None)
                 return
-            if not _IP_SCANNER_DIR.is_dir():
-                logger.warning("IP scanner sidecar unavailable: %s is missing.", _IP_SCANNER_DIR)
+            if not sidecar_dir.is_dir():
+                logger.warning("Sidecar '%s' unavailable: %s is missing.", name, sidecar_dir)
                 self._sidecars[name] = _Sidecar(name, 0, None)
                 return
 
@@ -136,22 +149,22 @@ class SidecarSupervisor:
             # New process group on Windows so we can signal the tree on stop.
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if sys.platform == "win32" else 0
             process = subprocess.Popen(  # noqa: S603 (fixed args, vendored app)
-                [node, *_entry_args(_IP_SCANNER_DIR)],
-                cwd=str(_IP_SCANNER_DIR),
+                [node, *_entry_args(sidecar_dir)],
+                cwd=str(sidecar_dir),
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
             if not _await_health(port, process):
-                logger.warning("IP scanner sidecar did not become healthy on port %d; marking unavailable.", port)
+                logger.warning("Sidecar '%s' did not become healthy on port %d; marking unavailable.", name, port)
                 _terminate(_Sidecar(name, port, process))
                 self._sidecars[name] = _Sidecar(name, 0, None)
                 return
             self._sidecars[name] = _Sidecar(name, port, process)
-            logger.info("IP scanner sidecar started on 127.0.0.1:%d.", port)
+            logger.info("Sidecar '%s' started on 127.0.0.1:%d.", name, port)
         except Exception:  # noqa: BLE001 (a sidecar must never crash app startup)
-            logger.exception("Failed to start IP scanner sidecar; marking unavailable.")
+            logger.exception("Failed to start sidecar '%s'; marking unavailable.", name)
             self._sidecars[name] = _Sidecar(name, 0, None)
 
 

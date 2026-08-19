@@ -69,8 +69,14 @@ export const router = createHashRouter([
       // Built-in TCP/Nmap engine, off the primary nav but reachable by direct
       // URL. The sidecar module owns /ip-scanner (see moduleData.ts).
       { path: "ip-scanner-sct", lazy: loadModulePage("ip-scanner-sct") },
-      { path: "bacnet-discovery", lazy: loadModulePage("bacnet-discovery") },
-      { path: "mqtt-discovery", lazy: loadModulePage("mqtt-discovery") },
+      { path: "bacnet-scanner", lazy: loadModulePage("bacnet-scanner") },
+      // Built-in BACnet engine, off the primary nav but reachable by direct
+      // URL. The sidecar module owns /bacnet-scanner (see moduleData.ts).
+      { path: "bacnet-discovery-sct", lazy: loadModulePage("bacnet-discovery-sct") },
+      { path: "mqtt-scanner", lazy: loadModulePage("mqtt-scanner") },
+      // Built-in MQTT engine, off the primary nav but reachable by direct URL.
+      // The sidecar module owns /mqtt-scanner (see moduleData.ts).
+      { path: "mqtt-discovery-sct", lazy: loadModulePage("mqtt-discovery-sct") },
       { path: "udmi-validation", lazy: loadModulePage("udmi-validation") },
       { path: "data-validation", lazy: loadModulePage("data-validation") },
       { path: "reports", lazy: loadModulePage("reports") },

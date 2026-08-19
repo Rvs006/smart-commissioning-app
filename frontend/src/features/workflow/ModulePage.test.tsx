@@ -1163,7 +1163,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -1237,7 +1237,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    const view = renderModule("mqtt-discovery");
+    const view = renderModule("mqtt-discovery-sct");
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
@@ -1330,7 +1330,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
@@ -1435,7 +1435,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     const downloadButton = await screen.findByRole("button", { name: "Export to XLSX" });
     await waitFor(() => expect(downloadButton).toBeEnabled());
     fireEvent.click(downloadButton);
@@ -1501,7 +1501,7 @@ describe("ModulePage discovery wiring", () => {
         }),
       );
 
-      renderModule("mqtt-discovery");
+      renderModule("mqtt-discovery-sct");
       const downloadButton = await screen.findByRole("button", { name: "Export to XLSX" });
       await waitFor(() => expect(downloadButton).toBeEnabled());
       fireEvent.click(downloadButton);
@@ -1540,7 +1540,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "2" },
@@ -1566,7 +1566,7 @@ describe("ModulePage discovery wiring", () => {
       posted = true;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "49" },
@@ -1589,7 +1589,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // Clear the default "10" so the duration is blank, then pick an hours unit:
     // the unit multiplier must not turn a blank (indefinite) into a bounded 0.
@@ -1617,7 +1617,7 @@ describe("ModulePage discovery wiring", () => {
       posted = true;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // "45s" must NOT silently coerce to the 0 = indefinite sentinel: that would
     // turn an intended bounded window into an unbounded background capture. It is
@@ -1641,7 +1641,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // Do NOT touch the topic filter: it defaults to blank. Root Topic was removed
     // from Configuration, so a blank filter is omitted from the run parameters
@@ -1664,7 +1664,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // An operator who wants a full-wildcard or scoped capture types it explicitly;
     // it flows through unchanged as the run's topic_filter override.
@@ -1755,7 +1755,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -1845,7 +1845,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -1909,7 +1909,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2002,7 +2002,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2071,7 +2071,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2155,7 +2155,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2231,7 +2231,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2541,7 +2541,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery");
+    renderModule("bacnet-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -2648,7 +2648,7 @@ describe("ModulePage BACnet backend provenance", () => {
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
-    renderModule("bacnet-discovery", "/?compare=prior-run", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("bacnet-discovery-sct", "/?compare=prior-run", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await waitFor(() => expect(previewPointsSignal).not.toBeNull());
@@ -2719,7 +2719,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("bacnet-discovery-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await waitFor(() => expect(resultsRequests).toBeGreaterThan(0));
@@ -2771,7 +2771,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("bacnet-discovery-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await screen.findAllByRole("button", { name: /Generate report from this run/i });
@@ -2820,7 +2820,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    const view = renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    const view = renderModule("bacnet-discovery-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await screen.findAllByRole("button", { name: /Generate report from this run/i });
@@ -2836,7 +2836,7 @@ describe("ModulePage BACnet backend provenance", () => {
         <SessionProvider>
           <MemoryRouter initialEntries={["/"]}>
             <LocationProbe />
-            <ModulePage moduleRoute="mqtt-discovery" />
+            <ModulePage moduleRoute="mqtt-discovery-sct" />
           </MemoryRouter>
         </SessionProvider>
       </QueryClientProvider>,
@@ -2937,7 +2937,7 @@ describe("ModulePage BACnet backend provenance", () => {
     );
 
     const { queryClient } = renderModule(
-      "bacnet-discovery",
+      "bacnet-discovery-sct",
       "/",
       [{ ...previewAuthorization, preview_run_id: sharedRunId }],
       false,
@@ -3070,7 +3070,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery");
+    renderModule("bacnet-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -3717,7 +3717,7 @@ describe("ModulePage labels and templates", () => {
 
   it("titles the bacnet-discovery hero 'BACnet Discovery'", async () => {
     stubBasic();
-    renderModule("bacnet-discovery");
+    renderModule("bacnet-discovery-sct");
     expect(
       await screen.findByRole("heading", { level: 2, name: "BACnet Discovery" }),
     ).toBeInTheDocument();
@@ -7964,7 +7964,7 @@ describe("ModulePage run retention", () => {
     // Sibling ModulePage routes share one component instance (no key prop), so
     // this rerender — not a remount — is the real cross-head bleed vector.
     // MQTT has no succeeded run of its own, so nothing may be re-attached.
-    view.rerender(tree("mqtt-discovery"));
+    view.rerender(tree("mqtt-discovery-sct"));
     await waitFor(() => expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument());
     expect(screen.queryByText(/Discovery run monitor/i)).not.toBeInTheDocument();
     expect(stepOf()).toBe("setup");
@@ -8021,7 +8021,7 @@ describe("ModulePage run retention", () => {
       created_at: "2026-06-11T10:00:00Z",
       updated_at: "2026-06-11T10:05:00Z",
     };
-    view.rerender(tree("mqtt-discovery"));
+    view.rerender(tree("mqtt-discovery-sct"));
     await waitFor(() => expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument());
     view.rerender(tree("ip-scanner-sct"));
 
@@ -8066,7 +8066,7 @@ describe("ModulePage run retention", () => {
 
   it("shows no results and no sample rows on a head that has never run", async () => {
     stubWithLastRun();
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // "Boiler 1 Controller" is an old fixture row; nothing fabricated may stand
     // in for a run that never happened.
@@ -9643,7 +9643,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    const { queryClient } = renderModule("bacnet-discovery", "/?compare=prior-run");
+    const { queryClient } = renderModule("bacnet-discovery-sct", "/?compare=prior-run");
     await waitFor(() => expect(pointsSignal).not.toBeNull());
     await waitFor(() => expect(comparisonSignal).not.toBeNull());
     const activeAuxiliaryKeys = queryClient
@@ -9834,7 +9834,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     await waitFor(() => {
       expect(runRequests).toBeGreaterThan(0);
       expect(topicRequests).toBeGreaterThan(0);
@@ -10582,7 +10582,7 @@ describe("ModulePage report controls placement", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     fireEvent.change(pickers[0], { target: { value: "all" } });
     const [reportButton] = await screen.findAllByRole("button", {

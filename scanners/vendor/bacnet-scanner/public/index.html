@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BACnet Scanner</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">⬡</span>
+        <div>
+          <div class="brand-title">BACnet Scanner</div>
+          <div class="brand-sub">BACnet/IP discovery &amp; device-register verification</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="scanState" class="scan-state idle">Idle</span>
+      </div>
+    </header>
+
+    <!-- Info banner -->
+    <div class="banner">
+      <span class="banner-icon">⬡</span>
+      <strong>BACnet Scanner:</strong>&nbsp;broadcasts a Who-Is on UDP 47808, collects every I-Am,
+      reads each device's identity (name, vendor, model, firmware, object count), discovers routers /
+      remote networks, and lets you drill into any device's object list. Compares everything against an
+      imported BACnet Device Register. Run with or without a register.
+    </div>
+
+    <!-- Adapter + config -->
+    <section class="config-grid">
+      <div class="config-card">
+        <div class="config-label">◱ NETWORK ADAPTER</div>
+        <select id="adapterSelect" class="config-input"></select>
+        <div id="adapterMeta" class="config-hint"></div>
+      </div>
+      <div class="config-card">
+        <div class="config-label">≋ DEVICE INSTANCE RANGE</div>
+        <div class="range-row">
+          <input id="rangeLow" class="config-input" placeholder="0" />
+          <span class="dash">–</span>
+          <input id="rangeHigh" class="config-input" placeholder="4194302" />
+        </div>
+        <div class="config-hint">Blank = discover all devices (global Who-Is)</div>
+      </div>
+      <div class="config-card">
+        <div class="config-label">≋ DISCOVERY WINDOW</div>
+        <div class="range-row">
+          <input id="discoverMs" class="config-input" type="number" value="4000" min="1000" step="500" />
+          <span class="unit">ms</span>
+        </div>
+        <div class="config-hint">How long to listen for I-Am replies</div>
+      </div>
+      <div class="config-card">
+        <div class="config-label">≋ BACNET DEVICE REGISTER</div>
+        <div id="registerStatus" class="register-status none">No register loaded</div>
+        <div class="register-actions">
+          <a href="/api/template" class="link-btn" download>⬇ Template</a>
+          <button id="importBtn" class="link-btn">⬆ Import CSV</button>
+          <button id="clearBtn" class="link-btn danger hidden">✕ Clear</button>
+          <input id="csvFile" type="file" accept=".csv,text/csv" hidden />
+        </div>
+      </div>
+    </section>
+
+    <!-- Summary cards -->
+    <section class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-title">Expected Devices <span class="i">ⓘ</span></div>
+        <div id="sumExpected" class="summary-num blue">0</div>
+        <div class="summary-sub">From BACnet Register</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-title">Discovered Devices <span class="i">ⓘ</span></div>
+        <div id="sumDiscovered" class="summary-num green">0</div>
+        <div id="sumDiscoveredSub" class="summary-sub">Answered Who-Is</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-title">Register Matches <span class="i">ⓘ</span></div>
+        <div id="sumMatches" class="summary-num green">0</div>
+        <div id="sumMatchesSub" class="summary-sub">Full RAG match</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-title">Unexpected / Rogue <span class="i">ⓘ</span></div>
+        <div id="sumRogue" class="summary-num red">0</div>
+        <div id="sumRogueSub" class="summary-sub">Not in register</div>
+      </div>
+    </section>
+
+    <!-- Toolbar -->
+    <section class="toolbar">
+      <div class="search-wrap">
+        <span class="search-icon">⌕</span>
+        <input id="searchInput" class="search-input" placeholder="Search by instance, name, vendor, model, IP…" />
+      </div>
+      <div class="filter-chips">
+        <button class="chip active" data-filter="all">All</button>
+        <button class="chip" data-filter="green">● Match</button>
+        <button class="chip" data-filter="amber">● Partial</button>
+        <button class="chip" data-filter="red">● Missing / Rogue</button>
+      </div>
+      <div class="toolbar-actions">
+        <button id="saveRegBtn" class="btn ghost" title="Build a BACnet Device Register from this scan's discovered devices">💾 Save as Register</button>
+        <button id="exportAssetsBtn" class="btn ghost" title="Select devices and export their objects + current values as JSON + XLSX in a ZIP">📦 Export Assets</button>
+        <button id="exportBtn" class="btn ghost">Export CSV</button>
+        <button id="scanBtn" class="btn primary">▶ Start Scan</button>
+      </div>
+    </section>
+
+    <!-- Export selection bar -->
+    <div id="exportBar" class="export-bar hidden">
+      <span class="export-info">
+        Tick the devices to export — <strong id="exportCount">0</strong> selected. Each asset is read for its
+        full object list &amp; current values, then packaged as <strong>JSON + XLSX</strong> (one folder per asset) in a single ZIP.
+      </span>
+      <div class="export-actions">
+        <button id="exportRunBtn" class="btn primary" disabled>⤓ Export Selected</button>
+        <button id="exportCancelBtn" class="btn ghost">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Networks -->
+    <div id="networksBar" class="networks-bar hidden"></div>
+
+    <!-- Progress -->
+    <div id="progressWrap" class="progress-wrap hidden">
+      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressText" class="progress-text"></div>
+    </div>
+
+    <!-- Main content: results + detail -->
+    <section class="content">
+      <div class="results-panel">
+        <div class="results-head">
+          <div class="results-title">Discovered Devices <span id="resultCount" class="count">(0)</span></div>
+          <div class="legend">
+            <span class="legend-item"><span class="dot green"></span>Match</span>
+            <span class="legend-item"><span class="dot amber"></span>Partial</span>
+            <span class="legend-item"><span class="dot red"></span>Missing / Rogue</span>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th class="sel-col"><input type="checkbox" id="selectAll" title="Select all" /></th>
+                <th>INSTANCE</th>
+                <th>DEVICE NAME</th>
+                <th>ADDRESS</th>
+                <th>NET</th>
+                <th>VENDOR</th>
+                <th>MODEL</th>
+                <th>FIRMWARE</th>
+                <th>OBJECTS</th>
+                <th>REGISTER</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody">
+              <tr class="empty-row"><td colspan="10">No scan yet. Select an adapter and press <strong>Start Scan</strong>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="divider" id="splitDivider" title="Drag to resize"><span></span></div>
+
+      <aside id="detailPanel" class="detail-panel empty">
+        <div class="detail-empty">Select a device to view details</div>
+      </aside>
+    </section>
+
+    <footer class="footer">
+      <span>BACnet Scanner v1.0 · loopback-only local tool · UDP 47808</span>
+      <span id="footAdapter"></span>
+    </footer>
+  </div>
+
+  <div id="detailBackdrop" class="detail-backdrop hidden"></div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -20,7 +20,9 @@ fabricating results.
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from smart_commissioning_core.db.repositories import ImportRepository
+from smart_commissioning_core.engines.bacnet_scanner_sidecar import process_bacnet_scanner_run
 from smart_commissioning_core.engines.ip_scanner_sidecar import process_ip_scanner_run
+from smart_commissioning_core.engines.mqtt_scanner_sidecar import process_mqtt_scanner_run
 
 from app.api.routes.discovery import (
     _create_run,
@@ -36,7 +38,12 @@ from app.core.config import get_settings
 from app.core.scopes import require_project_site_access
 from app.schemas.jobs import JobAcceptedResponse, JobCreateRequest
 from app.services.engine_dispatch import is_dry_run
-from app.services.sidecar_supervisor import IP_SCANNER, SidecarUnavailable
+from app.services.sidecar_supervisor import (
+    BACNET_SCANNER,
+    IP_SCANNER,
+    MQTT_SCANNER,
+    SidecarUnavailable,
+)
 
 router = APIRouter()
 
@@ -98,3 +105,113 @@ def create_ip_scanner_run(
 
     # enqueue=None keeps this strictly inline (dispatch_run runs inline for None).
     return _dispatch(run, enqueue=None, run_inline=run_inline, label="IP scanner")
+
+
+@router.post("/bacnet_sidecar/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
+def create_bacnet_scanner_run(
+    request: JobCreateRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
+
+    # Inline-only: no worker actor for the local sidecar (see create_ip_scanner_run).
+    if get_settings().job_execution_mode != "inline":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "BACnet scanner runs require the local inline executor; queue and "
+                "external execution are not available for the loopback sidecar."
+            ),
+        )
+
+    parameters = dict(request.parameters)
+    _require_legacy_scan_authorization(parameters)
+    _stamp_legacy_authorizer(parameters, principal)
+    parameters.setdefault("project_id", request.project_id)
+    parameters.setdefault("site_id", request.site_id)
+
+    # Resolve the sidecar URL up front for a live scan; an unavailable sidecar
+    # fails with 503 rather than starting a run that can only fail.
+    base_url: str | None = None
+    if not is_dry_run(parameters):
+        supervisor = getattr(http_request.app.state, "sidecar_supervisor", None)
+        if supervisor is None:
+            raise HTTPException(status_code=503, detail="BACnet scanner sidecar is not available.")
+        try:
+            base_url = supervisor.base_url_for(BACNET_SCANNER)
+        except SidecarUnavailable as error:
+            raise HTTPException(status_code=503, detail="BACnet scanner sidecar is not available.") from error
+
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "bacnet_scanner", principal)
+
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        return process_bacnet_scanner_run(
+            run.run_id,
+            frozen_parameters,
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            persist_records=run_store.replace_devices,
+            sidecar_base_url=base_url,
+            import_loader=ImportRepository(service.engine).get_accepted_rows,
+        )
+
+    return _dispatch(run, enqueue=None, run_inline=run_inline, label="BACnet scanner")
+
+
+@router.post("/mqtt_sidecar/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
+def create_mqtt_scanner_run(
+    request: JobCreateRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
+
+    # Inline-only: no worker actor for the local sidecar (see create_ip_scanner_run).
+    if get_settings().job_execution_mode != "inline":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "MQTT scanner runs require the local inline executor; queue and "
+                "external execution are not available for the loopback sidecar."
+            ),
+        )
+
+    parameters = dict(request.parameters)
+    # MQTT is a capture-only, read-only broker observation, but the same legacy
+    # consent gate the MQTT discovery route uses still governs a live capture.
+    _require_legacy_scan_authorization(parameters)
+    _stamp_legacy_authorizer(parameters, principal)
+    parameters.setdefault("project_id", request.project_id)
+    parameters.setdefault("site_id", request.site_id)
+
+    # Resolve the sidecar URL up front for a live capture; an unavailable sidecar
+    # fails with 503 rather than starting a run that can only fail.
+    base_url: str | None = None
+    if not is_dry_run(parameters):
+        supervisor = getattr(http_request.app.state, "sidecar_supervisor", None)
+        if supervisor is None:
+            raise HTTPException(status_code=503, detail="MQTT scanner sidecar is not available.")
+        try:
+            base_url = supervisor.base_url_for(MQTT_SCANNER)
+        except SidecarUnavailable as error:
+            raise HTTPException(status_code=503, detail="MQTT scanner sidecar is not available.") from error
+
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_scanner", principal)
+
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        return process_mqtt_scanner_run(
+            run.run_id,
+            frozen_parameters,
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            persist_records=run_store.replace_devices,
+            sidecar_base_url=base_url,
+            import_loader=ImportRepository(service.engine).get_accepted_rows,
+        )
+
+    return _dispatch(run, enqueue=None, run_inline=run_inline, label="MQTT scanner")

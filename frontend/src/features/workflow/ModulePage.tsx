@@ -297,13 +297,17 @@ type FrozenUdmiReportScope = {
   unexpectedDevices: number;
 };
 
-// Both IP lanes are discovery modules: "ip-scanner" is the vendored sidecar
-// (plain path), "ip-scanner-sct" is the relocated built-in TCP/Nmap engine.
+// Each protocol has two discovery lanes: the vendored sidecar (plain path) and
+// the relocated built-in engine ("-sct"). "ip-scanner"/"bacnet-scanner"/
+// "mqtt-scanner" are the operator-facing sidecars; "ip-scanner-sct"/
+// "bacnet-discovery-sct"/"mqtt-discovery-sct" are the built-in engines.
 const DISCOVERY_ROUTES = new Set([
   "ip-scanner",
   "ip-scanner-sct",
-  "bacnet-discovery",
-  "mqtt-discovery",
+  "bacnet-scanner",
+  "bacnet-discovery-sct",
+  "mqtt-scanner",
+  "mqtt-discovery-sct",
 ]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
@@ -463,7 +467,7 @@ function discoveryRowEntitySignature(
     const identity = row["Observed IP"] || row["MAC Address"] || row.Asset;
     return identity ? `ip\u0000${identity}` : null;
   }
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-discovery-sct") {
     const identity = [row.Instance, row.Address, row.Device].filter(Boolean).join("\u0000");
     return identity ? `bacnet\u0000${identity}` : null;
   }
@@ -598,7 +602,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const isSealedNetworkDiscoveryModule =
-    module.route === "ip-scanner-sct" || module.route === "bacnet-discovery";
+    module.route === "ip-scanner-sct" || module.route === "bacnet-discovery-sct";
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -1519,7 +1523,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const bacnetPointsQuery = useQuery({
     enabled:
       !runAccessClosed &&
-      module.route === "bacnet-discovery" &&
+      (module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery" &&
       activeRunAuthoritativelyTerminal,
@@ -1661,7 +1665,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       !runAccessClosed &&
       !activeRunMatchesReservedLiveSubmission &&
       !activeRunMatchesDefinitiveLiveRejection &&
-      module.route === "mqtt-discovery" &&
+      (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") &&
       Boolean(activeRun) &&
       activeRun?.kind === "discovery",
     queryFn: ({ signal }) =>
@@ -3385,7 +3389,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
   const bacnetHeadlineMetrics = useMemo<BacnetHeadlineMetricDisplay[] | null>(() => {
-    if (module.route !== "bacnet-discovery" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+    if ((module.route !== "bacnet-scanner" && module.route !== "bacnet-discovery-sct") || !discoveryResultsQuery.data || !finalEvidenceReady) {
       return null;
     }
     try {
@@ -3401,7 +3405,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // devices are never mistaken for a real on-wire scan. Null for other routes
   // and until a terminal run's results arrive.
   const bacnetBackend = useMemo(() => {
-    if (module.route !== "bacnet-discovery" || !discoveryResultsQuery.data) {
+    if ((module.route !== "bacnet-scanner" && module.route !== "bacnet-discovery-sct") || !discoveryResultsQuery.data) {
       return null;
     }
     return bacnetBackendLabel(discoveryResultsQuery.data);
@@ -3706,7 +3710,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Non-compliant (amber) with Pass-with-notes and paints Offline red. Discovery
   // (ip/bacnet) keeps the RAG pass/fail/warn tones, where tone == verdict.
   const resultsToneOptions =
-    module.route === "mqtt-discovery"
+    module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct"
       ? [
           { label: "All verdicts", value: "all" },
           { label: "In register", value: "pass" },
@@ -3753,7 +3757,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // the row's stringified "Raw Payload" cell. Null off the mqtt-discovery route,
   // before results land, or when nothing is selected.
   const selectedMqttTopic = useMemo<DiscoveryRowRecord | null>(() => {
-    if (module.route !== "mqtt-discovery" || !discoveryResultsQuery.data || !selectedResult) {
+    if ((module.route !== "mqtt-scanner" && module.route !== "mqtt-discovery-sct") || !discoveryResultsQuery.data || !selectedResult) {
       return null;
     }
     const topic = selectedResult.Topic;
@@ -4159,7 +4163,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       activeRun.kind === "discovery"
         ? ((module.route === "ip-scanner" || module.route === "ip-scanner-sct"
             ? "ip_discovery"
-            : module.route === "bacnet-discovery"
+            : module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct"
               ? "bacnet_discovery"
               : "mqtt_discovery") as ReportType)
         : validationRunQuery.data?.job_type === "udmi_validation"
@@ -4335,7 +4339,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       activeRunMatchesReservedLiveSubmission ||
       activeRunMatchesDefinitiveLiveRejection ||
       activeRun?.kind !== "discovery" ||
-      module.route !== "mqtt-discovery"
+      (module.route !== "mqtt-scanner" && module.route !== "mqtt-discovery-sct")
     ) {
       return;
     }
@@ -4372,7 +4376,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     (isSealedNetworkDiscoveryModule &&
       !scanDryRun &&
       (!scanAuthorized || !scanPreviewRunId || !scanAuthorizationId)) ||
-    (module.route === "mqtt-discovery" && !scanDryRun && !scanAuthorized) ||
+    (module.route === "mqtt-discovery-sct" && !scanDryRun && !scanAuthorized) ||
     nmapSelectionBlocked;
 
   // Import warnings are informational (their rows stay accepted), so they get
@@ -5654,7 +5658,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </section>
         )}
 
-        {module.route === "mqtt-discovery" && (
+        {(module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") && (
           <section className="surface" data-stepgroup="run">
             <div className="surface-heading">
               <div>
@@ -6728,7 +6732,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   {isDiscoveryModule ? (
                     module.route === "ip-scanner" || module.route === "ip-scanner-sct" ? (
                       'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
-                    ) : module.route === "mqtt-discovery" &&
+                    ) : (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") &&
                       discoveryResultsQuery.data?.register_comparison ? (
                       discoveryResultsQuery.data.register_comparison.register_available ? (
                         <>
@@ -6996,7 +7000,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </article>
 
-            {module.route === "bacnet-discovery" && !runAccessClosed && activeRunAuthoritativelyTerminal && (
+            {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && !runAccessClosed && activeRunAuthoritativelyTerminal && (
               <section className="surface" aria-labelledby="bacnet-points-heading">
                 <div className="surface-heading">
                   <div>
@@ -7144,7 +7148,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </div>
                   ))}
                 </div>
-                {module.route === "bacnet-discovery" && activeRun && activeRunTerminal && (
+                {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && activeRun && activeRunTerminal && (
                   <div className="detail-actions" aria-live="polite">
                     <div className="property-expansion-panel">
                       <strong>Bounded property read</strong>
@@ -7490,7 +7494,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                         );
                       })}
                   </div>
-                ) : module.route === "mqtt-discovery" ? (
+                ) : (module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct") ? (
                   // Real captured payload for the selected topic, replacing the old
                   // fabricated sample issue-cards on this discovery route.
                   selectedMqttTopic ? (
@@ -9797,7 +9801,7 @@ function buildResultDetailItems(
     return items;
   }
 
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     return [
       { label: "Device", value: row.Device ?? "Selected BACnet device" },
       { label: "Instance", value: row.Instance ?? "Unknown" },
@@ -9819,7 +9823,7 @@ function buildResultDetailItems(
     ];
   }
 
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     // Per-message metadata rides hidden row keys (see mqttRowsFromResults).
     // Honesty-rule wording is load-bearing: NEVER label a timestamp "Published"
     // (MQTT 3.1.1 has no publish time on the wire), and state that delivery QoS

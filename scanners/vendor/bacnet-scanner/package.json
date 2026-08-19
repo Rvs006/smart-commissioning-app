@@ -1,0 +1,13 @@
+{
+  "name": "bacnet-scanner",
+  "version": "1.0.0",
+  "description": "Standalone BACnet/IP scanner with RAG device-register comparison (Windows).",
+  "main": "server.js",
+  "bin": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "bundle": "node build-bundle.js"
+  },
+  "author": "",
+  "license": "MIT"
+}

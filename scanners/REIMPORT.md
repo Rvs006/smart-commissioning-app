@@ -9,7 +9,15 @@ contract stays green the drop is done, if it goes red the failure names the
 seam that moved.
 
 Repo root: `C:\Smart Commissioning App\smart-commissioning-app`
-Vendor trees: `scanners/vendor/<app>/` (e.g. `scanners/vendor/network-ip-scanner/`)
+Vendor trees: `scanners/vendor/<app>/`. Three apps, `<app>` = one of:
+
+| `<app>`               | sidecar   | port  | contract test suite                          |
+|-----------------------|-----------|-------|----------------------------------------------|
+| `network-ip-scanner`  | server.js | :3777 | `tests/test_ip_scanner_contract.py`          |
+| `bacnet-scanner`      | bacnet.js | :3778 | `tests/test_bacnet_scanner_contract.py`      |
+| `mqtt-discovery`      | server.js | :3799 | `tests/test_mqtt_discovery_contract.py`      |
+
+Run every step below once per app you are re-importing.
 
 ---
 
@@ -45,8 +53,16 @@ template CSVs and READMEs:
 - broker hosts -> `broker.example.local`
 - MACs        -> `00:00:5E:00:53:xx`
 
-Precedent already applied to `network-ip-scanner`: `Oxford Street` -> `Example
-Site`, device names genericized in the template CSV. Match that bar.
+Scrub already applied to the vendored trees (match this bar on the next drop):
+- `network-ip-scanner` — real site name -> `Example Site`, device names
+  genericized in the template CSV.
+- `bacnet-scanner` — register CSV + `README.txt` neutralized to `Example Site` /
+  generic device names (`AHU-01`, `Controller-01`, `Sensor-01`); `selftest.js`
+  real IP -> `192.0.2.37`.
+- `mqtt-discovery` — register CSV + `README.txt` neutralized to `Example Site`
+  and topic prefix `udmi/site/example` / generic device names; in
+  `public/index.html` the broker placeholder `electracom-broker` ->
+  `example-broker` and host -> `192.0.2.20`.
 
 Only a scrubbed tree proceeds to step 3.
 
@@ -61,10 +77,15 @@ contract test), so blowing the tree away is safe and is the point. If you find
 yourself editing a file under `vendor/` to make the import work, stop: the fix
 belongs in the adapter or the contract test, not in Pete's code.
 
+`mqtt-discovery` vendors **source only**: its `node_modules/` and `dist/` are
+gitignored (Node runs `server.js` directly; the portable build regenerates the
+bundle). Copy the source tree, not a built drop with deps committed.
+
 ### 4. Contract test = the gate
-Run the per-app scanner contract test:
+Each app has its own contract suite (see the table above); together the three
+suites are the re-import gate. Run the one for the app you dropped:
 ```
-cd backend && python -m pytest tests/test_<app>_scanner_contract.py -q
+cd backend && python -m pytest tests/test_<app>_contract.py -q
 ```
 - **Green** = done. The adapter still talks to the sidecar and every persisted
   record is json-safe.
@@ -82,9 +103,9 @@ The contract test is the honesty and safety boundary. It asserts:
 ### 5. Node smoke
 Confirm the sidecar itself still starts and answers:
 ```
-cd scanners/vendor/<app> && npm ci && node server.js
+cd scanners/vendor/<app> && npm ci && node <entry>   # entry = server.js, or bacnet.js for bacnet-scanner
 ```
-Hit `/api/health` and confirm it responds and reports a version (see standing
+Hit `/api/health` on the app's port (see table) and confirm it responds and reports a version (see standing
 agreements). Ctrl-C when green.
 
 ### 6. Commit

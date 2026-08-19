@@ -477,7 +477,7 @@ export function assetIdentity(route: string, row: Readonly<Record<string, string
   if (row.__entityKey) {
     return evidenceIdentity("entity", [route, row.__entityKey]);
   }
-  return route === "bacnet-discovery"
+  return route === "bacnet-scanner" || route === "bacnet-discovery-sct"
     ? evidenceIdentity("asset", [
         route,
         row.Asset,
@@ -516,7 +516,7 @@ export function topicIdentity(row: Readonly<Record<string, string>>): string {
 export function resultIdentity(route: string, row: Readonly<Record<string, string>>): string {
   return route === "udmi-validation"
     ? payloadIdentity(row)
-    : route === "mqtt-discovery"
+    : route === "mqtt-scanner" || route === "mqtt-discovery-sct"
       ? topicIdentity(row)
       : assetIdentity(route, row);
 }

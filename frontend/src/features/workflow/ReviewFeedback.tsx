@@ -23,12 +23,12 @@ const storageUnavailableStatus =
 
 const moduleLabels: Record<string, string> = {
   "/": "Homepage",
-  "/bacnet-discovery": "BACnet Discovery",
+  "/bacnet-scanner": "BACnet Discovery",
   "/configuration": "Configuration",
   "/data-validation": "Validation",
   "/hub": "Hub",
   "/ip-scanner": "IP Discovery",
-  "/mqtt-discovery": "MQTT Discovery",
+  "/mqtt-scanner": "MQTT Discovery",
   "/reports": "Reports",
   "/run-history": "Run History",
   "/udmi-validation": "UDMI",

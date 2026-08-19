@@ -185,8 +185,8 @@ export function RunHistoryPage() {
     jobTypeValue === "ip_discovery"
       ? "/ip-scanner"
       : jobTypeValue === "bacnet_discovery"
-        ? "/bacnet-discovery"
-        : "/mqtt-discovery";
+        ? "/bacnet-scanner"
+        : "/mqtt-scanner";
 
   const openComparison = () => {
     if (!compareQuery.data?.compatible) return;
