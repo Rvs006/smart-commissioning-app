@@ -95,6 +95,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         purge_old_logs(LOG_DIR, retention_days(logging_values))
     except Exception:  # noqa: BLE001 (configured logging is best-effort; never block startup)
         logger.debug("Could not apply configured logging settings.", exc_info=True)
+    # Start the local loopback scanner sidecars (e.g. the vendored IP scanner).
+    # Fail-soft by contract: a sidecar that will not start logs and marks itself
+    # unavailable rather than crashing boot; the scanners route then returns 503.
+    from app.services.sidecar_supervisor import SidecarSupervisor
+
+    supervisor = SidecarSupervisor()
+    try:
+        await supervisor.start_all()
+    except Exception:  # noqa: BLE001 (a sidecar must never block startup)
+        logger.exception("Sidecar supervisor start_all failed; scanners will be unavailable.")
+    _app.state.sidecar_supervisor = supervisor
+
     # Orphan-run sweep: a run left at status "running" by an application restart
     # (or a crash mid-persist) never reaches a terminal status on its own, so the
     # UI shows a run that spins forever. Mark such interrupted runs failed with an
@@ -129,6 +141,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         maintenance_stop.set()
+        try:
+            await supervisor.stop_all()
+        except Exception:  # noqa: BLE001 (best-effort shutdown; never mask others)
+            logger.exception("Sidecar supervisor stop_all failed.")
         from smart_commissioning_core.owned_run_heartbeat import (
             abandon_active_owned_run_heartbeats,
         )

@@ -297,7 +297,14 @@ type FrozenUdmiReportScope = {
   unexpectedDevices: number;
 };
 
-const DISCOVERY_ROUTES = new Set(["ip-scanner", "bacnet-discovery", "mqtt-discovery"]);
+// Both IP lanes are discovery modules: "ip-scanner" is the vendored sidecar
+// (plain path), "ip-scanner-sct" is the relocated built-in TCP/Nmap engine.
+const DISCOVERY_ROUTES = new Set([
+  "ip-scanner",
+  "ip-scanner-sct",
+  "bacnet-discovery",
+  "mqtt-discovery",
+]);
 
 // A large register can reject hundreds of rows. Render the first N and state the
 // honest remainder count rather than building pagination for a pre-1.0 fix:
@@ -428,7 +435,7 @@ function provisionalDiscoveryViewFor(
     status: "running",
     result_summary: {},
     discovered_assets:
-      route === "ip-scanner" ? projected.map((entry) => projectedIpAsset(entry)) : [],
+      route === "ip-scanner-sct" ? projected.map((entry) => projectedIpAsset(entry)) : [],
     devices: projected.map((entry) => entry.record),
     points: [],
     topics: [],
@@ -450,7 +457,9 @@ function discoveryRowEntitySignature(
   route: string,
   row: Readonly<Record<string, string>>,
 ): string | null {
-  if (route === "ip-scanner") {
+  // Progressive-observation reconciliation only runs for the built-in engine
+  // (jobType "ip_discovery"); the sidecar module never reaches a provisional view.
+  if (route === "ip-scanner-sct") {
     const identity = row["Observed IP"] || row["MAC Address"] || row.Asset;
     return identity ? `ip\u0000${identity}` : null;
   }
@@ -589,7 +598,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const workspace = moduleWorkspaces[moduleRoute];
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const isSealedNetworkDiscoveryModule =
-    module.route === "ip-scanner" || module.route === "bacnet-discovery";
+    module.route === "ip-scanner-sct" || module.route === "bacnet-discovery";
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -917,7 +926,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     "nmap-capability",
   ] as const;
   const nmapCapabilityQuery = useQuery({
-    enabled: module.route === "ip-scanner",
+    enabled: module.route === "ip-scanner-sct",
     queryFn: ({ signal }) =>
       getNmapCapability({
         projectId: workspaceRef.projectId,
@@ -3296,7 +3305,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     return provisionalDiscoveryViewFor(
       module.route,
       progressiveObservationRun.runId,
-      module.route === "ip-scanner" ? "ip_discovery" : "bacnet_discovery",
+      module.route === "ip-scanner-sct" ? "ip_discovery" : "bacnet_discovery",
       currentObservationFold,
     );
   }, [currentObservationFold, module.route, progressiveObservationRun, runAccessClosed]);
@@ -3357,7 +3366,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   }, [finalEvidenceReady, isDiscoveryModule, discoveryResultsQuery.data, module.route]);
 
   const ipHeadlineMetrics = useMemo<IpHeadlineMetricDisplay[] | null>(() => {
-    if (module.route !== "ip-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+    if (
+      (module.route !== "ip-scanner" && module.route !== "ip-scanner-sct") ||
+      !discoveryResultsQuery.data ||
+      !finalEvidenceReady
+    ) {
       return null;
     }
     try {
@@ -4144,7 +4157,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     generatedAllBundleDownload.reset();
     const reportType: ReportType =
       activeRun.kind === "discovery"
-        ? ((module.route === "ip-scanner"
+        ? ((module.route === "ip-scanner" || module.route === "ip-scanner-sct"
             ? "ip_discovery"
             : module.route === "bacnet-discovery"
               ? "bacnet_discovery"
@@ -4354,7 +4367,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     nmapCapabilityQuery.data?.state === "available" &&
     nmapCapabilityQuery.data.process_selection_allowed;
   const nmapSelectionBlocked =
-    module.route === "ip-scanner" && scanProvider === "operator_managed_nmap" && !nmapAvailable;
+    module.route === "ip-scanner-sct" && scanProvider === "operator_managed_nmap" && !nmapAvailable;
   const discoveryBlocked =
     (isSealedNetworkDiscoveryModule &&
       !scanDryRun &&
@@ -5402,7 +5415,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           </section>
         )}
 
-        {module.route === "ip-scanner" && (
+        {module.route === "ip-scanner-sct" && (
           <section className="surface" data-stepgroup="setup">
             <div className="surface-heading">
               <div>
@@ -6713,7 +6726,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               {usingLiveResults && (
                 <div className="sample-banner" role="note">
                   {isDiscoveryModule ? (
-                    module.route === "ip-scanner" ? (
+                    module.route === "ip-scanner" || module.route === "ip-scanner-sct" ? (
                       'Live discovery observations. The Result column reports this scan’s response and register-port verdicts; "no response on scanned ports" is inconclusive — a TCP-connect miss is not proof a host is absent.'
                     ) : module.route === "mqtt-discovery" &&
                       discoveryResultsQuery.data?.register_comparison ? (
@@ -9749,7 +9762,7 @@ function buildResultDetailItems(
   // the detail can show the actual issue text instead of a bare count.
   assetGroups: MergedAssetGroup[] | null = null,
 ): DetailItem[] {
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     // The per-host detail surfaced by the results "View" button. MAC/Hostname are
     // best-effort enrichment: the engine emits "—" (blank) when no ARP entry or
     // PTR record exists, so a blank here is honest, never fabricated.

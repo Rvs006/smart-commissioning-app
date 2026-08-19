@@ -59,11 +59,33 @@ const modules: ModuleDefinition[] = [
     runActions: []
   },
   {
-    // Route stays /ip-scanner and jobType stays "ip_discovery" (both are
-    // historical slugs the backend and saved runs key off); only the
-    // operator-facing title is renamed, so all three discovery heads read
-    // "<Protocol> Discovery" in the menu and on the page per review 2026-07-15.
+    // The vendored network IP scanner sidecar is the operator-facing IP lane
+    // (nav "IP Discovery" -> /ip-scanner). It runs through the plain discovery
+    // path (runKind "ip_sidecar"), with no Nmap or sealed-preview flow.
     route: "ip-scanner",
+    title: "IP Discovery",
+    summary:
+      "Runs the vendored network IP scanner sidecar, compares results to the imported IP register, and identifies reachable, missing, and rogue hosts.",
+    backendService: "IP scanner sidecar",
+    importTypes: ["ip_scanner_register"],
+    runActions: [
+      {
+        id: "ip-scanner.run",
+        kind: "discovery",
+        label: "Run IP Discovery",
+        helper: "Runs the IP scanner sidecar through the API and tracks it in the run monitor below.",
+        runKind: "ip_sidecar",
+        jobType: "ip_scanner"
+      }
+    ]
+  },
+  {
+    // The built-in TCP/Nmap discovery engine. It moved off the primary nav when
+    // the sidecar took over the /ip-scanner slug, but its engine, sealed-preview
+    // authorization flow, and Nmap path are unchanged and reachable at
+    // #/ip-scanner-sct. Route + jobType "ip_discovery" stay historical slugs the
+    // backend and saved runs key off.
+    route: "ip-scanner-sct",
     title: "IP Discovery",
     summary:
       "Runs authorized network discovery jobs, compares results to the imported IP register, and identifies reachable, missing, and rogue hosts.",

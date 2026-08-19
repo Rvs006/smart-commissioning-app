@@ -371,6 +371,18 @@ export const moduleWorkspaces: Record<string, ModuleWorkspace> = {
     columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
     evidence: [],
   },
+  // Built-in TCP/Nmap engine, relocated off the primary nav to /ip-scanner-sct
+  // when the sidecar took the /ip-scanner slug. Same IP results chrome; kept a
+  // distinct workspace so both routes render their hero/table and stay title-
+  // matched to moduleData (moduleTitles.test.ts).
+  "ip-scanner-sct": {
+    route: "ip-scanner-sct",
+    title: "IP Discovery",
+    headline: "Find reachable, missing, and rogue network hosts against the expected register.",
+    tableTitle: "Network Scan Results",
+    columns: ["Asset", "Expected IP", "Observed", "MAC Address", "Ports", "Match Basis", "Last Seen", "Detailed Status", "Result"],
+    evidence: [],
+  },
   "bacnet-discovery": {
     route: "bacnet-discovery",
     title: "BACnet Discovery",

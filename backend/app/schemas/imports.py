@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 ImportType = Literal[
     "ip_register",
+    "ip_scanner_register",
     "bacnet_register",
     "mqtt_register",
     "asset_validation",

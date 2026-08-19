@@ -436,7 +436,7 @@ export function discoveryViewFor(
   route: string,
   results: DiscoveryResultsResponse,
 ): DiscoveryView | null {
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     return { columns: ipResultColumns, rows: ipRowsFromResults(results) };
   }
   if (route === "bacnet-discovery") {
@@ -558,7 +558,7 @@ export function discoveryMetrics(
     return typeof value === "number" ? value : undefined;
   };
 
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     // New runs stamp hosts_responsive; pre-upgrade runs contained ONLY
     // responders in discovered_assets, so counting assets with an open port is
     // correct for both — and never miscounts the new silent (non-responder)
@@ -763,7 +763,7 @@ export function discoveryEmptyStateFor(
     };
   }
 
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     const scanned = num("hosts_scanned");
     let detail: string;
     if (scanned === 0) {

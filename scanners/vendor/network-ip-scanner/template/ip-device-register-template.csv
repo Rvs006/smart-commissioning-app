@@ -1,0 +1,6 @@
+IP Address,Hostname,Type,Vendor,Model,Expected Ports,Project,Location,Description
+10.0.10.15,DEV-VSD-01,Variable Speed Drive,Schneider Electric,Altivar ATV600,47808;80;443,Example Site,Plant Room,Supply fan VSD
+10.0.10.16,DEV-VSD-02,Variable Speed Drive,Schneider Electric,Altivar ATV600,47808;80,Example Site,Plant Room,Return fan VSD
+10.0.10.17,DEV-EM-01,Energy Meter,Schneider Electric,PM5560,47808,Example Site,Plant Room,Main incomer energy meter
+10.0.10.18,DEV-CTRL-01,Controller,Trend,IQ4E,47808;80;443,Example Site,Plant Room,AHU controller
+10.0.10.21,DEV-CAM-01,IP Camera,Axis,P3245,80;443;554,Example Site,Corridor,Corridor CCTV camera

@@ -115,6 +115,7 @@ export type SecretMaterialResponse = {
 
 export type ImportType =
   | "ip_register"
+  | "ip_scanner_register"
   | "bacnet_register"
   | "mqtt_register"
   | "asset_validation"
@@ -176,6 +177,7 @@ export type ImportBatchSummary = {
 
 export type JobType =
   | "ip_discovery"
+  | "ip_scanner"
   | "bacnet_discovery"
   | "mqtt_discovery"
   | "udmi_validation"
@@ -469,7 +471,11 @@ export type ValidationIssuesResponse = {
   issues: ValidationIssueRecord[];
 };
 
-export type DiscoveryRunKind = "ip" | "bacnet" | "mqtt";
+// "ip_sidecar" runs the vendored network IP scanner sidecar through the plain
+// discovery path. It is deliberately NOT in NetworkDiscoveryRunKind below, so it
+// never reaches the sealed-preview / scan-authorization flow the built-in "ip"
+// engine uses.
+export type DiscoveryRunKind = "ip" | "ip_sidecar" | "bacnet" | "mqtt";
 export type NmapProfileName =
   | "tcp_connect_inventory"
   | "host_discovery"
@@ -1755,7 +1761,7 @@ export function startDiscoveryRun(input: {
   );
 }
 
-type NetworkDiscoveryRunKind = Exclude<DiscoveryRunKind, "mqtt">;
+type NetworkDiscoveryRunKind = Exclude<DiscoveryRunKind, "mqtt" | "ip_sidecar">;
 type NetworkDiscoveryJobType = Extract<JobType, "ip_discovery" | "bacnet_discovery">;
 
 export function startDiscoveryPreview(input: {

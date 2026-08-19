@@ -130,7 +130,7 @@ class ReportListIntegrityError(RuntimeError):
     """A selected report page contains evidence that no longer verifies."""
 
 
-DISCOVERY_JOB_TYPES: set[JobType] = {"ip_discovery", "bacnet_discovery", "mqtt_discovery"}
+DISCOVERY_JOB_TYPES: set[JobType] = {"ip_discovery", "ip_scanner", "bacnet_discovery", "mqtt_discovery"}
 VALIDATION_JOB_TYPES: set[JobType] = {
     "udmi_validation",
     "mqtt_config_publish",

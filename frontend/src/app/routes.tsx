@@ -66,6 +66,9 @@ export const router = createHashRouter([
       { index: true, lazy: loadDashboardPage },
       { path: "configuration", lazy: loadConfigurationPage },
       { path: "ip-scanner", lazy: loadModulePage("ip-scanner") },
+      // Built-in TCP/Nmap engine, off the primary nav but reachable by direct
+      // URL. The sidecar module owns /ip-scanner (see moduleData.ts).
+      { path: "ip-scanner-sct", lazy: loadModulePage("ip-scanner-sct") },
       { path: "bacnet-discovery", lazy: loadModulePage("bacnet-discovery") },
       { path: "mqtt-discovery", lazy: loadModulePage("mqtt-discovery") },
       { path: "udmi-validation", lazy: loadModulePage("udmi-validation") },

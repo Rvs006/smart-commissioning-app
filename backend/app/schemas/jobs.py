@@ -78,6 +78,7 @@ def redact_sensitive_parameters(parameters: dict[str, object]) -> dict[str, obje
 
 JobType = Literal[
     "ip_discovery",
+    "ip_scanner",
     "bacnet_discovery",
     "mqtt_discovery",
     "udmi_validation",
