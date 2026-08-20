@@ -2986,7 +2986,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     captureSeconds.trim() === "" || !Number.isFinite(Number(captureSeconds))
       ? captureSeconds
       : String(Number(captureSeconds) * captureUnitSeconds);
-  const mqttCaptureOverCap = Number(captureSecondsEffective) > 172_800;
+  // The sidecar lane's window is adapter-capped at 900s (MAX_CAPTURE_SECONDS);
+  // the built-in lane keeps its 48-hour ceiling. A page is one route, so this
+  // single value is unambiguous.
+  const mqttCaptureCapSeconds = module.route === "mqtt-scanner" ? 900 : 172_800;
+  const mqttCaptureOverCap = Number(captureSecondsEffective) > mqttCaptureCapSeconds;
 
   // Run actions the Run Controls card list renders. Used ONLY to decide which
   // branch the list shows — the map below still walks the full module.runActions
@@ -5110,7 +5114,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     const mqttOverCapBlocked =
                       mqttCaptureOverCap &&
                       action.kind === "discovery" &&
-                      action.runKind === "mqtt";
+                      (action.runKind === "mqtt" || action.runKind === "mqtt_sidecar");
                     const overCapBlocked =
                       (udmiCaptureOverCap &&
                         action.kind === "validation" &&
@@ -5140,7 +5144,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               ? "Confirm scan authorization and select a sealed preview (or enable dry run) before starting a real scan."
                               : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
                             : mqttOverCapBlocked
-                              ? "Run time exceeds the 48-hour capture limit."
+                              ? module.route === "mqtt-scanner"
+                                ? "Run time exceeds the 15-minute scanner capture limit."
+                                : "Run time exceeds the 48-hour capture limit."
                               : overCapBlocked
                                 ? "Run time exceeds the 48-hour capture limit."
                                 : undefined;
@@ -5778,11 +5784,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </small>
               </label>
               <label>
-                Run time (blank = run until all assets/topics seen or until the user stops the run)
+                {module.route === "mqtt-scanner"
+                  ? "Run time (blank = 60-second default window)"
+                  : "Run time (blank = run until all assets/topics seen or until the user stops the run)"}
                 <input
                   inputMode="numeric"
                   onChange={(event) => setCaptureSeconds(event.target.value)}
-                  placeholder="blank = run until you stop the run"
+                  placeholder={
+                    module.route === "mqtt-scanner"
+                      ? "blank = 60-second default"
+                      : "blank = run until you stop the run"
+                  }
                   value={captureSeconds}
                 />
               </label>
@@ -5802,7 +5814,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </div>
             {mqttCaptureOverCap && (
               <span className="error-text">
-                Run time exceeds the 48-hour capture limit — shorten the window.
+                {module.route === "mqtt-scanner"
+                  ? "Run time exceeds the 15-minute scanner capture limit — shorten the window."
+                  : "Run time exceeds the 48-hour capture limit — shorten the window."}
               </span>
             )}
             <p className="section-copy">
@@ -5813,11 +5827,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <strong>
                 {Number(captureSecondsEffective) > 0
                   ? `${captureSecondsEffective}s`
-                  : "blank (run until you press Stop run)"}
+                  : module.route === "mqtt-scanner"
+                    ? "blank (60-second default window)"
+                    : "blank (run until you press Stop run)"}
               </strong>
-              . Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour
-              safety limit. Closing the app ends the run, which is then marked interrupted at next
-              start. Captured topics appear here when the run completes.
+              .{" "}
+              {module.route === "mqtt-scanner"
+                ? "Blank captures for the 60-second default; the window is capped at 15 minutes. Stop run ends the capture early."
+                : "Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety limit. Closing the app ends the run, which is then marked interrupted at next start."}{" "}
+              Captured topics appear here when the run completes.
             </p>
             {activeRunTerminal &&
               discoveryRunQuery.data?.result_summary?.indefinite_bounded_inline === true && (
@@ -6902,9 +6920,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <input
                       onChange={(event) => setResultsTextFilter(event.target.value)}
                       placeholder={
-                        resultsTopicColumn
-                          ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
-                          : "Asset, host, status, or any visible value"
+                        module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct"
+                          ? "Topic path, asset, payload text, status — or an MQTT wildcard (+/#)"
+                          : resultsTopicColumn
+                            ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
+                            : "Asset, host, status, or any visible value"
                       }
                       value={resultsTextFilter}
                     />
@@ -9299,6 +9319,27 @@ function buildDiscoveryParameters(
       );
     }
     parameters.capture_seconds = raw === "" ? 0 : seconds;
+  }
+  if (action.runKind === "mqtt_sidecar") {
+    // Sidecar capture lane: same operator inputs, bounded-capture semantics. The
+    // adapter reads topic_filter (a root-filter alias) and capture_seconds; blank
+    // omits the key so the engine's own defaults apply (# / 60s) — never a literal
+    // "#" or a 0-sentinel on the wire (this lane has no indefinite mode; its
+    // window is bounded 1-900s, clamped by the adapter).
+    const filter = options.captureTopicFilter?.trim();
+    if (filter) {
+      parameters.topic_filter = filter;
+    }
+    const raw = (options.captureSeconds ?? "").trim();
+    const seconds = Number(raw);
+    if (raw !== "" && !(Number.isFinite(seconds) && seconds > 0)) {
+      throw new Error(
+        "Run time must be a positive number, or blank for the 60-second default window.",
+      );
+    }
+    if (raw !== "") {
+      parameters.capture_seconds = seconds;
+    }
   }
   return parameters;
 }

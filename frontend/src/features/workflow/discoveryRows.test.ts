@@ -967,6 +967,29 @@ describe("filterResultRows (ISSUE-4)", () => {
   });
 });
 
+describe("MQTT payload search over captured topics (M3)", () => {
+  // The captured topic's last_payload is serialised into the visible "Raw Payload"
+  // cell, so the results text filter searches payload content, not just topic/asset.
+  const rows = mqttRowsFromResults(
+    mqttResults({
+      topic: "udmi/site/example/AHU-1/pointset",
+      message_count: 5,
+      last_payload: { points: { supply_air_temp: { present_value: 14.2 } } },
+      attributes: { device_ref: "AHU-1" },
+    }),
+  );
+
+  it("keeps a row whose payload content matches the query", () => {
+    expect(filterResultRows(rows, { text: "supply_air_temp", tone: "all" }, "Topic")).toHaveLength(
+      1,
+    );
+  });
+
+  it("drops a row whose payload does not contain the query", () => {
+    expect(filterResultRows(rows, { text: "return_air_temp", tone: "all" }, "Topic")).toEqual([]);
+  });
+});
+
 describe("groupUdmiRowsByAsset (ITEM-7)", () => {
   it("folds consecutive same-asset rows into groups with aggregate tone and counts", () => {
     const visible = [

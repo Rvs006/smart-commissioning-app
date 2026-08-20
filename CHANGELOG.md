@@ -32,9 +32,18 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   run's project and site and RAG-compare the scan against it. The register was
   read by the scanner but never bound before, so uploaded and saved registers
   now take effect where they previously appeared to be ignored.
+- The MQTT results filter now names payload text as a searchable field. Searching
+  the captured payload content over a completed scan already worked (the latest
+  payload per topic is shown and searched); the placeholder now says so and a
+  test pins it.
 
 ### Fixed
 
+- MQTT Discovery (scanner) now sends the operator's topic filter and run time to
+  the capture run. The sidecar lane previously ignored both, capturing every
+  topic (#) for the 60-second default no matter what the panel showed, while the
+  panel claimed the inputs were sent. The scanner window is bounded to 15 minutes
+  (blank uses the 60-second default); the panel copy now reflects that.
 - Signed report manifests and ZIP exports now retain the selected source-run
   IDs and frozen build provenance while remaining compatible with manifest
   schemas 1.0 and 1.1.
