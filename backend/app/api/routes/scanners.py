@@ -72,6 +72,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _bind_scanner_register(
+    project_id: str,
+    site_id: str,
+    parameters: dict,
+    *,
+    import_type: str,
+    records: list[dict] | None = None,
+) -> None:
+    """Freeze the newest usable ``import_type`` register into the run parameters.
+
+    Route-owned, mirroring ``discovery._bind_mqtt_register``: a caller cannot
+    smuggle an import from another workspace by supplying its id in the request
+    body. Without this, an uploaded (or saved-as) sidecar register was never
+    bound, so the sidecar scan had nothing to RAG-compare against. ``records``
+    is injectable for tests. The key ``register_import_id`` is exactly what each
+    sidecar adapter's ``_load_register_rows`` reads (all three sidecars share it,
+    each with its own register import type).
+    """
+    parameters.pop("register_import_id", None)
+    if records is None:
+        records = ImportRepository(service.engine).list(
+            project_id=project_id, site_id=site_id, import_type=import_type
+        )
+    for record in records:
+        if record.get("accepted_rows"):
+            parameters["register_import_id"] = str(record["import_id"])
+            return
+
+
 def _bind_ip_scanner_register(
     project_id: str,
     site_id: str,
@@ -79,24 +108,10 @@ def _bind_ip_scanner_register(
     *,
     records: list[dict] | None = None,
 ) -> None:
-    """Freeze the newest usable ip_scanner_register into the run parameters.
-
-    Route-owned, mirroring ``discovery._bind_mqtt_register``: a caller cannot
-    smuggle an import from another workspace by supplying its id in the request
-    body. Without this, an uploaded (or saved-as) IP register was never bound, so
-    the sidecar scan had nothing to RAG-compare against. ``records`` is injectable
-    for tests. The key ``register_import_id`` is exactly what the adapter's
-    ``_load_register_rows`` reads.
-    """
-    parameters.pop("register_import_id", None)
-    if records is None:
-        records = ImportRepository(service.engine).list(
-            project_id=project_id, site_id=site_id, import_type="ip_scanner_register"
-        )
-    for record in records:
-        if record.get("accepted_rows"):
-            parameters["register_import_id"] = str(record["import_id"])
-            return
+    """Bind the newest accepted ``ip_scanner_register`` (see :func:`_bind_scanner_register`)."""
+    _bind_scanner_register(
+        project_id, site_id, parameters, import_type="ip_scanner_register", records=records
+    )
 
 
 @router.post("/ip_sidecar/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
@@ -185,6 +200,12 @@ def create_bacnet_scanner_run(
     _stamp_legacy_authorizer(parameters, principal)
     parameters.setdefault("project_id", request.project_id)
     parameters.setdefault("site_id", request.site_id)
+    # Bind the newest accepted bacnet_scanner_register so the sidecar RAG-compares
+    # against it (unconditional, dry-run included; mirrors the IP binder). Without
+    # this the adapter read register_import_id but nothing ever set it.
+    _bind_scanner_register(
+        request.project_id, request.site_id, parameters, import_type="bacnet_scanner_register"
+    )
 
     # Resolve the sidecar URL up front for a live scan; an unavailable sidecar
     # fails with 503 rather than starting a run that can only fail.
@@ -241,6 +262,11 @@ def create_mqtt_scanner_run(
     _stamp_legacy_authorizer(parameters, principal)
     parameters.setdefault("project_id", request.project_id)
     parameters.setdefault("site_id", request.site_id)
+    # Bind the newest accepted mqtt_scanner_register so the sidecar RAG-compares
+    # against it (unconditional, dry-run included; mirrors the IP binder).
+    _bind_scanner_register(
+        request.project_id, request.site_id, parameters, import_type="mqtt_scanner_register"
+    )
 
     # Resolve the sidecar URL up front for a live capture; an unavailable sidecar
     # fails with 503 rather than starting a run that can only fail.

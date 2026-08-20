@@ -54,5 +54,41 @@ class BindIpScannerRegisterTest(unittest.TestCase):
         self.assertNotIn("register_import_id", params)
 
 
+class BindScannerRegisterTypeTest(unittest.TestCase):
+    """The generic binder (IP/BACnet/MQTT sidecars share it) must query the
+    exact register import type it was asked for. Without records injected it hits
+    ImportRepository.list, so a wrong or renamed type string breaks loudly here.
+    """
+
+    def setUp(self) -> None:
+        from app.api.routes import scanners
+
+        self.scanners = scanners
+
+    def _assert_binds_type(self, import_type: str) -> None:
+        from unittest.mock import patch
+
+        captured: dict = {}
+
+        class _Repo:
+            def __init__(self, *_a, **_k) -> None:
+                pass
+
+            def list(self, *, project_id: str, site_id: str, import_type: str) -> list:
+                captured["import_type"] = import_type
+                return [{"import_id": "imp_new", "accepted_rows": [{"col": "v"}]}]
+
+        params: dict = {}
+        with patch.object(self.scanners, "ImportRepository", _Repo):
+            self.scanners._bind_scanner_register("p", "s", params, import_type=import_type)
+        self.assertEqual(captured["import_type"], import_type)
+        self.assertEqual(params["register_import_id"], "imp_new")
+
+    def test_binds_the_newest_accepted_of_the_requested_type(self) -> None:
+        for import_type in ("bacnet_scanner_register", "mqtt_scanner_register", "ip_scanner_register"):
+            with self.subTest(import_type=import_type):
+                self._assert_binds_type(import_type)
+
+
 if __name__ == "__main__":
     unittest.main()
