@@ -60,6 +60,11 @@ export type BacnetHeadlineMetricDisplay = Readonly<{
   progress: string | null;
 }>;
 
+export type BacnetRouterDisplay = Readonly<{
+  address: string;
+  networks: string;
+}>;
+
 function serializeTargetRow(row: IpTargetRow): IpTargetExpression {
   const value = row.value.trim();
   const end = row.end?.trim() ?? "";
@@ -225,6 +230,36 @@ export function formatIpHeadlineMetrics(value: unknown): IpHeadlineMetricDisplay
       progress: `${metric.finalized_count} finalized, ${metric.pending_count} pending`,
     };
   });
+}
+
+/**
+ * Project `result_summary.routers` (stamped by the bacnet_scanner engine) into
+ * display rows. Returns null when the key is absent or not a list — a pre-router
+ * run, or the built-in engine, records nothing, so the UI renders no section;
+ * an empty array means the scan heard no router (the UI shows the "none
+ * responded" note). Malformed entries and blank addresses are skipped, never
+ * faked; networks are joined into a display string ("" when none advertised).
+ */
+export function formatBacnetRouters(value: unknown): BacnetRouterDisplay[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const rows: BacnetRouterDisplay[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const address = typeof record.address === "string" ? record.address.trim() : "";
+    if (!address) {
+      continue;
+    }
+    const networks = Array.isArray(record.networks)
+      ? record.networks.filter((net): net is number => typeof net === "number").join(", ")
+      : "";
+    rows.push({ address, networks });
+  }
+  return rows;
 }
 
 export function formatBacnetHeadlineMetrics(value: unknown): BacnetHeadlineMetricDisplay[] {

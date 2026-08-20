@@ -7,6 +7,14 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- BACnet Discovery (scanner) now surfaces the BACnet/IP routers and BBMDs that
+  answered Who-Is-Router during a scan, with the remote network numbers each
+  advertises, in a Routers / BBMDs panel on the Results step and a matching
+  report section. Routers are recorded in the run summary as reachability facts,
+  never as discovered devices.
+
 ### Fixed
 
 - Signed report manifests and ZIP exports now retain the selected source-run

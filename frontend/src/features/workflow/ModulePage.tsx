@@ -167,10 +167,12 @@ import {
 import {
   formatIpHeadlineMetrics,
   formatBacnetHeadlineMetrics,
+  formatBacnetRouters,
   serializeIpTargetRows,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
   type BacnetHeadlineMetricDisplay,
+  type BacnetRouterDisplay,
 } from "./ipDiscoveryModel";
 
 function newIpSubmissionKey(): string {
@@ -3399,6 +3401,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     } catch {
       return null;
     }
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
+  // Sidecar-only router/BBMD visibility: bacnet_scanner stamps result_summary.routers
+  // (the built-in engine never does). null = no router section at all (absent key);
+  // [] = the scan heard no router (render the "none responded" note).
+  const bacnetRouters = useMemo<BacnetRouterDisplay[] | null>(() => {
+    if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    return formatBacnetRouters(discoveryResultsQuery.data.result_summary.routers);
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
@@ -6999,6 +7011,51 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 )}
               </div>
             </article>
+
+            {module.route === "bacnet-scanner" && !runAccessClosed && activeRunAuthoritativelyTerminal && bacnetRouters !== null && (
+              <section className="surface" aria-labelledby="bacnet-routers-heading">
+                <div className="surface-heading">
+                  <div>
+                    <h3 id="bacnet-routers-heading">Routers / BBMDs</h3>
+                    <p className="section-copy">
+                      BACnet/IP routers and BBMDs that answered Who-Is-Router during discovery, and the
+                      remote network numbers they advertise.
+                    </p>
+                  </div>
+                  <span className="results-filter-count">
+                    {`${bacnetRouters.length} router${bacnetRouters.length === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+                {bacnetRouters.length === 0 ? (
+                  <div className="empty-workspace">
+                    <strong>No BACnet routers responded</strong>
+                    <span>
+                      No Who-Is-Router replies were heard during discovery — a recorded result, not an
+                      error.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="data-table-wrap results-scroll">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">Router Address</th>
+                          <th scope="col">Reachable Networks</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bacnetRouters.map((router) => (
+                          <tr key={router.address}>
+                            <td>{router.address}</td>
+                            <td>{router.networks || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
 
             {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && !runAccessClosed && activeRunAuthoritativelyTerminal && (
               <section className="surface" aria-labelledby="bacnet-points-heading">

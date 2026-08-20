@@ -697,6 +697,7 @@ _INVENTORY_IP_TITLE = "Discovered IP hosts"
 _INVENTORY_BACNET_DEVICES_TITLE = "Discovered BACnet devices"
 _INVENTORY_BACNET_POINTS_TITLE = "Discovered BACnet points"
 _INVENTORY_BACNET_SILENT_TITLE = "Expected BACnet devices not responding"
+_INVENTORY_BACNET_ROUTERS_TITLE = "Discovered BACnet routers"
 _INVENTORY_MQTT_TITLE = "Discovered MQTT topics"
 
 _INVENTORY_SUMMARY_COLUMNS = ("Source Run", "Type", "Status", "Counts")
@@ -722,6 +723,7 @@ _BACNET_DEVICE_COLUMNS = (
 )
 _BACNET_POINT_COLUMNS = ("Source Run", "Device", "Point ID", "Point Name", "Value", "Units")
 _BACNET_SILENT_COLUMNS = ("Source Run", "Register Asset", "Instance", "Address", "Directed Who-Is")
+_BACNET_ROUTER_COLUMNS = ("Source Run", "Router Address", "Reachable Networks")
 _MQTT_TOPIC_COLUMNS = ("Source Run", "Topic", "Messages", "Device Ref")
 
 # Honesty-rule wording for the expected-but-silent section: it mirrors the
@@ -731,6 +733,14 @@ _BACNET_SILENT_NOTE = (
     "Expected devices that did not answer during the scan window. Directed-Who-Is silence is "
     "inconclusive under BACnet-135 (an off-subnet device may reply with a local broadcast we "
     "cannot hear); these rows are neither confirmed present nor absent."
+)
+# Routers/BBMDs that answered Who-Is-Router during discovery. The advertised
+# network numbers are reachability facts, not scanned devices — devices on those
+# networks appear in the device section above only if they answered the scan.
+_BACNET_ROUTER_NOTE = (
+    "BACnet/IP routers and BBMDs that answered Who-Is-Router during discovery, with the remote "
+    "network numbers they advertise. Advertised networks are reachability facts, not scanned "
+    "devices; a device on one appears above only if it answered the scan itself."
 )
 # Shown when a discovery head was scoped but recorded no rows: an empty scan is
 # a recorded result, not a gap in the report.
@@ -761,6 +771,8 @@ _INVENTORY_COLUMN_WIDTHS = {
     "Model": 18,
     "Register Asset": 26,
     "Points": 10,
+    "Router Address": 22,
+    "Reachable Networks": 26,
     "Device": 20,
     "Point ID": 18,
     "Point Name": 40,
@@ -1336,10 +1348,11 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
     device_rows: list[dict[str, str]] = []
     point_rows: list[dict[str, str]] = []
     topic_rows: list[dict[str, str]] = []
+    router_rows: list[dict[str, str]] = []
     # (sort key, row) so the silent rows can be ordered independently of scope.
     silent_entries: list[tuple[tuple[str, str, str], dict[str, str]]] = []
 
-    has_ip = has_bacnet = has_mqtt = has_silent = False
+    has_ip = has_bacnet = has_mqtt = has_silent = has_routers = False
 
     for source in sources:
         run_id = str(source.run_id)
@@ -1463,6 +1476,30 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
                                 },
                             )
                         )
+            # Routers are summary-only (bacnet_scanner stamps result_summary.routers).
+            # Gate on the key's presence, not truthiness, so a scanner run that heard
+            # no router renders the "none responded" note while a pre-router run (or
+            # the built-in engine, which never records the field) shows no section.
+            if "routers" in summary:
+                has_routers = True
+                router_list = summary.get("routers")
+                if isinstance(router_list, list):
+                    for entry in router_list:
+                        if not isinstance(entry, dict):
+                            continue
+                        networks = entry.get("networks")
+                        rendered = (
+                            ", ".join(str(net) for net in networks)
+                            if isinstance(networks, list) and networks
+                            else _NO_VALUE
+                        )
+                        router_rows.append(
+                            {
+                                "Source Run": run_id,
+                                "Router Address": _inv_cell(entry.get("address")),
+                                "Reachable Networks": rendered,
+                            }
+                        )
 
         else:  # mqtt_discovery / mqtt_scanner (topic rows are shape-identical)
             has_mqtt = True
@@ -1521,6 +1558,15 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
     if has_bacnet:
         sections.append(_section(_INVENTORY_BACNET_DEVICES_TITLE, _BACNET_DEVICE_COLUMNS, device_rows))
         sections.append(_section(_INVENTORY_BACNET_POINTS_TITLE, _BACNET_POINT_COLUMNS, point_rows))
+    if has_routers:
+        sections.append(
+            _section(
+                _INVENTORY_BACNET_ROUTERS_TITLE,
+                _BACNET_ROUTER_COLUMNS,
+                router_rows,
+                note=_BACNET_ROUTER_NOTE,
+            )
+        )
     if has_silent:
         sections.append(
             _section(
@@ -3179,6 +3225,7 @@ _PDF_IP_WEIGHTS = (92, 74, 70, 58, 62, 46, 46, 46)
 _PDF_BACNET_DEVICE_WEIGHTS = (92, 42, 62, 74, 52, 52, 74, 30)
 _PDF_BACNET_POINT_WEIGHTS = (86, 60, 56, 104, 78, 40)
 _PDF_BACNET_SILENT_WEIGHTS = (86, 96, 44, 72, 58)
+_PDF_BACNET_ROUTER_WEIGHTS = (92, 90, 140)
 _PDF_MQTT_WEIGHTS = (72, 214, 46, 80)
 _PDF_INVENTORY_WEIGHTS = {
     _INVENTORY_SUMMARY_TITLE: _PDF_INVENTORY_SUMMARY_WEIGHTS,
@@ -3186,6 +3233,7 @@ _PDF_INVENTORY_WEIGHTS = {
     _INVENTORY_BACNET_DEVICES_TITLE: _PDF_BACNET_DEVICE_WEIGHTS,
     _INVENTORY_BACNET_POINTS_TITLE: _PDF_BACNET_POINT_WEIGHTS,
     _INVENTORY_BACNET_SILENT_TITLE: _PDF_BACNET_SILENT_WEIGHTS,
+    _INVENTORY_BACNET_ROUTERS_TITLE: _PDF_BACNET_ROUTER_WEIGHTS,
     _INVENTORY_MQTT_TITLE: _PDF_MQTT_WEIGHTS,
 }
 

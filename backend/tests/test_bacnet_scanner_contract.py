@@ -20,8 +20,10 @@ from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
     _RAG_SEVERITY,
     REGISTER_TEMPLATE_COLUMNS,
     _decode_export_zip,
+    _fold_router_event,
     _map_result,
     _register_csv,
+    _routers_from_fold,
     _scan_query,
 )
 
@@ -168,6 +170,38 @@ class SseEventContractTest(unittest.TestCase):
     def test_every_export_sse_type_emitted_in_source(self) -> None:
         for name in GOLDEN_EXPORT_SSE_TYPES:
             self._assert_emitted(name)
+
+
+class RouterVisibilityContractTest(unittest.TestCase):
+    def test_router_event_shape_in_source(self) -> None:
+        # Pin the exact emit the adapter's _fold_router_event decodes. If upstream
+        # renames router/networks the fold silently drops routers -> this catches it.
+        self.assertIn("type: 'router', router: r.ip, networks: r.networks", _SERVER_JS)
+
+    def test_adapter_folds_router_events_per_ip_with_sorted_networks(self) -> None:
+        fold: dict[str, list[int]] = {}
+        _fold_router_event(fold, {"type": "router", "router": "192.0.2.9", "networks": [300, 200]})
+        _fold_router_event(fold, {"type": "router", "router": "192.0.2.9", "networks": [200, 400]})
+        _fold_router_event(fold, {"type": "router", "router": "", "networks": [1]})  # blank ip skipped
+        self.assertEqual(
+            _routers_from_fold(fold),
+            [{"address": "192.0.2.9", "networks": [200, 300, 400]}],
+        )
+
+    def test_adapter_projects_routers_into_summary_only(self) -> None:
+        routers = [{"address": "192.0.2.9", "networks": [200, 300]}]
+        result = _map_result([], {}, [], {}, routers=routers)
+        self.assertEqual(result.result_summary_extra["routers"], routers)
+        # A router is never a device/point/issue -- it must not enter the tables
+        # replace_devices owns.
+        self.assertEqual(result.structured_records, [])
+        self.assertEqual(result.discovered_assets, [])
+        self.assertEqual(result.issues, [])
+
+    def test_map_result_stamps_empty_router_list_when_none_heard(self) -> None:
+        # The key is always present so the report/UI can tell "none responded"
+        # (empty list) from a pre-router run (absent key).
+        self.assertEqual(_map_result([], {}, [], {}).result_summary_extra["routers"], [])
 
 
 class RegisterTemplateContractTest(unittest.TestCase):
