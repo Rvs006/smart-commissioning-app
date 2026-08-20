@@ -25,6 +25,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   import, with each device's open ports recorded as its expected ports. The
   register is created through the same import pipeline as an upload, so it is
   reusable exactly like one.
+- MQTT Discovery (scanner) adds a Live Topic Tree: start a live broker session
+  and watch topics arrive in real time in a nested tree, with per-topic message
+  rates and a brief activity pulse. It is read-only and persists nothing; a
+  capture run remains the path to saved evidence. One session runs at a time
+  (engineer role, with a take-over), the browser never talks to the broker
+  directly, and a live session and a capture run are mutually exclusive because
+  both use the one broker connection. Focus an asset in the tree to see its live
+  points and last config payload in a side panel, filter the live tree by topic,
+  asset, or payload text, and change the live subscription without restarting the
+  session.
 
 ### Changed
 

@@ -2498,6 +2498,33 @@ input.field-expired {
   background: var(--accent-bg);
 }
 
+/* MQTT live topic tree: a brief tint when a topic sees traffic. Decorative only;
+   the msg/s column already conveys liveness, so reduced-motion drops it. */
+.mqtt-tree-flash {
+  animation: mqtt-tree-flash 0.7s ease-out;
+}
+
+@keyframes mqtt-tree-flash {
+  from {
+    background: var(--green-bg);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mqtt-tree-flash {
+    animation: none;
+  }
+}
+
+.mqtt-config-payload {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: monospace;
+}
+
 .asset-summary-toggle[aria-expanded="true"] .asset-summary-caret,
 .asset-summary-toggle[aria-expanded="true"] strong {
   color: var(--accent-hover);

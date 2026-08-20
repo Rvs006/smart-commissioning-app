@@ -80,6 +80,8 @@ import {
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
+import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
+import { useMqttLiveSession } from "./useMqttLiveSession";
 import {
   assetMatchesFacetFilter,
   buildAssetFacts,
@@ -747,6 +749,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
   // ip-scanner "save scan as register" outcome, cleared when a new run starts.
   const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
+  // mqtt-scanner live topic tree: the live search box (filters server-side).
+  const [mqttLiveSearch, setMqttLiveSearch] = useState("");
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -3474,6 +3478,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? (discoveryResultsQuery.data?.devices?.length ?? 0)
       : 0;
 
+  // MQTT live topic tree (M4a): a held broker session streamed to the browser.
+  // Read-only; nothing persists. Shares the capture panel's topic filter + the
+  // page's scan-authorization consent.
+  const mqttLive = useMqttLiveSession(
+    module.route === "mqtt-scanner",
+    { workspace: workspaceRef, authorized: scanAuthorized, rootFilter: captureTopicFilter.trim() || undefined },
+    apiClient,
+  );
+
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
   // and until a terminal run's results arrive.
@@ -5899,6 +5912,192 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ? captureTopicsQuery.error.message
                   : "request failed"}
               </span>
+            )}
+          </section>
+        )}
+
+        {module.route === "mqtt-scanner" && (
+          <section className="surface" data-stepgroup="run">
+            <div className="surface-heading">
+              <div>
+                <h3>Live Topic Tree</h3>
+                <p className="section-copy">
+                  Watch broker topics in real time. Nothing is persisted; run a capture above when you
+                  need saved evidence.
+                </p>
+              </div>
+              <div className="inline-actions">
+                {mqttLive.phase === "live" ||
+                mqttLive.phase === "connecting" ||
+                mqttLive.phase === "reconnecting" ||
+                mqttLive.phase === "unavailable" ? (
+                  <button
+                    className="secondary-button compact"
+                    disabled={!canEngineer}
+                    onClick={() => void mqttLive.stop()}
+                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                    type="button"
+                  >
+                    Stop live view
+                  </button>
+                ) : (
+                  <button
+                    className="secondary-button compact"
+                    disabled={!canEngineer || !scanAuthorized}
+                    onClick={() => void mqttLive.start()}
+                    title={
+                      !canEngineer
+                        ? ENGINEER_REQUIRED_TOOLTIP
+                        : !scanAuthorized
+                          ? "Tick the scan-authorization checkbox first."
+                          : undefined
+                    }
+                    type="button"
+                  >
+                    Start live view
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {mqttLive.error && (mqttLive.phase === "error" || mqttLive.phase === "unavailable") && (
+              <div className="state-panel error" role="alert">
+                <strong>Live session problem</strong>
+                <span>{mqttLive.error}</span>
+              </div>
+            )}
+
+            {mqttLive.phase === "occupied" && mqttLive.status?.session ? (
+              <div className="state-panel" role="status">
+                <strong>A live session is already open</strong>
+                <span>Held by {mqttLive.status.session.owner}. Take over to replace it.</span>
+                <div className="detail-actions">
+                  <button
+                    className="secondary-button compact"
+                    disabled={!canEngineer || !scanAuthorized}
+                    onClick={() => void mqttLive.start({ takeOver: true })}
+                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                    type="button"
+                  >
+                    Take over
+                  </button>
+                </div>
+              </div>
+            ) : mqttLive.phase === "live" && mqttLive.snapshot ? (
+              <>
+                <div className="publish-grid capture-controls">
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void mqttLive.search(mqttLiveSearch.trim());
+                    }}
+                  >
+                    <label>
+                      Search live topics
+                      <input
+                        onChange={(event) => setMqttLiveSearch(event.target.value)}
+                        placeholder="Topic, asset, or payload text — press Enter to filter"
+                        value={mqttLiveSearch}
+                      />
+                    </label>
+                  </form>
+                  <div className="inline-actions">
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer}
+                      onClick={() => void mqttLive.subscribe(captureTopicFilter.trim() || "#")}
+                      title={
+                        canEngineer
+                          ? "Re-subscribe the live session to the topic filter set above."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      Apply subscription filter
+                    </button>
+                  </div>
+                </div>
+                <div className="live-console-kpis" aria-live="polite">
+                  <div>
+                    <span className="live-console-pulse" aria-hidden="true" /> Broker
+                    <strong>{mqttLive.snapshot.status.status}</strong>
+                  </div>
+                  <div>
+                    <span>Topics</span>
+                    <strong>{mqttLive.snapshot.stats.topicsDiscovered}</strong>
+                  </div>
+                  <div>
+                    <span>Live assets</span>
+                    <strong>{mqttLive.snapshot.stats.liveAssets}</strong>
+                  </div>
+                  <div>
+                    <span>Messages</span>
+                    <strong>{mqttLive.snapshot.stats.totalMessages}</strong>
+                  </div>
+                  <div>
+                    <span>Issues</span>
+                    <strong>{mqttLive.snapshot.stats.issues}</strong>
+                  </div>
+                </div>
+                <MqttLiveTopicTree
+                  lastActivity={mqttLive.lastActivity}
+                  onFocus={(asset) => void mqttLive.focus(asset)}
+                  totalTopics={mqttLive.snapshot.totalTopics}
+                  tree={mqttLive.snapshot.tree}
+                  treeShown={mqttLive.snapshot.treeShown}
+                />
+                {mqttLive.snapshot.focused ? (
+                  <div className="detail-actions" aria-live="polite">
+                    <div className="property-expansion-panel">
+                      <strong>Focused: {mqttLive.snapshot.focused.asset}</strong>
+                      <span>Live points and the last config payload for this asset. Read-only.</span>
+                    </div>
+                    {mqttLive.snapshot.focused.livePoints.length > 0 ? (
+                      <div className="data-table-wrap results-scroll">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">Point</th>
+                              <th scope="col">Value</th>
+                              <th scope="col">Units</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mqttLive.snapshot.focused.livePoints.map((point) => (
+                              <tr key={point.name}>
+                                <td>{point.name}</td>
+                                <td>{point.value == null ? "—" : String(point.value)}</td>
+                                <td>{point.unit || "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="empty-workspace">
+                        <strong>No live points yet</strong>
+                        <span>Points appear as this asset publishes.</span>
+                      </div>
+                    )}
+                    {mqttLive.snapshot.focused.configPayload ? (
+                      <div className="state-panel" role="status">
+                        <strong>Config payload — {mqttLive.snapshot.focused.configTopic}</strong>
+                        <span className="mqtt-config-payload">{mqttLive.snapshot.focused.configPayload}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </>
+            ) : mqttLive.phase === "connecting" ? (
+              <div className="state-panel" role="status">
+                <strong>Opening live session…</strong>
+                <span>Connecting to the broker through the sidecar.</span>
+              </div>
+            ) : (
+              <div className="state-panel" role="status">
+                <strong>Live view not running</strong>
+                <span>Start a live view to watch broker topics as they arrive. Nothing is persisted.</span>
+              </div>
             )}
           </section>
         )}

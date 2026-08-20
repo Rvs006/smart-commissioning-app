@@ -48,7 +48,7 @@ GOLDEN_REGISTER_COLUMNS = (
 )
 
 # Endpoints the bounded read run drives (server.js router).
-GOLDEN_ENDPOINTS = {"/api/health", "/api/connect", "/api/status", "/api/export-archive", "/api/disconnect", "/api/register"}
+GOLDEN_ENDPOINTS = {"/api/health", "/api/connect", "/api/status", "/api/export-archive", "/api/disconnect", "/api/register", "/api/stream"}
 
 
 class HealthContractTest(unittest.TestCase):
@@ -171,6 +171,35 @@ class EndpointVocabularyContractTest(unittest.TestCase):
         # An empty capture returns 409 "Nothing discovered yet" — the adapter reads
         # that as an honest empty capture, not a transport error.
         self.assertIn("Nothing discovered yet", _SERVER_JS)
+
+
+class LiveStreamContractTest(unittest.TestCase):
+    """Pin the /api/stream SSE shapes the M4a live relay forwards and the frontend
+    types verbatim. If a re-import renames a node key or a frame type, the TS
+    ``MqttLiveTreeNode``/``MqttLiveSnapshot`` types silently drift — this fails
+    loudly instead."""
+
+    def test_frame_types_present_in_source(self) -> None:
+        self.assertIn("type: 'snapshot'", _SERVER_JS)
+        self.assertIn("type: 'activity'", _SERVER_JS)
+
+    def test_snapshot_envelope_keys(self) -> None:
+        # buildSnapshot returns exactly these top-level keys.
+        for token in ("status:", "stats,", "tree,", "treeShown:", "totalTopics:", "filtered:", "focused"):
+            self.assertIn(token, _SERVER_JS, f"snapshot key '{token}' missing from server.js")
+
+    def test_stats_counter_keys(self) -> None:
+        for counter in ("expectedAssets:", "subscribedAssets:", "liveAssets:", "topicsDiscovered:", "issues:", "totalMessages:"):
+            self.assertIn(counter, _SERVER_JS, f"stats counter '{counter}' missing from server.js")
+
+    def test_tree_node_key_legend(self) -> None:
+        # serializeChildren builds each node with this exact key set.
+        self.assertIn("const o = { n: k.name, p: k.path, t: k.t, m: k.m, r: round1(k.r), mt:", _SERVER_JS)
+        for token in ("o.dev = 1", "o.a = k.asset", "o.leaf = 1", "o.sc = k.schema", "o.ret = 1", "o.c = k.count", "o.iss = k.issues", "o.ch = serializeChildren"):
+            self.assertIn(token, _SERVER_JS, f"tree node key '{token}' missing from server.js")
+
+    def test_activity_frame_carries_paths(self) -> None:
+        self.assertIn("type: 'activity', paths", _SERVER_JS)
 
 
 class RunParameterSeamTest(unittest.TestCase):

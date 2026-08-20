@@ -19,6 +19,7 @@ fabricating results.
 """
 
 import logging
+from contextlib import nullcontext
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
@@ -58,6 +59,7 @@ from app.schemas.jobs import (
 )
 from app.services.engine_dispatch import is_dry_run
 from app.services.import_service import ImportService
+from app.services.mqtt_live_session import service as live_session_service
 from app.services.sidecar_supervisor import (
     BACNET_SCANNER,
     IP_SCANNER,
@@ -252,7 +254,24 @@ def create_mqtt_scanner_run(
         except SidecarUnavailable as error:
             raise HTTPException(status_code=503, detail="MQTT scanner sidecar is not available.") from error
 
-    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_scanner", principal)
+    # A live MQTT session and a capture run both drive the sidecar's one
+    # connection, so they are mutually exclusive. Hold the live-session lock while
+    # checking + creating the run so this cannot race with live/connect (which
+    # holds the same lock while checking for a running run). Dry runs touch no
+    # sidecar and are exempt. The lock is non-reentrant -> use current_locked().
+    guard = nullcontext() if is_dry_run(parameters) else live_session_service.lock
+    with guard:
+        if not is_dry_run(parameters):
+            held = live_session_service.current_locked()
+            if held is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"An MQTT live session is open (started by {held.owner} at "
+                        f"{held.since.isoformat()}). Stop the live view before starting a capture run."
+                    ),
+                )
+        run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_scanner", principal)
 
     def run_inline(run_store, frozen_parameters: dict) -> object:
         return process_mqtt_scanner_run(
