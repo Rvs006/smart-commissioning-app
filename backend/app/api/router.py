@@ -16,6 +16,7 @@ from app.api.routes import (
     reports,
     runs,
     scanners,
+    scanners_mqtt_live,
     system,
     udmi_schemas,
     users,
@@ -96,6 +97,9 @@ protected_router.include_router(discovery.router, prefix="/discovery", tags=["di
 # Mounted under /discovery so the frontend's /discovery/ip_sidecar/runs (the
 # plain, non-sealed discovery path) reaches it.
 protected_router.include_router(scanners.router, prefix="/discovery", tags=["scanners"])
+# MQTT live session (M4a): held broker connection streamed to the browser. Same
+# /discovery prefix; engineer-gated per-route; distinct from the capture run.
+protected_router.include_router(scanners_mqtt_live.router, prefix="/discovery", tags=["scanners", "mqtt-live"])
 protected_router.include_router(
     raw_evidence.router,
     prefix="/discovery",
