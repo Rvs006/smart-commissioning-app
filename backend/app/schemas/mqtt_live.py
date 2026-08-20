@@ -73,3 +73,52 @@ class MqttLiveDisconnectResponse(BaseModel):
 
     ok: bool
     released: bool
+
+
+class MqttLiveFocusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=64)
+    # The asset to focus (e.g. a device/gateway id from a tree node).
+    asset: str = Field(min_length=1, max_length=512)
+
+
+class MqttLiveFocusResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    # The sidecar's buildFocused() object (live points, config payload, per-topic
+    # detail), passed through verbatim; None when the asset is unknown.
+    focused: dict[str, object] | None = None
+
+
+class MqttLiveSubscribeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=64)
+    # Change the live subscription filter and/or qos. None leaves that field as-is
+    # on the sidecar; the browser never sends broker credentials.
+    root_filter: str | None = Field(default=None, max_length=512)
+    qos: int | None = Field(default=None, ge=0, le=2)
+
+
+class MqttLiveSubscribeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+
+
+class MqttLiveSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, max_length=64)
+    # Filters the live tree server-side (topic + asset + payload text). Blank
+    # clears the filter.
+    q: str = Field(default="", max_length=256)
+    matched_only: bool = False
+
+
+class MqttLiveSearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool

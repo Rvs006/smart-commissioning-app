@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { MqttLiveTreeNode } from "../../api/client";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
 
@@ -52,5 +52,13 @@ describe("MqttLiveTopicTree", () => {
   it("renders an empty state when no topics have been seen", () => {
     render(<MqttLiveTopicTree lastActivity={null} totalTopics={0} tree={[]} treeShown={0} />);
     expect(screen.getByText(/No topics seen yet/)).toBeInTheDocument();
+  });
+
+  it("focuses an asset when its Focus button is clicked", () => {
+    const onFocus = vi.fn();
+    render(<MqttLiveTopicTree lastActivity={null} onFocus={onFocus} totalTopics={3} tree={tree} treeShown={3} />);
+    fireEvent.click(screen.getByRole("button", { name: "site" })); // expand to reveal the asset node
+    fireEvent.click(screen.getByRole("button", { name: /Focus AHU-1/ }));
+    expect(onFocus).toHaveBeenCalledWith("AHU-1");
   });
 });

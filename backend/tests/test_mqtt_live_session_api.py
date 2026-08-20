@@ -283,6 +283,76 @@ class MqttLiveSessionApiTest(ApiTestCase):
         self.assertEqual(second.status_code, 200)
         self.assertFalse(second.json()["released"])
 
+    # -- focus ----------------------------------------------------------------
+
+    def test_focus_proxies_to_the_sidecar_for_the_current_session(self) -> None:
+        session = self._acquire()
+
+        def fake_post(_base, _path, body):
+            return {"ok": True, "focused": {"asset": body["asset"], "livePoints": []}}
+
+        with patch.object(self.live_routes, "_post_json", fake_post):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/focus",
+                json={"session_id": session.session_id, "asset": "AHU-1"},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["focused"]["asset"], "AHU-1")
+
+    def test_focus_with_a_stale_session_is_409(self) -> None:
+        response = self.client.post(
+            "/api/v1/discovery/mqtt_sidecar/live/focus",
+            json={"session_id": "not-current", "asset": "AHU-1"},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+
+    # -- subscribe + search ---------------------------------------------------
+
+    def test_subscribe_change_is_proxied(self) -> None:
+        session = self._acquire()
+        with patch.object(self.live_routes, "_post_json", lambda *_a: {"ok": True}):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/subscribe",
+                json={"session_id": session.session_id, "root_filter": "site/#", "qos": 1},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["ok"])
+
+    def test_subscribe_when_not_connected_is_409(self) -> None:
+        import urllib.error
+
+        session = self._acquire()
+
+        def not_connected(*_a):
+            raise urllib.error.HTTPError(
+                "http://x/api/subscribe", 409, "Conflict", {}, _FakeBody(b'{"ok":false,"error":"Not connected"}')
+            )
+
+        with patch.object(self.live_routes, "_post_json", not_connected):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/subscribe",
+                json={"session_id": session.session_id, "root_filter": "site/#"},
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+
+    def test_search_is_proxied_with_snake_to_camel_keys(self) -> None:
+        session = self._acquire()
+        captured: dict = {}
+
+        def fake_post(_base, _path, body):
+            captured["body"] = body
+            return {"type": "snapshot"}
+
+        with patch.object(self.live_routes, "_post_json", fake_post):
+            response = self.client.post(
+                "/api/v1/discovery/mqtt_sidecar/live/search",
+                json={"session_id": session.session_id, "q": "supply_air_temp", "matched_only": True},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(captured["body"], {"q": "supply_air_temp", "matchedOnly": True})
+
     # -- stream relay ---------------------------------------------------------
 
     def test_stream_open_with_a_stale_session_is_409(self) -> None:

@@ -2623,6 +2623,19 @@ export type MqttLiveTreeNode = {
   ch?: MqttLiveTreeNode[];
 };
 
+export type MqttLiveFocusedPoint = { name: string; value: unknown; unit: string; ts: number };
+
+// The sidecar's buildFocused() object. Only the fields the live focus panel
+// renders are typed; the sidecar sends more (per-topic history, comparison,
+// register meta) which pass through untyped.
+export type MqttLiveFocused = {
+  asset: string;
+  livePoints: MqttLiveFocusedPoint[];
+  lastPayload: string;
+  configTopic: string;
+  configPayload: string;
+};
+
 export type MqttLiveSnapshot = {
   type: "snapshot";
   status: MqttLiveConnection;
@@ -2631,7 +2644,7 @@ export type MqttLiveSnapshot = {
   treeShown: number;
   totalTopics: number;
   filtered: boolean;
-  focused: unknown | null;
+  focused: MqttLiveFocused | null;
 };
 
 export type MqttLiveActivity = { type: "activity"; paths: string[] };
@@ -2708,6 +2721,69 @@ export function getMqttLiveStatus(input: {
   context?: ApiRequestContext;
 } = {}): Promise<MqttLiveStatusResponse> {
   return request<MqttLiveStatusResponse>("/discovery/mqtt_sidecar/live/status", undefined, input.context);
+}
+
+export type MqttLiveFocusResponse = { ok: boolean; focused: MqttLiveFocused | null };
+
+// Focus one asset in the live session: its live points / config payload then ride
+// the snapshot stream. Read-only; sets the sidecar's single-tenant focus.
+export function focusMqttLiveAsset(input: {
+  sessionId: string;
+  asset: string;
+  context?: ApiRequestContext;
+}): Promise<MqttLiveFocusResponse> {
+  return request<MqttLiveFocusResponse>(
+    "/discovery/mqtt_sidecar/live/focus",
+    {
+      body: JSON.stringify({ session_id: input.sessionId, asset: input.asset }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export type MqttLiveOk = { ok: boolean };
+
+// Change the live subscription (filter and/or qos) on the held session.
+export function subscribeMqttLive(input: {
+  sessionId: string;
+  rootFilter?: string;
+  qos?: number;
+  context?: ApiRequestContext;
+}): Promise<MqttLiveOk> {
+  return request<MqttLiveOk>(
+    "/discovery/mqtt_sidecar/live/subscribe",
+    {
+      body: JSON.stringify({
+        session_id: input.sessionId,
+        ...(input.rootFilter !== undefined ? { root_filter: input.rootFilter } : {}),
+        ...(input.qos !== undefined ? { qos: input.qos } : {}),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+// Filter the live tree server-side (topic + asset + payload text). The filtered
+// result rides the snapshot stream; blank clears the filter.
+export function searchMqttLive(input: {
+  sessionId: string;
+  q: string;
+  matchedOnly?: boolean;
+  context?: ApiRequestContext;
+}): Promise<MqttLiveOk> {
+  return request<MqttLiveOk>(
+    "/discovery/mqtt_sidecar/live/search",
+    {
+      body: JSON.stringify({ session_id: input.sessionId, q: input.q, matched_only: input.matchedOnly ?? false }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
 }
 
 function parseMqttLiveEventName(value: string): MqttLiveEventName | null {

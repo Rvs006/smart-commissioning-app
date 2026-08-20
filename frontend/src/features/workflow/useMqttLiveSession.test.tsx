@@ -4,15 +4,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../api/client", () => ({
   connectMqttLiveSession: vi.fn(),
   disconnectMqttLiveSession: vi.fn(),
+  focusMqttLiveAsset: vi.fn(),
   getMqttLiveStatus: vi.fn(),
+  searchMqttLive: vi.fn(),
   streamMqttLiveEvents: vi.fn(() => () => {}),
+  subscribeMqttLive: vi.fn(),
 }));
 
 import {
   connectMqttLiveSession,
   disconnectMqttLiveSession,
+  focusMqttLiveAsset,
   getMqttLiveStatus,
+  searchMqttLive,
   streamMqttLiveEvents,
+  subscribeMqttLive,
   type MqttLiveCallbacks,
   type MqttLiveConnection,
   type MqttLiveSessionInfo,
@@ -39,6 +45,9 @@ describe("useMqttLiveSession", () => {
     vi.mocked(getMqttLiveStatus).mockResolvedValue(statusResponse(null));
     vi.mocked(connectMqttLiveSession).mockReset();
     vi.mocked(disconnectMqttLiveSession).mockReset();
+    vi.mocked(focusMqttLiveAsset).mockReset().mockResolvedValue({ ok: true, focused: null });
+    vi.mocked(searchMqttLive).mockReset().mockResolvedValue({ ok: true });
+    vi.mocked(subscribeMqttLive).mockReset().mockResolvedValue({ ok: true });
     vi.mocked(streamMqttLiveEvents).mockReset().mockReturnValue(() => {});
   });
 
@@ -95,5 +104,33 @@ describe("useMqttLiveSession", () => {
     });
     expect(disconnectMqttLiveSession).toHaveBeenCalled();
     await waitFor(() => expect(result.current.phase).toBe("no_session"));
+  });
+
+  it("focus sends the asset for the current session", async () => {
+    vi.mocked(connectMqttLiveSession).mockResolvedValue({ ok: true, session: sessionInfo("me"), connection: connection() });
+    const { result } = renderHook(() => useMqttLiveSession(true, { workspace, authorized: true }));
+    await waitFor(() => expect(result.current.phase).toBe("no_session"));
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.focus("AHU-1");
+    });
+    expect(focusMqttLiveAsset).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s1", asset: "AHU-1" }));
+  });
+
+  it("subscribe and search send for the current session", async () => {
+    vi.mocked(connectMqttLiveSession).mockResolvedValue({ ok: true, session: sessionInfo("me"), connection: connection() });
+    const { result } = renderHook(() => useMqttLiveSession(true, { workspace, authorized: true }));
+    await waitFor(() => expect(result.current.phase).toBe("no_session"));
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.subscribe("site/#", 1);
+      await result.current.search("supply");
+    });
+    expect(subscribeMqttLive).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s1", rootFilter: "site/#", qos: 1 }));
+    expect(searchMqttLive).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "s1", q: "supply" }));
   });
 });

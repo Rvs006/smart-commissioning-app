@@ -31,7 +31,10 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   capture run remains the path to saved evidence. One session runs at a time
   (engineer role, with a take-over), the browser never talks to the broker
   directly, and a live session and a capture run are mutually exclusive because
-  both use the one broker connection.
+  both use the one broker connection. Focus an asset in the tree to see its live
+  points and last config payload in a side panel, filter the live tree by topic,
+  asset, or payload text, and change the live subscription without restarting the
+  session.
 
 ### Changed
 

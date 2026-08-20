@@ -749,6 +749,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
   // ip-scanner "save scan as register" outcome, cleared when a new run starts.
   const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
+  // mqtt-scanner live topic tree: the live search box (filters server-side).
+  const [mqttLiveSearch, setMqttLiveSearch] = useState("");
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -5983,6 +5985,38 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             ) : mqttLive.phase === "live" && mqttLive.snapshot ? (
               <>
+                <div className="publish-grid capture-controls">
+                  <form
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void mqttLive.search(mqttLiveSearch.trim());
+                    }}
+                  >
+                    <label>
+                      Search live topics
+                      <input
+                        onChange={(event) => setMqttLiveSearch(event.target.value)}
+                        placeholder="Topic, asset, or payload text — press Enter to filter"
+                        value={mqttLiveSearch}
+                      />
+                    </label>
+                  </form>
+                  <div className="inline-actions">
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer}
+                      onClick={() => void mqttLive.subscribe(captureTopicFilter.trim() || "#")}
+                      title={
+                        canEngineer
+                          ? "Re-subscribe the live session to the topic filter set above."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      Apply subscription filter
+                    </button>
+                  </div>
+                </div>
                 <div className="live-console-kpis" aria-live="polite">
                   <div>
                     <span className="live-console-pulse" aria-hidden="true" /> Broker
@@ -6007,10 +6041,52 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </div>
                 <MqttLiveTopicTree
                   lastActivity={mqttLive.lastActivity}
+                  onFocus={(asset) => void mqttLive.focus(asset)}
                   totalTopics={mqttLive.snapshot.totalTopics}
                   tree={mqttLive.snapshot.tree}
                   treeShown={mqttLive.snapshot.treeShown}
                 />
+                {mqttLive.snapshot.focused ? (
+                  <div className="detail-actions" aria-live="polite">
+                    <div className="property-expansion-panel">
+                      <strong>Focused: {mqttLive.snapshot.focused.asset}</strong>
+                      <span>Live points and the last config payload for this asset. Read-only.</span>
+                    </div>
+                    {mqttLive.snapshot.focused.livePoints.length > 0 ? (
+                      <div className="data-table-wrap results-scroll">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th scope="col">Point</th>
+                              <th scope="col">Value</th>
+                              <th scope="col">Units</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {mqttLive.snapshot.focused.livePoints.map((point) => (
+                              <tr key={point.name}>
+                                <td>{point.name}</td>
+                                <td>{point.value == null ? "—" : String(point.value)}</td>
+                                <td>{point.unit || "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="empty-workspace">
+                        <strong>No live points yet</strong>
+                        <span>Points appear as this asset publishes.</span>
+                      </div>
+                    )}
+                    {mqttLive.snapshot.focused.configPayload ? (
+                      <div className="state-panel" role="status">
+                        <strong>Config payload — {mqttLive.snapshot.focused.configTopic}</strong>
+                        <span className="mqtt-config-payload">{mqttLive.snapshot.focused.configPayload}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </>
             ) : mqttLive.phase === "connecting" ? (
               <div className="state-panel" role="status">

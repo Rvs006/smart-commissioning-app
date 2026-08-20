@@ -18,6 +18,7 @@ type TreeProps = {
   treeShown: number;
   totalTopics: number;
   lastActivity: { paths: string[]; at: number } | null;
+  onFocus?: (asset: string) => void;
 };
 
 function TreeNodeRows({
@@ -26,12 +27,14 @@ function TreeNodeRows({
   expanded,
   onToggle,
   flashing,
+  onFocus,
 }: {
   node: MqttLiveTreeNode;
   depth: number;
   expanded: Set<string>;
   onToggle: (path: string) => void;
   flashing: Set<string>;
+  onFocus?: (asset: string) => void;
 }) {
   const hasChildren = Boolean(node.ch && node.ch.length > 0);
   const isOpen = expanded.has(node.p);
@@ -54,7 +57,15 @@ function TreeNodeRows({
           ) : (
             <strong>{node.n}</strong>
           )}
-          {node.a ? <span className="results-filter-count"> {node.a}</span> : null}
+          {node.a ? (
+            onFocus ? (
+              <button className="secondary-button compact" onClick={() => onFocus(node.a as string)} type="button">
+                Focus {node.a}
+              </button>
+            ) : (
+              <span className="results-filter-count"> {node.a}</span>
+            )
+          ) : null}
         </td>
         <td>{node.t}</td>
         <td>{node.m}</td>
@@ -79,6 +90,7 @@ function TreeNodeRows({
               depth={depth + 1}
               key={child.p}
               node={child}
+              onFocus={onFocus}
               onToggle={onToggle}
             />
           ))
@@ -87,7 +99,7 @@ function TreeNodeRows({
   );
 }
 
-export function MqttLiveTopicTree({ tree, treeShown, totalTopics, lastActivity }: TreeProps) {
+export function MqttLiveTopicTree({ tree, treeShown, totalTopics, lastActivity, onFocus }: TreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [flashing, setFlashing] = useState<Set<string>>(() => new Set());
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -153,6 +165,7 @@ export function MqttLiveTopicTree({ tree, treeShown, totalTopics, lastActivity }
                 depth={0}
                 key={node.p}
                 node={node}
+                onFocus={onFocus}
                 onToggle={onToggle}
               />
             ))}

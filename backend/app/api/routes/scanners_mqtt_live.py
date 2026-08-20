@@ -43,8 +43,14 @@ from app.schemas.mqtt_live import (
     MqttLiveConnectResponse,
     MqttLiveDisconnectRequest,
     MqttLiveDisconnectResponse,
+    MqttLiveFocusRequest,
+    MqttLiveFocusResponse,
+    MqttLiveSearchRequest,
+    MqttLiveSearchResponse,
     MqttLiveSessionInfo,
     MqttLiveStatusResponse,
+    MqttLiveSubscribeRequest,
+    MqttLiveSubscribeResponse,
 )
 from app.services.mqtt_live_session import LiveSession
 from app.services.mqtt_live_session import service as live_service
@@ -217,6 +223,94 @@ def disconnect_mqtt_live(
     an operator Stop is always safe to press."""
     released = live_service.release(request.session_id)
     return MqttLiveDisconnectResponse(ok=True, released=released)
+
+
+@router.post(
+    "/mqtt_sidecar/live/focus",
+    response_model=MqttLiveFocusResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def focus_mqtt_live(
+    request: MqttLiveFocusRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> MqttLiveFocusResponse:
+    """Focus one asset in the live session so its live points, per-topic detail,
+    and config payload ride the snapshot stream. Read-only; sets the sidecar's
+    single-tenant focus (one operator, one session)."""
+    session = live_service.current()
+    if session is None or session.session_id != request.session_id:
+        raise HTTPException(status_code=409, detail="The live session has ended or was taken over. Refresh status.")
+    require_project_site_access(principal, session.project_id, session.site_id, engine=service.engine)
+    base_url = _resolve_base_url(http_request)
+    try:
+        result = _post_json(base_url, "/api/focus", {"asset": request.asset})
+    except (urllib.error.URLError, OSError) as error:
+        raise HTTPException(status_code=502, detail="The MQTT discovery sidecar could not be reached.") from error
+    ok = bool(isinstance(result, dict) and result.get("ok"))
+    focused = result.get("focused") if isinstance(result, dict) else None
+    return MqttLiveFocusResponse(ok=ok, focused=focused if isinstance(focused, dict) else None)
+
+
+def _current_session_or_409(session_id: str, principal: AuthPrincipal):
+    """Assert ``session_id`` is the current lease + the caller scopes to it."""
+    session = live_service.current()
+    if session is None or session.session_id != session_id:
+        raise HTTPException(status_code=409, detail="The live session has ended or was taken over. Refresh status.")
+    require_project_site_access(principal, session.project_id, session.site_id, engine=service.engine)
+    return session
+
+
+@router.post(
+    "/mqtt_sidecar/live/subscribe",
+    response_model=MqttLiveSubscribeResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def subscribe_mqtt_live(
+    request: MqttLiveSubscribeRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> MqttLiveSubscribeResponse:
+    """Change the live subscription (filter and/or qos) on the held session."""
+    _current_session_or_409(request.session_id, principal)
+    base_url = _resolve_base_url(http_request)
+    body: dict[str, object] = {}
+    if request.root_filter is not None:
+        body["rootFilter"] = request.root_filter
+    if request.qos is not None:
+        body["qos"] = request.qos
+    try:
+        result = _post_json(base_url, "/api/subscribe", body)
+    except urllib.error.HTTPError as error:
+        # The sidecar returns 409 when the session is not connected to the broker.
+        raise HTTPException(status_code=409, detail="The live session is not connected to the broker.") from error
+    except (urllib.error.URLError, OSError) as error:
+        raise HTTPException(status_code=502, detail="The MQTT discovery sidecar could not be reached.") from error
+    if not (isinstance(result, dict) and result.get("ok")):
+        detail = str((result or {}).get("error") or "The subscription change was rejected.")
+        raise HTTPException(status_code=409, detail=detail)
+    return MqttLiveSubscribeResponse(ok=True)
+
+
+@router.post(
+    "/mqtt_sidecar/live/search",
+    response_model=MqttLiveSearchResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def search_mqtt_live(
+    request: MqttLiveSearchRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> MqttLiveSearchResponse:
+    """Filter the live tree server-side (topic + asset + payload text). The
+    filtered result rides the snapshot stream; blank clears the filter."""
+    _current_session_or_409(request.session_id, principal)
+    base_url = _resolve_base_url(http_request)
+    try:
+        _post_json(base_url, "/api/search", {"q": request.q, "matchedOnly": request.matched_only})
+    except (urllib.error.URLError, OSError) as error:
+        raise HTTPException(status_code=502, detail="The MQTT discovery sidecar could not be reached.") from error
+    return MqttLiveSearchResponse(ok=True)
 
 
 @router.get(

@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   connectMqttLiveSession,
   disconnectMqttLiveSession,
+  focusMqttLiveAsset,
   getMqttLiveStatus,
+  searchMqttLive,
   streamMqttLiveEvents,
+  subscribeMqttLive,
   type MqttLiveControlName,
   type MqttLiveFrame,
   type MqttLiveSessionInfo,
@@ -37,6 +40,9 @@ export type MqttLiveSessionState = {
   error: string | null;
   start: (opts?: { takeOver?: boolean }) => Promise<void>;
   stop: () => Promise<void>;
+  focus: (asset: string) => Promise<void>;
+  subscribe: (rootFilter: string, qos?: number) => Promise<void>;
+  search: (q: string) => Promise<void>;
   refreshStatus: () => Promise<void>;
 };
 
@@ -256,6 +262,56 @@ export function useMqttLiveSession(
     void refreshStatus();
   }, [clearRetry, context, disposeStream, refreshStatus, state.session?.session_id]);
 
+  const focus = useCallback(
+    async (asset: string) => {
+      const sessionId = state.session?.session_id;
+      if (!sessionId || !asset) {
+        return;
+      }
+      try {
+        // Fire-and-forget: the focused asset's detail rides the snapshot stream,
+        // so we do not need the immediate response.
+        await focusMqttLiveAsset({ sessionId, asset, context: context() });
+      } catch {
+        // Focus is best-effort; a failure leaves the current focus unchanged.
+      }
+    },
+    [context, state.session?.session_id],
+  );
+
+  const subscribe = useCallback(
+    async (rootFilter: string, qos?: number) => {
+      const sessionId = state.session?.session_id;
+      if (!sessionId) {
+        return;
+      }
+      try {
+        await subscribeMqttLive({ sessionId, rootFilter, qos, context: context() });
+      } catch (error) {
+        if (mountedRef.current) {
+          setState((current) => ({ ...current, error: errorMessage(error) }));
+        }
+      }
+    },
+    [context, state.session?.session_id],
+  );
+
+  const search = useCallback(
+    async (q: string) => {
+      const sessionId = state.session?.session_id;
+      if (!sessionId) {
+        return;
+      }
+      try {
+        // The filtered tree rides the snapshot stream, so ignore the response.
+        await searchMqttLive({ sessionId, q, context: context() });
+      } catch {
+        // Search is best-effort; a failure leaves the current filter unchanged.
+      }
+    },
+    [context, state.session?.session_id],
+  );
+
   // On enable, read occupancy once. On disable/unmount, abort the stream but do
   // NOT disconnect (see the hook docstring).
   useEffect(() => {
@@ -283,6 +339,9 @@ export function useMqttLiveSession(
     error: state.error,
     start,
     stop,
+    focus,
+    subscribe,
+    search,
     refreshStatus,
   };
 }

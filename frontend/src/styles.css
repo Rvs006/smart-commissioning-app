@@ -2519,6 +2519,12 @@ input.field-expired {
   }
 }
 
+.mqtt-config-payload {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: monospace;
+}
+
 .asset-summary-toggle[aria-expanded="true"] .asset-summary-caret,
 .asset-summary-toggle[aria-expanded="true"] strong {
   color: var(--accent-hover);
