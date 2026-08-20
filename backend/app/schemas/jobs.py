@@ -85,6 +85,7 @@ JobType = Literal[
     "mqtt_discovery",
     "udmi_validation",
     "mqtt_config_publish",
+    "mqtt_publish",
     "bacnet_validation",
     "mapping_validation",
     "report_generation",

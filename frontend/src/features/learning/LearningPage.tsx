@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useContext, useState } from "react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { SessionContext } from "../../app/sessionContext";
 import { getTheme, toggleTheme } from "../../app/theme";
 
 // Stand-alone "Learning as a…" course surface for the Smart Commissioning Tool.
@@ -825,6 +826,8 @@ export function LearningPage() {
   const [activeRoleId, setActiveRoleId] = useState<string>(ROLES[0].id);
   const [setupPathId, setSetupPathId] = useState<string>(SETUP_PATHS[0].id);
   const [themeMode, setThemeMode] = useState<"light" | "dark">(getTheme());
+  // Read defensively: these docs also render outside a SessionProvider (tests).
+  const authorizationEnforced = useContext(SessionContext)?.authorizationEnforced ?? true;
 
   const role = ROLES.find((r) => r.id === activeRoleId) ?? ROLES[0];
   const setupPath = SETUP_PATHS.find((p) => p.id === setupPathId) ?? SETUP_PATHS[0];
@@ -958,6 +961,13 @@ export function LearningPage() {
                 <h2 className="dc-ref-title">Run an IP discovery</h2>
                 <span className="dc-guidance-meta">Seven steps</span>
               </div>
+              {!authorizationEnforced && (
+                <p className="dc-note">
+                  This deployment runs with authorization prompts disabled: skip the preview,
+                  approval, and confirmation steps below. Configure the scan and select Run to
+                  start it directly. Every run is still recorded as evidence.
+                </p>
+              )}
               <ol className="dc-numbered">
                 <li>Configure the targets and TCP ports, then confirm the correct source interface.</li>
                 <li>Tick Dry run and select Preview. The preview sends no network traffic.</li>

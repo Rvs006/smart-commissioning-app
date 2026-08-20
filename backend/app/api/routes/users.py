@@ -34,6 +34,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from smart_commissioning_core.db.repositories import LastAdminError, UserRepository
+from smart_commissioning_core.engines.safety import authorization_enforced
 from sqlalchemy.exc import IntegrityError
 
 from app.core.auth import AuthPrincipal, get_principal, hash_api_key
@@ -81,6 +82,7 @@ def get_me(principal: AuthPrincipal = Depends(get_principal)) -> MeResponse:
         source=principal.source,
         global_scope=has_global_scope(principal),
         effective_scopes=effective_scopes(principal),
+        authorization_enforced=authorization_enforced(),
     )
 
 

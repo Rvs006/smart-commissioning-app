@@ -41,7 +41,7 @@ from smart_commissioning_core.engines.mqtt_discovery import (
     DEFAULT_CAPTURE_SECONDS,
     process_mqtt_discovery_run,
 )
-from smart_commissioning_core.engines.safety import is_authorized
+from smart_commissioning_core.engines.safety import authorization_enforced, is_authorized
 from smart_commissioning_core.mqtt_settings import INDEFINITE_BACKSTOP_SECONDS, parse_capture_seconds
 from smart_commissioning_core.rbac import Role
 from smart_commissioning_core.run_context import canonical_sha256
@@ -176,6 +176,12 @@ def _prepare_scan_parameters(
                 status_code=400,
                 detail="A dry preview cannot consume a scan authorization.",
             )
+        return parameters, True
+    if not authorization_enforced() and not has_preview and not has_authorization:
+        # Frictionless deployment: a live run needs no sealed preview or admin
+        # approval. Route it through the same server-side resolution/sealing the
+        # preview uses (second value True) so the engine still receives a fully
+        # bound scan_contract_v1; the engine runs live because dry_run is False.
         return parameters, True
     if not has_preview or not has_authorization:
         raise HTTPException(status_code=400, detail=_SCAN_AUTH_DETAIL)
@@ -715,6 +721,9 @@ def create_ip_discovery_run(
             principal=principal,
         )
         _bind_control_identity(parameters, principal)
+        # No-op for an enforced dry preview (is_dry_run short-circuits); for a
+        # frictionless live-direct run it stamps the initiator into evidence.
+        _stamp_legacy_authorizer(parameters, principal)
     else:
         _guard_frozen_source_interface(parameters)
         if parameters.get("provider") == "operator_managed_nmap":
@@ -806,6 +815,9 @@ def create_bacnet_discovery_run(
             principal=principal,
         )
         _bind_control_identity(parameters, principal)
+        # No-op for an enforced dry preview (is_dry_run short-circuits); for a
+        # frictionless live-direct run it stamps the initiator into evidence.
+        _stamp_legacy_authorizer(parameters, principal)
     else:
         _guard_frozen_source_interface(parameters)
     # HONESTY: an authorized real BACnet scan defaults to the real bacpypes3
@@ -907,11 +919,15 @@ def create_bacnet_property_run(
     if set(request.parameters) - {"dry_run"}:
         raise HTTPException(status_code=400, detail="Property expansion parameters are server-derived.")
     preview = request.preview_run_id is None
+    # Frictionless deployments allow a live property write with no sealed child
+    # authorization, but ONLY when the caller explicitly asks (dry_run=False).
+    # The parent-ceiling and frozen-destination guards above still bound it.
+    direct_live = preview and not authorization_enforced() and request.parameters.get("dry_run") is False
     child_parameters: dict[str, object]
     if preview:
         child_parameters = deepcopy(parent_parameters)
         child_parameters.pop("scan_contract_v1", None)
-        child_parameters["dry_run"] = True
+        child_parameters["dry_run"] = not direct_live
         child_parameters["property_parent_run_id"] = request.parent_run_id
         child_parameters["property_device_instance"] = request.device_instance
         child_parameters["property_destination"] = source_address
@@ -949,6 +965,9 @@ def create_bacnet_property_run(
             "parent_run_id": request.parent_run_id,
         }
         _bind_control_identity(child_parameters, principal)
+        # No-op for a dry preview; stamps the initiator for a frictionless
+        # live-direct property write.
+        _stamp_legacy_authorizer(child_parameters, principal)
         child_request = JobCreateRequest(
             project_id=request.project_id,
             site_id=request.site_id,

@@ -38,6 +38,10 @@ export type MeResponse = {
   source: "user_key" | "shared_key" | "local";
   global_scope: boolean;
   effective_scopes: EffectiveScope[];
+  // Whether this deployment enforces the scan/write authorization ceremony.
+  // Optional so existing test mocks keep compiling; absent is treated as
+  // enforced (fail-closed).
+  authorization_enforced?: boolean;
 };
 
 // A user as returned by the admin /users endpoints (never includes key material).
@@ -186,6 +190,7 @@ export type JobType =
   | "mqtt_discovery"
   | "udmi_validation"
   | "mqtt_config_publish"
+  | "mqtt_publish"
   | "bacnet_validation"
   | "mapping_validation"
   | "report_generation";
@@ -2779,6 +2784,95 @@ export function searchMqttLive(input: {
     "/discovery/mqtt_sidecar/live/search",
     {
       body: JSON.stringify({ session_id: input.sessionId, q: input.q, matched_only: input.matchedOnly ?? false }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+// M5: sealed one-message publish. The DRY preview seals the exact bytes (no
+// broker I/O); an admin approves that exact preview; the live send replays only
+// the frozen bytes (empty parameters + the two ids).
+export function startMqttPublishPreview(input: {
+  workspace: WorkspaceRef;
+  topic: string;
+  payload: string;
+  qos?: number;
+  retain?: boolean;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    "/discovery/mqtt_sidecar/live/publish/runs",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        job_type: "mqtt_publish",
+        parameters: {
+          dry_run: true,
+          topic: input.topic,
+          payload: input.payload,
+          qos: input.qos ?? 0,
+          retain: input.retain ?? false,
+        },
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+// Frictionless deployments: a live send goes directly, no preview/approval. The
+// backend seals the exact bytes server-side and records the sender. Only reachable
+// when the deployment reports authorization_enforced === false.
+export function startDirectMqttPublish(input: {
+  workspace: WorkspaceRef;
+  topic: string;
+  payload: string;
+  qos?: number;
+  retain?: boolean;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    "/discovery/mqtt_sidecar/live/publish/runs",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        job_type: "mqtt_publish",
+        parameters: {
+          topic: input.topic,
+          payload: input.payload,
+          qos: input.qos ?? 0,
+          retain: input.retain ?? false,
+        },
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function startAuthorizedMqttPublish(input: {
+  workspace: WorkspaceRef;
+  previewRunId: string;
+  scanAuthorizationId: string;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    "/discovery/mqtt_sidecar/live/publish/runs",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        job_type: "mqtt_publish",
+        parameters: {},
+        preview_run_id: input.previewRunId,
+        scan_authorization_id: input.scanAuthorizationId,
+      }),
       headers: { "Content-Type": "application/json" },
       method: "POST",
     },

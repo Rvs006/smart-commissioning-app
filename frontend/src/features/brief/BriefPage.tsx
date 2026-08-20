@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useContext, useState } from "react";
 import { Link } from "react-router";
+import { SessionContext } from "../../app/sessionContext";
 import { getTheme, toggleTheme } from "../../app/theme";
 
 // Standalone Product Brief surface. Mirrors the Electracom reference brief 1:1 in
@@ -208,6 +209,9 @@ export function BriefPage() {
   const [tab, setTab] = useState<TabId>("basics");
   const [role, setRole] = useState<RoleId>("engineer");
   const [mode, setMode] = useState<"light" | "dark">(getTheme());
+  // Read defensively: these docs also render outside a SessionProvider (tests).
+  // Absent -> enforced, so the frictionless note only shows when truly disabled.
+  const authorizationEnforced = useContext(SessionContext)?.authorizationEnforced ?? true;
 
   const onToggleTheme = () => {
     toggleTheme();
@@ -327,6 +331,14 @@ export function BriefPage() {
               </p>
 
               <h2>How a protected discovery run works</h2>
+              {!authorizationEnforced && (
+                <p className="dc-note">
+                  This deployment runs with authorization prompts disabled: live scans and
+                  publishes start directly, with no preview or approval. The preview and
+                  approval steps below apply only to enforced deployments. Every run is
+                  still recorded as evidence.
+                </p>
+              )}
               <p>
                 A dry-run preview creates a scan plan without network I/O. It checks the
                 targets, ports, provider and safety limits, but it does not contact the

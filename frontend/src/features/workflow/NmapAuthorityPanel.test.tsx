@@ -33,6 +33,7 @@ function renderPanel(
   const admin = input.admin ?? true;
   const session: SessionContextValue = {
     apiClient,
+    authorizationEnforced: true,
     canAdmin: admin,
     canEngineer: admin,
     error: null,

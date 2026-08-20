@@ -81,6 +81,7 @@ import {
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
+import { MqttPublishModal } from "./MqttPublishModal";
 import { useMqttLiveSession } from "./useMqttLiveSession";
 import {
   assetMatchesFacetFilter,
@@ -589,6 +590,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // disabled with an explanatory tooltip rather than letting the click 403.
   const {
     apiClient,
+    authorizationEnforced,
     canAdmin,
     canEngineer,
     me,
@@ -663,7 +665,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   );
   const [publishWaitSeconds, setPublishWaitSeconds] = useState("5");
   const [scanPorts, setScanPorts] = useState<ScanPort[]>(defaultScanPorts);
-  const [scanAuthorized, setScanAuthorized] = useState(false);
+  const [scanAuthorizedChecked, setScanAuthorizedChecked] = useState(false);
+  // Frictionless deployments need no checkbox: a live scan is authorized by
+  // default. Enforced deployments require the operator to tick it. Every
+  // submit/gate consumer reads this derived value.
+  const scanAuthorized = authorizationEnforced ? scanAuthorizedChecked : true;
   const [scanDryRun, setScanDryRun] = useState(false);
   const [scanTarget, setScanTarget] = useState("");
   const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
@@ -751,6 +757,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
   // mqtt-scanner live topic tree: the live search box (filters server-side).
   const [mqttLiveSearch, setMqttLiveSearch] = useState("");
+  // mqtt-scanner: the sealed "publish a message" modal (M5).
+  const [mqttPublishOpen, setMqttPublishOpen] = useState(false);
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -2013,7 +2021,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setReportScopeSnapshot(null);
     setReportIntents(null);
     dispatchRun({ type: "reset" });
-    setScanAuthorized(false);
+    setScanAuthorizedChecked(false);
     setScanDryRun(false);
     setScanTarget("");
     setSchemaSetLabel("");
@@ -2372,6 +2380,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             runKind: action.runKind as "ip" | "bacnet",
             workspace: workspaceRef,
             idempotencyKey,
+          });
+        }
+        if (!authorizationEnforced) {
+          // Frictionless deployment: a live scan starts directly. The backend
+          // seals it server-side from these real parameters (no preview/approval).
+          return startDiscoveryRun({
+            context: { client: apiClient },
+            jobType: action.jobType,
+            parameters,
+            runKind: action.runKind,
+            workspace: workspaceRef,
           });
         }
         if (!scanPreviewRunId || !scanAuthorizationId) {
@@ -4461,7 +4480,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const discoveryBlocked =
     (isSealedNetworkDiscoveryModule &&
       !scanDryRun &&
-      (!scanAuthorized || !scanPreviewRunId || !scanAuthorizationId)) ||
+      // Frictionless deployments need no sealed preview/authorization ids.
+      (!scanAuthorized || (authorizationEnforced && (!scanPreviewRunId || !scanAuthorizationId)))) ||
     (module.route === "mqtt-discovery-sct" && !scanDryRun && !scanAuthorized) ||
     nmapSelectionBlocked;
 
@@ -4987,12 +5007,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     />
                     Dry run — preview the scan plan with no network I/O (no authorization needed).
                   </label>
-                  {!scanDryRun && (
+                  {!scanDryRun && authorizationEnforced && (
                     <>
                       <label className="confirm-row">
                         <input
-                          checked={scanAuthorized}
-                          onChange={(event) => setScanAuthorized(event.target.checked)}
+                          checked={scanAuthorizedChecked}
+                          onChange={(event) => setScanAuthorizedChecked(event.target.checked)}
                           type="checkbox"
                         />
                         {isSealedNetworkDiscoveryModule
@@ -6015,8 +6035,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     >
                       Apply subscription filter
                     </button>
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer || mqttPublishOpen}
+                      onClick={() => setMqttPublishOpen(true)}
+                      title={canEngineer ? "Publish one message to a topic (sealed preview + admin approval)." : ENGINEER_REQUIRED_TOOLTIP}
+                      type="button"
+                    >
+                      Publish message…
+                    </button>
                   </div>
                 </div>
+                {mqttPublishOpen && (
+                  <MqttPublishModal
+                    apiClient={apiClient}
+                    authorizationEnforced={authorizationEnforced}
+                    onClose={() => setMqttPublishOpen(false)}
+                    workspace={workspaceRef}
+                  />
+                )}
                 <div className="live-console-kpis" aria-live="polite">
                   <div>
                     <span className="live-console-pulse" aria-hidden="true" /> Broker

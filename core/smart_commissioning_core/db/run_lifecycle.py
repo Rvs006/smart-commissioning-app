@@ -1399,7 +1399,19 @@ class RunLifecycleRepository:
             authorization_statement = authorization_statement.with_for_update()
         authorization_row = session.execute(authorization_statement).one_or_none()
         if authorization_row is None:
-            raise ActiveControlDeniedError("live scan authorization linkage is missing")
+            # Function-local import defers to call time, so the engines package is
+            # fully loaded and cannot form an import cycle with this db module.
+            from smart_commissioning_core.engines.safety import authorization_enforced
+
+            if authorization_enforced():
+                raise ActiveControlDeniedError("live scan authorization linkage is missing")
+            # Frictionless deployment: no admin-approval row exists by design. The
+            # owner / lease / cancel fences above already ran; the initiator
+            # identity + revocation check below still applies. Nothing is
+            # fabricated -- the absent row is the honest record that no
+            # two-person approval occurred.
+            self._require_active_initiator(session, run, context, lock_related=lock_related)
+            return
         authorization, link = authorization_row
         if (
             authorization.preview_run_id != link.parent_run_id

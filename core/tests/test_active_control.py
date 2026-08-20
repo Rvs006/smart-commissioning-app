@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import threading
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from smart_commissioning_core.db.base import Base
 from smart_commissioning_core.db.engine import (
@@ -47,7 +49,7 @@ _USER_ID = "user-active-control"
 _USERNAME = "engineer-active-control"
 
 
-def _context(*, dry_run: bool) -> RunContextV1:
+def _context(*, dry_run: bool, resource_key: str = "nic:192.0.2.10") -> RunContextV1:
     return RunContextV1.model_validate(
         {
             "project_id": _PROJECT_ID,
@@ -62,7 +64,7 @@ def _context(*, dry_run: bool) -> RunContextV1:
                 "scan_contract_v1": {
                     "scan_contract_version": "1.0",
                     "packet_plan_sha256": _DIGEST,
-                    "resource_keys": ["nic:192.0.2.10"],
+                    "resource_keys": [resource_key],
                     "initiating_user_id": _USER_ID,
                     "principal_source": "user_key",
                     "deployment_role": "hub",
@@ -401,6 +403,47 @@ class ActiveControlRepositoryTests(unittest.TestCase):
             grant.revoked_at = self.now + timedelta(seconds=3)
         with self.assertRaisesRegex(ActiveControlDeniedError, "scope grant"):
             self.owned.require_active_control(now=self.now + timedelta(seconds=4))
+
+    def _claimed_live_run_without_linkage(self) -> OwnedRunStore:
+        # A live run with no admin-approval linkage (authorization_id and
+        # preview_run_id both None). Legal to create; the active-control fence
+        # normally denies it as "linkage is missing".
+        envelope = self.repository.create_run_with_context(
+            job_type="ip_discovery",
+            # Distinct protocol key so this run does not conflict with the linked
+            # live run held by setUp.
+            context=_context(dry_run=False, resource_key="nic:198.51.100.10"),
+            run_id="run-frictionless",
+            now=self.now,
+        )
+        lease = self.repository.claim_run(
+            envelope.run_id, envelope.dispatch_id, lease_seconds=60, now=self.now
+        )
+        assert lease is not None
+        return OwnedRunStore(self.repository, lease)
+
+    def test_missing_linkage_denied_when_authorization_enforced(self) -> None:
+        owned = self._claimed_live_run_without_linkage()
+        with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": "1"}):
+            with self.assertRaisesRegex(ActiveControlDeniedError, "linkage is missing"):
+                owned.require_active_control(now=self.now + timedelta(seconds=1))
+
+    def test_missing_linkage_allowed_when_frictionless(self) -> None:
+        owned = self._claimed_live_run_without_linkage()
+        with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": "0"}):
+            # No approval row, but the initiator (active user + active grant) is
+            # valid, so the run keeps control.
+            owned.require_active_control(now=self.now + timedelta(seconds=1))
+
+    def test_frictionless_still_denies_a_revoked_initiator(self) -> None:
+        # Removing the approval must NOT remove the identity fence: a deactivated
+        # initiator is still denied even in a frictionless deployment.
+        owned = self._claimed_live_run_without_linkage()
+        with session_factory(self.engine).begin() as session:
+            session.get(User, _USER_ID).is_active = False
+        with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": "0"}):
+            with self.assertRaisesRegex(ActiveControlDeniedError, "initiating user"):
+                owned.require_active_control(now=self.now + timedelta(seconds=1))
 
     def test_demoted_named_engineer_cannot_retain_active_control(self) -> None:
         self.owned.require_active_control(now=self.now + timedelta(seconds=1))

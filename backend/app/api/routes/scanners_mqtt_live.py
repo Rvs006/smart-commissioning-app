@@ -16,15 +16,17 @@ events.py's cancel-safety, scope-recheck, and honesty vocabulary.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 import urllib.error
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from functools import partial
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from smart_commissioning_core.engines.mqtt_publish_sidecar import process_mqtt_publish_run
 from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
     _connect_config,
     _get_json,
@@ -32,12 +34,23 @@ from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
     _post_json,
     _root_filter,
 )
+from smart_commissioning_core.mqtt_settings import MqttSettingsError, build_mqtt_connection_settings
 from starlette.responses import StreamingResponse
 
-from app.api.routes.discovery import _require_legacy_scan_authorization, require_engineer, service
+from app.api.routes.discovery import (
+    _bind_control_identity,
+    _create_run,
+    _dispatch,
+    _prepare_scan_parameters,
+    _require_legacy_scan_authorization,
+    _settings_throttle,
+    require_engineer,
+    service,
+)
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
-from app.core.scopes import require_project_site_access
+from app.core.scopes import load_scoped_run, require_project_site_access
+from app.schemas.jobs import JobAcceptedResponse, JobCreateRequest
 from app.schemas.mqtt_live import (
     MqttLiveConnectRequest,
     MqttLiveConnectResponse,
@@ -52,6 +65,7 @@ from app.schemas.mqtt_live import (
     MqttLiveSubscribeRequest,
     MqttLiveSubscribeResponse,
 )
+from app.services.engine_dispatch import is_dry_run
 from app.services.mqtt_live_session import LiveSession
 from app.services.mqtt_live_session import service as live_service
 from app.services.sidecar_supervisor import MQTT_SCANNER, SidecarUnavailable
@@ -430,3 +444,168 @@ async def _live_relay(
         return  # client disconnected; exit quietly (events.py convention)
     finally:
         live_service.stream_detach(session_id)
+
+
+# --------------------------------------------------------------------------
+# M5 PR-A: sealed one-message publish through the held live session.
+# --------------------------------------------------------------------------
+
+_PUBLISH_ALLOWED_KEYS = frozenset({"dry_run", "topic", "payload", "qos", "retain"})
+_PUBLISH_PAYLOAD_MAX_BYTES = 65_536
+_PUBLISH_TOPIC_MAX = 1024
+
+
+def _seal_publish_preview(parameters: dict, principal: AuthPrincipal) -> None:
+    """Validate the operator's publish and freeze it into a scan_contract_v1.
+
+    Only ``{dry_run, topic, payload, qos, retain}`` are accepted; the broker
+    identity resolves server-side (no browser secrets). The frozen contract's
+    ``packet_plan_sha256`` is what an admin approves and what the live send
+    replays, so the wire bytes can only ever be these.
+    """
+    extra = set(parameters) - _PUBLISH_ALLOWED_KEYS
+    if extra:
+        raise HTTPException(status_code=400, detail=f"Unexpected publish parameters: {', '.join(sorted(extra))}.")
+    topic = str(parameters.get("topic") or "").strip()
+    if (
+        not topic
+        or len(topic) > _PUBLISH_TOPIC_MAX
+        or "+" in topic
+        or "#" in topic
+        or any(ord(char) < 32 for char in topic)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="A publish topic is required and must not contain wildcards (+ or #) or control characters.",
+        )
+    payload = parameters.get("payload")
+    if not isinstance(payload, str):
+        raise HTTPException(status_code=400, detail="The publish payload must be a string.")
+    payload_bytes = payload.encode("utf-8")
+    if len(payload_bytes) > _PUBLISH_PAYLOAD_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="The publish payload exceeds the 64 KiB limit.")
+    qos = parameters.get("qos", 0)
+    if qos not in (0, 1, 2):
+        raise HTTPException(status_code=400, detail="QoS must be 0, 1, or 2.")
+    retain = bool(parameters.get("retain"))
+    try:
+        settings = build_mqtt_connection_settings({})
+    except (MqttSettingsError, ValueError) as error:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No MQTT broker is configured. Enter the broker FQDN or IP address "
+                "on the Configuration page and save it."
+            ),
+        ) from error
+    parameters["topic"] = topic
+    parameters["qos"] = qos
+    parameters["retain"] = retain
+    parameters["scan_contract_v1"] = {
+        "scan_contract_version": "1.0",
+        "job_type": "mqtt_publish",
+        "mqtt_publish": {
+            "topic": topic,
+            "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "payload_bytes": len(payload_bytes),
+            "qos": qos,
+            "retain": retain,
+            # host/port/tls only; credentials never enter the sealed contract.
+            "broker": {"host": settings.host, "port": settings.port, "tls": settings.use_tls},
+            "policy": {"dispatch_phase_seconds": 30.0, "run_deadline_seconds": 60.0},
+        },
+    }
+    _bind_control_identity(parameters, principal)
+
+
+def _assert_session_broker_matches_seal(base_url: str, parameters: Mapping) -> None:
+    """The held session must be connected to the SAME broker the seal approved."""
+    sealed = ((parameters.get("scan_contract_v1") or {}).get("mqtt_publish") or {}).get("broker") or {}
+    try:
+        status = _get_json(base_url, "/api/status")
+    except (urllib.error.URLError, OSError) as error:
+        raise HTTPException(status_code=502, detail="The MQTT discovery sidecar could not be reached.") from error
+    connection = (status or {}).get("status") if isinstance(status, dict) else {}
+    connection = connection if isinstance(connection, dict) else {}
+    if connection.get("status") != "connected":
+        raise HTTPException(status_code=409, detail="The live session is not connected to the broker.")
+    live = (str(connection.get("host") or "").strip().casefold(), int(connection.get("port") or 0), bool(connection.get("tls")))
+    seal = (str(sealed.get("host") or "").strip().casefold(), int(sealed.get("port") or 0), bool(sealed.get("tls")))
+    if live != seal:
+        raise HTTPException(
+            status_code=409,
+            detail="The live session is connected to a different broker than the sealed preview.",
+        )
+
+
+@router.post(
+    "/mqtt_sidecar/live/publish/runs",
+    response_model=JobAcceptedResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def create_mqtt_publish_run(
+    request: JobCreateRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JobAcceptedResponse:
+    """Publish one MQTT message through the sealed preview ceremony.
+
+    Dry run previews the exact bytes with no broker I/O and seals them; an admin
+    approves that exact preview (POST /scan-authorizations); the live send replays
+    the frozen bytes (empty parameters + the two ids) only if the current live
+    session is held by the sender and connected to the sealed broker.
+    """
+    require_project_site_access(principal, request.project_id, request.site_id, engine=service.engine)
+    if get_settings().job_execution_mode != "inline":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "MQTT publish runs require the local inline executor; queue and "
+                "external execution are not available for the loopback sidecar."
+            ),
+        )
+    # _prepare_scan_parameters decides dry-vs-live FIRST (400s a dry preview that
+    # carries ids, or a live send with non-empty parameters) before any run lookup.
+    # It returns needs_seal=True for a dry preview AND for a frictionless
+    # live-direct send (no sealed preview exists yet); False for a sealed replay.
+    parameters, needs_seal = _prepare_scan_parameters(request, expected_job_type="mqtt_publish", principal=principal)
+    base_url: str | None = None
+    if needs_seal:
+        _seal_publish_preview(parameters, principal)
+    else:
+        load_scoped_run(str(request.preview_run_id), principal, engine=service.engine)  # scope the sealed preview
+    if not is_dry_run(parameters):
+        # Any live send (sealed replay OR frictionless direct) must run through a
+        # live session held by the sender and connected to the sealed broker.
+        # These are transport correctness, not authorization friction.
+        base_url = _resolve_base_url(http_request)
+        session = live_service.current()
+        if session is None:
+            raise HTTPException(status_code=409, detail="No MQTT live session is open. Start the live view first.")
+        if session.owner != principal.username:
+            raise HTTPException(
+                status_code=409,
+                detail=f"The live session is held by {session.owner}. Only the session owner can send a write.",
+            )
+        if (session.project_id, session.site_id) != (request.project_id, request.site_id):
+            raise HTTPException(status_code=409, detail="The live session belongs to a different workspace.")
+        _assert_session_broker_matches_seal(base_url, parameters)
+        if needs_seal:
+            # Frictionless live-direct: no admin-approval row exists, so record
+            # the sender as the authorizer for the engine's evidence line.
+            parameters["scan_authorization"] = {"authorized": True, "authorized_by": principal.username}
+
+    run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_publish", principal)
+
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        return process_mqtt_publish_run(
+            run.run_id,
+            frozen_parameters,
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=is_dry_run(frozen_parameters),
+            sidecar_base_url=base_url,
+        )
+
+    return _dispatch(run, enqueue=None, run_inline=run_inline, label="MQTT publish")

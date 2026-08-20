@@ -141,6 +141,7 @@ DISCOVERY_JOB_TYPES: set[JobType] = {
 VALIDATION_JOB_TYPES: set[JobType] = {
     "udmi_validation",
     "mqtt_config_publish",
+    "mqtt_publish",
     "bacnet_validation",
     "mapping_validation",
 }

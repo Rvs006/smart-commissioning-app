@@ -35,6 +35,23 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   points and last config payload in a side panel, filter the live tree by topic,
   asset, or payload text, and change the live subscription without restarting the
   session.
+- MQTT Discovery (scanner) adds Publish message to the live topic tree: send one
+  message to a topic through a staged flow that first previews the exact bytes
+  (with the payload SHA-256 and byte count) and sends nothing, then requires an
+  admin to approve that exact message before an engineer sends it. The send
+  replays only the approved bytes and refuses if a single byte changed. The
+  result reports what the sidecar MQTT client accepted, never a claimed broker
+  delivery, and the evidence records the topic, broker host, port, and TLS, never
+  credentials.
+- A deployment can now turn off the authorization ceremony. With
+  SCT_REQUIRE_SCAN_AUTHORIZATION=0, scans and device writes run with no
+  "authorized" checkbox and no sealed two-person approval; the run still records
+  who started it and the full evidence. The default stays enforced, so existing
+  deployments and tests are unchanged, and the portable Windows build ships with
+  it off so field engineers get it out of the box. The interface hides the
+  checkbox and the approval controls when GET /me reports the mode is off, and
+  the Brief and Learning pages note that the preview and approval steps do not
+  apply.
 
 ### Changed
 
