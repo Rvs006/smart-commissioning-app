@@ -51,6 +51,7 @@ import {
   startAuthorizedDiscoveryRun,
   startBacnetPropertyRun,
   browseBacnetScannerObjects,
+  saveIpScanRunAsRegister,
   startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
@@ -744,6 +745,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [objectBrowseResult, setObjectBrowseResult] = useState<BacnetObjectBrowseResponse | null>(
     null,
   );
+  // ip-scanner "save scan as register" outcome, cleared when a new run starts.
+  const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -2625,6 +2628,26 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     setObjectBrowseResult(null);
   }, [detailRow]);
 
+  // ip-scanner: turn this scan into a reusable ip_scanner_register. The created
+  // import is byte-identical to an upload, so the next IP scan for this
+  // project/site binds and RAG-compares against it.
+  const saveRegisterMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "ip-scanner.save-register"),
+    mutationFn: (runId: string) =>
+      saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
+    onSuccess: (summary) => {
+      setSavedRegister(summary);
+      // Mirror importMutation.onSuccess: refresh the "register on file" note.
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+      });
+    },
+  });
+
+  useEffect(() => {
+    setSavedRegister(null);
+  }, [activeRun?.runId, activeRun?.epoch]);
+
   const propertyLiveMutation = useMutation({
     mutationFn: ({
       authorizationId,
@@ -3439,6 +3462,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     }
     return formatBacnetRouters(discoveryResultsQuery.data.result_summary.routers);
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
+  // ip-scanner save-as-register is offered only once a scan has succeeded and
+  // recorded responding devices (a failed/empty/dry-run scan has nothing to save).
+  const saveableDeviceCount =
+    module.route === "ip-scanner" && activeRunStatus === "succeeded"
+      ? (discoveryResultsQuery.data?.devices?.length ?? 0)
+      : 0;
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
@@ -6745,26 +6775,64 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div>
                   <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
                 </div>
-                <button
-                  className="secondary-button compact"
-                  disabled={
-                    !exportEnabled ||
-                    exportDownload.pendingKey !== null ||
-                    validationJsonDownload.pendingKey !== null
-                  }
-                  onClick={handleExport}
-                  title={exportTooltip}
-                  type="button"
-                >
-                  {validationJsonDownload.pendingKey === "validation-json"
-                    ? "Downloading JSON..."
-                    : exportDownload.pendingKey === "export"
-                      ? "Exporting..."
-                      : canDownloadValidationJson
-                        ? "Download raw JSON"
-                        : "Export"}
-                </button>
+                <div className="inline-actions">
+                  {module.route === "ip-scanner" && (
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer || !saveableDeviceCount || saveRegisterMutation.isPending}
+                      onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
+                      title={
+                        canEngineer
+                          ? "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      {saveRegisterMutation.isPending ? "Saving register..." : "Save scan as register"}
+                    </button>
+                  )}
+                  <button
+                    className="secondary-button compact"
+                    disabled={
+                      !exportEnabled ||
+                      exportDownload.pendingKey !== null ||
+                      validationJsonDownload.pendingKey !== null
+                    }
+                    onClick={handleExport}
+                    title={exportTooltip}
+                    type="button"
+                  >
+                    {validationJsonDownload.pendingKey === "validation-json"
+                      ? "Downloading JSON..."
+                      : exportDownload.pendingKey === "export"
+                        ? "Exporting..."
+                        : canDownloadValidationJson
+                          ? "Download raw JSON"
+                          : "Export"}
+                  </button>
+                </div>
               </div>
+
+              {module.route === "ip-scanner" && savedRegister && (
+                <div className="state-panel success" role="status">
+                  <strong>Saved as register</strong>
+                  <span>
+                    {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
+                    {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next IP
+                    Discovery run for this project and site will compare against it.
+                  </span>
+                </div>
+              )}
+              {module.route === "ip-scanner" && saveRegisterMutation.isError && (
+                <div className="state-panel error" role="alert">
+                  <strong>Save as register failed</strong>
+                  <span>
+                    {saveRegisterMutation.error instanceof Error
+                      ? saveRegisterMutation.error.message
+                      : "The register could not be created."}
+                  </span>
+                </div>
+              )}
 
               {usingLiveResults && (
                 <div className="sample-banner" role="note">

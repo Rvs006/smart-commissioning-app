@@ -27,7 +27,13 @@ from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
     browse_device_objects,
     process_bacnet_scanner_run,
 )
-from smart_commissioning_core.engines.ip_scanner_sidecar import process_ip_scanner_run
+from smart_commissioning_core.engines.ip_scanner_sidecar import (
+    _register_csv as _ip_register_csv,  # shared serializer: rows -> the sidecar's 9-col CSV
+)
+from smart_commissioning_core.engines.ip_scanner_sidecar import (
+    process_ip_scanner_run,
+    register_rows_from_devices,
+)
 from smart_commissioning_core.engines.mqtt_scanner_sidecar import process_mqtt_scanner_run
 
 from app.api.routes.discovery import (
@@ -43,6 +49,7 @@ from app.api.routes.discovery import (
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
 from app.core.scopes import require_project_site_access
+from app.schemas.imports import ImportBatchSummary
 from app.schemas.jobs import (
     BacnetObjectBrowseRequest,
     BacnetObjectBrowseResponse,
@@ -50,6 +57,7 @@ from app.schemas.jobs import (
     JobCreateRequest,
 )
 from app.services.engine_dispatch import is_dry_run
+from app.services.import_service import ImportService
 from app.services.sidecar_supervisor import (
     BACNET_SCANNER,
     IP_SCANNER,
@@ -60,6 +68,33 @@ from app.services.sidecar_supervisor import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _bind_ip_scanner_register(
+    project_id: str,
+    site_id: str,
+    parameters: dict,
+    *,
+    records: list[dict] | None = None,
+) -> None:
+    """Freeze the newest usable ip_scanner_register into the run parameters.
+
+    Route-owned, mirroring ``discovery._bind_mqtt_register``: a caller cannot
+    smuggle an import from another workspace by supplying its id in the request
+    body. Without this, an uploaded (or saved-as) IP register was never bound, so
+    the sidecar scan had nothing to RAG-compare against. ``records`` is injectable
+    for tests. The key ``register_import_id`` is exactly what the adapter's
+    ``_load_register_rows`` reads.
+    """
+    parameters.pop("register_import_id", None)
+    if records is None:
+        records = ImportRepository(service.engine).list(
+            project_id=project_id, site_id=site_id, import_type="ip_scanner_register"
+        )
+    for record in records:
+        if record.get("accepted_rows"):
+            parameters["register_import_id"] = str(record["import_id"])
+            return
 
 
 @router.post("/ip_sidecar/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
@@ -88,6 +123,10 @@ def create_ip_scanner_run(
     # The adapter reads project/site off parameters for its persisted records.
     parameters.setdefault("project_id", request.project_id)
     parameters.setdefault("site_id", request.site_id)
+    # Bind the newest accepted ip_scanner_register (uploaded or saved-as-register)
+    # so the sidecar RAG-compares against it. Unconditional (dry-run included),
+    # mirroring the mqtt register binder.
+    _bind_ip_scanner_register(request.project_id, request.site_id, parameters)
 
     # Resolve the sidecar's loopback URL up front for a live scan so an
     # unavailable sidecar fails the request with 503 rather than starting a run
@@ -350,3 +389,56 @@ def browse_bacnet_scanner_objects(
         address=str(device.get("address") or ""),
         **payload,
     )
+
+
+@router.post(
+    "/ip_sidecar/runs/{run_id}/save-as-register",
+    response_model=ImportBatchSummary,
+    dependencies=[Depends(require_engineer)],
+)
+def save_ip_scan_as_register(
+    run_id: str,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> ImportBatchSummary:
+    """Turn a succeeded IP scanner run's responding devices into an ip_scanner_register.
+
+    A DB read then a DB write: no network I/O and no sidecar, so it deliberately
+    skips the scan-authorization consent gate and the inline-only 503 the live
+    scanner routes carry (those would be untrue here). The created import goes
+    through the same ``ImportService`` pipeline as an upload, so it is
+    indistinguishable from an uploaded ``ip_scanner_register``; a later IP scan
+    for this project/site binds and RAG-compares against it (see
+    ``_bind_ip_scanner_register``).
+    """
+    run = _load_discovery_run(run_id, principal)  # scoped access + 404
+    if run.job_type != "ip_scanner":
+        raise HTTPException(status_code=404, detail="IP scanner run was not found.")
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail="Save as register requires a succeeded IP scanner run.",
+        )
+
+    devices = DiscoveryRepository(service.engine).list_devices(run_id)
+    rows = register_rows_from_devices(devices)
+    if not rows:
+        raise HTTPException(
+            status_code=409,
+            detail="This run recorded no responding devices to save as a register.",
+        )
+
+    summary, _errors = ImportService(service.engine).create_import(
+        import_type="ip_scanner_register",
+        file_name=f"scan-register-{run_id}.csv",
+        file_bytes=_ip_register_csv(rows).encode("utf-8"),
+        project_id=run.project_id,
+        site_id=run.site_id,
+    )
+    logger.info(
+        "ip scan saved as register run_id=%s import_id=%s rows=%d by=%s",
+        run_id,
+        summary.import_id,
+        summary.accepted_rows,
+        principal.username,
+    )
+    return summary

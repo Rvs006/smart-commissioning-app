@@ -359,6 +359,54 @@ def _load_register_rows(
         return []
 
 
+def register_rows_from_devices(devices: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """Project persisted ip_scanner device dicts into ip_scanner_register rows.
+
+    Parity port of the vendored app's Save-as-Register: each responding device's
+    actual open ports become its Expected Ports, and its RESOLVED hostname (never
+    an unverified expected one) becomes Hostname. Rows are keyed by
+    ``REGISTER_TEMPLATE_COLUMNS`` so ``_register_csv(register_rows_from_devices(...))``
+    yields exactly the sidecar's register CSV, which the import profile then
+    accepts and re-serialises back into the sidecar on the next scan (round-trip).
+
+    Every cell is a ``str`` by construction, so the values are json-safe without a
+    ``json_safe_value`` wrap; the import pipeline re-parses them from CSV anyway.
+    Devices the scan could not reach are skipped defensively (``_map_result``
+    already keeps ``missing``/``unreachable`` rows out of the persisted set, so a
+    register only ever lists devices that actually answered).
+    """
+
+    def _cell(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    rows: list[dict[str, str]] = []
+    for device in devices:
+        attributes = device.get("attributes") or {}
+        if attributes.get("register") == "missing" or attributes.get("status") == "unreachable":
+            continue
+        device_type = device.get("device_type") or ""
+        # An unverified name came from the register's EXPECTED hostname, not an
+        # observation; recording it as the new register's Hostname would launder
+        # an expectation into "observed truth", so blank it (mirrors the vendored app).
+        hostname = "" if attributes.get("hostname_status") == "unverified" else _cell(device.get("name"))
+        open_ports = attributes.get("open_ports") or []
+        rows.append(
+            {
+                "IP Address": _cell(device.get("address")),
+                "Hostname": hostname,
+                # rogue / plain hosts carry the neutral ip_host type -> blank.
+                "Type": "" if device_type in ("", "ip_host") else device_type,
+                "Vendor": _cell(device.get("vendor")),
+                "Model": _cell(device.get("model")),
+                "Expected Ports": ";".join(str(port) for port in open_ports),
+                "Project": _cell(attributes.get("project")),
+                "Location": _cell(attributes.get("location")),
+                "Description": _cell(attributes.get("description")),
+            }
+        )
+    return rows
+
+
 def _register_csv(register_rows: Sequence[Mapping[str, Any]]) -> str:
     """Serialize accepted register rows to the sidecar's 9-column CSV."""
     buffer = io.StringIO()
@@ -510,6 +558,29 @@ def _demo() -> None:
     header = csv_text.splitlines()[0]
     assert header == ",".join(REGISTER_TEMPLATE_COLUMNS), header
     assert "192.0.2.10" in csv_text
+
+    # Save-as-register: persisted devices -> ip_scanner_register rows. Each row
+    # carries the 9 golden columns; open ports become Expected Ports; an
+    # unverified hostname is blanked; unreachable/missing rows are dropped.
+    devices = [
+        {"address": "192.0.2.10", "name": "h-a", "vendor": "Acme", "model": "X1",
+         "device_type": "server", "attributes": {"open_ports": [80, 443], "hostname_status": "match",
+                                                  "project": "P1", "location": "Rack 1", "description": "web"}},
+        {"address": "192.0.2.11", "name": "expected-b", "vendor": None, "model": None,
+         "device_type": "ip_host", "attributes": {"open_ports": [], "hostname_status": "unverified"}},
+        {"address": "192.0.2.12", "name": None, "device_type": "ip_host",
+         "attributes": {"register": "missing", "status": "unreachable", "open_ports": []}},
+    ]
+    reg = register_rows_from_devices(devices)
+    assert len(reg) == 2, reg  # unreachable/missing dropped
+    assert set(reg[0]) == set(REGISTER_TEMPLATE_COLUMNS), reg[0]
+    assert reg[0]["IP Address"] == "192.0.2.10" and reg[0]["Expected Ports"] == "80;443", reg[0]
+    assert reg[0]["Type"] == "server" and reg[0]["Hostname"] == "h-a", reg[0]
+    assert reg[0]["Project"] == "P1" and reg[0]["Location"] == "Rack 1", reg[0]
+    assert reg[1]["Hostname"] == "", reg[1]  # unverified name never laundered in
+    assert reg[1]["Type"] == "" and reg[1]["Expected Ports"] == "", reg[1]
+    # The projection round-trips through the sidecar's own register CSV.
+    assert _register_csv(reg).splitlines()[0] == ",".join(REGISTER_TEMPLATE_COLUMNS)
 
     # scan-query accepts both naming conventions; start is mandatory upstream.
     assert _scan_query({"start_ip": "192.0.2.1", "end_ip": "192.0.2.9"})["start"] == "192.0.2.1"

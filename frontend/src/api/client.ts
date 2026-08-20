@@ -1929,6 +1929,20 @@ export function browseBacnetScannerObjects(input: {
   );
 }
 
+// Turn a succeeded IP scanner run's responding devices into an accepted
+// ip_scanner_register import (server-side, from the run's own evidence). Returns
+// the same ImportBatchSummary an upload returns.
+export function saveIpScanRunAsRegister(input: {
+  runId: string;
+  context?: ApiRequestContext;
+}): Promise<ImportBatchSummary> {
+  return request<ImportBatchSummary>(
+    `/discovery/ip_sidecar/runs/${encodeURIComponent(input.runId)}/save-as-register`,
+    { method: "POST" },
+    input.context,
+  );
+}
+
 export function createScanAuthorization(input: {
   previewRunId: string;
   ticket: string;

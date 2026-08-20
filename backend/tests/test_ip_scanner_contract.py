@@ -22,12 +22,14 @@ from smart_commissioning_core.engines.ip_scanner_sidecar import (
     _map_result,
     _register_csv,
     _scan_query,
+    register_rows_from_devices,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _VENDOR_DIR = _REPO_ROOT / "scanners" / "vendor" / "network-ip-scanner"
 _SERVER_JS = (_VENDOR_DIR / "server.js").read_text(encoding="utf-8")
 _SCANNER_JS = (_VENDOR_DIR / "scanner.js").read_text(encoding="utf-8")
+_APP_JS = (_VENDOR_DIR / "public" / "app.js").read_text(encoding="utf-8")
 _TEMPLATE_CSV = (_VENDOR_DIR / "template" / "ip-device-register-template.csv").read_text(encoding="utf-8")
 
 # --- Golden constants copied verbatim from the driving contract -------------
@@ -135,6 +137,68 @@ class RegisterTemplateContractTest(unittest.TestCase):
         csv_text = _register_csv([{"IP Address": "192.0.2.1", "Expected Ports": "80;443"}])
         self.assertEqual(csv_text.splitlines()[0], ",".join(GOLDEN_REGISTER_COLUMNS))
         self.assertIn("192.0.2.1", csv_text)
+
+
+class SaveAsRegisterContractTest(unittest.TestCase):
+    def test_vendored_save_as_register_logic_pinned(self) -> None:
+        # The parity source: if upstream changes the filter or the ports join,
+        # our projection must be revisited -> pin the exact literals.
+        self.assertIn("function saveAsRegister", _APP_JS)
+        self.assertIn("r.status === 'reachable' || r.status === 'rogue'", _APP_JS)
+        self.assertIn("(r.openPorts || []).join(';')", _APP_JS)
+
+    def test_projection_rows_match_golden_columns_and_join_ports(self) -> None:
+        devices = [
+            {"address": "192.0.2.10", "name": "h-a", "vendor": "Acme", "model": "X1",
+             "device_type": "server", "attributes": {"open_ports": [80, 443], "hostname_status": "match",
+                                                      "project": "P1", "location": "Rack 1", "description": "web"}},
+            {"address": "192.0.2.99", "name": None, "device_type": "ip_host",
+             "attributes": {"open_ports": [23], "register": "rogue", "status": "rogue"}},
+        ]
+        rows = register_rows_from_devices(devices)
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            self.assertEqual(set(row), set(GOLDEN_REGISTER_COLUMNS))
+        self.assertEqual(rows[0]["Expected Ports"], "80;443")
+        self.assertEqual(rows[0]["Type"], "server")
+        # A rogue/plain host carries the neutral ip_host type -> blank Type.
+        self.assertEqual(rows[1]["Type"], "")
+        self.assertEqual(rows[1]["IP Address"], "192.0.2.99")
+
+    def test_projection_drops_unreachable_and_blanks_unverified_hostname(self) -> None:
+        devices = [
+            {"address": "192.0.2.11", "name": "expected-b", "device_type": "ip_host",
+             "attributes": {"open_ports": [], "hostname_status": "unverified"}},
+            {"address": "192.0.2.12", "name": None, "device_type": "ip_host",
+             "attributes": {"register": "missing", "status": "unreachable", "open_ports": []}},
+        ]
+        rows = register_rows_from_devices(devices)
+        self.assertEqual(len(rows), 1)  # unreachable/missing dropped
+        # An unverified (never-observed) hostname is blanked, never laundered in.
+        self.assertEqual(rows[0]["Hostname"], "")
+        self.assertEqual(rows[0]["Expected Ports"], "")
+
+    def test_projection_rows_accepted_by_import_profile(self) -> None:
+        # Deferred import (module-level would bind reports/discovery engines under
+        # unittest); PROFILES itself is pure. Proves create_import accepts 100% of
+        # projected rows, so the saved register round-trips.
+        from app.services.import_service import PROFILES
+
+        devices = [
+            {"address": "192.0.2.10", "name": "h-a", "vendor": "Acme", "model": "X1",
+             "device_type": "server", "attributes": {"open_ports": [80, 443], "hostname_status": "match"}},
+        ]
+        profile = PROFILES["ip_scanner_register"]
+        for number, row in enumerate(register_rows_from_devices(devices), start=2):
+            self.assertEqual(profile.validate_row(row, number), [])
+
+    def test_projection_roundtrips_through_register_csv(self) -> None:
+        devices = [{"address": "10.0.0.5", "name": "h", "device_type": "ip_host",
+                    "attributes": {"open_ports": [502]}}]
+        csv_text = _register_csv(register_rows_from_devices(devices))
+        self.assertEqual(csv_text.splitlines()[0], ",".join(GOLDEN_REGISTER_COLUMNS))
+        self.assertIn("10.0.0.5", csv_text)
+        self.assertIn("502", csv_text)
 
 
 class ScanQueryContractTest(unittest.TestCase):

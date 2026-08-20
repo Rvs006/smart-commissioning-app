@@ -20,6 +20,18 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   changing the sealed scan results. The read needs scan authorization and the
   engineer role, and it reports the device's own no-answer message honestly
   instead of an empty success.
+- IP Discovery (scanner) adds Save scan as register on the Results step: a
+  succeeded scan's responding devices become an accepted ip_scanner_register
+  import, with each device's open ports recorded as its expected ports. The
+  register is created through the same import pipeline as an upload, so it is
+  reusable exactly like one.
+
+### Changed
+
+- IP scanner runs now bind the newest accepted ip_scanner_register for the
+  run's project and site and RAG-compare the scan against it. The register was
+  read by the scanner but never bound before, so uploaded and saved registers
+  now take effect where they previously appeared to be ignored.
 
 ### Fixed
 
