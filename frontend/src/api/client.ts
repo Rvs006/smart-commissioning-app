@@ -2579,3 +2579,269 @@ export function streamRunEvents(
     controller.abort();
   };
 }
+
+// ---------------------------------------------------------------------------
+// MQTT live session (M4a): a held broker connection streamed to the browser.
+// The frame types mirror the vendored sidecar's /api/stream shapes verbatim (a
+// backend contract test pins them). The browser never sends broker secrets.
+// ---------------------------------------------------------------------------
+
+export type MqttLiveConnection = {
+  status: "disconnected" | "connecting" | "connected" | "reconnecting" | "error";
+  host: string;
+  port: number;
+  tls: boolean;
+  rootFilter: string;
+  qos: number;
+  error: string;
+  since: number;
+};
+
+export type MqttLiveStats = {
+  expectedAssets: number;
+  subscribedAssets: number;
+  liveAssets: number;
+  topicsDiscovered: number;
+  issues: number;
+  totalMessages: number;
+};
+
+export type MqttLiveTreeNode = {
+  n: string;
+  p: string;
+  t: number;
+  m: number;
+  r: number;
+  mt: 0 | 1;
+  dev?: 1;
+  a?: string;
+  leaf?: 1;
+  sc?: string;
+  ret?: 1;
+  c?: number;
+  iss?: number;
+  ch?: MqttLiveTreeNode[];
+};
+
+export type MqttLiveSnapshot = {
+  type: "snapshot";
+  status: MqttLiveConnection;
+  stats: MqttLiveStats;
+  tree: MqttLiveTreeNode[];
+  treeShown: number;
+  totalTopics: number;
+  filtered: boolean;
+  focused: unknown | null;
+};
+
+export type MqttLiveActivity = { type: "activity"; paths: string[] };
+export type MqttLiveFrame = MqttLiveSnapshot | MqttLiveActivity;
+export type MqttLiveControlName = "closed" | "unavailable" | "timeout";
+export type MqttLiveEventName = "message" | MqttLiveControlName;
+
+export type MqttLiveSessionInfo = {
+  session_id: string;
+  owner: string;
+  project_id: string;
+  site_id: string;
+  since: string;
+};
+
+export type MqttLiveConnectResponse = {
+  ok: boolean;
+  session: MqttLiveSessionInfo;
+  connection: MqttLiveConnection;
+};
+
+export type MqttLiveStatusResponse = {
+  session: MqttLiveSessionInfo | null;
+  sidecar_available: boolean;
+  connection: MqttLiveConnection | null;
+  stats: MqttLiveStats | null;
+  register: { assets: number; points: number } | null;
+};
+
+export type MqttLiveDisconnectResponse = { ok: boolean; released: boolean };
+
+export function connectMqttLiveSession(input: {
+  workspace: WorkspaceRef;
+  authorized: boolean;
+  rootFilter?: string;
+  qos?: number;
+  takeOver?: boolean;
+  context?: ApiRequestContext;
+}): Promise<MqttLiveConnectResponse> {
+  return request<MqttLiveConnectResponse>(
+    "/discovery/mqtt_sidecar/live/connect",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        authorized: input.authorized,
+        ...(input.rootFilter ? { root_filter: input.rootFilter } : {}),
+        ...(input.qos !== undefined ? { qos: input.qos } : {}),
+        ...(input.takeOver ? { take_over: true } : {}),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function disconnectMqttLiveSession(input: {
+  sessionId?: string;
+  context?: ApiRequestContext;
+}): Promise<MqttLiveDisconnectResponse> {
+  return request<MqttLiveDisconnectResponse>(
+    "/discovery/mqtt_sidecar/live/disconnect",
+    {
+      body: JSON.stringify(input.sessionId ? { session_id: input.sessionId } : {}),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+export function getMqttLiveStatus(input: {
+  context?: ApiRequestContext;
+} = {}): Promise<MqttLiveStatusResponse> {
+  return request<MqttLiveStatusResponse>("/discovery/mqtt_sidecar/live/status", undefined, input.context);
+}
+
+function parseMqttLiveEventName(value: string): MqttLiveEventName | null {
+  return value === "message" || value === "closed" || value === "unavailable" || value === "timeout"
+    ? value
+    : null;
+}
+
+function isMqttLiveFrame(value: unknown): value is MqttLiveFrame {
+  return isPlainObject(value) && (value.type === "snapshot" || value.type === "activity");
+}
+
+export function parseMqttLiveSseBuffer(
+  buffer: string,
+): { events: Array<{ name: MqttLiveEventName; frame: MqttLiveFrame | null }>; rest: string } {
+  const events: Array<{ name: MqttLiveEventName; frame: MqttLiveFrame | null }> = [];
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const parts = normalized.split("\n\n");
+  const rest = parts.pop() ?? "";
+  for (const block of parts) {
+    const trimmed = block.trim();
+    if (!trimmed) {
+      continue;
+    }
+    let rawName = "message";
+    const dataLines: string[] = [];
+    for (const line of trimmed.split("\n")) {
+      if (line.startsWith("event:")) {
+        rawName = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        dataLines.push(line.slice("data:".length).trim());
+      }
+    }
+    const name = parseMqttLiveEventName(rawName);
+    if (name === null) {
+      continue;
+    }
+    let decoded: unknown = null;
+    if (dataLines.length > 0) {
+      try {
+        decoded = JSON.parse(dataLines.join(""));
+      } catch {
+        decoded = null;
+      }
+    }
+    events.push({ name, frame: name === "message" && isMqttLiveFrame(decoded) ? decoded : null });
+  }
+  return { events, rest };
+}
+
+export type MqttLiveCallbacks = {
+  onFrame: (frame: MqttLiveFrame) => void;
+  onControl: (name: MqttLiveControlName) => void;
+  onClose?: () => void;
+  onError?: (error: unknown) => void;
+};
+
+/**
+ * Opens the proxied MQTT live-session SSE stream and dispatches parsed frames.
+ * Returns a disposer that aborts the fetch (cancel-safe). Mirrors
+ * streamRunEvents; the backend never exposes the sidecar directly.
+ */
+export function streamMqttLiveEvents(
+  sessionId: string,
+  callbacks: MqttLiveCallbacks,
+  context?: ApiRequestContext,
+): () => void {
+  const controller = new AbortController();
+  let closed = false;
+
+  const finish = (error?: unknown) => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    if (error !== undefined) {
+      callbacks.onError?.(error);
+    }
+    callbacks.onClose?.();
+  };
+
+  void (async () => {
+    try {
+      const init = {
+        headers: { Accept: "text/event-stream" },
+        signal: combineSignals(controller.signal, context?.signal),
+      };
+      const path = `/discovery/mqtt_sidecar/live/stream?session_id=${encodeURIComponent(sessionId)}`;
+      const response = context?.client
+        ? await context.client.fetchRaw(path, init)
+        : await fetch(`${apiBaseUrl}${path}`, withApiKey(init));
+
+      if (response.status === 401) {
+        throw new ApiError(AUTH_REQUIRED_MESSAGE, response.status);
+      }
+      if (!response.ok) {
+        throw new ApiError(await parseApiError(response), response.status);
+      }
+      if (!response.body) {
+        throw new Error("Streaming response body is not available.");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const { events, rest } = parseMqttLiveSseBuffer(buffer);
+        buffer = rest;
+        for (const { name, frame } of events) {
+          if (name === "message") {
+            if (frame) {
+              callbacks.onFrame(frame);
+            }
+          } else {
+            callbacks.onControl(name);
+          }
+        }
+      }
+      finish();
+    } catch (error) {
+      if (controller.signal.aborted) {
+        finish();
+        return;
+      }
+      finish(error);
+    }
+  })();
+
+  return () => {
+    controller.abort();
+  };
+}

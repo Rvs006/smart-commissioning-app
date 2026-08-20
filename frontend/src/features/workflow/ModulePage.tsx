@@ -80,6 +80,8 @@ import {
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
+import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
+import { useMqttLiveSession } from "./useMqttLiveSession";
 import {
   assetMatchesFacetFilter,
   buildAssetFacts,
@@ -3474,6 +3476,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       ? (discoveryResultsQuery.data?.devices?.length ?? 0)
       : 0;
 
+  // MQTT live topic tree (M4a): a held broker session streamed to the browser.
+  // Read-only; nothing persists. Shares the capture panel's topic filter + the
+  // page's scan-authorization consent.
+  const mqttLive = useMqttLiveSession(
+    module.route === "mqtt-scanner",
+    { workspace: workspaceRef, authorized: scanAuthorized, rootFilter: captureTopicFilter.trim() || undefined },
+    apiClient,
+  );
+
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
   // and until a terminal run's results arrive.
@@ -5899,6 +5910,118 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                   ? captureTopicsQuery.error.message
                   : "request failed"}
               </span>
+            )}
+          </section>
+        )}
+
+        {module.route === "mqtt-scanner" && (
+          <section className="surface" data-stepgroup="run">
+            <div className="surface-heading">
+              <div>
+                <h3>Live Topic Tree</h3>
+                <p className="section-copy">
+                  Watch broker topics in real time. Nothing is persisted; run a capture above when you
+                  need saved evidence.
+                </p>
+              </div>
+              <div className="inline-actions">
+                {mqttLive.phase === "live" ||
+                mqttLive.phase === "connecting" ||
+                mqttLive.phase === "reconnecting" ||
+                mqttLive.phase === "unavailable" ? (
+                  <button
+                    className="secondary-button compact"
+                    disabled={!canEngineer}
+                    onClick={() => void mqttLive.stop()}
+                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                    type="button"
+                  >
+                    Stop live view
+                  </button>
+                ) : (
+                  <button
+                    className="secondary-button compact"
+                    disabled={!canEngineer || !scanAuthorized}
+                    onClick={() => void mqttLive.start()}
+                    title={
+                      !canEngineer
+                        ? ENGINEER_REQUIRED_TOOLTIP
+                        : !scanAuthorized
+                          ? "Tick the scan-authorization checkbox first."
+                          : undefined
+                    }
+                    type="button"
+                  >
+                    Start live view
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {mqttLive.error && (mqttLive.phase === "error" || mqttLive.phase === "unavailable") && (
+              <div className="state-panel error" role="alert">
+                <strong>Live session problem</strong>
+                <span>{mqttLive.error}</span>
+              </div>
+            )}
+
+            {mqttLive.phase === "occupied" && mqttLive.status?.session ? (
+              <div className="state-panel" role="status">
+                <strong>A live session is already open</strong>
+                <span>Held by {mqttLive.status.session.owner}. Take over to replace it.</span>
+                <div className="detail-actions">
+                  <button
+                    className="secondary-button compact"
+                    disabled={!canEngineer || !scanAuthorized}
+                    onClick={() => void mqttLive.start({ takeOver: true })}
+                    title={canEngineer ? undefined : ENGINEER_REQUIRED_TOOLTIP}
+                    type="button"
+                  >
+                    Take over
+                  </button>
+                </div>
+              </div>
+            ) : mqttLive.phase === "live" && mqttLive.snapshot ? (
+              <>
+                <div className="live-console-kpis" aria-live="polite">
+                  <div>
+                    <span className="live-console-pulse" aria-hidden="true" /> Broker
+                    <strong>{mqttLive.snapshot.status.status}</strong>
+                  </div>
+                  <div>
+                    <span>Topics</span>
+                    <strong>{mqttLive.snapshot.stats.topicsDiscovered}</strong>
+                  </div>
+                  <div>
+                    <span>Live assets</span>
+                    <strong>{mqttLive.snapshot.stats.liveAssets}</strong>
+                  </div>
+                  <div>
+                    <span>Messages</span>
+                    <strong>{mqttLive.snapshot.stats.totalMessages}</strong>
+                  </div>
+                  <div>
+                    <span>Issues</span>
+                    <strong>{mqttLive.snapshot.stats.issues}</strong>
+                  </div>
+                </div>
+                <MqttLiveTopicTree
+                  lastActivity={mqttLive.lastActivity}
+                  totalTopics={mqttLive.snapshot.totalTopics}
+                  tree={mqttLive.snapshot.tree}
+                  treeShown={mqttLive.snapshot.treeShown}
+                />
+              </>
+            ) : mqttLive.phase === "connecting" ? (
+              <div className="state-panel" role="status">
+                <strong>Opening live session…</strong>
+                <span>Connecting to the broker through the sidecar.</span>
+              </div>
+            ) : (
+              <div className="state-panel" role="status">
+                <strong>Live view not running</strong>
+                <span>Start a live view to watch broker topics as they arrive. Nothing is persisted.</span>
+              </div>
             )}
           </section>
         )}
