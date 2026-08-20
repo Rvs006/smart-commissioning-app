@@ -287,6 +287,11 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     # the hosted compose profile (infra/) sets AUTH_MODE=api_key instead.
     _set_env_default("AUTH_MODE", "local")
     _set_env_default("JOB_EXECUTION_MODE", "inline")
+    # The portable field build ships frictionless: scans and device writes run
+    # with no "authorized" checkbox and no sealed two-person approval (evidence
+    # is still recorded). Set SCT_REQUIRE_SCAN_AUTHORIZATION=1 in the environment
+    # to restore the enforced ceremony. Default only -- a parent value wins.
+    _set_env_default("SCT_REQUIRE_SCAN_AUTHORIZATION", "0")
     # v0.1.43 has one portable product. Nmap remains guarded by the persisted
     # Global Admin approval and exact local-installation confirmation; this
     # fixed launcher setting only exposes that approval capability. It is not

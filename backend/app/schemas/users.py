@@ -27,6 +27,10 @@ class MeResponse(BaseModel):
     source: str  # "user_key" | "shared_key" | "local"
     global_scope: bool = False
     effective_scopes: list[EffectiveScope] = Field(default_factory=list)
+    # Whether this deployment enforces the scan/write authorization ceremony.
+    # False -> the UI hides the checkbox and the sealed-preview approval and
+    # submits runs directly. Defaults True so older clients stay enforced.
+    authorization_enforced: bool = True
 
 
 class UserResponse(BaseModel):

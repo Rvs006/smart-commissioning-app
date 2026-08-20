@@ -566,12 +566,18 @@ def create_mqtt_publish_run(
         )
     # _prepare_scan_parameters decides dry-vs-live FIRST (400s a dry preview that
     # carries ids, or a live send with non-empty parameters) before any run lookup.
-    parameters, preview = _prepare_scan_parameters(request, expected_job_type="mqtt_publish", principal=principal)
+    # It returns needs_seal=True for a dry preview AND for a frictionless
+    # live-direct send (no sealed preview exists yet); False for a sealed replay.
+    parameters, needs_seal = _prepare_scan_parameters(request, expected_job_type="mqtt_publish", principal=principal)
     base_url: str | None = None
-    if preview:
+    if needs_seal:
         _seal_publish_preview(parameters, principal)
     else:
-        load_scoped_run(str(request.preview_run_id), principal, engine=service.engine)  # scope the preview
+        load_scoped_run(str(request.preview_run_id), principal, engine=service.engine)  # scope the sealed preview
+    if not is_dry_run(parameters):
+        # Any live send (sealed replay OR frictionless direct) must run through a
+        # live session held by the sender and connected to the sealed broker.
+        # These are transport correctness, not authorization friction.
         base_url = _resolve_base_url(http_request)
         session = live_service.current()
         if session is None:
@@ -584,6 +590,10 @@ def create_mqtt_publish_run(
         if (session.project_id, session.site_id) != (request.project_id, request.site_id):
             raise HTTPException(status_code=409, detail="The live session belongs to a different workspace.")
         _assert_session_broker_matches_seal(base_url, parameters)
+        if needs_seal:
+            # Frictionless live-direct: no admin-approval row exists, so record
+            # the sender as the authorizer for the engine's evidence line.
+            parameters["scan_authorization"] = {"authorized": True, "authorized_by": principal.username}
 
     run = _create_run(request.model_copy(update={"parameters": parameters}), "mqtt_publish", principal)
 

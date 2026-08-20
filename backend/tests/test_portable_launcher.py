@@ -47,6 +47,7 @@ _MANAGED_VARS = (
     "SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED",
     "SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED",
     "SMART_COMMISSIONING_APP_VERSION",
+    "SCT_REQUIRE_SCAN_AUTHORIZATION",
 )
 
 
@@ -113,6 +114,20 @@ class ConfigureEnvironmentTests(unittest.TestCase):
         self.assertEqual(os.environ["DATABASE_URL"], expected)
         # Nothing overridden, so nothing is printed.
         self.assertEqual(buffer.getvalue(), "")
+
+    def test_frictionless_authorization_is_the_portable_default_and_reversible(self) -> None:
+        root = self._make_root()
+        for name in _MANAGED_VARS:
+            os.environ.pop(name, None)
+        self.launcher.configure_environment(root)
+        self.assertEqual(os.environ["SCT_REQUIRE_SCAN_AUTHORIZATION"], "0")
+
+        # A parent-set value wins (the escape hatch back to the enforced ceremony).
+        for name in _MANAGED_VARS:
+            os.environ.pop(name, None)
+        os.environ["SCT_REQUIRE_SCAN_AUTHORIZATION"] = "1"
+        self.launcher.configure_environment(self._make_root())
+        self.assertEqual(os.environ["SCT_REQUIRE_SCAN_AUTHORIZATION"], "1")
 
     def test_every_v0143_portable_forces_the_same_approval_only_nmap_environment(self) -> None:
         for name in _MANAGED_VARS:
