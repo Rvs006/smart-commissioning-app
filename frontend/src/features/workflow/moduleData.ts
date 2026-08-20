@@ -271,3 +271,16 @@ export function getModuleByRoute(route: string): ModuleDefinition {
   }
   return module;
 }
+
+// Resolve a run's job type to the route of the module that owns it, so callers
+// (e.g. Run History's comparison launcher) don't hand-maintain their own
+// jobType->route map and drift from the module registry. Built-in discovery
+// types (ip_discovery/bacnet_discovery/mqtt_discovery) resolve to their -sct
+// module; the sidecar types (ip_scanner/bacnet_scanner/mqtt_scanner) to the
+// sidecar module. First match wins, which is unambiguous for the six discovery
+// job types since each lives in exactly one module.
+export function moduleRouteForJobType(jobType: JobType): string | undefined {
+  return modules.find((module) =>
+    module.runActions.some((action) => "jobType" in action && action.jobType === jobType),
+  )?.route;
+}

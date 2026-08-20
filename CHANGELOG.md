@@ -9,6 +9,11 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ### Fixed
 
+- Run History's "Open in module" now opens the module that actually ran a sealed
+  comparison. A hand-maintained job-type-to-route map had drifted, so the three
+  built-in discovery lanes (ip_discovery, bacnet_discovery, mqtt_discovery) all
+  opened their sidecar page instead of the built-in -sct page. The route is now
+  derived from the module registry, so it can no longer drift.
 - Signed report manifests and ZIP exports now retain the selected source-run
   IDs and frozen build provenance while remaining compatible with manifest
   schemas 1.0 and 1.1.
