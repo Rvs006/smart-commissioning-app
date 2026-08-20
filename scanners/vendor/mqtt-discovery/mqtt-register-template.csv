@@ -1,0 +1,8 @@
+Asset,Topic,Type,Point,Unit,Data Type,Schema,Site,Location,Description
+AHU-01,udmi/site/example/ahu/01,AHU,supply_air_temp,degC,analog,udmi-v2,Example Site,Plant Room,AHU-01 supply air temperature
+AHU-01,udmi/site/example/ahu/01,AHU,return_air_temp,degC,analog,udmi-v2,Example Site,Plant Room,AHU-01 return air temperature
+AHU-01,udmi/site/example/ahu/01,AHU,supply_fan_speed,percent,analog,udmi-v2,Example Site,Plant Room,AHU-01 supply fan speed command
+VAV-01,udmi/site/example/vav/01,VAV,zone_air_temp,degC,analog,udmi-v2,Example Site,Open Plan,VAV-01 zone temperature
+VAV-01,udmi/site/example/vav/01,VAV,damper_position,percent,analog,udmi-v2,Example Site,Open Plan,VAV-01 damper position
+FCU-05,udmi/site/example/fcu/05,FCU,fan_status,bool,binary,udmi-v2,Example Site,Meeting Room,FCU-05 fan run status
+PMP-01,udmi/site/example/vsd/pump-01,Pump,pump_speed,percent,analog,udmi-v2,Example Site,Plant,CHW pump VSD speed

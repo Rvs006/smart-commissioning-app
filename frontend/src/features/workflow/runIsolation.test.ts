@@ -326,7 +326,7 @@ describe("frontend run and session isolation", () => {
     const mqttRun = toRunRef(
       first,
       DEFAULT_WORKSPACE,
-      "mqtt-discovery",
+      "mqtt-scanner",
       run({
       job_type: "mqtt_discovery",
       run_id: "run-mqtt",
@@ -353,7 +353,7 @@ describe("frontend run and session isolation", () => {
     const active = toRunRef(
       scope,
       DEFAULT_WORKSPACE,
-      "mqtt-discovery",
+      "mqtt-scanner",
       run({
       job_type: "mqtt_discovery",
       run_id: "run-b",
@@ -433,7 +433,7 @@ describe("frontend run and session isolation", () => {
     const active = toRunRef(
       scope,
       DEFAULT_WORKSPACE,
-      "mqtt-discovery",
+      "mqtt-scanner",
       run({
       job_type: "mqtt_discovery",
       run_id: "run-mqtt",
@@ -619,8 +619,8 @@ describe("frontend run and session isolation", () => {
       assetIdentity("ip-scanner", { "Observed IP": "192.0.2.9" }),
     );
     expect(
-      assetIdentity("bacnet-discovery", { Address: "192.0.2.8:47808", Instance: "1001" }),
-    ).not.toBe(assetIdentity("bacnet-discovery", { Address: "192.0.2.8:47808", Instance: "1002" }));
+      assetIdentity("bacnet-scanner", { Address: "192.0.2.8:47808", Instance: "1001" }),
+    ).not.toBe(assetIdentity("bacnet-scanner", { Address: "192.0.2.8:47808", Instance: "1002" }));
   });
 
   it("keeps progressive discovery selection on the server entity key as display fields change", () => {

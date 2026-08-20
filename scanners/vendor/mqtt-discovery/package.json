@@ -1,0 +1,15 @@
+{
+  "name": "mqtt-discovery",
+  "version": "2.0.0",
+  "description": "SCA MQTT Discovery — broker subscribe, UDMI asset/point discovery + register validation (Windows).",
+  "main": "server.js",
+  "bin": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "postject": "^1.0.0-alpha.6"
+  }
+}

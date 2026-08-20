@@ -1,0 +1,23 @@
+{
+  "name": "network-ip-scanner",
+  "version": "1.0.0",
+  "description": "Network IP Scanner with RAG device-register comparison (Windows).",
+  "main": "server.js",
+  "bin": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*",
+      "template/**/*",
+      "oui.js"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "author": "",
+  "license": "MIT"
+}

@@ -15,6 +15,7 @@ from app.api.routes import (
     raw_evidence,
     reports,
     runs,
+    scanners,
     system,
     udmi_schemas,
     users,
@@ -90,6 +91,11 @@ protected_router.include_router(
     events.router, prefix="/runs", tags=["runs", "events"], dependencies=[Depends(require_role(Role.VIEWER))]
 )
 protected_router.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
+# Standalone loopback-sidecar scanners (job_type ip_scanner). Inline-only; the
+# route rejects a non-inline deployment with 503. Engineer-gated per-route.
+# Mounted under /discovery so the frontend's /discovery/ip_sidecar/runs (the
+# plain, non-sealed discovery path) reaches it.
+protected_router.include_router(scanners.router, prefix="/discovery", tags=["scanners"])
 protected_router.include_router(
     raw_evidence.router,
     prefix="/discovery",

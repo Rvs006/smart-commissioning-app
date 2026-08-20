@@ -296,6 +296,30 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
     # only the one-click local approval and process lane.
     os.environ["SMART_COMMISSIONING_NMAP_XML_IMPORT_ENABLED"] = "0"
 
+    # Vendored Node scanner sidecars ship flat at <bundle>/scanners/<app> (the
+    # supervisor's default is scanners/vendor/<name>, the dev layout). Point it
+    # at the bundled dirs and prepend the bundled signed node.exe to PATH so the
+    # supervisor's shutil.which("node") runs it. Existence-gated so the unfrozen
+    # dev layout keeps the supervisor's own scanners/vendor default untouched.
+    scanners_root = root / "scanners"
+    for env_name, app_dir in (
+        ("SMART_COMMISSIONING_IP_SCANNER_DIR", "network-ip-scanner"),
+        ("SMART_COMMISSIONING_BACNET_SCANNER_DIR", "bacnet-scanner"),
+        ("SMART_COMMISSIONING_MQTT_SCANNER_DIR", "mqtt-discovery"),
+    ):
+        candidate = scanners_root / app_dir
+        if candidate.is_dir():
+            os.environ.setdefault(env_name, str(candidate))
+    # The portable bundle wants the sidecars actually running; the backend
+    # lifespan only spawns them when this is set (tests and plain uvicorn leave
+    # it unset). setdefault so an operator can force it off.
+    os.environ.setdefault("SMART_COMMISSIONING_ENABLE_SIDECARS", "1")
+    if (scanners_root / "node.exe").is_file():
+        os.environ["PATH"] = str(scanners_root) + os.pathsep + os.environ.get("PATH", "")
+    # ponytail: taskkill /F /T on lifespan stop covers Ctrl+C (the documented stop).
+    # Add a kill-on-job-close Job Object only if orphaned node.exe after a hard
+    # console close shows up as a real field problem.
+
 
 def open_browser_later(url: str) -> None:
     def open_url() -> None:

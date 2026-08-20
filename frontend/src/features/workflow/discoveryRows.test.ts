@@ -561,7 +561,7 @@ describe("discoveryEmptyStateFor", () => {
 
   it("names the Who-Is instance range and the BBMD caveat for empty BACnet discovery", () => {
     const state = discoveryEmptyStateFor(
-      "bacnet-discovery",
+      "bacnet-scanner",
       emptyResults("succeeded", {
         device_count: 0,
         device_instance_low: 0,
@@ -574,7 +574,7 @@ describe("discoveryEmptyStateFor", () => {
   });
 
   it("omits the BACnet instance range when the summary does not carry one", () => {
-    const state = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", {}));
+    const state = discoveryEmptyStateFor("bacnet-scanner", emptyResults("succeeded", {}));
     expect(state?.detail).toMatch(/No devices answered the Who-Is\./);
     expect(state?.detail).not.toMatch(/instance range/);
   });
@@ -588,7 +588,7 @@ describe("discoveryEmptyStateFor", () => {
       "Registered with BBMD 10.10.30.4, but no devices answered the Who-Is (instances 0–4194303) " +
       "within 3s. Check the device-instance range and the BBMD's broadcast distribution.";
     const state = discoveryEmptyStateFor(
-      "bacnet-discovery",
+      "bacnet-scanner",
       emptyResults("succeeded", {
         device_count: 0,
         device_instance_low: 0,
@@ -606,7 +606,7 @@ describe("discoveryEmptyStateFor", () => {
     // Runs recorded before v0.1.12 carry no hint; they must still explain
     // themselves rather than regress to bare "no results".
     const state = discoveryEmptyStateFor(
-      "bacnet-discovery",
+      "bacnet-scanner",
       emptyResults("succeeded", { device_count: 0, device_instance_low: 1, device_instance_high: 4194303 }),
     );
     expect(state?.detail).toMatch(/No devices answered the Who-Is \(instance range 1–4194303\)/);
@@ -614,9 +614,9 @@ describe("discoveryEmptyStateFor", () => {
   });
 
   it("falls back when the hint is blank or not a string", () => {
-    const blank = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", { empty_scan_hint: "  " }));
+    const blank = discoveryEmptyStateFor("bacnet-scanner", emptyResults("succeeded", { empty_scan_hint: "  " }));
     expect(blank?.detail).toMatch(/No devices answered the Who-Is/);
-    const nonString = discoveryEmptyStateFor("bacnet-discovery", emptyResults("succeeded", { empty_scan_hint: 42 }));
+    const nonString = discoveryEmptyStateFor("bacnet-scanner", emptyResults("succeeded", { empty_scan_hint: 42 }));
     expect(nonString?.detail).toMatch(/No devices answered the Who-Is/);
   });
 
@@ -625,7 +625,7 @@ describe("discoveryEmptyStateFor", () => {
     // sent no packets — either reading as "we looked and found nothing" is the
     // exact dishonesty the status/dry_run ordering exists to prevent.
     const failed = discoveryEmptyStateFor(
-      "bacnet-discovery",
+      "bacnet-scanner",
       emptyResults("failed", { empty_scan_hint: "No devices answered the Who-Is." }),
       "The BBMD at 10.10.30.4:47808 refused foreign-device registration (result code 3).",
     );
@@ -633,7 +633,7 @@ describe("discoveryEmptyStateFor", () => {
     expect(failed?.detail).toBe("The BBMD at 10.10.30.4:47808 refused foreign-device registration (result code 3).");
 
     const dry = discoveryEmptyStateFor(
-      "bacnet-discovery",
+      "bacnet-scanner",
       emptyResults("succeeded", { dry_run: true, empty_scan_hint: "No devices answered the Who-Is." }),
     );
     expect(dry?.title).toMatch(/Dry run complete — preview only/);
@@ -642,7 +642,7 @@ describe("discoveryEmptyStateFor", () => {
 
   it("names the capture window for an empty MQTT capture", () => {
     const state = discoveryEmptyStateFor(
-      "mqtt-discovery",
+      "mqtt-scanner",
       emptyResults("succeeded", { topics_discovered: 0, messages_captured: 0, capture_seconds: 30 }),
     );
     expect(state?.title).toMatch(/no MQTT messages received/);
@@ -651,7 +651,7 @@ describe("discoveryEmptyStateFor", () => {
 
   it("echoes the engine's own failure message instead of implying nothing was found", () => {
     const state = discoveryEmptyStateFor(
-      "mqtt-discovery",
+      "mqtt-scanner",
       emptyResults("failed", {}),
       "MQTT discovery failed (capture_window_empty).",
     );

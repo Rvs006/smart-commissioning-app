@@ -1,0 +1,6 @@
+Device Instance,Device Name,Network,IP Address,Vendor,Model,Location,Expected Objects,Description
+1001,CTRL-01,0,10.0.10.15,Trend,IQ4E,Plant Room,42,Example AHU controller
+1002,CTRL-02,0,10.0.10.16,Trend,IQ4E,Plant Room,42,Example AHU controller
+2001,EM-01,0,10.0.10.17,Schneider Electric,PM5560,Plant Room,18,Example energy meter
+3001,FCU-01,0,10.0.11.20,Distech Controls,ECB-VAV,Corridor,12,Example FCU controller
+5001,SUPERVISOR-01,0,10.0.10.10,Tridium,JACE-8000,Comms Room,650,Example BACnet supervisor

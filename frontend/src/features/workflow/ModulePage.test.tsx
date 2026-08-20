@@ -314,7 +314,7 @@ it("lets an admin approve a sealed IP preview from Run Controls", async () => {
     }),
   );
 
-  renderModule("ip-scanner", "/", authorizations);
+  renderModule("ip-scanner-sct", "/", authorizations);
 
   fireEvent.click(await screen.findByLabelText(/Dry run/i));
   fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
@@ -457,7 +457,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // The real-scan run button is disabled until the operator confirms.
     const queueButton = await screen.findByRole("button", { name: "Run" });
@@ -475,7 +475,7 @@ describe("ModulePage discovery wiring", () => {
     // hostname is unique to the live results payload (not present in sample rows);
     // it now appears in both the results table and the selected-result detail aside.
     expect((await screen.findAllByText("plant-controller")).length).toBeGreaterThan(0);
-    // Live banner is shown (its ip-scanner copy still opens with this phrase).
+    // Live banner is shown (its ip-scanner-sct copy still opens with this phrase).
     expect(screen.getByText(/Live discovery observations/i)).toBeInTheDocument();
     // The Result column now reports each host's scan verdict.
     expect(screen.getByRole("columnheader", { name: "Result" })).toBeInTheDocument();
@@ -634,7 +634,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("ip-scanner-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
@@ -756,7 +756,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     fireEvent.change(await screen.findByLabelText(/CSV or XLSX file/i), {
       target: { files: [new File(["reg"], "ip_register.csv")] },
@@ -810,7 +810,7 @@ describe("ModulePage discovery wiring", () => {
   it("shows a server-truth 'already imported' note when no file is staged (ISSUE-5)", async () => {
     stubLatestImportFetch(latestImportSummary);
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // The empty file input no longer implies nothing was uploaded: the note names
     // the stored register and states it is persisted and used by runs here.
@@ -822,7 +822,7 @@ describe("ModulePage discovery wiring", () => {
   it("hides the 'already imported' note while a new file is staged (ISSUE-5)", async () => {
     stubLatestImportFetch(latestImportSummary);
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect(await screen.findByText("Register already imported")).toBeInTheDocument();
     // Staging a file replaces the server-truth note with the in-session
@@ -856,7 +856,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // The profiles load resolves the card; the note is absent.
     expect(await screen.findByRole("button", { name: "Upload and validate" })).toBeInTheDocument();
@@ -897,7 +897,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // Type an ad-hoc CIDR override and authorize the real scan, mirroring the
     // authorized-scan test above.
@@ -946,7 +946,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -1005,7 +1005,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect(await screen.findByText(/Nmap 7\.98 is confirmed for this site/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Discovery provider"), {
       target: { value: "operator_managed_nmap" },
@@ -1093,7 +1093,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     const approve = await screen.findByRole("button", { name: "Approve detected Nmap" });
     fireEvent.click(approve);
 
@@ -1163,7 +1163,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -1237,7 +1237,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    const view = renderModule("mqtt-discovery");
+    const view = renderModule("mqtt-discovery-sct");
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
@@ -1330,7 +1330,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     expect(await screen.findByText("preview/site/device/events")).toBeInTheDocument();
@@ -1435,7 +1435,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     const downloadButton = await screen.findByRole("button", { name: "Export to XLSX" });
     await waitFor(() => expect(downloadButton).toBeEnabled());
     fireEvent.click(downloadButton);
@@ -1501,7 +1501,7 @@ describe("ModulePage discovery wiring", () => {
         }),
       );
 
-      renderModule("mqtt-discovery");
+      renderModule("mqtt-discovery-sct");
       const downloadButton = await screen.findByRole("button", { name: "Export to XLSX" });
       await waitFor(() => expect(downloadButton).toBeEnabled());
       fireEvent.click(downloadButton);
@@ -1540,7 +1540,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "2" },
@@ -1566,7 +1566,7 @@ describe("ModulePage discovery wiring", () => {
       posted = true;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
       target: { value: "49" },
@@ -1589,7 +1589,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // Clear the default "10" so the duration is blank, then pick an hours unit:
     // the unit multiplier must not turn a blank (indefinite) into a bounded 0.
@@ -1617,7 +1617,7 @@ describe("ModulePage discovery wiring", () => {
       posted = true;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // "45s" must NOT silently coerce to the 0 = indefinite sentinel: that would
     // turn an intended bounded window into an unbounded background capture. It is
@@ -1641,7 +1641,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // Do NOT touch the topic filter: it defaults to blank. Root Topic was removed
     // from Configuration, so a blank filter is omitted from the run parameters
@@ -1664,7 +1664,7 @@ describe("ModulePage discovery wiring", () => {
       postedBody = body;
     });
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // An operator who wants a full-wildcard or scoped capture types it explicitly;
     // it flows through unchanged as the run's topic_filter override.
@@ -1755,7 +1755,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -1845,7 +1845,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -1909,7 +1909,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2002,7 +2002,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2071,7 +2071,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2155,7 +2155,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2231,7 +2231,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
     const runButton = await screen.findByRole("button", { name: "Run" });
@@ -2274,7 +2274,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const authorizedRunButton = await prepareAuthorizedIpRun();
     fireEvent.click(authorizedRunButton);
@@ -2330,7 +2330,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // Before any run the headline metric is a neutral empty state, NOT the old
     // hardcoded sample ("118" / "reachable hosts") that looked like a real scan.
@@ -2359,7 +2359,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     fireEvent.click(screen.getByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -2403,7 +2403,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const queueButton = await prepareAuthorizedIpRun();
     fireEvent.click(queueButton);
@@ -2453,7 +2453,7 @@ describe("ModulePage discovery wiring", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     fireEvent.click(screen.getByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -2541,7 +2541,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery");
+    renderModule("bacnet-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -2648,7 +2648,7 @@ describe("ModulePage BACnet backend provenance", () => {
         throw new Error(`Unexpected fetch in test: ${url}`);
       }),
     );
-    renderModule("bacnet-discovery", "/?compare=prior-run", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("bacnet-discovery-sct", "/?compare=prior-run", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await waitFor(() => expect(previewPointsSignal).not.toBeNull());
@@ -2719,7 +2719,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("bacnet-discovery-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await waitFor(() => expect(resultsRequests).toBeGreaterThan(0));
@@ -2771,7 +2771,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    renderModule("bacnet-discovery-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await screen.findAllByRole("button", { name: /Generate report from this run/i });
@@ -2820,7 +2820,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    const view = renderModule("bacnet-discovery", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
+    const view = renderModule("bacnet-discovery-sct", "/", [{ ...previewAuthorization, preview_run_id: sharedRunId }]);
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     fireEvent.click(await screen.findByRole("button", { name: "Preview" }));
     await screen.findAllByRole("button", { name: /Generate report from this run/i });
@@ -2836,7 +2836,7 @@ describe("ModulePage BACnet backend provenance", () => {
         <SessionProvider>
           <MemoryRouter initialEntries={["/"]}>
             <LocationProbe />
-            <ModulePage moduleRoute="mqtt-discovery" />
+            <ModulePage moduleRoute="mqtt-discovery-sct" />
           </MemoryRouter>
         </SessionProvider>
       </QueryClientProvider>,
@@ -2937,7 +2937,7 @@ describe("ModulePage BACnet backend provenance", () => {
     );
 
     const { queryClient } = renderModule(
-      "bacnet-discovery",
+      "bacnet-discovery-sct",
       "/",
       [{ ...previewAuthorization, preview_run_id: sharedRunId }],
       false,
@@ -3070,7 +3070,7 @@ describe("ModulePage BACnet backend provenance", () => {
       }),
     );
 
-    renderModule("bacnet-discovery");
+    renderModule("bacnet-discovery-sct");
 
     fireEvent.click(await screen.findByLabelText(/Dry run/i));
     const previewButton = await screen.findByRole("button", { name: "Preview" });
@@ -3653,7 +3653,7 @@ describe("ModulePage labels and templates", () => {
 
   it("renames the discovery run action from Queue to Run", async () => {
     stubBasic();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect(await screen.findByText("Run IP Discovery")).toBeInTheDocument();
   });
 
@@ -3707,9 +3707,9 @@ describe("ModulePage labels and templates", () => {
   // operatorData workspace title shadows the moduleData one on every head that
   // has a workspace — i.e. all five. These assert the string an operator
   // actually reads, whichever layer supplies it.
-  it("titles the ip-scanner hero 'IP Discovery', matching its menu entry", async () => {
+  it("titles the ip-scanner-sct hero 'IP Discovery', matching its menu entry", async () => {
     stubBasic();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect(
       await screen.findByRole("heading", { level: 2, name: "IP Discovery" }),
     ).toBeInTheDocument();
@@ -3717,7 +3717,7 @@ describe("ModulePage labels and templates", () => {
 
   it("titles the bacnet-discovery hero 'BACnet Discovery'", async () => {
     stubBasic();
-    renderModule("bacnet-discovery");
+    renderModule("bacnet-discovery-sct");
     expect(
       await screen.findByRole("heading", { level: 2, name: "BACnet Discovery" }),
     ).toBeInTheDocument();
@@ -7869,7 +7869,7 @@ describe("ModulePage run retention", () => {
     edge_id: null,
   };
 
-  // Serves the last-succeeded-run lookup per job type, so an ip-scanner render
+  // Serves the last-succeeded-run lookup per job type, so an ip-scanner-sct render
   // rehydrates run-ip-1 while every other head finds nothing of its own.
   function stubWithLastRun() {
     vi.stubGlobal(
@@ -7900,7 +7900,7 @@ describe("ModulePage run retention", () => {
 
   it("re-attaches the last succeeded run on arrival without the operator running anything", async () => {
     stubWithLastRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // No Run click anywhere in this test: the monitor comes back on its own.
     expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
@@ -7909,7 +7909,7 @@ describe("ModulePage run retention", () => {
 
   it("leaves a restored run on the Setup step instead of hijacking it to Results", async () => {
     stubWithLastRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
     // The operator came here to set something up. A run they did not just start
@@ -7922,7 +7922,7 @@ describe("ModulePage run retention", () => {
 
   it("shows the restored run's live results once the operator clicks through to Results", async () => {
     stubWithLastRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect(await screen.findByText(/Discovery run monitor/i)).toBeInTheDocument();
 
     // Results is one click away and holds the real rows from the restored run.
@@ -7933,7 +7933,7 @@ describe("ModulePage run retention", () => {
 
   it("offers Generate report from this run for a restored terminal run", async () => {
     stubWithLastRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // A restored run satisfies the engineer + terminal gates just like a fresh
     // one, so the report affordance survives navigating away and back — both
@@ -7958,13 +7958,13 @@ describe("ModulePage run retention", () => {
         </SessionProvider>
       </QueryClientProvider>
     );
-    const view = render(tree("ip-scanner"));
+    const view = render(tree("ip-scanner-sct"));
     expect((await screen.findAllByText("run-ip-1")).length).toBeGreaterThan(0);
 
     // Sibling ModulePage routes share one component instance (no key prop), so
     // this rerender — not a remount — is the real cross-head bleed vector.
     // MQTT has no succeeded run of its own, so nothing may be re-attached.
-    view.rerender(tree("mqtt-discovery"));
+    view.rerender(tree("mqtt-discovery-sct"));
     await waitFor(() => expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument());
     expect(screen.queryByText(/Discovery run monitor/i)).not.toBeInTheDocument();
     expect(stepOf()).toBe("setup");
@@ -8012,7 +8012,7 @@ describe("ModulePage run retention", () => {
         </SessionProvider>
       </QueryClientProvider>
     );
-    const view = render(tree("ip-scanner"));
+    const view = render(tree("ip-scanner-sct"));
     expect((await screen.findAllByText("run-ip-1")).length).toBeGreaterThan(0);
 
     latestIpRun = {
@@ -8021,9 +8021,9 @@ describe("ModulePage run retention", () => {
       created_at: "2026-06-11T10:00:00Z",
       updated_at: "2026-06-11T10:05:00Z",
     };
-    view.rerender(tree("mqtt-discovery"));
+    view.rerender(tree("mqtt-discovery-sct"));
     await waitFor(() => expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument());
-    view.rerender(tree("ip-scanner"));
+    view.rerender(tree("ip-scanner-sct"));
 
     expect((await screen.findAllByText("run-ip-2")).length).toBeGreaterThan(0);
     expect(screen.queryByText("run-ip-1")).not.toBeInTheDocument();
@@ -8055,7 +8055,7 @@ describe("ModulePage run retention", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect(stepOf()).toBe("setup");
 
     const runButton = await prepareAuthorizedIpRun();
@@ -8066,7 +8066,7 @@ describe("ModulePage run retention", () => {
 
   it("shows no results and no sample rows on a head that has never run", async () => {
     stubWithLastRun();
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
 
     // "Boiler 1 Controller" is an old fixture row; nothing fabricated may stand
     // in for a run that never happened.
@@ -8157,7 +8157,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await waitFor(() => expect(observationRequests).toBeGreaterThan(0));
 
     await act(async () => {
@@ -8234,12 +8234,12 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner", "/ip-scanner");
+    renderModule("ip-scanner-sct", "/ip-scanner-sct");
     const runButton = await prepareAuthorizedIpRun();
     fireEvent.click(runButton);
 
     await waitFor(() =>
-      expect(screen.getByTestId("test-location")).toHaveTextContent("/ip-scanner?run=run-ip-1"),
+      expect(screen.getByTestId("test-location")).toHaveTextContent("/ip-scanner-sct?run=run-ip-1"),
     );
   });
 
@@ -8348,7 +8348,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect((await screen.findAllByText("ahu-eight")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("ahu-nine")).length).toBeGreaterThan(0);
@@ -8462,7 +8462,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect((await screen.findAllByText("equal-cursor-controller")).length).toBeGreaterThan(0);
     await waitFor(() => expect(observationRequests).toBe(2));
@@ -8548,7 +8548,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     await waitFor(() => expect(observationRequests).toBe(1));
     terminal = true;
@@ -8614,7 +8614,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner", "/ip-scanner?run=run-ip-requested");
+    renderModule("ip-scanner-sct", "/ip-scanner-sct?run=run-ip-requested");
 
     expect((await screen.findAllByText("run-ip-requested")).length).toBeGreaterThan(0);
     expect(screen.queryByText("run-ip-newer")).not.toBeInTheDocument();
@@ -8669,7 +8669,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner", "/ip-scanner?run=run-ip-hidden");
+    renderModule("ip-scanner-sct", "/ip-scanner-sct?run=run-ip-hidden");
 
     expect((await screen.findAllByText("run-ip-accessible")).length).toBeGreaterThan(0);
     expect(screen.queryByText("run-ip-hidden")).not.toBeInTheDocument();
@@ -8797,7 +8797,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect((await screen.findAllByText("provisional-controller")).length).toBeGreaterThan(0);
     const provisionalSelected = (
@@ -8952,7 +8952,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect((await screen.findAllByText("expired-provisional-controller")).length).toBeGreaterThan(
       0,
     );
@@ -9072,7 +9072,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     expect(
       (await screen.findAllByText("quarantined-provisional-controller")).length,
     ).toBeGreaterThan(0);
@@ -9183,7 +9183,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const selectedBefore = await screen.findByText("selected-before");
     const selectedBeforeRow = selectedBefore.closest("tr");
@@ -9294,7 +9294,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect((await screen.findAllByText("private-closed-controller")).length).toBeGreaterThan(0);
     stream.push(
@@ -9389,7 +9389,7 @@ describe("ModulePage progressive discovery observations", () => {
       <QueryClientProvider client={queryClient}>
         <SessionContext.Provider value={sessionValue(workspace)}>
           <MemoryRouter initialEntries={["/"]}>
-            <ModulePage moduleRoute="ip-scanner" />
+            <ModulePage moduleRoute="ip-scanner-sct" />
           </MemoryRouter>
         </SessionContext.Provider>
       </QueryClientProvider>
@@ -9406,7 +9406,7 @@ describe("ModulePage progressive discovery observations", () => {
     const collidingRunRef: RunRef = {
       family: "discovery",
       jobType: "ip_discovery",
-      module: "ip-scanner",
+      module: "ip-scanner-sct",
       origin: "restored",
       runId: sharedRunId,
       sessionScopeId,
@@ -9489,7 +9489,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await waitFor(() => expect(observationRequested).toBe(true));
 
     stream.push(
@@ -9556,7 +9556,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    const { queryClient } = renderModule("ip-scanner");
+    const { queryClient } = renderModule("ip-scanner-sct");
     await waitFor(() => expect(resultsSignal).not.toBeNull());
     let activeResultsQueryKey: readonly unknown[] = [];
     await waitFor(() =>
@@ -9643,7 +9643,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    const { queryClient } = renderModule("bacnet-discovery", "/?compare=prior-run");
+    const { queryClient } = renderModule("bacnet-discovery-sct", "/?compare=prior-run");
     await waitFor(() => expect(pointsSignal).not.toBeNull());
     await waitFor(() => expect(comparisonSignal).not.toBeNull());
     const activeAuxiliaryKeys = queryClient
@@ -9772,7 +9772,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await waitFor(() => {
       expect(runRequests).toBeGreaterThan(0);
       expect(observationRequests).toBeGreaterThan(0);
@@ -9834,7 +9834,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     await waitFor(() => {
       expect(runRequests).toBeGreaterThan(0);
       expect(topicRequests).toBeGreaterThan(0);
@@ -9887,7 +9887,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     const [reportButton] = await screen.findAllByRole("button", {
       name: /Generate report from this run/i,
     });
@@ -9935,7 +9935,7 @@ describe("ModulePage progressive discovery observations", () => {
       }),
     );
 
-    const { queryClient } = renderModule("ip-scanner");
+    const { queryClient } = renderModule("ip-scanner-sct");
     const invalidateReports = vi.spyOn(queryClient, "invalidateQueries");
     const [formatPicker] = await screen.findAllByLabelText("Report format");
     fireEvent.change(formatPicker, { target: { value: "all" } });
@@ -10113,7 +10113,7 @@ describe("ModulePage reports visibility", () => {
       <QueryClientProvider client={queryClient}>
         <SessionProvider>
           <MemoryRouter>
-            <ModulePage moduleRoute="ip-scanner" />
+            <ModulePage moduleRoute="ip-scanner-sct" />
           </MemoryRouter>
         </SessionProvider>
       </QueryClientProvider>,
@@ -10293,7 +10293,7 @@ describe("ModulePage report controls placement", () => {
   // report controls — which live in the "setup run" group — go with it.
   it("renders the report controls in both the run-monitor and the results step group", async () => {
     stubTerminalRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const buttons = await screen.findAllByRole("button", {
       name: /Generate report from this run/i,
@@ -10309,7 +10309,7 @@ describe("ModulePage report controls placement", () => {
 
   it("keeps report generation available when final evidence refresh fails", async () => {
     stubTerminalRun({ finalEvidenceFails: true });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
     expect(
@@ -10319,7 +10319,7 @@ describe("ModulePage report controls placement", () => {
 
   it("rejects a mismatched final run before requesting discovery results", async () => {
     const captured = stubTerminalRun({ finalRun: { ...terminalRun, run_id: "wrong-run" } });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
     expect(captured.discoveryResultsRequests).toBe(0);
@@ -10328,7 +10328,7 @@ describe("ModulePage report controls placement", () => {
 
   it("does not retry a nontransient final-run status error or request discovery results", async () => {
     const captured = stubTerminalRun({ runStatusError: 400 });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect(await screen.findByText("Final evidence unavailable")).toBeInTheDocument();
     expect(captured.discoveryResultsRequests).toBe(0);
@@ -10337,7 +10337,7 @@ describe("ModulePage report controls placement", () => {
 
   it("fails terminal sync after the four bounded nonterminal status attempts without fetching results", async () => {
     const captured = stubTerminalRun({ finalRun: { ...terminalRun, status: "running" } });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     expect(
       await screen.findByText("Final evidence unavailable", {}, { timeout: 4_000 }),
@@ -10351,7 +10351,7 @@ describe("ModulePage report controls placement", () => {
   // the test above, but would render on every step in a real browser.
   it("hangs the results-step report section directly off .module-steps so the CSS gate applies", async () => {
     stubTerminalRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const buttons = await screen.findAllByRole("button", {
       name: /Generate report from this run/i,
@@ -10362,7 +10362,7 @@ describe("ModulePage report controls placement", () => {
 
   it("shares one format selection between both report control instances", async () => {
     const captured = stubTerminalRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     expect(pickers).toHaveLength(2);
@@ -10384,7 +10384,7 @@ describe("ModulePage report controls placement", () => {
 
   it("generates PDF, Word, Excel, and evidence pack reports from Generate All", async () => {
     const captured = stubTerminalRun();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     fireEvent.change(pickers[1], { target: { value: "all" } });
@@ -10418,7 +10418,7 @@ describe("ModulePage report controls placement", () => {
 
   it("continues serial Generate All after one format fails", async () => {
     const captured = stubTerminalRun({ failReportFormats: ["docx"] });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     fireEvent.change(pickers[1], { target: { value: "all" } });
@@ -10445,7 +10445,7 @@ describe("ModulePage report controls placement", () => {
     const captured = stubTerminalRun({
       failReportFormats: ["pdf", "docx", "xlsx", "zip"],
     });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     fireEvent.change(pickers[1], { target: { value: "all" } });
@@ -10475,7 +10475,7 @@ describe("ModulePage report controls placement", () => {
       createObjectURL: vi.fn(() => "blob:mock"),
       revokeObjectURL: vi.fn(),
     });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     fireEvent.change(pickers[1], { target: { value: "all" } });
@@ -10582,7 +10582,7 @@ describe("ModulePage report controls placement", () => {
       }),
     );
 
-    renderModule("mqtt-discovery");
+    renderModule("mqtt-discovery-sct");
     const pickers = (await screen.findAllByLabelText("Report format")) as HTMLSelectElement[];
     fireEvent.change(pickers[0], { target: { value: "all" } });
     const [reportButton] = await screen.findAllByRole("button", {
@@ -10631,7 +10631,7 @@ describe("ModulePage report controls placement", () => {
 
   it("renders no report controls until a run exists", async () => {
     stubTerminalRun({ lastRun: false });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // Wait for the page to settle before trusting an absence assertion.
     expect(await screen.findByRole("button", { name: "Run" })).toBeInTheDocument();
@@ -10642,7 +10642,7 @@ describe("ModulePage report controls placement", () => {
 
   it("renders no report controls for a viewer, even with a terminal run attached", async () => {
     stubTerminalRun({ role: "viewer" });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // The monitor proves the terminal run really is attached — so the absence
     // below is the engineer gate doing its job in the new section, not a page
@@ -10738,7 +10738,7 @@ describe("ModulePage snap-to-top when results open", () => {
   it("snaps to the hero when a succeeded run advances to Results", async () => {
     const scrollSpy = spyOnScroll();
     stubIpScanner();
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const queueButton = await prepareAuthorizedIpRun();
 
@@ -10808,7 +10808,7 @@ describe("ModulePage snap-to-top when results open", () => {
   it("does not snap for a run rehydrated on arrival", async () => {
     const scrollSpy = spyOnScroll();
     stubIpScanner({ lastRun: true });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     // The monitor proves the restored run really did attach, so the absence
     // below is the restored guard holding, not a page with nothing on it.
@@ -10825,7 +10825,7 @@ describe("ModulePage snap-to-top when results open", () => {
   it("snaps to the hero on a manual step click to Results", async () => {
     const scrollSpy = spyOnScroll();
     stubIpScanner({ lastRun: true });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const resultsStep = await screen.findByRole("button", { name: /Results/i });
     await waitFor(() => expect(resultsStep).toBeEnabled());
@@ -10942,7 +10942,7 @@ describe("ModulePage import rejection reasons", () => {
       },
     });
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await uploadFile();
 
     // Row + field + message + code, with the reason the operator has to act on.
@@ -10993,7 +10993,7 @@ describe("ModulePage import rejection reasons", () => {
       },
     });
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await uploadFile();
 
     // The summary already carries the columns, so this line needs no fetch...
@@ -11021,7 +11021,7 @@ describe("ModulePage import rejection reasons", () => {
       onErrorsUrl: (url) => errorUrls.push(url),
     });
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await uploadFile();
 
     expect(await screen.findByText("ACCEPTED")).toBeInTheDocument();
@@ -11032,7 +11032,7 @@ describe("ModulePage import rejection reasons", () => {
   it("says so honestly when the reasons cannot be loaded", async () => {
     stubImport({ errorsFails: true });
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await uploadFile();
 
     // An empty list must never masquerade as "no reasons" when the fetch failed.
@@ -11060,7 +11060,7 @@ describe("ModulePage import rejection reasons", () => {
       },
     });
 
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
     await uploadFile();
 
     const panel = (await screen.findByText("60 of 65 rows rejected — reasons below")).closest(
@@ -11072,7 +11072,7 @@ describe("ModulePage import rejection reasons", () => {
 
   it("clears the file input's value on selection so a re-picked same-name file is re-read", async () => {
     stubImport({ summary: rejectedSummary({ status: "accepted", accepted_rows: 4 }) });
-    renderModule("ip-scanner");
+    renderModule("ip-scanner-sct");
 
     const input = (await screen.findByLabelText(/CSV or XLSX file/i)) as HTMLInputElement;
 

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MQTT Discovery</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Top navigation (SCA suite) -->
+  <nav class="topnav">
+    <div class="nav-inner">
+      <div class="nav-group">
+        <span class="nav-group-label">Setup</span>
+        <button class="nav-tab" data-stub="Configuration"><span class="nav-ico">⚙</span> Configuration</button>
+      </div>
+      <div class="nav-group">
+        <span class="nav-group-label">Discovery</span>
+        <button class="nav-tab" data-stub="IP Scanner"><span class="nav-ico">⇄</span> IP Scanner</button>
+        <button class="nav-tab" data-stub="BACnet Discovery"><span class="nav-ico">⌗</span> BACnet Discovery</button>
+        <button class="nav-tab active"><span class="nav-ico">☁</span> MQTT Discovery</button>
+      </div>
+      <div class="nav-group">
+        <span class="nav-group-label">Validation</span>
+        <button class="nav-tab" data-stub="Data Validation"><span class="nav-ico">✓</span> Data Validation</button>
+      </div>
+      <div class="nav-group">
+        <span class="nav-group-label">Workflow</span>
+        <button class="nav-tab" data-stub="Reports"><span class="nav-ico">▤</span> Reports</button>
+      </div>
+    </div>
+  </nav>
+
+  <div class="app">
+    <!-- Info banner -->
+    <div class="banner">
+      <span class="banner-icon">〜</span>
+      <strong>MQTT Discovery:</strong>&nbsp;subscribes to broker topics, discovers assets and inspects UDMI-style payloads for point extraction and validation.
+    </div>
+
+    <!-- Status cards -->
+    <section class="status-grid">
+      <div class="status-card">
+        <div class="status-label">⇆ BROKER STATUS <span class="i">ⓘ</span></div>
+        <div id="brokerStatus" class="status-value">Disconnected</div>
+        <div class="status-actions">
+          <button id="connectBtn" class="mini-btn primary">Connect…</button>
+          <button id="disconnectBtn" class="mini-btn hidden">Disconnect</button>
+        </div>
+      </div>
+      <div class="status-card">
+        <div class="status-label">⇆ ROOT TOPIC FILTER <span class="i">ⓘ</span></div>
+        <div class="filter-row">
+          <input id="rootFilterInput" class="filter-input" placeholder="#" value="#" />
+          <button id="applyFilterBtn" class="mini-btn primary" disabled title="Change the live subscription without reconnecting">Apply</button>
+        </div>
+        <label class="chk tiny"><input id="clearOnChange" type="checkbox" checked /> clear on change</label>
+      </div>
+      <div class="status-card">
+        <div class="status-label">⇆ QOS <span class="i">ⓘ</span></div>
+        <select id="qosSelect" class="filter-input">
+          <option value="0">0 - At most once</option>
+          <option value="1" selected>1 - At least once</option>
+          <option value="2">2 - Exactly once</option>
+        </select>
+        <div class="status-sub">Applies on Apply / Connect</div>
+      </div>
+      <div class="status-card">
+        <div class="status-label">⇆ SUBSCRIPTION MODE <span class="i">ⓘ</span></div>
+        <div id="subMode" class="status-value">Subscribe (Live)</div>
+      </div>
+      <div class="status-card">
+        <div class="status-label">⇆ IMPORT REGISTER <span class="i">ⓘ</span></div>
+        <div id="registerStatus" class="status-value muted-value">No register</div>
+        <div class="status-actions">
+          <a href="/api/template" class="mini-btn" download>⬇ Template</a>
+          <button id="importBtn" class="mini-btn">⬆ Import</button>
+          <button id="clearRegBtn" class="mini-btn hidden">✕</button>
+          <input id="csvFile" type="file" accept=".csv,text/csv" hidden />
+        </div>
+      </div>
+    </section>
+
+    <!-- Metric cards -->
+    <section class="metric-grid">
+      <div class="metric-card">
+        <div class="metric-title">Expected Assets <span class="i">ⓘ</span></div>
+        <div id="mExpected" class="metric-num blue">0</div>
+        <div class="metric-sub">From MQTT Register</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Subscribed Assets <span class="i">ⓘ</span></div>
+        <div id="mSubscribed" class="metric-num green">0</div>
+        <div class="metric-sub">Matched assets</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Topics Discovered <span class="i">ⓘ</span></div>
+        <div id="mTopics" class="metric-num orange">0</div>
+        <div class="metric-sub">Unique topics</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-title">Schema / Payload Issues <span class="i">ⓘ</span></div>
+        <div id="mIssues" class="metric-num pink">0</div>
+        <div class="metric-sub">Needs attention</div>
+      </div>
+    </section>
+
+    <!-- Content -->
+    <section class="content">
+      <!-- Left: discovered topics & assets -->
+      <div class="panel list-panel">
+        <div class="panel-head">
+          <div class="panel-title">Discovered Topics &amp; Assets
+            <span id="liveBadge" class="live-badge hidden">● Live</span>
+          </div>
+          <div class="panel-head-actions">
+            <button id="exportBtnGlobal" class="btn ghost sm" title="Export all discovered assets (live + history) as a ZIP archive" disabled>⬇ Export</button>
+            <button id="saveRegBtn" class="btn ghost sm" title="Generate a register CSV from the discovered assets & points" disabled>⬇ Save as Register</button>
+            <button id="publishBtn" class="btn ghost sm" disabled>▲ Publish</button>
+          </div>
+        </div>
+        <div class="list-search">
+          <input id="topicSearch" class="search-input sm" placeholder="Search topics, assets &amp; payloads…" />
+          <label class="chk"><input id="matchedOnly" type="checkbox" /> Matched only</label>
+        </div>
+        <div class="tree-toolbar">
+          <div class="tree-sort">
+            <span>Sort:</span>
+            <button class="sort-btn active" data-sort="rate">Rate</button>
+            <button class="sort-btn" data-sort="name">A–Z</button>
+          </div>
+          <div class="tree-tools">
+            <button id="expandTopBtn" class="link-mini" title="Expand the first level">⊕ Expand top</button>
+            <button id="collapseAllBtn" class="link-mini" title="Collapse everything">⊖ Collapse all</button>
+          </div>
+        </div>
+        <div class="tree-scroll">
+          <div id="tree" class="tree"><div class="tree-empty">Not connected. Click <strong>Connect…</strong> to subscribe to a broker.</div></div>
+        </div>
+        <div id="listFoot" class="list-foot"></div>
+      </div>
+
+      <!-- Draggable splitter -->
+      <div class="splitter" id="splitter" title="Drag to resize · double-click to reset"><span class="splitter-grip"></span></div>
+
+      <!-- Right: asset detail -->
+      <div class="panel detail-panel" id="detailPanel">
+        <div class="detail-empty" id="detailEmpty">Select a topic or asset to inspect its live payload and points.</div>
+        <div class="detail-body hidden" id="detailBody">
+          <div class="detail-head">
+            <div>
+              <div class="detail-asset" id="dAsset">—</div>
+              <div class="detail-badges" id="dBadges"></div>
+            </div>
+            <div class="detail-live" id="dLive"></div>
+          </div>
+          <div class="tabs">
+            <button class="tab active" data-tab="overview">Overview</button>
+            <button class="tab" data-tab="live">Live Payload</button>
+            <button class="tab" data-tab="points">Points</button>
+            <button class="tab" data-tab="config">Config</button>
+            <button class="tab" data-tab="metadata">Metadata</button>
+            <div class="tabs-spacer"></div>
+            <button id="pauseBtn" class="btn ghost sm">⏸ Pause Stream</button>
+            <a id="exportBtn" class="btn ghost sm" href="#">⬇ Export Payload</a>
+          </div>
+
+          <!-- Overview -->
+          <div class="tabpane active" data-pane="overview">
+            <div class="kv" id="ovKv"></div>
+            <div class="ov-topics">
+              <div class="sub-title">Topics <span class="i">ⓘ</span></div>
+              <div id="ovTopics" class="topic-list"></div>
+            </div>
+            <div class="cmp-block" id="ovCmp"></div>
+          </div>
+
+          <!-- Live payload -->
+          <div class="tabpane" data-pane="live">
+            <div class="live-layout">
+              <div class="live-main">
+                <div class="sub-title">Live Payload <span class="i">ⓘ</span></div>
+                <div id="histChips" class="hist-chips"></div>
+                <pre class="json-view" id="jsonView">—</pre>
+              </div>
+              <div class="live-side">
+                <div class="side-card">
+                  <div class="sub-title">Extracted Points (Live)</div>
+                  <table class="points-table" id="pointsMini"><tbody></tbody></table>
+                </div>
+                <div class="side-card">
+                  <div class="sub-title">Register Comparison <span class="i">ⓘ</span></div>
+                  <div id="cmpMini"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Points -->
+          <div class="tabpane" data-pane="points">
+            <table class="points-table full" id="pointsFull">
+              <thead><tr><th>POINT</th><th>VALUE</th><th>UNIT</th><th>REGISTER</th><th>TS</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <!-- Config -->
+          <div class="tabpane" data-pane="config">
+            <div class="cfg-head">
+              <div>
+                <div class="sub-title">Write Config</div>
+                <div class="cfg-topic">Target: <code id="cfgTopic">—</code></div>
+              </div>
+              <div class="cfg-opts">
+                <label class="fld inline"><span>QoS</span><select id="cfgQos"><option value="0">0</option><option value="1" selected>1</option></select></label>
+                <label class="chk"><input id="cfgRetain" type="checkbox" checked /> retain</label>
+                <button id="cfgPrefillBtn" class="btn ghost sm" title="Load the device's current config">↻ Load current</button>
+              </div>
+            </div>
+            <textarea id="cfgPayload" class="cfg-editor" rows="14" placeholder='{ "…": "paste the UDMI config JSON to send to the device" }'></textarea>
+            <div class="cfg-foot">
+              <div id="cfgError" class="conn-error hidden"></div>
+              <button id="cfgSendBtn" class="btn primary" disabled>▲ Send to /config</button>
+            </div>
+          </div>
+
+          <!-- Metadata -->
+          <div class="tabpane" data-pane="metadata">
+            <div id="metaBody"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span>SCA · MQTT Discovery v2.0 · loopback-only local tool</span>
+      <span id="footConn"></span>
+    </footer>
+  </div>
+
+  <!-- Connection dialog -->
+  <div id="connModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Connect to MQTT Broker</div>
+        <button class="modal-close" data-close>✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <label class="fld span2"><span>Name</span><input id="cName" placeholder="example-broker" /></label>
+          <label class="fld"><span>Protocol</span>
+            <select id="cProto">
+              <option value="mqtt">mqtt:// (TCP)</option>
+              <option value="mqtts">mqtts:// (TLS)</option>
+            </select>
+          </label>
+          <label class="fld"><span>Host</span><input id="cHost" placeholder="192.0.2.20" /></label>
+          <label class="fld"><span>Port</span><input id="cPort" type="number" placeholder="1883" /></label>
+          <label class="fld"><span>Client ID</span><input id="cClientId" placeholder="auto" /></label>
+          <label class="fld"><span>Username</span><input id="cUser" placeholder="(anonymous)" autocomplete="off" /></label>
+          <label class="fld"><span>Password</span><input id="cPass" type="password" placeholder="" autocomplete="off" /></label>
+          <label class="fld"><span>Root Topic Filter</span><input id="cFilter" placeholder="#" value="#" /></label>
+          <label class="fld"><span>QoS</span>
+            <select id="cQos">
+              <option value="0">0 - At most once</option>
+              <option value="1" selected>1 - At least once</option>
+              <option value="2">2 - Exactly once</option>
+            </select>
+          </label>
+          <label class="chk span2" id="validateWrap"><input id="cValidate" type="checkbox" checked /> Validate broker TLS certificate</label>
+          <details class="span2 certs">
+            <summary>TLS certificates (optional)</summary>
+            <div class="cert-hint">Paste PEM text, or upload a <code>.pem</code> / <code>.crt</code> / <code>.cer</code> / <code>.key</code> file from this machine.</div>
+            <div class="fld span2">
+              <span class="cert-lbl">CA certificate
+                <button type="button" class="file-btn" data-cert="cCa">📁 Upload file…</button>
+                <span class="cert-file" id="cCaFile"></span>
+              </span>
+              <textarea id="cCa" rows="2" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+              <input type="file" id="cCaInput" accept=".pem,.crt,.cer,.ca,.cert,.key,.txt" hidden />
+            </div>
+            <div class="fld">
+              <span class="cert-lbl">Client cert
+                <button type="button" class="file-btn" data-cert="cCert">📁 Upload…</button>
+                <span class="cert-file" id="cCertFile"></span>
+              </span>
+              <textarea id="cCert" rows="2"></textarea>
+              <input type="file" id="cCertInput" accept=".pem,.crt,.cer,.cert,.txt" hidden />
+            </div>
+            <div class="fld">
+              <span class="cert-lbl">Client key
+                <button type="button" class="file-btn" data-cert="cKey">📁 Upload…</button>
+                <span class="cert-file" id="cKeyFile"></span>
+              </span>
+              <textarea id="cKey" rows="2"></textarea>
+              <input type="file" id="cKeyInput" accept=".pem,.key,.txt" hidden />
+            </div>
+          </details>
+        </div>
+        <div id="connError" class="conn-error hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-close>Cancel</button>
+        <button id="doConnectBtn" class="btn primary">Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Publish dialog -->
+  <div id="pubModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Publish Message</div>
+        <button class="modal-close" data-close-pub>✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="fld span2"><span>Topic</span><input id="pTopic" placeholder="udmi/site/example/ahu/01" /></label>
+        <div class="fmt-row">
+          <span>Format:</span>
+          <label class="radio"><input type="radio" name="pfmt" value="raw" /> raw</label>
+          <label class="radio"><input type="radio" name="pfmt" value="json" checked /> json</label>
+        </div>
+        <label class="fld span2"><span>Payload</span><textarea id="pPayload" rows="8" placeholder='{ "msg": "hello" }'></textarea></label>
+        <div class="pub-opts">
+          <label class="fld inline"><span>QoS</span>
+            <select id="pQos"><option value="0">0</option><option value="1">1</option></select>
+          </label>
+          <label class="chk"><input id="pRetain" type="checkbox" /> retain</label>
+        </div>
+        <div id="pubError" class="conn-error hidden"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-close-pub>Cancel</button>
+        <button id="doPublishBtn" class="btn primary">▲ Publish</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Config confirm dialog -->
+  <div id="cfgModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">⚠ Confirm config write</div>
+        <button class="modal-close" data-close-cfg>✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="cfg-warn">This publishes a <strong>config</strong> message to a live device. Review carefully — it can change how the equipment operates.</p>
+        <div class="kv">
+          <div class="k">Topic</div><div class="v"><code id="cfgConfTopic"></code></div>
+          <div class="k">QoS / retain</div><div class="v" id="cfgConfOpts"></div>
+        </div>
+        <div class="sub-title" style="margin-top:12px">Payload</div>
+        <pre class="json-view" id="cfgConfPayload" style="max-height:240px"></pre>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" data-close-cfg>Cancel</button>
+        <button id="cfgConfirmBtn" class="btn primary">▲ Send to device</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

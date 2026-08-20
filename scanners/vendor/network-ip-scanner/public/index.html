@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Network IP Scanner</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◇</span>
+        <div>
+          <div class="brand-title">Network IP Scanner</div>
+          <div class="brand-sub">Discovery &amp; device-register verification</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span id="scanState" class="scan-state idle">Idle</span>
+      </div>
+    </header>
+
+    <!-- Info banner -->
+    <div class="banner">
+      <span class="banner-icon">〜</span>
+      <strong>IP Scanner:</strong>&nbsp;discovers every device on the network (including unexpected
+      "foreign" hosts), scans all common ports &amp; services automatically, resolves hostnames, and
+      compares everything against the imported IP Device Register. Run with or without a register.
+    </div>
+
+    <!-- Adapter + config -->
+    <section class="config-grid">
+      <div class="config-card">
+        <div class="config-label">◱ NETWORK ADAPTER</div>
+        <select id="adapterSelect" class="config-input"></select>
+        <div id="adapterMeta" class="config-hint"></div>
+      </div>
+      <div class="config-card">
+        <div class="config-label">≋ TARGET IP RANGE</div>
+        <div class="range-row">
+          <input id="rangeStart" class="config-input" placeholder="10.0.10.1" />
+          <span class="dash">–</span>
+          <input id="rangeEnd" class="config-input" placeholder="10.0.12.254" />
+        </div>
+        <div id="rangeHint" class="config-hint"></div>
+      </div>
+      <div class="config-card">
+        <div class="config-label">≋ TIMEOUT</div>
+        <div class="range-row">
+          <input id="timeoutInput" class="config-input" type="number" value="1000" min="200" step="100" />
+          <span class="unit">ms</span>
+        </div>
+        <div class="config-hint">Per-probe timeout</div>
+      </div>
+      <div class="config-card">
+        <div class="config-label">≋ IP DEVICE REGISTER</div>
+        <div id="registerStatus" class="register-status none">No register loaded</div>
+        <div class="register-actions">
+          <a href="/api/template" class="link-btn" download>⬇ Template</a>
+          <button id="importBtn" class="link-btn">⬆ Import CSV</button>
+          <button id="clearBtn" class="link-btn danger hidden">✕ Clear</button>
+          <input id="csvFile" type="file" accept=".csv,text/csv" hidden />
+        </div>
+      </div>
+    </section>
+
+    <!-- Summary cards -->
+    <section class="summary-grid">
+      <div class="summary-card">
+        <div class="summary-title">Expected Devices <span class="i">ⓘ</span></div>
+        <div id="sumExpected" class="summary-num blue">0</div>
+        <div class="summary-sub">From IP Device Register</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-title">Reachable Devices <span class="i">ⓘ</span></div>
+        <div id="sumReachable" class="summary-num green">0</div>
+        <div id="sumReachableSub" class="summary-sub">Discovered live</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-title">Register Matches <span class="i">ⓘ</span></div>
+        <div id="sumMatches" class="summary-num green">0</div>
+        <div id="sumMatchesSub" class="summary-sub">Full RAG match</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-title">Unexpected / Rogue Hosts <span class="i">ⓘ</span></div>
+        <div id="sumRogue" class="summary-num red">0</div>
+        <div id="sumRogueSub" class="summary-sub">Not in register</div>
+      </div>
+    </section>
+
+    <!-- Toolbar -->
+    <section class="toolbar">
+      <div class="search-wrap">
+        <span class="search-icon">⌕</span>
+        <input id="searchInput" class="search-input" placeholder="Search by IP, hostname, service…" />
+      </div>
+      <div class="filter-chips">
+        <button class="chip active" data-filter="all">All</button>
+        <button class="chip" data-filter="green">● Match</button>
+        <button class="chip" data-filter="amber">● Partial</button>
+        <button class="chip" data-filter="red">● Missing / Rogue</button>
+      </div>
+      <div class="toolbar-actions">
+        <button id="saveRegBtn" class="btn ghost" title="Build an IP Device Register from this scan's actual open ports and hostnames">💾 Save as Register</button>
+        <button id="exportBtn" class="btn ghost">Export CSV</button>
+        <button id="scanBtn" class="btn primary">▶ Start Scan</button>
+      </div>
+    </section>
+
+    <!-- Progress -->
+    <div id="progressWrap" class="progress-wrap hidden">
+      <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+      <div id="progressText" class="progress-text"></div>
+    </div>
+
+    <!-- Main content: results + detail -->
+    <section class="content">
+      <div class="results-panel">
+        <div class="results-head">
+          <div class="results-title">Discovery Results <span id="resultCount" class="count">(0)</span></div>
+          <div class="legend">
+            <span class="legend-item"><span class="dot green"></span>Match</span>
+            <span class="legend-item"><span class="dot amber"></span>Partial</span>
+            <span class="legend-item"><span class="dot red"></span>Missing / Rogue</span>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>IP ADDRESS</th>
+                <th>HOSTNAME</th>
+                <th>MAC ADDRESS</th>
+                <th>STATUS</th>
+                <th>LATENCY</th>
+                <th>OPEN PORTS</th>
+                <th>SERVICE</th>
+                <th>REGISTER</th>
+                <th>PROJECT</th>
+              </tr>
+            </thead>
+            <tbody id="resultsBody">
+              <tr class="empty-row"><td colspan="9">No scan yet. Select an adapter and press <strong>Start Scan</strong>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <aside id="detailPanel" class="detail-panel empty">
+        <div class="detail-empty">Select a device to view details</div>
+      </aside>
+    </section>
+
+    <footer class="footer">
+      <span>Network IP Scanner v1.0 · loopback-only local tool</span>
+      <span id="footAdapter"></span>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

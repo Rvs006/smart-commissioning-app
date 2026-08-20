@@ -18,8 +18,8 @@ const NAV_GROUPS: NavGroup[] = [
     stage: "Discover",
     items: [
       { label: "IP Discovery", to: "/ip-scanner" },
-      { label: "BACnet Discovery", to: "/bacnet-discovery" },
-      { label: "MQTT Discovery", to: "/mqtt-discovery" },
+      { label: "BACnet Discovery", to: "/bacnet-scanner" },
+      { label: "MQTT Discovery", to: "/mqtt-scanner" },
     ],
   },
   {
@@ -41,12 +41,15 @@ const NAV_GROUPS: NavGroup[] = [
 
 const pageTitles: Record<string, string> = {
   "/": "Homepage",
-  "/bacnet-discovery": "BACnet Discovery",
+  "/bacnet-scanner": "BACnet Discovery",
+  "/bacnet-discovery-sct": "BACnet Discovery (built-in engine)",
   "/configuration": "Configuration",
   "/data-validation": "BACnet to MQTT Validation",
   "/hub": "Multi-Project Hub",
   "/ip-scanner": "IP Discovery",
-  "/mqtt-discovery": "MQTT Discovery",
+  "/ip-scanner-sct": "IP Discovery (built-in engine)",
+  "/mqtt-scanner": "MQTT Discovery",
+  "/mqtt-discovery-sct": "MQTT Discovery (built-in engine)",
   "/reports": "Reports",
   "/run-history": "Run History",
   "/udmi-validation": "UDMI Payload Workbench",
@@ -55,12 +58,15 @@ const pageTitles: Record<string, string> = {
 
 const pageSubtitles: Record<string, string> = {
   "/": "Start here, review site readiness, then choose the next commissioning action.",
-  "/bacnet-discovery": "Review discovered devices, objects and live properties.",
+  "/bacnet-scanner": "Review discovered devices, objects and live properties.",
+  "/bacnet-discovery-sct": "Built-in BACnet engine lane.",
   "/configuration": "Keep connection settings focused and safe to edit.",
   "/data-validation": "Compare point quality and protocol alignment.",
   "/hub": "Track runs across every project, site, and edge from one operator view.",
   "/ip-scanner": "Find reachable, missing and unexpected hosts.",
-  "/mqtt-discovery": "Inspect broker topics, payloads and extracted points.",
+  "/ip-scanner-sct": "Built-in TCP/Nmap engine lane.",
+  "/mqtt-scanner": "Inspect broker topics, payloads and extracted points.",
+  "/mqtt-discovery-sct": "Built-in MQTT engine lane.",
   "/reports": "Generate evidence packs and issue reports.",
   "/run-history": "Browse, sort, filter, and export every recorded run.",
   "/udmi-validation":

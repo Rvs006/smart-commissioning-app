@@ -400,6 +400,43 @@ def _validate_asset_identity(row: dict[str, str], row_number: int) -> list[Impor
     ]
 
 
+def _validate_ip_or_hostname(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    """ip_scanner_register match key: IP Address OR Hostname (one-of).
+
+    Mirrors the sidecar, which drops a register row only when BOTH its ip and
+    hostname are empty (server.js importRegister).
+    """
+    if row.get("IP Address", "").strip() or row.get("Hostname", "").strip():
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="IP Address",
+            code="missing_ip_or_hostname",
+            message="Provide an IP Address or a Hostname (at least one is required).",
+        )
+    ]
+
+
+def _validate_asset_or_topic(row: dict[str, str], row_number: int) -> list[ImportErrorRecord]:
+    """mqtt_scanner_register match key: Asset OR Topic (one-of).
+
+    Mirrors the sidecar, which drops a register row only when BOTH its asset and
+    topic are empty (udmi.importRegister derives the asset from the topic when
+    the asset cell is blank).
+    """
+    if row.get("Asset", "").strip() or row.get("Topic", "").strip():
+        return []
+    return [
+        ImportErrorRecord(
+            row_number=row_number,
+            field="Asset",
+            code="missing_asset_or_topic",
+            message="Provide an Asset or a Topic (at least one is required).",
+        )
+    ]
+
+
 def _conflicting_asset_topic_error(
     row: dict[str, str],
     row_number: int,
@@ -535,6 +572,84 @@ PROFILES: dict[ImportType, ImportProfile] = {
         warning_checks=(
             _field_check("Expected services/ports", _warn_udp_ports),
             _field_check("Ports that should not be enabled", _warn_udp_ports),
+        ),
+    ),
+    # Register for the standalone IP scanner sidecar. The columns are the
+    # sidecar's own 9-column template (verbatim) so a run's accepted rows
+    # re-serialize straight back into the sidecar with no field translation
+    # (see engines/ip_scanner_sidecar.REGISTER_TEMPLATE_COLUMNS). Header
+    # casing/spacing variants are canonicalised like every other profile.
+    # Match key is IP-or-Hostname (one-of), matching the sidecar.
+    "ip_scanner_register": ImportProfile(
+        import_type="ip_scanner_register",
+        description="Expected device register for the standalone IP scanner sidecar.",
+        # No column is required alone; IP-or-Hostname is enforced one-of below.
+        required_columns=(),
+        optional_columns=(
+            "IP Address",
+            "Hostname",
+            "Type",
+            "Vendor",
+            "Model",
+            "Expected Ports",
+            "Project",
+            "Location",
+            "Description",
+        ),
+        duplicate_key_fields=("IP Address", "Hostname"),
+        extra_checks=(_validate_ip_or_hostname, _field_check("IP Address", _validate_ip)),
+        warning_checks=(_field_check("Expected Ports", _warn_udp_ports),),
+    ),
+    # Register for the standalone BACnet scanner sidecar. Columns are the
+    # sidecar's own 9-column template (verbatim), so accepted rows re-serialize
+    # straight back with no field translation (bacnet-scanner template). Match
+    # key is the globally-unique BACnet Device Instance, which the sidecar drops
+    # a row without (server.js importRegister parses it as an integer).
+    "bacnet_scanner_register": ImportProfile(
+        import_type="bacnet_scanner_register",
+        description="Expected device register for the standalone BACnet scanner sidecar.",
+        required_columns=("Device Instance",),
+        optional_columns=(
+            "Device Name",
+            "Network",
+            "IP Address",
+            "Vendor",
+            "Model",
+            "Location",
+            "Expected Objects",
+            "Description",
+        ),
+        duplicate_key_fields=("Device Instance",),
+        extra_checks=(
+            _field_check("Device Instance", _validate_numeric),
+            _field_check("IP Address", _validate_ip),
+        ),
+    ),
+    # Register for the standalone MQTT discovery sidecar. Columns are the
+    # sidecar's own 10-column template (verbatim). Identity is Asset + point
+    # (udmi.normPoint normalises the point name at compare time); a row is kept
+    # when either Asset or Topic is present (Asset-or-Topic one-of below).
+    "mqtt_scanner_register": ImportProfile(
+        import_type="mqtt_scanner_register",
+        description="Expected asset and point register for the standalone MQTT discovery sidecar.",
+        # No column is required alone; Asset-or-Topic is enforced one-of below.
+        required_columns=(),
+        optional_columns=(
+            "Asset",
+            "Topic",
+            "Type",
+            "Point",
+            "Unit",
+            "Data Type",
+            "Schema",
+            "Site",
+            "Location",
+            "Description",
+        ),
+        duplicate_key_fields=("Asset", "Point"),
+        extra_checks=(
+            _validate_asset_or_topic,
+            _field_check("Topic", _validate_topic),
         ),
     ),
     "bacnet_register": ImportProfile(
@@ -714,6 +829,40 @@ EXAMPLE_ROWS: dict[ImportType, dict[str, str]] = {
         "Expected hostname": "ahu-l03-017",
         "Expected services/ports": "47808/udp, 443/tcp",
         "Ports that should not be enabled": "23/tcp, 21/tcp",
+    },
+    "ip_scanner_register": {
+        "IP Address": "192.0.2.117",
+        "Hostname": "ahu-l03-017",
+        "Type": "Controller",
+        "Vendor": "ExpectedCo",
+        "Model": "Model-A",
+        "Expected Ports": "47808;80;443",
+        "Project": "Example Site",
+        "Location": "Level 3 plantroom",
+        "Description": "AHU controller",
+    },
+    "bacnet_scanner_register": {
+        "Device Instance": "2001117",
+        "Device Name": "Level 3 AHU",
+        "Network": "2001",
+        "IP Address": "192.0.2.117",
+        "Vendor": "ExpectedCo",
+        "Model": "Model-A",
+        "Location": "Level 3 plantroom",
+        "Expected Objects": "AI:0;AO:1;BV:2",
+        "Description": "AHU controller",
+    },
+    "mqtt_scanner_register": {
+        "Asset": "AHU-01",
+        "Topic": "demo-site/b1/ahu/01/#",
+        "Type": "AHU",
+        "Point": "supply_air_temp",
+        "Unit": "degC",
+        "Data Type": "analog",
+        "Schema": "udmi-v2",
+        "Site": "Example Site",
+        "Location": "Plant Room",
+        "Description": "AHU-01 supply air temperature",
     },
     "bacnet_register": {
         "Project/site": "Example Site / Plant Room",

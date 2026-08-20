@@ -59,11 +59,33 @@ const modules: ModuleDefinition[] = [
     runActions: []
   },
   {
-    // Route stays /ip-scanner and jobType stays "ip_discovery" (both are
-    // historical slugs the backend and saved runs key off); only the
-    // operator-facing title is renamed, so all three discovery heads read
-    // "<Protocol> Discovery" in the menu and on the page per review 2026-07-15.
+    // The vendored network IP scanner sidecar is the operator-facing IP lane
+    // (nav "IP Discovery" -> /ip-scanner). It runs through the plain discovery
+    // path (runKind "ip_sidecar"), with no Nmap or sealed-preview flow.
     route: "ip-scanner",
+    title: "IP Discovery",
+    summary:
+      "Runs the vendored network IP scanner sidecar, compares results to the imported IP register, and identifies reachable, missing, and rogue hosts.",
+    backendService: "IP scanner sidecar",
+    importTypes: ["ip_scanner_register"],
+    runActions: [
+      {
+        id: "ip-scanner.run",
+        kind: "discovery",
+        label: "Run IP Discovery",
+        helper: "Runs the IP scanner sidecar through the API and tracks it in the run monitor below.",
+        runKind: "ip_sidecar",
+        jobType: "ip_scanner"
+      }
+    ]
+  },
+  {
+    // The built-in TCP/Nmap discovery engine. It moved off the primary nav when
+    // the sidecar took over the /ip-scanner slug, but its engine, sealed-preview
+    // authorization flow, and Nmap path are unchanged and reachable at
+    // #/ip-scanner-sct. Route + jobType "ip_discovery" stay historical slugs the
+    // backend and saved runs key off.
+    route: "ip-scanner-sct",
     title: "IP Discovery",
     summary:
       "Runs authorized network discovery jobs, compares results to the imported IP register, and identifies reachable, missing, and rogue hosts.",
@@ -81,7 +103,33 @@ const modules: ModuleDefinition[] = [
     ]
   },
   {
-    route: "bacnet-discovery",
+    // The vendored BACnet scanner sidecar is the operator-facing BACnet lane
+    // (nav "BACnet Discovery" -> /bacnet-scanner). It runs through the plain
+    // discovery path (runKind "bacnet_sidecar"), with no sealed-preview flow.
+    route: "bacnet-scanner",
+    title: "BACnet Discovery",
+    summary:
+      "Runs the vendored BACnet scanner sidecar, compares results to the imported BACnet register, and identifies reachable, missing, and rogue devices.",
+    backendService: "BACnet scanner sidecar",
+    importTypes: ["bacnet_scanner_register"],
+    runActions: [
+      {
+        id: "bacnet-scanner.run",
+        kind: "discovery",
+        label: "Run BACnet Discovery",
+        helper: "Runs the BACnet scanner sidecar through the API and tracks it in the run monitor below.",
+        runKind: "bacnet_sidecar",
+        jobType: "bacnet_scanner"
+      }
+    ]
+  },
+  {
+    // The built-in BACnet discovery engine. It moved off the primary nav when
+    // the sidecar took over the /bacnet-discovery slug, but its engine and
+    // BACnet path are unchanged and reachable at #/bacnet-discovery-sct.
+    // Route + jobType "bacnet_discovery" stay historical slugs the backend and
+    // saved runs key off.
+    route: "bacnet-discovery-sct",
     title: "BACnet Discovery",
     summary:
       "Discovers BACnet devices and objects, exposes live object properties, and compares discovered devices against the project register.",
@@ -99,7 +147,32 @@ const modules: ModuleDefinition[] = [
     ]
   },
   {
-    route: "mqtt-discovery",
+    // The vendored MQTT scanner sidecar is the operator-facing MQTT lane
+    // (nav "MQTT Discovery" -> /mqtt-scanner). It runs through the plain
+    // discovery path (runKind "mqtt_sidecar"), with no sealed-preview flow.
+    route: "mqtt-scanner",
+    title: "MQTT Discovery",
+    summary:
+      "Runs the vendored MQTT scanner sidecar, compares results to the imported MQTT register, and identifies reachable, missing, and rogue topics.",
+    backendService: "MQTT scanner sidecar",
+    importTypes: ["mqtt_scanner_register"],
+    runActions: [
+      {
+        id: "mqtt-scanner.run",
+        kind: "discovery",
+        label: "Run MQTT Discovery",
+        helper: "Runs the MQTT scanner sidecar through the API and tracks it in the run monitor below.",
+        runKind: "mqtt_sidecar",
+        jobType: "mqtt_scanner"
+      }
+    ]
+  },
+  {
+    // The built-in MQTT discovery engine. It moved off the primary nav when the
+    // sidecar took over the /mqtt-discovery slug, but its engine and MQTT path
+    // are unchanged and reachable at #/mqtt-discovery-sct. Route + jobType
+    // "mqtt_discovery" stay historical slugs the backend and saved runs key off.
+    route: "mqtt-discovery-sct",
     title: "MQTT Discovery",
     summary:
       "Connects to the broker, subscribes to topics, inspects live payloads, extracts points, and compares discovered topics to the MQTT register.",

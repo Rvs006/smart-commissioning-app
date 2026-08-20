@@ -66,6 +66,9 @@ export function formatRunProgress(summary: Record<string, unknown> | undefined):
 
 const jobTypeLabels: Record<JobType, string> = {
   ip_discovery: "IP discovery",
+  ip_scanner: "IP discovery",
+  bacnet_scanner: "BACnet discovery",
+  mqtt_scanner: "MQTT discovery",
   bacnet_discovery: "BACnet discovery",
   mqtt_discovery: "MQTT discovery",
   udmi_validation: "UDMI validation",

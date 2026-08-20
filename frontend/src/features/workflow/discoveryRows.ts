@@ -436,13 +436,13 @@ export function discoveryViewFor(
   route: string,
   results: DiscoveryResultsResponse,
 ): DiscoveryView | null {
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     return { columns: ipResultColumns, rows: ipRowsFromResults(results) };
   }
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     return { columns: bacnetResultColumns, rows: bacnetRowsFromResults(results) };
   }
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     return { columns: mqttResultColumns, rows: mqttRowsFromResults(results) };
   }
   return null;
@@ -558,7 +558,7 @@ export function discoveryMetrics(
     return typeof value === "number" ? value : undefined;
   };
 
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     // New runs stamp hosts_responsive; pre-upgrade runs contained ONLY
     // responders in discovered_assets, so counting assets with an open port is
     // correct for both — and never miscounts the new silent (non-responder)
@@ -574,7 +574,7 @@ export function discoveryMetrics(
       secondaryLabel: "hosts scanned",
     };
   }
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     const devices = num("device_count") ?? results.devices.length;
     const points = num("point_count") ?? results.points.length;
     return {
@@ -584,7 +584,7 @@ export function discoveryMetrics(
       secondaryLabel: "points indexed",
     };
   }
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     const topics = num("topics_discovered") ?? results.topics.length;
     const messages = num("messages_captured") ?? 0;
     return {
@@ -763,7 +763,7 @@ export function discoveryEmptyStateFor(
     };
   }
 
-  if (route === "ip-scanner") {
+  if (route === "ip-scanner" || route === "ip-scanner-sct") {
     const scanned = num("hosts_scanned");
     let detail: string;
     if (scanned === 0) {
@@ -779,7 +779,7 @@ export function discoveryEmptyStateFor(
     return { title: "Scan complete — no responsive hosts found", detail };
   }
 
-  if (route === "bacnet-discovery") {
+  if (route === "bacnet-scanner" || route === "bacnet-discovery-sct") {
     const title = "Discovery complete — no BACnet devices responded";
 
     // The engine authors empty_scan_hint from what the run ACTUALLY did: which
@@ -811,7 +811,7 @@ export function discoveryEmptyStateFor(
     };
   }
 
-  if (route === "mqtt-discovery") {
+  if (route === "mqtt-scanner" || route === "mqtt-discovery-sct") {
     // Defensive only: the engine currently stamps a zero-message capture as
     // FAILED (capture_window_empty, mqtt_discovery.py:447-461), so this arm is
     // unreachable today and must not be described as fixing an observable case.

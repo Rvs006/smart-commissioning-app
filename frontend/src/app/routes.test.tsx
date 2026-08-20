@@ -20,8 +20,10 @@ describe("application routes", () => {
     for (const path of [
       "configuration",
       "ip-scanner",
-      "bacnet-discovery",
-      "mqtt-discovery",
+      "bacnet-scanner",
+      "bacnet-discovery-sct",
+      "mqtt-scanner",
+      "mqtt-discovery-sct",
       "udmi-validation",
       "data-validation",
       "reports",
