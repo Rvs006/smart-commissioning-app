@@ -70,19 +70,23 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-16. The latest public release is
-  v0.1.49; v0.1.50 is the current candidate. The candidate updates the bundled
-  Brief and Learning pages with the sealed-preview authorization flow,
-  equivalent-retry rules, terminal evidence states, protocol and Nmap
-  boundaries, exports, and troubleshooting. It retains v0.1.49 run isolation
-  and idempotency behavior and adds no database migration or BACnet write
-  capability. Built-in TCP connect remains the default. Nmap stays optional,
-  locally installed, and unbundled. MQTT templates use a blank Payload type
-  where appropriate and reserve `#` for topic filters; private customer copies
-  do not ship. Field acceptance remains open until
-  `docs/v0.1.50-field-acceptance-checklist.md` is recorded privately. Keep
-  source, raw evidence, report bytes, EXE identity, Docker labels, and release
-  SHA bound to the same run or commit.
+- **Current handoff**: status as of 2026-08-20. The latest public release is
+  v0.1.49; v0.1.52 is the current candidate. The candidate integrates the three
+  standalone Node scanner apps as SCT-supervised loopback sidecars (IP `:3777`,
+  BACnet `:3778`, MQTT `:3799`) driven by Python adapter engines through
+  `run_engine`, and adds three discovery modules that back the operator-facing
+  IP/BACnet/MQTT tabs with the previous engines parked at their `*-sct` routes.
+  Scanner runs render in all report formats from frozen source-run evidence and
+  download byte-identically. The Windows portable ships the three scanner
+  `dist/bundle.js` artifacts and one signed `node.exe`. Sidecars are gated
+  behind `SMART_COMMISSIONING_ENABLE_SIDECARS` (off by default), bind loopback
+  only, and hold no persistent state. MQTT scanning stays read-only, with no
+  publish or configuration writes. The release adds no database migration or
+  BACnet write capability; it retains the Alembic head `a6b7c8d9e0f1` and the
+  Sync v2 head `a7b8c9d0e1f2`. Rollback to v0.1.50 is a redeploy of the prior
+  portable or image (`docs/migration-rollback-v0.1.52.md`). Field acceptance
+  remains open, recorded privately. Keep source, raw evidence, report bytes,
+  EXE identity, Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the

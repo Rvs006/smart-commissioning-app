@@ -16,6 +16,34 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   source run, and hosted pages now declare the existing Electracom browser
   icon instead of requesting a missing favicon.
 
+## [0.1.52] - 2026-08-20
+
+### Added
+
+- The three standalone Node scanner apps are integrated as SCT-supervised
+  loopback sidecars (IP `:3777`, BACnet `:3778`, MQTT `:3799`), driven by Python
+  adapter engines through `run_engine`. Enable them with the
+  `SMART_COMMISSIONING_ENABLE_SIDECARS` gate; they stay off by default.
+- Three discovery modules now back the operator-facing IP, BACnet, and MQTT
+  tabs. The previous engines are parked at their `*-sct` routes and remain
+  available.
+
+### Changed
+
+- Scanner runs render in every report format (PDF, DOCX, XLSX, evidence pack)
+  from the same frozen source-run evidence, and repeated report downloads return
+  byte-identical output.
+- The Windows portable bundle ships the three scanner `dist/bundle.js` artifacts
+  and one signed `node.exe`.
+
+### Compatibility
+
+- This release adds no database migration. It retains the Alembic head
+  `a6b7c8d9e0f1` and the Sync v2 head `a7b8c9d0e1f2`. MQTT scanning stays
+  read-only, with no publish or configuration writes. Sidecars bind loopback
+  ports only and hold no persistent state. Rollback to v0.1.50 is a redeploy of
+  the prior portable or image; see `docs/migration-rollback-v0.1.52.md`.
+
 ## [0.1.50] - 2026-08-16
 
 ### Fixed
