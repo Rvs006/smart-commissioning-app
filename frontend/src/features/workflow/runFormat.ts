@@ -72,6 +72,7 @@ const jobTypeLabels: Record<JobType, string> = {
   bacnet_discovery: "BACnet discovery",
   mqtt_discovery: "MQTT discovery",
   udmi_validation: "UDMI validation",
+  mqtt_publish: "MQTT publish",
   mqtt_config_publish: "MQTT config publish",
   bacnet_validation: "BACnet validation",
   mapping_validation: "Mapping validation",

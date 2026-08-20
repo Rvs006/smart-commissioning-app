@@ -27,6 +27,7 @@ const jobTypeOptions: { value: JobType; label: string }[] = [
   { label: "BACnet discovery", value: "bacnet_discovery" },
   { label: "MQTT discovery", value: "mqtt_discovery" },
   { label: "UDMI validation", value: "udmi_validation" },
+  { label: "MQTT publish", value: "mqtt_publish" },
   { label: "MQTT config publish", value: "mqtt_config_publish" },
   { label: "BACnet validation", value: "bacnet_validation" },
   { label: "Mapping validation", value: "mapping_validation" },

@@ -81,6 +81,7 @@ import {
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
+import { MqttPublishModal } from "./MqttPublishModal";
 import { useMqttLiveSession } from "./useMqttLiveSession";
 import {
   assetMatchesFacetFilter,
@@ -751,6 +752,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
   // mqtt-scanner live topic tree: the live search box (filters server-side).
   const [mqttLiveSearch, setMqttLiveSearch] = useState("");
+  // mqtt-scanner: the sealed "publish a message" modal (M5).
+  const [mqttPublishOpen, setMqttPublishOpen] = useState(false);
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -6015,8 +6018,24 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     >
                       Apply subscription filter
                     </button>
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer || mqttPublishOpen}
+                      onClick={() => setMqttPublishOpen(true)}
+                      title={canEngineer ? "Publish one message to a topic (sealed preview + admin approval)." : ENGINEER_REQUIRED_TOOLTIP}
+                      type="button"
+                    >
+                      Publish message…
+                    </button>
                   </div>
                 </div>
+                {mqttPublishOpen && (
+                  <MqttPublishModal
+                    apiClient={apiClient}
+                    onClose={() => setMqttPublishOpen(false)}
+                    workspace={workspaceRef}
+                  />
+                )}
                 <div className="live-console-kpis" aria-live="polite">
                   <div>
                     <span className="live-console-pulse" aria-hidden="true" /> Broker
