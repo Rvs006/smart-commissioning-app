@@ -70,24 +70,19 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-20. The latest public release is
-  v0.1.49; v0.1.52 is the current candidate. v0.1.52 integrates the three
-  standalone Node scanner apps (IP :3777, BACnet :3778, MQTT :3799) as
-  SCT-supervised loopback sidecars driven by Python adapter engines through
-  `run_engine`, surfaced as three discovery modules that replace the
-  operator-facing IP/BACnet/MQTT tabs (the built-in TCP/Nmap and Python
-  discovery engines are parked at `/*-sct` as a fallback lane). Sidecar scanner
-  runs render in every report format and stay byte-reproducible. The portable
-  bundle ships the three `dist/bundle.js` plus one signed `node.exe` under
-  `scanners/`; the launcher sets `SMART_COMMISSIONING_ENABLE_SIDECARS=1` so only
-  the real exe spawns sidecars (tests and plain uvicorn do not). MQTT scanning
-  is read-only (no publish/config). The scanner routes use the legacy
-  `authorized` gate, not the sealed-preview ceremony, as a documented first cut.
-  It retains v0.1.49 run isolation and idempotency and adds no database
-  migration. Built-in TCP connect remains the default; Nmap stays optional and
-  unbundled. Field acceptance remains open. Keep source, raw evidence, report
-  bytes, EXE identity, Docker labels, and release SHA bound to the same run or
-  commit.
+- **Current handoff**: status as of 2026-08-16. The latest public release is
+  v0.1.49; v0.1.50 is the current candidate. The candidate updates the bundled
+  Brief and Learning pages with the sealed-preview authorization flow,
+  equivalent-retry rules, terminal evidence states, protocol and Nmap
+  boundaries, exports, and troubleshooting. It retains v0.1.49 run isolation
+  and idempotency behavior and adds no database migration or BACnet write
+  capability. Built-in TCP connect remains the default. Nmap stays optional,
+  locally installed, and unbundled. MQTT templates use a blank Payload type
+  where appropriate and reserve `#` for topic filters; private customer copies
+  do not ship. Field acceptance remains open until
+  `docs/v0.1.50-field-acceptance-checklist.md` is recorded privately. Keep
+  source, raw evidence, report bytes, EXE identity, Docker labels, and release
+  SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the
@@ -183,43 +178,3 @@ collection order is alphabetical - keep it so.
   trustworthy**. This is worth doing before any push: a stray tool-call XML tag
   left in a test file once reddened `main` as a plain syntax error, and because
   ruff runs before the unit tests it blocked the whole suite.
-
-## Agent skill routing
-
-Use the installed skills deliberately in SCT work. Name the skills in the
-request with `$skill-name` so the agent loads their instructions before acting.
-Select only the skills relevant to the task, and list the selected skills in
-the plan with a short reason.
-
-- Planning or a user-requested goal: use `$ce-plan`.
-- Implementation or build work: use `$ce-work` plus the relevant domain skills.
-- React and component architecture: use `$vercel-react-best-practices` and
-  `$vercel-composition-patterns`.
-- TypeScript: use `$typescript-advanced-types`.
-- Vite: use `$vite`.
-- Vitest and test changes: use `$vitest`.
-- Node.js backend work: use `$nodejs-backend-patterns` and
-  `$nodejs-best-practices`.
-- UI work, accessibility, or SEO: use `$frontend-design`, `$accessibility`,
-  and `$seo` as applicable.
-- Diagnosis and failing behavior: use `$ce-debug` plus the relevant domain
-  skill.
-- Browser verification: use `$ce-test-browser` and `$accessibility` when the
-  change affects the web UI.
-
-For a goal, include the skill names in the goal objective. A goal stores the
-objective, but it does not permanently bind a skill selection to every later
-turn. Repeat the selected skill names when continuing the goal. Do not mark a
-goal complete until the requested implementation and its proportionate tests
-or verification are finished.
-
-Reusable SCT prompt shape:
-
-```text
-Use $ce-plan to make the plan, then use $ce-work to implement it.
-Also use the relevant SCT skills: $vercel-react-best-practices,
-$typescript-advanced-types, $vite, and $vitest. Add $accessibility for UI
-changes. State which skills you selected and why, inspect the repository
-before editing, keep the plan aligned with the goal, run the relevant checks,
-and report any blocked validation clearly.
-```
