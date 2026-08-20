@@ -1360,11 +1360,12 @@ def _discovery_inventory(run: object) -> list[dict[str, object]] | None:
 
         if source.job_type in ("ip_discovery", "ip_scanner"):
             has_ip = True
-            devices = [
-                device
-                for device in discovery_rows(source.run_id, "devices")
-                if device.get("device_type") == "ip_host"
-            ]
+            # Every row in an IP run's devices table is a discovered host. The
+            # ip_scanner sidecar TYPES its hosts (e.g. "server") and only falls
+            # back to "ip_host" when untyped, so a "device_type == ip_host" filter
+            # silently dropped every typed host from the report. Include them all;
+            # there is no non-host row here to exclude (routers are BACnet-only).
+            devices = list(discovery_rows(source.run_id, "devices"))
             for device in devices:
                 attributes = device.get("attributes") or {}
                 ip_rows.append(
