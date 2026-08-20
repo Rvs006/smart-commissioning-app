@@ -50,6 +50,7 @@ import {
   startMqttConfigPublishRun,
   startAuthorizedDiscoveryRun,
   startBacnetPropertyRun,
+  browseBacnetScannerObjects,
   startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
@@ -74,6 +75,7 @@ import {
   type SessionBoundApiClient,
   type NmapProfileName,
   type BacnetPropertyName,
+  type BacnetObjectBrowseResponse,
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
@@ -736,6 +738,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Workbench uses the persistent Inspector instead, so this state is never set
   // for UDMI rows.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
+  // bacnet-scanner live object browse (ephemeral read, scoped to the open detail
+  // dialog). Cleared whenever the viewed device changes so one device's objects
+  // never render under another.
+  const [objectBrowseResult, setObjectBrowseResult] = useState<BacnetObjectBrowseResponse | null>(
+    null,
+  );
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -2597,6 +2605,25 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       );
     },
   });
+
+  // bacnet-scanner live object browse: an ephemeral read of one device's live
+  // object list. Unlike the built-in property expansion, it starts no child run
+  // and persists nothing — the sealed scan results are unchanged.
+  const objectBrowseMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "bacnet-scanner.object-browse"),
+    mutationFn: ({ runId, deviceInstance }: { runId: string; deviceInstance: number }) =>
+      browseBacnetScannerObjects({
+        context: { client: apiClient },
+        runId,
+        deviceInstance,
+        authorized: scanAuthorized,
+      }),
+    onSuccess: (result) => setObjectBrowseResult(result),
+  });
+
+  useEffect(() => {
+    setObjectBrowseResult(null);
+  }, [detailRow]);
 
   const propertyLiveMutation = useMutation({
     mutationFn: ({
@@ -7205,7 +7232,96 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </div>
                   ))}
                 </div>
-                {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && activeRun && activeRunTerminal && (
+                {module.route === "bacnet-scanner" && activeRun && activeRunTerminal && (() => {
+                  const deviceInstance = Number(detailRow.Instance);
+                  const hasInstance = Number.isInteger(deviceInstance) && deviceInstance >= 0;
+                  const browsingThis =
+                    objectBrowseMutation.variables?.deviceInstance === deviceInstance;
+                  const pending = objectBrowseMutation.isPending && browsingThis;
+                  const errored = objectBrowseMutation.isError && browsingThis;
+                  const result =
+                    objectBrowseResult && objectBrowseResult.device_instance === deviceInstance
+                      ? objectBrowseResult
+                      : null;
+                  return (
+                    <div className="detail-actions" aria-live="polite">
+                      <div className="property-expansion-panel">
+                        <strong>Browse live objects</strong>
+                        <span>
+                          Reads this device&apos;s object list and present values directly from the
+                          network. Nothing is persisted; the scan results above are unchanged.
+                        </span>
+                        <button
+                          className="secondary-button compact"
+                          disabled={pending || !hasInstance || !scanAuthorized}
+                          onClick={() => {
+                            if (hasInstance && activeRun) {
+                              objectBrowseMutation.mutate({ runId: activeRun.runId, deviceInstance });
+                            }
+                          }}
+                          type="button"
+                        >
+                          {pending ? "Reading object list…" : "Browse live objects"}
+                        </button>
+                        {!scanAuthorized && (
+                          <span>Tick the scan-authorization checkbox on the Run step first.</span>
+                        )}
+                        {scanAuthorized && !hasInstance && (
+                          <span>This row has no device instance to read.</span>
+                        )}
+                      </div>
+                      {errored && (
+                        <div className="state-panel error" role="alert">
+                          <strong>Object browse failed</strong>
+                          <span>
+                            {objectBrowseMutation.error instanceof Error
+                              ? objectBrowseMutation.error.message
+                              : "The device object list could not be read."}
+                          </span>
+                        </div>
+                      )}
+                      {result && (
+                        <>
+                          <span className="results-filter-count">
+                            {`${result.count} object${result.count === 1 ? "" : "s"} on device · showing ${result.objects.length}`}
+                            {result.truncated ? " · list truncated at the read cap" : ""}
+                          </span>
+                          {result.error && (
+                            <div className="state-panel" role="status">
+                              <strong>Device did not return a full object list</strong>
+                              <span>{result.error}</span>
+                            </div>
+                          )}
+                          {result.objects.length > 0 && (
+                            <div className="data-table-wrap results-scroll">
+                              <table className="data-table">
+                                <thead>
+                                  <tr>
+                                    <th scope="col">Object</th>
+                                    <th scope="col">Name</th>
+                                    <th scope="col">Present Value</th>
+                                    <th scope="col">Units</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {result.objects.map((object) => (
+                                    <tr key={`${object.type_name}-${object.instance}`}>
+                                      <td>{`${object.type_name}-${object.instance}`}</td>
+                                      <td>{object.name || "—"}</td>
+                                      <td>{object.present_value || "—"}</td>
+                                      <td>{object.units || "—"}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
+                {module.route === "bacnet-discovery-sct" && activeRun && activeRunTerminal && (
                   <div className="detail-actions" aria-live="polite">
                     <div className="property-expansion-panel">
                       <strong>Bounded property read</strong>

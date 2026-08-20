@@ -1883,6 +1883,52 @@ export function startBacnetPropertyRun(input: {
   );
 }
 
+export type BacnetBrowsedObject = {
+  type: number;
+  type_name: string;
+  instance: number;
+  name: string;
+  present_value: string;
+  units: string;
+};
+
+export type BacnetObjectBrowseResponse = {
+  run_id: string;
+  device_instance: number;
+  address: string;
+  objects: BacnetBrowsedObject[];
+  count: number;
+  truncated: boolean;
+  error: string | null;
+};
+
+// On-demand live object browse for one device in a succeeded bacnet_scanner run.
+// Ephemeral read: the backend drives the sidecar and returns JSON; nothing is
+// persisted and the sealed scan results are unchanged.
+export function browseBacnetScannerObjects(input: {
+  runId: string;
+  deviceInstance: number;
+  authorized: boolean;
+  cap?: number;
+  readTimeoutMs?: number;
+  context?: ApiRequestContext;
+}): Promise<BacnetObjectBrowseResponse> {
+  return request<BacnetObjectBrowseResponse>(
+    `/discovery/bacnet_sidecar/runs/${encodeURIComponent(input.runId)}/object-browse`,
+    {
+      body: JSON.stringify({
+        device_instance: input.deviceInstance,
+        authorized: input.authorized,
+        ...(input.cap !== undefined ? { cap: input.cap } : {}),
+        ...(input.readTimeoutMs !== undefined ? { read_timeout_ms: input.readTimeoutMs } : {}),
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
 export function createScanAuthorization(input: {
   previewRunId: string;
   ticket: string;

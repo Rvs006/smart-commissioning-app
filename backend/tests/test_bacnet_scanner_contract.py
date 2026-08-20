@@ -25,6 +25,7 @@ from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
     _register_csv,
     _routers_from_fold,
     _scan_query,
+    map_browse_objects,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +59,9 @@ GOLDEN_SCAN_SSE_TYPES = {
     "start", "device", "router", "discovered", "device-update", "progress", "result", "complete", "error",
 }
 GOLDEN_EXPORT_SSE_TYPES = {"device", "objprogress", "device-done", "packaging", "ready", "error"}
+# The /api/objects (on-demand per-device browse) SSE contract.
+GOLDEN_OBJECTS_SSE_TYPES = {"progress", "objects", "complete", "error"}
+GOLDEN_OBJECTS_QUERY_PARAMS = ("instance", "ip", "port", "network", "mac", "cap", "timeout")
 
 GOLDEN_REGISTER_COLUMNS = (
     "Device Instance", "Device Name", "Network", "IP Address", "Vendor",
@@ -202,6 +206,68 @@ class RouterVisibilityContractTest(unittest.TestCase):
         # The key is always present so the report/UI can tell "none responded"
         # (empty list) from a pre-router run (absent key).
         self.assertEqual(_map_result([], {}, [], {}).result_summary_extra["routers"], [])
+
+
+class ObjectBrowseContractTest(unittest.TestCase):
+    def test_objects_endpoint_present_in_source(self) -> None:
+        self.assertIn("p === '/api/objects'", _SERVER_JS)
+
+    def test_every_objects_sse_type_emitted_in_source(self) -> None:
+        for name in GOLDEN_OBJECTS_SSE_TYPES:
+            self.assertTrue(
+                f"type: '{name}'" in _SERVER_JS or f"type:'{name}'" in _SERVER_JS,
+                f"objects SSE type '{name}' is not emitted by the vendored app",
+            )
+
+    def test_objects_query_params_read_in_source(self) -> None:
+        for param in GOLDEN_OBJECTS_QUERY_PARAMS:
+            self.assertIn(
+                f"searchParams.get('{param}')", _SERVER_JS,
+                f"/api/objects no longer reads query param '{param}'",
+            )
+
+    def test_object_result_envelope_in_source(self) -> None:
+        # readObjectList returns {objects, count, truncated, error}; map_browse_objects
+        # depends on that envelope and on the per-object camelCase field names.
+        self.assertIn("truncated: total > limit", _BACNET_JS)
+        for field in ("typeName", "presentValue"):
+            self.assertIn(field, _BACNET_JS, f"object field '{field}' missing from bacnet.js")
+
+    def test_map_browse_objects_snake_cases_the_golden_shape(self) -> None:
+        result = map_browse_objects(
+            {
+                "type": "objects",
+                "objects": [
+                    {"type": 0, "typeName": "analog-input", "instance": 3, "name": "SAT",
+                     "presentValue": "18.60", "units": "degreesCelsius"},
+                    {"typeName": "no-type-or-instance"},  # malformed -> skipped
+                ],
+                "count": 42,
+                "truncated": True,
+                "error": None,
+            }
+        )
+        self.assertEqual(result["count"], 42)
+        self.assertTrue(result["truncated"])
+        self.assertIsNone(result["error"])
+        self.assertEqual(len(result["objects"]), 1)
+        self.assertEqual(
+            result["objects"][0],
+            {
+                "type": 0, "type_name": "analog-input", "instance": 3,
+                "name": "SAT", "present_value": "18.60", "units": "degreesCelsius",
+            },
+        )
+
+    def test_map_browse_objects_passes_no_answer_error_through_honestly(self) -> None:
+        sentence = "Device did not answer the object-list read (no response after retries)."
+        # The exact wording the operator will read is owned by the sidecar; pin it.
+        self.assertIn(sentence, _BACNET_JS)
+        result = map_browse_objects({"type": "objects", "objects": [], "count": 0, "error": sentence})
+        # A no-answer read is an honest empty result carrying the device's error,
+        # never fabricated rows.
+        self.assertEqual(result["objects"], [])
+        self.assertEqual(result["error"], sentence)
 
 
 class RegisterTemplateContractTest(unittest.TestCase):

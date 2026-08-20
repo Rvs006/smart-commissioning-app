@@ -18,15 +18,22 @@ if it dies mid-scan the adapter engine records a real failed run rather than
 fabricating results.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from smart_commissioning_core.db.repositories import ImportRepository
-from smart_commissioning_core.engines.bacnet_scanner_sidecar import process_bacnet_scanner_run
+from smart_commissioning_core.db.repositories import DiscoveryRepository, ImportRepository
+from smart_commissioning_core.engines.bacnet_scanner_sidecar import (
+    SidecarTransportError,
+    browse_device_objects,
+    process_bacnet_scanner_run,
+)
 from smart_commissioning_core.engines.ip_scanner_sidecar import process_ip_scanner_run
 from smart_commissioning_core.engines.mqtt_scanner_sidecar import process_mqtt_scanner_run
 
 from app.api.routes.discovery import (
     _create_run,
     _dispatch,
+    _load_discovery_run,
     _require_legacy_scan_authorization,
     _settings_throttle,
     _stamp_legacy_authorizer,
@@ -36,7 +43,12 @@ from app.api.routes.discovery import (
 from app.core.auth import AuthPrincipal, get_principal
 from app.core.config import get_settings
 from app.core.scopes import require_project_site_access
-from app.schemas.jobs import JobAcceptedResponse, JobCreateRequest
+from app.schemas.jobs import (
+    BacnetObjectBrowseRequest,
+    BacnetObjectBrowseResponse,
+    JobAcceptedResponse,
+    JobCreateRequest,
+)
 from app.services.engine_dispatch import is_dry_run
 from app.services.sidecar_supervisor import (
     BACNET_SCANNER,
@@ -44,6 +56,8 @@ from app.services.sidecar_supervisor import (
     MQTT_SCANNER,
     SidecarUnavailable,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -215,3 +229,124 @@ def create_mqtt_scanner_run(
         )
 
     return _dispatch(run, enqueue=None, run_inline=run_inline, label="MQTT scanner")
+
+
+def _optional_int(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_bacnet_address(address: object) -> tuple[str, int | None]:
+    """Split a persisted device address into (ip, port).
+
+    The sidecar's ``compare()`` embeds a non-default port as ``ip:port``; a bare
+    ip carries no port (the sidecar then uses its default). Never guesses a port.
+    """
+    text = str(address or "").strip()
+    if ":" in text:
+        head, _, tail = text.rpartition(":")
+        if head and tail.isdigit():
+            return head, int(tail)
+    return text, None
+
+
+def _find_bacnet_device(run_id: str, device_instance: int) -> dict | None:
+    """Resolve the browse target from the run's OWN evidence, never a client value."""
+    for device in DiscoveryRepository(service.engine).list_devices(run_id):
+        if device.get("device_type") != "bacnet_device":
+            continue
+        attributes = device.get("attributes") or {}
+        if _optional_int(attributes.get("device_instance")) == device_instance:
+            return device
+    return None
+
+
+@router.post(
+    "/bacnet_sidecar/runs/{run_id}/object-browse",
+    response_model=BacnetObjectBrowseResponse,
+    dependencies=[Depends(require_engineer)],
+)
+def browse_bacnet_scanner_objects(
+    run_id: str,
+    request: BacnetObjectBrowseRequest,
+    http_request: Request,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> BacnetObjectBrowseResponse:
+    """Read one device's live object list on demand for a succeeded bacnet_scanner run.
+
+    An ephemeral read: it drives the sidecar's ``/api/objects`` to completion and
+    returns JSON. It persists NOTHING and never touches the scan's device table,
+    so the sealed results are unchanged. The target device is resolved from the
+    run's own evidence (never a client-supplied address). A live read is real
+    network I/O, so the same legacy consent gate the scan run uses applies.
+
+    Single-tenant sidecar: this shares the sidecar's one BACnet UDP client with a
+    concurrent scan (invoke-id multiplexed, so protocol-safe) but never touches
+    its in-memory register, so there is no shared mutable state to guard. No mutex
+    in M1.
+    """
+    run = _load_discovery_run(run_id, principal)  # scoped access + 404
+    if run.job_type != "bacnet_scanner":
+        # Browse is the sidecar lane only; conceal other lanes as not-found.
+        raise HTTPException(status_code=404, detail="BACnet scanner run was not found.")
+    if run.status != "succeeded":
+        raise HTTPException(
+            status_code=409,
+            detail="Object browse requires a succeeded BACnet scanner run.",
+        )
+    if get_settings().job_execution_mode != "inline":
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "BACnet object browse requires the local inline executor; queue and "
+                "external execution are not available for the loopback sidecar."
+            ),
+        )
+    # A live browse is real network I/O -> same consent gate as the scan run.
+    _require_legacy_scan_authorization({"authorized": request.authorized})
+
+    supervisor = getattr(http_request.app.state, "sidecar_supervisor", None)
+    if supervisor is None:
+        raise HTTPException(status_code=503, detail="BACnet scanner sidecar is not available.")
+    try:
+        base_url = supervisor.base_url_for(BACNET_SCANNER)
+    except SidecarUnavailable as error:
+        raise HTTPException(status_code=503, detail="BACnet scanner sidecar is not available.") from error
+
+    device = _find_bacnet_device(run_id, request.device_instance)
+    if device is None:
+        raise HTTPException(status_code=404, detail="BACnet device is not present in this run.")
+    attributes = device.get("attributes") or {}
+    ip, port = _split_bacnet_address(device.get("address"))
+    if not ip:
+        raise HTTPException(status_code=409, detail="The recorded device has no address to read.")
+    mac = attributes.get("mac")
+
+    logger.info(
+        "bacnet object browse run_id=%s device_instance=%s by=%s",
+        run_id,
+        request.device_instance,
+        principal.username,
+    )
+    try:
+        payload = browse_device_objects(
+            base_url=base_url,
+            instance=request.device_instance,
+            ip=ip,
+            port=port,
+            network=_optional_int(attributes.get("network")),
+            mac=str(mac) if mac else None,
+            cap=request.cap,
+            read_timeout_ms=request.read_timeout_ms,
+        )
+    except SidecarTransportError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    return BacnetObjectBrowseResponse(
+        run_id=run_id,
+        device_instance=request.device_instance,
+        address=str(device.get("address") or ""),
+        **payload,
+    )

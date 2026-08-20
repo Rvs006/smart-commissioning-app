@@ -14,6 +14,12 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   advertises, in a Routers / BBMDs panel on the Results step and a matching
   report section. Routers are recorded in the run summary as reachability facts,
   never as discovered devices.
+- BACnet Discovery (scanner) adds a Browse live objects action in a device's
+  result detail. It reads that device's live object list and present values on
+  demand and shows them in an object table, without persisting anything or
+  changing the sealed scan results. The read needs scan authorization and the
+  engineer role, and it reports the device's own no-answer message honestly
+  instead of an empty success.
 
 ### Fixed
 
