@@ -26,7 +26,7 @@ REPORT_SNAPSHOT_SCHEMA_VERSION = "2.0"
 ARTIFACT_MANIFEST_SCHEMA_VERSION = "1.2"
 # Compatibility constant for existing manifest readers. The core package owns
 # the canonical source version; runtime stamps are validated below.
-REPORT_RENDERER_VERSION = "0.1.52"
+REPORT_RENDERER_VERSION = "0.1.50"
 validate_packaged_application_version(
     REPORT_RENDERER_VERSION,
     source="backend.app.services.report_artifacts.REPORT_RENDERER_VERSION",
