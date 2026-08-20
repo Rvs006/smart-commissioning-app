@@ -70,17 +70,21 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-16. The latest public release is
-  v0.1.49; v0.1.50 is the current candidate. The candidate updates the bundled
-  Brief and Learning pages with the sealed-preview authorization flow,
-  equivalent-retry rules, terminal evidence states, protocol and Nmap
-  boundaries, exports, and troubleshooting. It retains v0.1.49 run isolation
-  and idempotency behavior and adds no database migration or BACnet write
-  capability. Built-in TCP connect remains the default. Nmap stays optional,
-  locally installed, and unbundled. MQTT templates use a blank Payload type
-  where appropriate and reserve `#` for topic filters; private customer copies
-  do not ship. Field acceptance remains open until
-  `docs/v0.1.50-field-acceptance-checklist.md` is recorded privately. Keep
+- **Current handoff**: status as of 2026-08-21. The latest public release is
+  v0.1.50; v0.1.51 is the current candidate. v0.1.51 brings the standalone IP,
+  BACnet, and MQTT discovery tools into SCT as native modules on top of its
+  authorization, evidence, and reporting: BACnet router/BBMD visibility and
+  on-demand live object browse, IP save-scan-as-register, an MQTT live topic
+  tree with focus/subscribe/search, and a sealed one-message MQTT publish. It
+  adds a frictionless authorization mode: with `SCT_REQUIRE_SCAN_AUTHORIZATION=0`
+  scans and device writes run with no authorization checkbox and no sealed
+  two-person approval, evidence unchanged; the portable build ships frictionless
+  while the source and hosted/Docker defaults stay enforced. It also binds the
+  BACnet and MQTT sidecar registers (only IP bound before) and stops the IP scan
+  report dropping typed hosts. It retains the v0.1.49 run-isolation and
+  equivalent-retry behavior and adds no database migration. Built-in TCP connect
+  remains the default. Nmap stays optional, locally installed, and unbundled.
+  Field acceptance for v0.1.51 remains open until recorded privately. Keep
   source, raw evidence, report bytes, EXE identity, Docker labels, and release
   SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a

@@ -43,20 +43,35 @@ Status meanings:
 
 | Area | Status | Documents |
 | --- | --- | --- |
-| Internal portable candidate | v0.1.50 candidate | [Release notes](release-notes-v0.1.50.md), [validation](release-validation-v0.1.50.md), and [rollback](migration-rollback-v0.1.50.md) |
-| Hosted Docker | v0.1.50 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.50.md) |
+| Internal portable candidate | v0.1.51 candidate | [Release notes](release-notes-v0.1.51.md), [validation](release-validation-v0.1.51.md), and [rollback](migration-rollback-v0.1.51.md) |
+| Hosted Docker | v0.1.51 candidate | [Docker deployment and rollback](docker-deployment-rollback-v0.1.51.md) |
 | Portable rebuild | Current | [Portable bundle rebuild](portable-bundle-rebuild.md) |
 | MQTT identities and ACLs | Versioned for v0.1.26 | [MQTT client IDs and broker ACLs](mqtt-client-id-and-acl.md) |
 | Inline ownership | Versioned for v0.1.27 | [Inline heartbeat](inline-heartbeat-v0.1.27.md) |
 | Database migration | Versioned | [v0.1.26](migration-rollback-v0.1.26.md), [v0.1.27](migration-rollback-v0.1.27.md), [v0.1.28](migration-rollback-v0.1.28.md), [v0.1.29](migration-rollback-v0.1.29.md), [v0.1.30](migration-rollback-v0.1.30.md), [v0.1.31](migration-rollback-v0.1.31.md), [v0.1.36](migration-rollback-v0.1.36.md), [v0.1.37](migration-rollback-v0.1.37.md), [v0.1.38](migration-rollback-v0.1.38.md), [v0.1.39](migration-rollback-v0.1.39.md), [v0.1.40](migration-rollback-v0.1.40.md), [v0.1.41](migration-rollback-v0.1.41.md), and [v0.1.42](migration-rollback-v0.1.42.md) |
 | Sync design | Current | [Architecture](sync-architecture.md), [wire format](sync-v2-wire-format.md), [credential scope](sync-v2-credential-scope.md), [operations](sync-v2-operations.md) |
 
-## v0.1.50 candidate
+## v0.1.51 candidate
 
-v0.1.50 updates the bundled Brief and Learning pages with the complete
-protected discovery sequence, safe equivalent retries, scan-state definitions,
-protocol and Nmap boundaries, reports, exports, and troubleshooting. It retains
-v0.1.49 behavior and adds no database migration or BACnet write capability.
+v0.1.51 brings the standalone IP, BACnet, and MQTT discovery tools into SCT as
+native modules (router/BBMD visibility, live object browse, save-scan-as-register,
+a live MQTT topic tree, and a sealed one-message publish), and adds a frictionless
+authorization mode. It retains v0.1.49 run-isolation and equivalent-retry
+behavior and adds no database migration.
+
+- [Release notes](release-notes-v0.1.51.md)
+- [Release validation record](release-validation-v0.1.51.md)
+- [Migration and rollback](migration-rollback-v0.1.51.md)
+- [Docker deployment and rollback](docker-deployment-rollback-v0.1.51.md)
+- [Field acceptance checklist](v0.1.51-field-acceptance-checklist.md)
+- [Evidence manifest](v0.1.51-evidence-manifest.md)
+- [Nmap operator guide](nmap-one-click-operator-guide.md)
+
+## v0.1.50 release record
+
+v0.1.50 is the latest published release while v0.1.51 remains a candidate. It
+updated the bundled Brief and Learning pages with the protected discovery
+sequence, safe equivalent retries, and protocol and Nmap boundaries.
 
 - [Release notes](release-notes-v0.1.50.md)
 - [Release validation record](release-validation-v0.1.50.md)
@@ -64,12 +79,10 @@ v0.1.49 behavior and adds no database migration or BACnet write capability.
 - [Docker deployment and rollback](docker-deployment-rollback-v0.1.50.md)
 - [Field acceptance checklist](v0.1.50-field-acceptance-checklist.md)
 - [Evidence manifest](v0.1.50-evidence-manifest.md)
-- [Nmap operator guide](nmap-one-click-operator-guide.md)
 
 ## v0.1.49 release record
 
-v0.1.49 is the latest published release while v0.1.50 remains a candidate. It
-delivered run-isolated preview/live evidence and equivalent IP retries.
+v0.1.49 delivered run-isolated preview/live evidence and equivalent IP retries.
 
 - [Release notes](release-notes-v0.1.49.md)
 - [Release validation record](release-validation-v0.1.49.md)
