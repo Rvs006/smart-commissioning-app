@@ -21,6 +21,7 @@ import {
 } from "./runFormat";
 import { useSession } from "../../app/sessionContext";
 import { queryKeys } from "../../api/queryKeys";
+import { moduleRouteForJobType } from "./moduleData";
 
 // Read-only Run History: the full run list from GET /runs as a sortable table
 // with ABSOLUTE Started/Finished timestamps and a derived Duration. Where the
@@ -188,20 +189,13 @@ export function RunHistoryPage() {
     setSearchParams(next);
   };
 
-  const comparisonModulePath = (jobTypeValue: JobType | undefined): string =>
-    jobTypeValue === "ip_discovery" || jobTypeValue === "ip_scanner"
-      ? "/ip-scanner"
-      : jobTypeValue === "bacnet_discovery" || jobTypeValue === "bacnet_scanner"
-        ? "/bacnet-scanner"
-        : "/mqtt-scanner";
-
   const openComparison = () => {
     if (!compareQuery.data?.compatible) return;
-    const modulePath = comparisonModulePath(
-      comparableRuns.find((run) => run.run_id === candidateRunId)?.job_type,
-    );
+    const jobTypeValue = comparableRuns.find((run) => run.run_id === candidateRunId)?.job_type;
+    const route = jobTypeValue && moduleRouteForJobType(jobTypeValue);
+    if (!route) return;
     navigate(
-      `${modulePath}?run=${encodeURIComponent(candidateRunId)}&compare=${encodeURIComponent(baselineRunId)}`,
+      `/${route}?run=${encodeURIComponent(candidateRunId)}&compare=${encodeURIComponent(baselineRunId)}`,
     );
   };
 
