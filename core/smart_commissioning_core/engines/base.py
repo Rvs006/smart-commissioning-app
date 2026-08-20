@@ -379,6 +379,9 @@ def _scan_runtime_limits(parameters: Mapping[str, Any]) -> _ScanRuntimeLimits | 
     protocol_key = {
         "ip_discovery": "ip",
         "bacnet_discovery": "bacnet",
+        # mqtt_publish is a sealed WRITE (one message through the held live
+        # session); its contract carries scan_contract_v1.mqtt_publish.policy.
+        "mqtt_publish": "mqtt_publish",
     }.get(job_type)
     if protocol_key is None:
         raise ValueError("scan_contract_v1 has an unsupported scan job type")
