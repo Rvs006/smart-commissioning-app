@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyScanAuthorization,
+  formatBacnetRouters,
   formatIpHeadlineMetrics,
   serializeIpTargetRows,
   type IpTargetRow,
@@ -155,5 +156,41 @@ describe("IP headline metric presentation", () => {
     expect(() => formatIpHeadlineMetrics({ schema_version: "1.0", metrics: [] })).toThrow(
       "Invalid IP headline metric snapshot",
     );
+  });
+});
+
+describe("BACnet router presentation", () => {
+  it("maps well-formed router entries and joins networks", () => {
+    expect(
+      formatBacnetRouters([
+        { address: "192.0.2.9", networks: [200, 300] },
+        { address: "192.0.2.10", networks: [] },
+      ]),
+    ).toEqual([
+      { address: "192.0.2.9", networks: "200, 300" },
+      { address: "192.0.2.10", networks: "" },
+    ]);
+  });
+
+  it("returns null when the key is absent or not a list (no section rendered)", () => {
+    expect(formatBacnetRouters(undefined)).toBeNull();
+    expect(formatBacnetRouters({})).toBeNull();
+    expect(formatBacnetRouters("nope")).toBeNull();
+  });
+
+  it("returns an empty array when the scan heard no router (none-responded note)", () => {
+    expect(formatBacnetRouters([])).toEqual([]);
+  });
+
+  it("skips malformed entries and blank addresses, never fabricating rows", () => {
+    expect(
+      formatBacnetRouters([
+        null,
+        "bad",
+        { networks: [1] },
+        { address: "   " },
+        { address: "192.0.2.9", networks: [1, "two", 3] },
+      ]),
+    ).toEqual([{ address: "192.0.2.9", networks: "1, 3" }]);
   });
 });

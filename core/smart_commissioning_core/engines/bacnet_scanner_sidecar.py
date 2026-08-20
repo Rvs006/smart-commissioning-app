@@ -95,8 +95,9 @@ _SCAN_DEADLINE_S = 180.0
 
 # Transport seam: given (base_url, register_csv, scan_query, is_cancelled,
 # export_deadline_s) return ``{"rows": [...], "summary": {...},
-# "device_files": [<per-asset export json>, ...]}``. Injectable so tests exercise
-# the mapping with no HTTP.
+# "device_files": [<per-asset export json>, ...], "routers": [...]}``. Injectable
+# so tests exercise the mapping with no HTTP. ``routers`` is optional for an
+# injected test client (a missing key projects to an empty router list).
 SidecarClient = Callable[..., dict[str, Any]]
 
 
@@ -222,6 +223,7 @@ async def _run_bacnet_scanner(
         payload.get("summary") or {},
         payload.get("device_files") or [],
         ctx.parameters,
+        routers=payload.get("routers") or [],
     )
 
 
@@ -230,11 +232,43 @@ async def _run_bacnet_scanner(
 # --------------------------------------------------------------------------
 
 
+def _fold_router_event(fold: dict[str, list[int]], event: Mapping[str, Any]) -> None:
+    """Accumulate one ``/api/scan`` ``router`` SSE event into ``fold`` (ip -> nets).
+
+    Golden shape: ``{"type": "router", "router": "<ip>", "networks": [<int dnet>, ...]}``.
+    A blank/absent router ip is skipped; per ip the advertised remote-network
+    numbers are unioned (deduped, ip insertion order preserved). Pure — no I/O —
+    so the transport calls it inside the SSE loop and the contract test drives it
+    directly with fixtures.
+    """
+    ip = str(event.get("router") or "").strip()
+    if not ip:
+        return
+    nets = fold.setdefault(ip, [])
+    for value in event.get("networks") or []:
+        # bool is an int subclass; a BACnet network number is never a bool.
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value not in nets:
+            nets.append(value)
+
+
+def _routers_from_fold(fold: Mapping[str, list[int]]) -> list[dict[str, Any]]:
+    """Project the accumulated ip -> networks fold into persisted router rows.
+
+    ``[{"address": <ip>, "networks": sorted([...])}]`` — networks sorted so the
+    frozen run summary is byte-deterministic regardless of Who-Is-Router order.
+    """
+    return [{"address": ip, "networks": sorted(nets)} for ip, nets in fold.items()]
+
+
 def _map_result(
     rows: Sequence[Mapping[str, Any]],
     summary: Mapping[str, Any],
     device_files: Sequence[Mapping[str, Any]],
     parameters: Mapping[str, Any],
+    *,
+    routers: Sequence[Mapping[str, Any]] = (),
 ) -> EngineResult:
     """Project the sidecar's scan + export output into the shared record shapes.
 
@@ -242,6 +276,13 @@ def _map_result(
     list — the device/point key-sniff persister routes a record carrying
     ``point_id``/``device_ref`` to the points table and everything else to
     devices.
+
+    Routers are summary-only: discovered BACnet/IP routers (and BBMDs) land in
+    ``result_summary_extra["routers"]`` and NEVER in ``structured_records`` — a
+    router is a reachability fact, not a commissionable device, so it must not
+    enter the devices table (which ``replace_devices`` owns). The key is always
+    stamped (an empty list when no router answered) so the report/UI can tell
+    "none responded" from a pre-router run that never recorded the field.
     """
     project_id = parameters.get("project_id")
     site_id = parameters.get("site_id")
@@ -342,6 +383,7 @@ def _map_result(
             "register_missing": summary.get("missing"),
             "register_rogue": summary.get("rogue"),
             "points_exported": sum(len(a.get("points") or []) for a in device_files),
+            "routers": [dict(router) for router in routers],
             "scanner": ENGINE_NAME,
         }
     )
@@ -462,7 +504,7 @@ def _default_sidecar_client(
     try:
         adapter_index = _resolve_adapter_index(base, source_ip)
         _post_register(base, register_csv)
-        rows, summary, devices = _stream_scan(base, adapter_index, scan_query, is_cancelled)
+        rows, summary, devices, routers = _stream_scan(base, adapter_index, scan_query, is_cancelled)
         device_files = _export_devices(base, devices, is_cancelled, export_deadline_s)
     except SidecarTransportError:
         _delete_register(base)  # best-effort; never masks the primary error
@@ -473,7 +515,7 @@ def _default_sidecar_client(
             "The BACnet scanner sidecar could not be reached during the scan."
         ) from error
     _delete_register(base)
-    return {"rows": rows, "summary": summary, "device_files": device_files}
+    return {"rows": rows, "summary": summary, "device_files": device_files, "routers": routers}
 
 
 def _resolve_adapter_index(base: str, source_ip: str) -> int:
@@ -540,18 +582,20 @@ def _stream_scan(
     adapter_index: int,
     scan_query: Mapping[str, str],
     is_cancelled: Callable[[], bool],
-) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
-    """Consume ``/api/scan`` SSE; return (rows, summary, device-target list).
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Consume ``/api/scan`` SSE; return (rows, summary, device-target list, routers).
 
     Devices captured from ``device``/``device-update`` events carry the raw
     target fields (instance/ip/port/network/mac/name) the ``/api/export`` body
-    needs; ``result`` carries the RAG {rows, summary}.
+    needs; ``result`` carries the RAG {rows, summary}; ``router`` events carry the
+    BACnet/IP routers (and BBMDs) that answered Who-Is-Router, folded per ip.
     """
     params = dict(scan_query)
     params["adapter"] = str(adapter_index)
     url = f"{base}/api/scan?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(url, headers={"Accept": "text/event-stream"})  # noqa: S310
     devices: dict[Any, dict[str, Any]] = {}
+    router_fold: dict[str, list[int]] = {}
     rows: list[dict[str, Any]] = []
     summary: dict[str, Any] = {}
     deadline = time.monotonic() + _SCAN_DEADLINE_S
@@ -563,6 +607,8 @@ def _stream_scan(
                 instance = device.get("instance")
                 if instance is not None:
                     devices[instance] = {**devices.get(instance, {}), **device}
+            elif kind == "router":
+                _fold_router_event(router_fold, event)
             elif kind == "result":
                 rows = list(event.get("rows") or [])
                 summary = dict(event.get("summary") or {})
@@ -573,7 +619,7 @@ def _stream_scan(
                 )
             elif kind == "complete":
                 break
-    return rows, summary, list(devices.values())
+    return rows, summary, list(devices.values()), _routers_from_fold(router_fold)
 
 
 def _export_devices(
@@ -634,6 +680,128 @@ def _decode_export_zip(zip_b64: str) -> list[dict[str, Any]]:
         return []  # a corrupt archive is honest "no points", never a fake point
 
 
+# --------------------------------------------------------------------------
+# On-demand object browse: drive /api/objects to completion for one device.
+# --------------------------------------------------------------------------
+
+# Adapter-side wall-clock budget for a single-device object browse. The sidecar's
+# readObjectList has no mid-device cancel (driving contract §5), so this is the
+# only bound on a device whose reads hang; closing the socket at the deadline is
+# the only stop.
+# ponytail: fixed ceiling; make it a request parameter if a dense controller's
+# inventory legitimately needs longer.
+_BROWSE_DEADLINE_S = 120.0
+
+
+def map_browse_objects(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one ``/api/objects`` ``objects`` SSE event into the SCT shape.
+
+    The sidecar emits camelCase objects
+    ``{type, typeName, instance, name, presentValue, units}``; SCT's API is
+    snake_case, so a rename upstream fails the contract test instead of silently
+    blanking the browse. Objects whose ``type``/``instance`` are not ints are
+    skipped (skip-one-keep-rest, like ``_decode_export_zip``); every value is
+    passed through ``json_safe_value``. The device's own no-answer error (a real
+    result) is preserved verbatim, never turned into fabricated rows.
+    """
+
+    def _text(value: Any) -> str:
+        return "" if value is None else str(value)
+
+    objects: list[dict[str, Any]] = []
+    for obj in event.get("objects") or []:
+        if not isinstance(obj, Mapping):
+            continue
+        obj_type = obj.get("type")
+        instance = obj.get("instance")
+        # bool is an int subclass; a BACnet object type/instance is never a bool.
+        if not isinstance(obj_type, int) or isinstance(obj_type, bool):
+            continue
+        if not isinstance(instance, int) or isinstance(instance, bool):
+            continue
+        objects.append(
+            json_safe_value(
+                {
+                    "type": obj_type,
+                    "type_name": _text(obj.get("typeName")),
+                    "instance": instance,
+                    "name": _text(obj.get("name")),
+                    "present_value": _text(obj.get("presentValue")),
+                    "units": _text(obj.get("units")),
+                }
+            )
+        )
+    return {
+        "objects": objects,
+        "count": int(event.get("count") or 0),
+        "truncated": bool(event.get("truncated")),
+        "error": event.get("error") or None,
+    }
+
+
+def browse_device_objects(
+    *,
+    base_url: str,
+    instance: int,
+    ip: str,
+    port: int | None = None,
+    network: int | None = None,
+    mac: str | None = None,
+    cap: int | None = None,
+    read_timeout_ms: int | None = None,
+    deadline_s: float = _BROWSE_DEADLINE_S,
+) -> dict[str, Any]:
+    """Drive ``/api/objects`` for one device to completion; return the mapped result.
+
+    Synchronous by design (M1): the route blocks on this and returns JSON — no
+    browser SSE (a later milestone). Bounded by ``deadline_s`` because the sidecar
+    cannot stop a device enumeration mid-flight. Honest failures only: a sidecar
+    ``error`` event, an unreachable sidecar, or a deadline reached with no
+    ``objects`` event raises :class:`SidecarTransportError` — never a fabricated
+    empty list. A device that merely did not answer the object-list read IS a
+    success: the sidecar returns an ``objects`` event with an empty list and its
+    own error sentence, passed through verbatim.
+
+    Optional query params (port/network/mac/cap/timeout) are omitted when unset so
+    the sidecar applies its own defaults (BACNET_PORT / cap 200 / 1500 ms) — the
+    adapter never fabricates a target field.
+    """
+    base = base_url.rstrip("/")
+    params: dict[str, str] = {"instance": str(instance), "ip": ip}
+    if port:
+        params["port"] = str(port)
+    if network:
+        params["network"] = str(network)
+    if mac:
+        params["mac"] = mac
+    if cap:
+        params["cap"] = str(cap)
+    if read_timeout_ms:
+        params["timeout"] = str(read_timeout_ms)
+    url = f"{base}/api/objects?{urllib.parse.urlencode(params)}"
+    request = urllib.request.Request(url, headers={"Accept": "text/event-stream"})  # noqa: S310
+    deadline = time.monotonic() + deadline_s
+    try:
+        with urllib.request.urlopen(request, timeout=None) as stream:  # noqa: S310
+            for event in _iter_sse_events(stream, lambda: False, deadline):
+                kind = event.get("type")
+                if kind == "objects":
+                    return map_browse_objects(event)
+                if kind == "error":
+                    raise SidecarTransportError(
+                        "The BACnet scanner sidecar reported an object-browse error "
+                        f"({event.get('message') or 'no detail'})."
+                    )
+    except (urllib.error.URLError, OSError, TimeoutError) as error:
+        raise SidecarTransportError(
+            "The BACnet scanner sidecar could not be reached during the object browse."
+        ) from error
+    raise SidecarTransportError(
+        "The BACnet object browse ended without an answer (time budget exceeded or "
+        "the connection closed before the device replied)."
+    )
+
+
 def _demo() -> None:
     """Assert-based self-check for the pure mapping + register serialization."""
     rows = [
@@ -683,6 +851,43 @@ def _demo() -> None:
     assert ahu["attributes"]["asset_id"] == "bacnet-device-1001", ahu
     assert ahu["attributes"]["register_state"] == "match", ahu
     assert ahu["attributes"]["firmware"] == "1.2", ahu
+
+    # Routers are summary-only, folded per ip with sorted networks, never devices.
+    fold: dict[str, list[int]] = {}
+    _fold_router_event(fold, {"type": "router", "router": "192.0.2.9", "networks": [300, 200]})
+    _fold_router_event(fold, {"type": "router", "router": "192.0.2.9", "networks": [200, 400]})
+    _fold_router_event(fold, {"type": "router", "router": "", "networks": [1]})  # blank ip skipped
+    routers = _routers_from_fold(fold)
+    assert routers == [{"address": "192.0.2.9", "networks": [200, 300, 400]}], routers
+    routed = _map_result([], {}, [], {}, routers=routers)
+    assert routed.result_summary_extra["routers"] == routers, routed.result_summary_extra
+    assert routed.structured_records == [], routed.structured_records
+    assert _map_result([], {}, [], {}).result_summary_extra["routers"] == [], "empty router list stamped"
+
+    # Object browse maps the sidecar's camelCase objects to snake_case, skips
+    # malformed entries, and preserves a device's honest no-answer error.
+    browsed = map_browse_objects(
+        {
+            "type": "objects",
+            "objects": [
+                {"type": 0, "typeName": "analog-input", "instance": 3, "name": "SAT",
+                 "presentValue": "18.60", "units": "°C"},
+                {"typeName": "no-type"},  # missing int type/instance -> skipped
+            ],
+            "count": 42,
+            "truncated": True,
+            "error": None,
+        }
+    )
+    assert browsed["count"] == 42 and browsed["truncated"] is True, browsed
+    assert len(browsed["objects"]) == 1, browsed
+    assert browsed["objects"][0] == {
+        "type": 0, "type_name": "analog-input", "instance": 3,
+        "name": "SAT", "present_value": "18.60", "units": "°C",
+    }, browsed["objects"][0]
+    no_answer = map_browse_objects({"type": "objects", "objects": [], "count": 0,
+                                    "error": "Device did not answer the object-list read."})
+    assert no_answer["objects"] == [] and no_answer["error"] == "Device did not answer the object-list read.", no_answer
 
     csv_text = _register_csv([{"Device Instance": "1001", "Device Name": "AHU-1"}])
     assert csv_text.splitlines()[0] == ",".join(REGISTER_TEMPLATE_COLUMNS), csv_text

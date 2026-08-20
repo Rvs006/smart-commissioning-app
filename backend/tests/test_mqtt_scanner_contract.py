@@ -16,12 +16,15 @@ import unittest
 from pathlib import Path
 
 from smart_commissioning_core.engines.mqtt_scanner_sidecar import (
+    MAX_CAPTURE_SECONDS,
     REGISTER_TEMPLATE_COLUMNS,
     _as_payload_dict,
     _asset_key,
+    _capture_seconds,
     _map_manifest,
     _norm_point,
     _register_csv,
+    _root_filter,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -168,6 +171,31 @@ class EndpointVocabularyContractTest(unittest.TestCase):
         # An empty capture returns 409 "Nothing discovered yet" — the adapter reads
         # that as an honest empty capture, not a transport error.
         self.assertIn("Nothing discovered yet", _SERVER_JS)
+
+
+class RunParameterSeamTest(unittest.TestCase):
+    """Pin the frontend->adapter parameter spellings for the sidecar capture lane.
+
+    The /mqtt-scanner capture panel sends ``topic_filter`` and ``capture_seconds``;
+    this adapter's alias list and bounds are the other half of that seam. If either
+    side renames or re-bounds, this fails instead of silently capturing '#'/60s.
+    No HTTP, no DB.
+    """
+
+    def test_topic_filter_key_is_a_root_filter_alias(self) -> None:
+        self.assertEqual(_root_filter({"topic_filter": "udmi/site/example/#"}), "udmi/site/example/#")
+
+    def test_blank_or_absent_filter_captures_all_topics(self) -> None:
+        self.assertEqual(_root_filter({}), "#")
+        self.assertEqual(_root_filter({"topic_filter": "  "}), "#")
+
+    def test_capture_seconds_bounds_are_the_sidecar_lane_contract(self) -> None:
+        self.assertEqual(_capture_seconds({}), 60.0)  # absent -> default
+        self.assertEqual(_capture_seconds({"capture_seconds": 300}), 300.0)
+        # 0 is NOT an indefinite sentinel on this lane (unlike mqtt_discovery).
+        self.assertEqual(_capture_seconds({"capture_seconds": 0}), 60.0)
+        # The hard cap is the sidecar-lane safety ceiling.
+        self.assertEqual(_capture_seconds({"capture_seconds": 3600}), MAX_CAPTURE_SECONDS)
 
 
 if __name__ == "__main__":

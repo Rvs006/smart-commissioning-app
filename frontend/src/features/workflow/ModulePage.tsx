@@ -50,6 +50,8 @@ import {
   startMqttConfigPublishRun,
   startAuthorizedDiscoveryRun,
   startBacnetPropertyRun,
+  browseBacnetScannerObjects,
+  saveIpScanRunAsRegister,
   startDiscoveryPreview,
   startDiscoveryRun,
   startValidationRun,
@@ -74,6 +76,7 @@ import {
   type SessionBoundApiClient,
   type NmapProfileName,
   type BacnetPropertyName,
+  type BacnetObjectBrowseResponse,
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
@@ -167,10 +170,12 @@ import {
 import {
   formatIpHeadlineMetrics,
   formatBacnetHeadlineMetrics,
+  formatBacnetRouters,
   serializeIpTargetRows,
   type IpTargetRow,
   type IpHeadlineMetricDisplay,
   type BacnetHeadlineMetricDisplay,
+  type BacnetRouterDisplay,
 } from "./ipDiscoveryModel";
 
 function newIpSubmissionKey(): string {
@@ -734,6 +739,14 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   // Workbench uses the persistent Inspector instead, so this state is never set
   // for UDMI rows.
   const [detailRow, setDetailRow] = useState<Record<string, string> | null>(null);
+  // bacnet-scanner live object browse (ephemeral read, scoped to the open detail
+  // dialog). Cleared whenever the viewed device changes so one device's objects
+  // never render under another.
+  const [objectBrowseResult, setObjectBrowseResult] = useState<BacnetObjectBrowseResponse | null>(
+    null,
+  );
+  // ip-scanner "save scan as register" outcome, cleared when a new run starts.
+  const [savedRegister, setSavedRegister] = useState<ImportBatchSummary | null>(null);
   const [propertyExpansionNotice, setPropertyExpansionNotice] = useState<string | null>(null);
   const [propertyOwner, setPropertyOwner] = useState<RunEpochOwner | null>(null);
   const [propertyRunId, setPropertyRunId] = useState<string | null>(null);
@@ -2596,6 +2609,45 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     },
   });
 
+  // bacnet-scanner live object browse: an ephemeral read of one device's live
+  // object list. Unlike the built-in property expansion, it starts no child run
+  // and persists nothing — the sealed scan results are unchanged.
+  const objectBrowseMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "bacnet-scanner.object-browse"),
+    mutationFn: ({ runId, deviceInstance }: { runId: string; deviceInstance: number }) =>
+      browseBacnetScannerObjects({
+        context: { client: apiClient },
+        runId,
+        deviceInstance,
+        authorized: scanAuthorized,
+      }),
+    onSuccess: (result) => setObjectBrowseResult(result),
+  });
+
+  useEffect(() => {
+    setObjectBrowseResult(null);
+  }, [detailRow]);
+
+  // ip-scanner: turn this scan into a reusable ip_scanner_register. The created
+  // import is byte-identical to an upload, so the next IP scan for this
+  // project/site binds and RAG-compares against it.
+  const saveRegisterMutation = useMutation({
+    mutationKey: mutationKeys.action(sessionScopeId, "ip-scanner.save-register"),
+    mutationFn: (runId: string) =>
+      saveIpScanRunAsRegister({ context: { client: apiClient }, runId }),
+    onSuccess: (summary) => {
+      setSavedRegister(summary);
+      // Mirror importMutation.onSuccess: refresh the "register on file" note.
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.latestImport(sessionScopeId, workspaceRef),
+      });
+    },
+  });
+
+  useEffect(() => {
+    setSavedRegister(null);
+  }, [activeRun?.runId, activeRun?.epoch]);
+
   const propertyLiveMutation = useMutation({
     mutationFn: ({
       authorizationId,
@@ -2934,7 +2986,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     captureSeconds.trim() === "" || !Number.isFinite(Number(captureSeconds))
       ? captureSeconds
       : String(Number(captureSeconds) * captureUnitSeconds);
-  const mqttCaptureOverCap = Number(captureSecondsEffective) > 172_800;
+  // The sidecar lane's window is adapter-capped at 900s (MAX_CAPTURE_SECONDS);
+  // the built-in lane keeps its 48-hour ceiling. A page is one route, so this
+  // single value is unambiguous.
+  const mqttCaptureCapSeconds = module.route === "mqtt-scanner" ? 900 : 172_800;
+  const mqttCaptureOverCap = Number(captureSecondsEffective) > mqttCaptureCapSeconds;
 
   // Run actions the Run Controls card list renders. Used ONLY to decide which
   // branch the list shows — the map below still walks the full module.runActions
@@ -3400,6 +3456,23 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       return null;
     }
   }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
+  // Sidecar-only router/BBMD visibility: bacnet_scanner stamps result_summary.routers
+  // (the built-in engine never does). null = no router section at all (absent key);
+  // [] = the scan heard no router (render the "none responded" note).
+  const bacnetRouters = useMemo<BacnetRouterDisplay[] | null>(() => {
+    if (module.route !== "bacnet-scanner" || !discoveryResultsQuery.data || !finalEvidenceReady) {
+      return null;
+    }
+    return formatBacnetRouters(discoveryResultsQuery.data.result_summary.routers);
+  }, [discoveryResultsQuery.data, finalEvidenceReady, module.route]);
+
+  // ip-scanner save-as-register is offered only once a scan has succeeded and
+  // recorded responding devices (a failed/empty/dry-run scan has nothing to save).
+  const saveableDeviceCount =
+    module.route === "ip-scanner" && activeRunStatus === "succeeded"
+      ? (discoveryResultsQuery.data?.devices?.length ?? 0)
+      : 0;
 
   // BACnet-only provenance: read result_summary.backend so simulated sample
   // devices are never mistaken for a real on-wire scan. Null for other routes
@@ -5041,7 +5114,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     const mqttOverCapBlocked =
                       mqttCaptureOverCap &&
                       action.kind === "discovery" &&
-                      action.runKind === "mqtt";
+                      (action.runKind === "mqtt" || action.runKind === "mqtt_sidecar");
                     const overCapBlocked =
                       (udmiCaptureOverCap &&
                         action.kind === "validation" &&
@@ -5071,7 +5144,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                               ? "Confirm scan authorization and select a sealed preview (or enable dry run) before starting a real scan."
                               : "Confirm broker-capture authorization (or enable dry run) before starting a real capture."
                             : mqttOverCapBlocked
-                              ? "Run time exceeds the 48-hour capture limit."
+                              ? module.route === "mqtt-scanner"
+                                ? "Run time exceeds the 15-minute scanner capture limit."
+                                : "Run time exceeds the 48-hour capture limit."
                               : overCapBlocked
                                 ? "Run time exceeds the 48-hour capture limit."
                                 : undefined;
@@ -5709,11 +5784,17 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 </small>
               </label>
               <label>
-                Run time (blank = run until all assets/topics seen or until the user stops the run)
+                {module.route === "mqtt-scanner"
+                  ? "Run time (blank = 60-second default window)"
+                  : "Run time (blank = run until all assets/topics seen or until the user stops the run)"}
                 <input
                   inputMode="numeric"
                   onChange={(event) => setCaptureSeconds(event.target.value)}
-                  placeholder="blank = run until you stop the run"
+                  placeholder={
+                    module.route === "mqtt-scanner"
+                      ? "blank = 60-second default"
+                      : "blank = run until you stop the run"
+                  }
                   value={captureSeconds}
                 />
               </label>
@@ -5733,7 +5814,9 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
             </div>
             {mqttCaptureOverCap && (
               <span className="error-text">
-                Run time exceeds the 48-hour capture limit — shorten the window.
+                {module.route === "mqtt-scanner"
+                  ? "Run time exceeds the 15-minute scanner capture limit — shorten the window."
+                  : "Run time exceeds the 48-hour capture limit — shorten the window."}
               </span>
             )}
             <p className="section-copy">
@@ -5744,11 +5827,15 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               <strong>
                 {Number(captureSecondsEffective) > 0
                   ? `${captureSecondsEffective}s`
-                  : "blank (run until you press Stop run)"}
+                  : module.route === "mqtt-scanner"
+                    ? "blank (60-second default window)"
+                    : "blank (run until you press Stop run)"}
               </strong>
-              . Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour
-              safety limit. Closing the app ends the run, which is then marked interrupted at next
-              start. Captured topics appear here when the run completes.
+              .{" "}
+              {module.route === "mqtt-scanner"
+                ? "Blank captures for the 60-second default; the window is capped at 15 minutes. Stop run ends the capture early."
+                : "Blank runs until you press Stop run, the 500-distinct-topic cap, or the 48-hour safety limit. Closing the app ends the run, which is then marked interrupted at next start."}{" "}
+              Captured topics appear here when the run completes.
             </p>
             {activeRunTerminal &&
               discoveryRunQuery.data?.result_summary?.indefinite_bounded_inline === true && (
@@ -6706,26 +6793,64 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                 <div>
                   <h3>{workspace?.tableTitle ?? "Workflow Results"}</h3>
                 </div>
-                <button
-                  className="secondary-button compact"
-                  disabled={
-                    !exportEnabled ||
-                    exportDownload.pendingKey !== null ||
-                    validationJsonDownload.pendingKey !== null
-                  }
-                  onClick={handleExport}
-                  title={exportTooltip}
-                  type="button"
-                >
-                  {validationJsonDownload.pendingKey === "validation-json"
-                    ? "Downloading JSON..."
-                    : exportDownload.pendingKey === "export"
-                      ? "Exporting..."
-                      : canDownloadValidationJson
-                        ? "Download raw JSON"
-                        : "Export"}
-                </button>
+                <div className="inline-actions">
+                  {module.route === "ip-scanner" && (
+                    <button
+                      className="secondary-button compact"
+                      disabled={!canEngineer || !saveableDeviceCount || saveRegisterMutation.isPending}
+                      onClick={() => activeRun && saveRegisterMutation.mutate(activeRun.runId)}
+                      title={
+                        canEngineer
+                          ? "Turn this scan's responding devices into an expected-device register (their open ports become the expected ports)."
+                          : ENGINEER_REQUIRED_TOOLTIP
+                      }
+                      type="button"
+                    >
+                      {saveRegisterMutation.isPending ? "Saving register..." : "Save scan as register"}
+                    </button>
+                  )}
+                  <button
+                    className="secondary-button compact"
+                    disabled={
+                      !exportEnabled ||
+                      exportDownload.pendingKey !== null ||
+                      validationJsonDownload.pendingKey !== null
+                    }
+                    onClick={handleExport}
+                    title={exportTooltip}
+                    type="button"
+                  >
+                    {validationJsonDownload.pendingKey === "validation-json"
+                      ? "Downloading JSON..."
+                      : exportDownload.pendingKey === "export"
+                        ? "Exporting..."
+                        : canDownloadValidationJson
+                          ? "Download raw JSON"
+                          : "Export"}
+                  </button>
+                </div>
               </div>
+
+              {module.route === "ip-scanner" && savedRegister && (
+                <div className="state-panel success" role="status">
+                  <strong>Saved as register</strong>
+                  <span>
+                    {savedRegister.file_name}: {savedRegister.accepted_rows} of{" "}
+                    {savedRegister.total_rows} rows accepted ({savedRegister.import_id}). The next IP
+                    Discovery run for this project and site will compare against it.
+                  </span>
+                </div>
+              )}
+              {module.route === "ip-scanner" && saveRegisterMutation.isError && (
+                <div className="state-panel error" role="alert">
+                  <strong>Save as register failed</strong>
+                  <span>
+                    {saveRegisterMutation.error instanceof Error
+                      ? saveRegisterMutation.error.message
+                      : "The register could not be created."}
+                  </span>
+                </div>
+              )}
 
               {usingLiveResults && (
                 <div className="sample-banner" role="note">
@@ -6795,9 +6920,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     <input
                       onChange={(event) => setResultsTextFilter(event.target.value)}
                       placeholder={
-                        resultsTopicColumn
-                          ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
-                          : "Asset, host, status, or any visible value"
+                        module.route === "mqtt-scanner" || module.route === "mqtt-discovery-sct"
+                          ? "Topic path, asset, payload text, status — or an MQTT wildcard (+/#)"
+                          : resultsTopicColumn
+                            ? "Topic path, asset, status — or an MQTT wildcard (+/#)"
+                            : "Asset, host, status, or any visible value"
                       }
                       value={resultsTextFilter}
                     />
@@ -7000,6 +7127,51 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               </div>
             </article>
 
+            {module.route === "bacnet-scanner" && !runAccessClosed && activeRunAuthoritativelyTerminal && bacnetRouters !== null && (
+              <section className="surface" aria-labelledby="bacnet-routers-heading">
+                <div className="surface-heading">
+                  <div>
+                    <h3 id="bacnet-routers-heading">Routers / BBMDs</h3>
+                    <p className="section-copy">
+                      BACnet/IP routers and BBMDs that answered Who-Is-Router during discovery, and the
+                      remote network numbers they advertise.
+                    </p>
+                  </div>
+                  <span className="results-filter-count">
+                    {`${bacnetRouters.length} router${bacnetRouters.length === 1 ? "" : "s"}`}
+                  </span>
+                </div>
+                {bacnetRouters.length === 0 ? (
+                  <div className="empty-workspace">
+                    <strong>No BACnet routers responded</strong>
+                    <span>
+                      No Who-Is-Router replies were heard during discovery — a recorded result, not an
+                      error.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="data-table-wrap results-scroll">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">Router Address</th>
+                          <th scope="col">Reachable Networks</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {bacnetRouters.map((router) => (
+                          <tr key={router.address}>
+                            <td>{router.address}</td>
+                            <td>{router.networks || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
+
             {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && !runAccessClosed && activeRunAuthoritativelyTerminal && (
               <section className="surface" aria-labelledby="bacnet-points-heading">
                 <div className="surface-heading">
@@ -7148,7 +7320,96 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
                     </div>
                   ))}
                 </div>
-                {(module.route === "bacnet-scanner" || module.route === "bacnet-discovery-sct") && activeRun && activeRunTerminal && (
+                {module.route === "bacnet-scanner" && activeRun && activeRunTerminal && (() => {
+                  const deviceInstance = Number(detailRow.Instance);
+                  const hasInstance = Number.isInteger(deviceInstance) && deviceInstance >= 0;
+                  const browsingThis =
+                    objectBrowseMutation.variables?.deviceInstance === deviceInstance;
+                  const pending = objectBrowseMutation.isPending && browsingThis;
+                  const errored = objectBrowseMutation.isError && browsingThis;
+                  const result =
+                    objectBrowseResult && objectBrowseResult.device_instance === deviceInstance
+                      ? objectBrowseResult
+                      : null;
+                  return (
+                    <div className="detail-actions" aria-live="polite">
+                      <div className="property-expansion-panel">
+                        <strong>Browse live objects</strong>
+                        <span>
+                          Reads this device&apos;s object list and present values directly from the
+                          network. Nothing is persisted; the scan results above are unchanged.
+                        </span>
+                        <button
+                          className="secondary-button compact"
+                          disabled={pending || !hasInstance || !scanAuthorized}
+                          onClick={() => {
+                            if (hasInstance && activeRun) {
+                              objectBrowseMutation.mutate({ runId: activeRun.runId, deviceInstance });
+                            }
+                          }}
+                          type="button"
+                        >
+                          {pending ? "Reading object list…" : "Browse live objects"}
+                        </button>
+                        {!scanAuthorized && (
+                          <span>Tick the scan-authorization checkbox on the Run step first.</span>
+                        )}
+                        {scanAuthorized && !hasInstance && (
+                          <span>This row has no device instance to read.</span>
+                        )}
+                      </div>
+                      {errored && (
+                        <div className="state-panel error" role="alert">
+                          <strong>Object browse failed</strong>
+                          <span>
+                            {objectBrowseMutation.error instanceof Error
+                              ? objectBrowseMutation.error.message
+                              : "The device object list could not be read."}
+                          </span>
+                        </div>
+                      )}
+                      {result && (
+                        <>
+                          <span className="results-filter-count">
+                            {`${result.count} object${result.count === 1 ? "" : "s"} on device · showing ${result.objects.length}`}
+                            {result.truncated ? " · list truncated at the read cap" : ""}
+                          </span>
+                          {result.error && (
+                            <div className="state-panel" role="status">
+                              <strong>Device did not return a full object list</strong>
+                              <span>{result.error}</span>
+                            </div>
+                          )}
+                          {result.objects.length > 0 && (
+                            <div className="data-table-wrap results-scroll">
+                              <table className="data-table">
+                                <thead>
+                                  <tr>
+                                    <th scope="col">Object</th>
+                                    <th scope="col">Name</th>
+                                    <th scope="col">Present Value</th>
+                                    <th scope="col">Units</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {result.objects.map((object) => (
+                                    <tr key={`${object.type_name}-${object.instance}`}>
+                                      <td>{`${object.type_name}-${object.instance}`}</td>
+                                      <td>{object.name || "—"}</td>
+                                      <td>{object.present_value || "—"}</td>
+                                      <td>{object.units || "—"}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
+                {module.route === "bacnet-discovery-sct" && activeRun && activeRunTerminal && (
                   <div className="detail-actions" aria-live="polite">
                     <div className="property-expansion-panel">
                       <strong>Bounded property read</strong>
@@ -9058,6 +9319,27 @@ function buildDiscoveryParameters(
       );
     }
     parameters.capture_seconds = raw === "" ? 0 : seconds;
+  }
+  if (action.runKind === "mqtt_sidecar") {
+    // Sidecar capture lane: same operator inputs, bounded-capture semantics. The
+    // adapter reads topic_filter (a root-filter alias) and capture_seconds; blank
+    // omits the key so the engine's own defaults apply (# / 60s) — never a literal
+    // "#" or a 0-sentinel on the wire (this lane has no indefinite mode; its
+    // window is bounded 1-900s, clamped by the adapter).
+    const filter = options.captureTopicFilter?.trim();
+    if (filter) {
+      parameters.topic_filter = filter;
+    }
+    const raw = (options.captureSeconds ?? "").trim();
+    const seconds = Number(raw);
+    if (raw !== "" && !(Number.isFinite(seconds) && seconds > 0)) {
+      throw new Error(
+        "Run time must be a positive number, or blank for the 60-second default window.",
+      );
+    }
+    if (raw !== "") {
+      parameters.capture_seconds = seconds;
+    }
   }
   return parameters;
 }

@@ -7,8 +7,43 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- BACnet Discovery (scanner) now surfaces the BACnet/IP routers and BBMDs that
+  answered Who-Is-Router during a scan, with the remote network numbers each
+  advertises, in a Routers / BBMDs panel on the Results step and a matching
+  report section. Routers are recorded in the run summary as reachability facts,
+  never as discovered devices.
+- BACnet Discovery (scanner) adds a Browse live objects action in a device's
+  result detail. It reads that device's live object list and present values on
+  demand and shows them in an object table, without persisting anything or
+  changing the sealed scan results. The read needs scan authorization and the
+  engineer role, and it reports the device's own no-answer message honestly
+  instead of an empty success.
+- IP Discovery (scanner) adds Save scan as register on the Results step: a
+  succeeded scan's responding devices become an accepted ip_scanner_register
+  import, with each device's open ports recorded as its expected ports. The
+  register is created through the same import pipeline as an upload, so it is
+  reusable exactly like one.
+
+### Changed
+
+- IP scanner runs now bind the newest accepted ip_scanner_register for the
+  run's project and site and RAG-compare the scan against it. The register was
+  read by the scanner but never bound before, so uploaded and saved registers
+  now take effect where they previously appeared to be ignored.
+- The MQTT results filter now names payload text as a searchable field. Searching
+  the captured payload content over a completed scan already worked (the latest
+  payload per topic is shown and searched); the placeholder now says so and a
+  test pins it.
+
 ### Fixed
 
+- MQTT Discovery (scanner) now sends the operator's topic filter and run time to
+  the capture run. The sidecar lane previously ignored both, capturing every
+  topic (#) for the 60-second default no matter what the panel showed, while the
+  panel claimed the inputs were sent. The scanner window is bounded to 15 minutes
+  (blank uses the 60-second default); the panel copy now reflects that.
 - Signed report manifests and ZIP exports now retain the selected source-run
   IDs and frozen build provenance while remaining compatible with manifest
   schemas 1.0 and 1.1.

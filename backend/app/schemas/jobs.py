@@ -145,6 +145,49 @@ class BacnetPropertyRunRequest(BaseModel):
         return self
 
 
+class BacnetObjectBrowseRequest(BaseModel):
+    """An on-demand live object-list read for one device in a bacnet_scanner run.
+
+    The device is resolved from the parent run's own evidence by ``device_instance``
+    (the route never trusts a client-supplied address). ``authorized`` gates the
+    live network read through the same legacy consent gate the scan run uses.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_instance: int = Field(ge=0, le=4_194_302)
+    authorized: bool = False
+    cap: int | None = Field(default=None, ge=1, le=1000)
+    read_timeout_ms: int | None = Field(default=None, ge=500, le=6000)
+
+
+class BacnetBrowsedObject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: int
+    type_name: str
+    instance: int
+    name: str
+    present_value: str
+    units: str
+
+
+class BacnetObjectBrowseResponse(BaseModel):
+    """Result of a live object browse. ``error`` carries the device's own
+    no-answer sentence when the object-list read returned nothing (a real
+    result, never a fabricated empty success)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    device_instance: int
+    address: str
+    objects: list[BacnetBrowsedObject] = Field(default_factory=list)
+    count: int = 0
+    truncated: bool = False
+    error: str | None = None
+
+
 class DiscoveryObservationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

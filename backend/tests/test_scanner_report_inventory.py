@@ -173,6 +173,52 @@ class ScannerReportInventoryTest(unittest.TestCase):
         self.assertEqual(point_row["Units"], "degC")
         _assert_no_leak(self, sections)
 
+    def test_bacnet_scanner_renders_router_section(self) -> None:
+        run = _run(
+            "bacnet_scanner",
+            "bac-run",
+            {"devices": [], "points": []},
+            {
+                "devices_discovered": 0,
+                "routers": [
+                    {"address": "192.0.2.9", "networks": [200, 300]},
+                    {"address": "192.0.2.10", "networks": []},
+                ],
+            },
+        )
+        sections = self.reports._discovery_inventory(run)
+        section = _section(sections, self.reports._BACNET_ROUTER_COLUMNS)
+        self.assertEqual(len(section["rows"]), 2)
+        self.assertEqual(
+            section["rows"][0],
+            {"Source Run": "bac-run", "Router Address": "192.0.2.9", "Reachable Networks": "200, 300"},
+        )
+        # A router that advertised no remote network renders the blank sentinel,
+        # never an empty string or a fabricated network number.
+        self.assertEqual(section["rows"][1]["Reachable Networks"], "—")
+        _assert_no_leak(self, sections)
+
+    def test_bacnet_scanner_empty_router_list_renders_none_note(self) -> None:
+        run = _run("bacnet_scanner", "bac-run", {"devices": [], "points": []},
+                   {"devices_discovered": 0, "routers": []})
+        sections = self.reports._discovery_inventory(run)
+        section = _section(sections, self.reports._BACNET_ROUTER_COLUMNS)
+        self.assertEqual(section["rows"], [])
+        # Key present but empty -> the honest "none responded" note, not the
+        # generic empty-scan note (a scan that heard no router is a real result).
+        self.assertEqual(section["note"], self.reports._BACNET_ROUTER_NOTE)
+
+    def test_bacnet_run_without_router_key_has_no_router_section(self) -> None:
+        # Pre-router runs and the built-in engine never stamp result_summary.routers;
+        # they must render no router section at all (absence != empty list).
+        run = _run("bacnet_scanner", "bac-run", {"devices": [], "points": []},
+                   {"devices_discovered": 0})
+        sections = self.reports._discovery_inventory(run)
+        self.assertFalse(
+            any(section["columns"] == self.reports._BACNET_ROUTER_COLUMNS for section in sections),
+            "a run with no routers key must not produce a router section",
+        )
+
     def test_mqtt_scanner_renders_topic_columns_and_summed_messages(self) -> None:
         run = _run(
             "mqtt_scanner",

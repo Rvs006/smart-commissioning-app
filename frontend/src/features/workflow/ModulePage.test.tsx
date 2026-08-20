@@ -1157,6 +1157,123 @@ describe("ModulePage discovery wiring", () => {
     );
   }
 
+  function stubMqttSidecarRunFetch(onPost: (body: { parameters: Record<string, unknown> }) => void) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+        if (url.endsWith("/api/v1/me")) return jsonResponse(mePayload);
+        if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+        if (url.endsWith("/api/v1/discovery/mqtt_sidecar/runs") && init?.method === "POST") {
+          onPost(JSON.parse(String(init.body)) as { parameters: Record<string, unknown> });
+          return jsonResponse(mqttAccepted);
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/topics")) {
+          return jsonResponse({ run_id: "run-mqtt-1", topics: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1/results")) {
+          return jsonResponse({ ...resultsPayload, run_id: "run-mqtt-1", discovered_assets: [] });
+        }
+        if (url.endsWith("/api/v1/discovery/runs/run-mqtt-1")) {
+          return jsonResponse(mqttTerminal);
+        }
+        throw new Error(`Unexpected fetch in test: ${url}`);
+      }),
+    );
+  }
+
+  it("sends the MQTT scanner (sidecar) topic filter and bounded run time to the run (M3)", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttSidecarRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-scanner");
+
+    fireEvent.change(await screen.findByLabelText(/Topic filter/i), {
+      target: { value: "site/asset-1/#" },
+    });
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "5" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
+      target: { value: "minutes" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
+    expect(parameters.topic_filter).toBe("site/asset-1/#");
+    expect(parameters.capture_seconds).toBe(300);
+  });
+
+  it("omits both MQTT scanner capture keys when filter and run time are blank (M3)", async () => {
+    let postedBody: { parameters: Record<string, unknown> } | null = null;
+    stubMqttSidecarRunFetch((body) => {
+      postedBody = body;
+    });
+
+    renderModule("mqtt-scanner");
+
+    // Blank filter + blank run time -> neither key on the wire; the adapter's own
+    // defaults (# / 60s) apply, never a literal "#" or 0-sentinel.
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "" } });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    const parameters = (postedBody as unknown as { parameters: Record<string, unknown> })
+      .parameters;
+    expect(parameters).not.toHaveProperty("topic_filter");
+    expect(parameters).not.toHaveProperty("capture_seconds");
+  });
+
+  it("refuses an MQTT scanner run time over the 15-minute cap without posting (M3)", async () => {
+    let posted = false;
+    stubMqttSidecarRunFetch(() => {
+      posted = true;
+    });
+
+    renderModule("mqtt-scanner");
+
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), { target: { value: "16" } });
+    fireEvent.change(await screen.findByLabelText(/Run time unit/i), {
+      target: { value: "minutes" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+
+    expect(await screen.findByText(/15-minute scanner capture limit/i)).toBeInTheDocument();
+    const runButton = screen.getByRole("button", { name: "Run" });
+    expect(runButton).toBeDisabled();
+    fireEvent.click(runButton);
+    expect(posted).toBe(false);
+  });
+
+  it("blocks a non-numeric MQTT scanner run time and posts nothing (M3)", async () => {
+    let posted = false;
+    stubMqttSidecarRunFetch(() => {
+      posted = true;
+    });
+
+    renderModule("mqtt-scanner");
+
+    fireEvent.change(await screen.findByLabelText(/Run time \(blank/i), {
+      target: { value: "45s" },
+    });
+    fireEvent.click(screen.getByLabelText(/I am authorized to scan this network/i));
+    const runButton = await screen.findByRole("button", { name: "Run" });
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+
+    expect(await screen.findByText(/Run time must be a positive number/i)).toBeInTheDocument();
+    expect(posted).toBe(false);
+  });
+
   it("sends an MQTT dry-run preview instead of an unauthorized live capture", async () => {
     let postedBody: { parameters: Record<string, unknown> } | null = null;
     stubMqttRunFetch((body) => {
