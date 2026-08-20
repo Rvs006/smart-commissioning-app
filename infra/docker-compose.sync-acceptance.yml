@@ -23,7 +23,7 @@ services:
       context: ..
       dockerfile: backend/Dockerfile
       args:
-        APP_VERSION: "${APP_VERSION:-v0.1.50}"
+        APP_VERSION: "${APP_VERSION:-v0.1.52}"
         SOURCE_COMMIT: "${SOURCE_COMMIT:-unknown}"
         SOURCE_REPOSITORY: "${SOURCE_REPOSITORY:-https://github.com/Rvs006/smart-commissioning-app}"
     user: "0:0"
@@ -50,7 +50,7 @@ services:
       context: ..
       dockerfile: backend/Dockerfile
       args:
-        APP_VERSION: "${APP_VERSION:-v0.1.50}"
+        APP_VERSION: "${APP_VERSION:-v0.1.52}"
         SOURCE_COMMIT: "${SOURCE_COMMIT:-unknown}"
         SOURCE_REPOSITORY: "${SOURCE_REPOSITORY:-https://github.com/Rvs006/smart-commissioning-app}"
     restart: "no"
