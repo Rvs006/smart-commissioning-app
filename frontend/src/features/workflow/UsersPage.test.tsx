@@ -124,6 +124,7 @@ function renderUsers(meOverrides: Partial<MeResponse> = {}) {
   const sessionScopeId = createSessionScopeId();
   const session: SessionContextValue = {
     apiClient: createSessionBoundApiClient(sessionScopeId, DEFAULT_WORKSPACE, null),
+    authorizationEnforced: true,
     canAdmin: true,
     canEngineer: true,
     error: null,

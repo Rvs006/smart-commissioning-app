@@ -17,6 +17,10 @@ export type SessionContextValue = {
   // so actions stay disabled until the role is positively known (fail-closed).
   canEngineer: boolean;
   canAdmin: boolean;
+  // Whether this deployment enforces the scan/write authorization ceremony.
+  // True while loading or when the field is absent (fail-closed) so the UI never
+  // drops the checkbox/approval before the mode is positively known.
+  authorizationEnforced: boolean;
   // True while the /me query is in flight (a key is set but role not yet known).
   isLoading: boolean;
   // The /me query errored (e.g. an invalid key -> 401). The shell surfaces this.

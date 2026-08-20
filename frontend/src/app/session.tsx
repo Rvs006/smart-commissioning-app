@@ -130,6 +130,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     const role = me?.role ?? null;
     return {
       apiClient,
+      authorizationEnforced: me?.authorization_enforced ?? true,
       canAdmin: roleAtLeast(role ?? undefined, "admin"),
       canEngineer: roleAtLeast(role ?? undefined, "engineer"),
       error: meQuery.error,

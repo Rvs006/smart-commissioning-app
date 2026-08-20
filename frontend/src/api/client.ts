@@ -38,6 +38,10 @@ export type MeResponse = {
   source: "user_key" | "shared_key" | "local";
   global_scope: boolean;
   effective_scopes: EffectiveScope[];
+  // Whether this deployment enforces the scan/write authorization ceremony.
+  // Optional so existing test mocks keep compiling; absent is treated as
+  // enforced (fail-closed).
+  authorization_enforced?: boolean;
 };
 
 // A user as returned by the admin /users endpoints (never includes key material).
@@ -2807,6 +2811,38 @@ export function startMqttPublishPreview(input: {
         job_type: "mqtt_publish",
         parameters: {
           dry_run: true,
+          topic: input.topic,
+          payload: input.payload,
+          qos: input.qos ?? 0,
+          retain: input.retain ?? false,
+        },
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    },
+    input.context,
+  );
+}
+
+// Frictionless deployments: a live send goes directly, no preview/approval. The
+// backend seals the exact bytes server-side and records the sender. Only reachable
+// when the deployment reports authorization_enforced === false.
+export function startDirectMqttPublish(input: {
+  workspace: WorkspaceRef;
+  topic: string;
+  payload: string;
+  qos?: number;
+  retain?: boolean;
+  context?: ApiRequestContext;
+}): Promise<JobAcceptedResponse> {
+  return request<JobAcceptedResponse>(
+    "/discovery/mqtt_sidecar/live/publish/runs",
+    {
+      body: JSON.stringify({
+        project_id: input.workspace.projectId,
+        site_id: input.workspace.siteId,
+        job_type: "mqtt_publish",
+        parameters: {
           topic: input.topic,
           payload: input.payload,
           qos: input.qos ?? 0,

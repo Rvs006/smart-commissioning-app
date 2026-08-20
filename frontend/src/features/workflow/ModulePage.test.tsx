@@ -351,6 +351,50 @@ it("lets an admin approve a sealed IP preview from Run Controls", async () => {
   });
 });
 
+it("frictionless deployment hides the authorization ceremony and runs a live scan directly", async () => {
+  let liveBody: Record<string, unknown> | null = null;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/v1/runs?")) return jsonResponse({ runs: [] });
+      if (url.endsWith("/api/v1/me")) return jsonResponse({ ...mePayload, authorization_enforced: false });
+      if (url.endsWith("/api/v1/imports/profiles")) return jsonResponse(profilesPayload);
+      if (url.endsWith("/api/v1/discovery/ip/runs") && init?.method === "POST") {
+        liveBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse(acceptedRun);
+      }
+      if (url.endsWith("/api/v1/discovery/runs/run-ip-1/results")) return jsonResponse(resultsPayload);
+      if (url.endsWith("/api/v1/discovery/runs/run-ip-1")) return jsonResponse(terminalRun);
+      throw new Error(`Unexpected fetch in test: ${url}`);
+    }),
+  );
+
+  renderModule("ip-scanner-sct");
+
+  // The "I am authorized" checkbox and the sealed-preview authorization control
+  // are both gone in a frictionless deployment. waitFor lets /me resolve first
+  // (Target override renders regardless of the mode).
+  await screen.findByLabelText(/Target override/i);
+  await waitFor(() =>
+    expect(screen.queryByLabelText(/I am authorized to scan this network/i)).toBeNull(),
+  );
+  expect(screen.queryByRole("combobox", { name: /Sealed preview authorization/i })).toBeNull();
+
+  fireEvent.change(screen.getByLabelText(/Target override/i), { target: { value: "10.20.0.0/24" } });
+  const runButton = await screen.findByRole("button", { name: "Run" });
+  await waitFor(() => expect(runButton).toBeEnabled());
+  fireEvent.click(runButton);
+
+  // The live scan posts its real parameters directly, with no sealed ids.
+  await waitFor(() => expect(liveBody).not.toBeNull());
+  const body = liveBody as unknown as { parameters: Record<string, unknown> };
+  expect(body.parameters).toMatchObject({ cidr: "10.20.0.0/24" });
+  expect(body.parameters).not.toHaveProperty("dry_run");
+  expect(body).not.toHaveProperty("preview_run_id");
+  expect(body).not.toHaveProperty("scan_authorization_id");
+});
+
 async function prepareAuthorizedIpRun(): Promise<HTMLElement> {
   const dryRun = await screen.findByLabelText(/Dry run/i);
   fireEvent.click(dryRun);
@@ -9484,6 +9528,7 @@ describe("ModulePage progressive discovery observations", () => {
     });
     const sessionValue = (workspace: WorkspaceRef): SessionContextValue => ({
       apiClient: createSessionBoundApiClient(sessionScopeId, workspace, "engineer-key"),
+      authorizationEnforced: true,
       canAdmin: false,
       canEngineer: true,
       error: null,

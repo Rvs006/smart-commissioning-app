@@ -5,6 +5,7 @@ vi.mock("../../api/client", () => ({
   createScanAuthorization: vi.fn(),
   getValidationRun: vi.fn(),
   startAuthorizedMqttPublish: vi.fn(),
+  startDirectMqttPublish: vi.fn(),
   startMqttPublishPreview: vi.fn(),
 }));
 
@@ -12,6 +13,7 @@ import {
   createScanAuthorization,
   getValidationRun,
   startAuthorizedMqttPublish,
+  startDirectMqttPublish,
   startMqttPublishPreview,
 } from "../../api/client";
 import { MqttPublishModal } from "./MqttPublishModal";
@@ -100,6 +102,29 @@ describe("MqttPublishModal", () => {
     expect(startAuthorizedMqttPublish).toHaveBeenCalledWith(
       expect.objectContaining({ previewRunId: "prev1", scanAuthorizationId: "auth1" }),
     );
+  });
+
+  it("frictionless mode sends directly with no preview or approval", async () => {
+    vi.mocked(startDirectMqttPublish).mockResolvedValue({ run_id: "send1" } as never);
+    vi.mocked(getValidationRun).mockResolvedValue({
+      run_id: "send1",
+      status: "succeeded",
+      result_summary: { publish: { topic: "site/ahu-1/cmd", authorized_by: "shared-key", accepted_by_sidecar: true, delivery_confirmed: false } },
+    } as never);
+
+    render(<MqttPublishModal authorizationEnforced={false} onClose={() => {}} workspace={workspace} />);
+    fillCompose();
+    // No preview button in frictionless mode; a direct Send instead.
+    expect(screen.queryByRole("button", { name: /Preview/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Send to live equipment/ }));
+
+    await screen.findByText(/Sent/);
+    expect(startDirectMqttPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ topic: "site/ahu-1/cmd", payload: '{"cmd":1}' }),
+    );
+    // The sealed preview path was never touched.
+    expect(startMqttPublishPreview).not.toHaveBeenCalled();
+    expect(createScanAuthorization).not.toHaveBeenCalled();
   });
 
   it("shows an honest failure when the send run fails", async () => {

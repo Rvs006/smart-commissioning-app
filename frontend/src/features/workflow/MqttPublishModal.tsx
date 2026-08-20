@@ -3,6 +3,7 @@ import {
   createScanAuthorization,
   getValidationRun,
   startAuthorizedMqttPublish,
+  startDirectMqttPublish,
   startMqttPublishPreview,
   type RunRecord,
   type ScanAuthorizationV1,
@@ -12,11 +13,14 @@ import type { WorkspaceRef } from "../../app/sessionScope";
 
 // Sealed one-message publish (M5 PR-A). Compose -> Preview (no send) -> Approve
 // (admin) -> Send (replays the frozen bytes) -> Result. Built from SCT's existing
-// dialog / state-panel / data-table vocabulary.
+// dialog / state-panel / data-table vocabulary. In a frictionless deployment
+// (authorizationEnforced=false) it collapses to Compose -> Send: the backend
+// seals the exact bytes server-side and records the sender.
 
 type Props = {
   workspace: WorkspaceRef;
   apiClient?: SessionBoundApiClient;
+  authorizationEnforced?: boolean;
   defaultTopic?: string;
   onClose: () => void;
 };
@@ -42,7 +46,13 @@ function planField(run: RunRecord | null, key: string): unknown {
   return plan?.[key];
 }
 
-export function MqttPublishModal({ workspace, apiClient, defaultTopic, onClose }: Props) {
+export function MqttPublishModal({
+  workspace,
+  apiClient,
+  authorizationEnforced = true,
+  defaultTopic,
+  onClose,
+}: Props) {
   const context = apiClient ? { client: apiClient } : undefined;
   const [stage, setStage] = useState<Stage>("compose");
   const [topic, setTopic] = useState(defaultTopic ?? "");
@@ -72,6 +82,21 @@ export function MqttPublishModal({ workspace, apiClient, defaultTopic, onClose }
         setPreviewRun(run);
         setStage("preview");
       }
+    } catch (err) {
+      fail(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doDirectSend = async () => {
+    // Frictionless: no preview/approval. The backend seals the bytes server-side.
+    setBusy(true);
+    setError(null);
+    try {
+      const accepted = await startDirectMqttPublish({ workspace, topic, payload, qos, retain, context });
+      setSendRun(await pollRun(accepted.run_id, apiClient));
+      setStage("result");
     } catch (err) {
       fail(err);
     } finally {
@@ -133,8 +158,9 @@ export function MqttPublishModal({ workspace, apiClient, defaultTopic, onClose }
         <div>
           <h3 id="mqtt-publish-heading">Publish a message</h3>
           <p className="section-copy">
-            A preview shows the exact bytes and sends nothing. An admin approves that exact message before it can be
-            sent to the live broker.
+            {authorizationEnforced
+              ? "A preview shows the exact bytes and sends nothing. An admin approves that exact message before it can be sent to the live broker."
+              : "This message sends directly through the held live session. The exact bytes are recorded as evidence."}
           </p>
         </div>
         <button className="secondary-button compact" onClick={onClose} type="button">
@@ -171,14 +197,25 @@ export function MqttPublishModal({ workspace, apiClient, defaultTopic, onClose }
             <input checked={retain} onChange={(event) => setRetain(event.target.checked)} type="checkbox" />
             Retain
           </label>
-          <button
-            className="primary-button compact"
-            disabled={busy || topic.trim().length === 0}
-            onClick={() => void doPreview()}
-            type="button"
-          >
-            {busy ? "Previewing…" : "Preview — nothing is sent"}
-          </button>
+          {authorizationEnforced ? (
+            <button
+              className="primary-button compact"
+              disabled={busy || topic.trim().length === 0}
+              onClick={() => void doPreview()}
+              type="button"
+            >
+              {busy ? "Previewing…" : "Preview — nothing is sent"}
+            </button>
+          ) : (
+            <button
+              className="primary-button compact"
+              disabled={busy || topic.trim().length === 0}
+              onClick={() => void doDirectSend()}
+              type="button"
+            >
+              {busy ? "Sending…" : "Send to live equipment"}
+            </button>
+          )}
         </div>
       )}
 
