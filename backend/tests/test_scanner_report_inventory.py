@@ -122,6 +122,42 @@ class ScannerReportInventoryTest(unittest.TestCase):
         self.assertEqual(counts, "3 hosts scanned, 1 responsive")
         _assert_no_leak(self, sections)
 
+    def test_ip_scanner_includes_typed_hosts_not_just_ip_host(self) -> None:
+        # Regression: the ip_scanner sidecar TYPES its hosts (e.g. "server") and
+        # only falls back to "ip_host" when untyped. The inventory must render
+        # every host, not silently drop the typed ones.
+        run = _run(
+            "ip_scanner",
+            "ip-run-typed",
+            {
+                "devices": [
+                    _salt(
+                        {
+                            "device_type": "server",
+                            "address": "10.0.0.9",
+                            "name": "srv-1",
+                            "attributes": {"open_ports": [443]},
+                        }
+                    ),
+                    _salt(
+                        {
+                            "device_type": "ip_host",
+                            "address": "10.0.0.10",
+                            "name": "host-b",
+                            "attributes": {"open_ports": [80]},
+                        }
+                    ),
+                ]
+            },
+            {"hosts_scanned": 2, "hosts_responsive": 2},
+        )
+        sections = self.reports._discovery_inventory(run)
+        self.assertIsNotNone(sections)
+        section = _section(sections, self.reports._IP_INVENTORY_COLUMNS)
+        addresses = {row["Address"] for row in section["rows"]}
+        self.assertEqual(addresses, {"10.0.0.9", "10.0.0.10"}, "the typed 'server' host must not be dropped")
+        _assert_no_leak(self, sections)
+
     def test_bacnet_scanner_renders_device_and_point_columns(self) -> None:
         run = _run(
             "bacnet_scanner",
