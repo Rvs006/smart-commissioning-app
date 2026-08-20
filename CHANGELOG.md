@@ -7,8 +7,6 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
-## [0.1.51] - 2026-08-20
-
 ### Added
 
 - BACnet Discovery (scanner) now surfaces the BACnet/IP routers and BBMDs that
