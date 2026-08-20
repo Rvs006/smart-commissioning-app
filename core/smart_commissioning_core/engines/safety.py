@@ -46,8 +46,31 @@ DRY-RUN CONVENTION (see :func:`build_dry_run_plan`):
     :func:`build_dry_run_plan` produces the canonical shape for that value.
 """
 
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+# A deployment MAY opt out of the authorization ceremony (the "authorized"
+# checkbox and the sealed two-person approval) by setting this to a falsy value.
+# The public default is enforced, so existing deployments, tests, and the shared
+# source are unchanged; a portable build sets it to "0" to run frictionless.
+# Evidence recording is independent of this flag and is never affected.
+_AUTHORIZATION_ENV_VAR = "SCT_REQUIRE_SCAN_AUTHORIZATION"
+_FALSY = frozenset({"0", "false", "off", "no", ""})
+
+
+def authorization_enforced() -> bool:
+    """Whether active-scan / device-write authorization is enforced (default True).
+
+    Read at call time so a deployment (or a test) can flip it via the
+    ``SCT_REQUIRE_SCAN_AUTHORIZATION`` environment variable without a restart of
+    import-time state. Absent or truthy -> enforced; ``0``/``false``/``off``/
+    ``no``/empty -> frictionless.
+    """
+    raw = os.environ.get(_AUTHORIZATION_ENV_VAR)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _FALSY
 
 
 class ScanNotAuthorized(RuntimeError):
@@ -87,7 +110,14 @@ def is_authorized(parameters: Mapping[str, Any] | None) -> bool:
 
     Convenience predicate for callers that want to branch rather than catch
     :class:`ScanNotAuthorized`.
+
+    In a frictionless deployment (:func:`authorization_enforced` is False) this
+    is always True: the gate is disabled, so every legacy-gated caller
+    (sidecar scans, config publish) and every engine guard passes. The sealed
+    route helper handles its own frictionless branch.
     """
+    if not authorization_enforced():
+        return True
     authorized, _ = _coerce_authorization(parameters)
     return authorized
 

@@ -8,9 +8,11 @@ counter so we can assert the concurrency bound is never exceeded.
 """
 
 import asyncio
+import os
 import threading
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from smart_commissioning_core.engines.base import (
     _PERSIST_FAILURE_MESSAGE,
@@ -25,6 +27,7 @@ from smart_commissioning_core.engines.base import (
 )
 from smart_commissioning_core.engines.safety import (
     ScanNotAuthorized,
+    authorization_enforced,
     build_dry_run_plan,
     is_authorized,
     require_scan_authorization,
@@ -346,6 +349,33 @@ class SafetyTests(unittest.TestCase):
             self.assertNotIn("s3cret", str(error))
         else:
             self.fail("expected ScanNotAuthorized")
+
+    def test_authorization_enforced_default_and_env_toggle(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(authorization_enforced(), "absent env -> enforced")
+        for truthy in ("1", "true", "on", "yes", "ENFORCE"):
+            with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": truthy}):
+                self.assertTrue(authorization_enforced())
+        for falsy in ("0", "false", "off", "no", "", "  Off  "):
+            with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": falsy}):
+                self.assertFalse(authorization_enforced())
+
+    def test_frictionless_mode_disables_the_gate(self) -> None:
+        # With the gate off, an unauthorized (or empty) parameters set passes and
+        # require_scan_authorization does not raise. Evidence is unaffected here.
+        with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": "0"}):
+            self.assertTrue(is_authorized({}))
+            self.assertTrue(is_authorized(None))
+            self.assertTrue(is_authorized({"authorized": False}))
+            require_scan_authorization({})  # must not raise
+            require_scan_authorization(None)  # must not raise
+
+    def test_enforced_mode_still_rejects_unauthorized(self) -> None:
+        # Explicit-enforce keeps the original contract intact.
+        with patch.dict(os.environ, {"SCT_REQUIRE_SCAN_AUTHORIZATION": "1"}):
+            self.assertFalse(is_authorized({}))
+            with self.assertRaises(ScanNotAuthorized):
+                require_scan_authorization({})
 
     def test_build_dry_run_plan_has_no_side_effects(self) -> None:
         # A fake target records if it was 'contacted'. Building a dry-run plan
