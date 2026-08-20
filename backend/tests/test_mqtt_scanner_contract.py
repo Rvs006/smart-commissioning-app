@@ -1,6 +1,6 @@
 """Golden-fixture contract test for the mqtt_scanner sidecar adapter.
 
-The Pete re-import gate for the MQTT lane: it pins the driving contract between
+The upstream re-import gate for the MQTT lane: it pins the driving contract between
 the SCT adapter and the vendored ``mqtt-discovery`` Node app. If the vendored app
 changes its health version, export manifest shape, register columns, match keys,
 or its connect/status/export endpoint vocabulary — or if the adapter drifts from

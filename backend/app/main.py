@@ -101,10 +101,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from app.services.sidecar_supervisor import SidecarSupervisor
 
     supervisor = SidecarSupervisor()
-    try:
-        await supervisor.start_all()
-    except Exception:  # noqa: BLE001 (a sidecar must never block startup)
-        logger.exception("Sidecar supervisor start_all failed; scanners will be unavailable.")
+    # Spawning the vendored Node sidecars is opt-in: the portable launcher (and a
+    # docker profile) set SMART_COMMISSIONING_ENABLE_SIDECARS=1. Plain uvicorn runs
+    # and the test suite leave it unset, so they never spawn real node children
+    # (the scanners route then returns 503). Without this gate every TestClient
+    # that enters the lifespan would spawn three node processes.
+    if os.getenv("SMART_COMMISSIONING_ENABLE_SIDECARS") == "1":
+        try:
+            await supervisor.start_all()
+        except Exception:  # noqa: BLE001 (a sidecar must never block startup)
+            logger.exception("Sidecar supervisor start_all failed; scanners will be unavailable.")
     _app.state.sidecar_supervisor = supervisor
 
     # Orphan-run sweep: a run left at status "running" by an application restart

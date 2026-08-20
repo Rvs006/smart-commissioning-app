@@ -6,20 +6,20 @@ topic rows), so no DB or engine is touched. Every frozen row is salted with the
 repository ``id`` / ``created_at`` a real read would carry; the tests prove those
 sentinels never reach a rendered cell (byte-reproducibility of the signed
 artifact).
+
+Importing ``app.api.routes.reports`` binds its module-level ``service =
+RunService()`` to ``get_engine()``. Under ``unittest`` (CI has no pytest
+``conftest``), a module-level import here would fire that binding at COLLECTION
+time -- before any API test harness clears the engine cache and points at a
+migrated temp database -- leaving ``service`` stuck on the unmigrated default DB
+and every later DB-backed test failing with "Run not found". So the import is
+deferred into ``setUp`` (see conftest.py's docstring for the full failure mode).
 """
 
 from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
-
-from app.api.routes.reports import (
-    _BACNET_DEVICE_COLUMNS,
-    _BACNET_POINT_COLUMNS,
-    _IP_INVENTORY_COLUMNS,
-    _MQTT_TOPIC_COLUMNS,
-    _discovery_inventory,
-)
 
 # Sentinel values a live DiscoveryRepository read would attach to each row. If
 # any of these strings surfaces in a rendered cell, byte-reproducibility is
@@ -75,6 +75,13 @@ def _assert_no_leak(testcase: unittest.TestCase, sections: list[dict[str, object
 
 
 class ScannerReportInventoryTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # Deferred import (see the module docstring): binding reports.py's
+        # module-level engine at collection time poisons every DB-backed test.
+        from app.api.routes import reports
+
+        self.reports = reports
+
     def test_ip_scanner_renders_ip_columns_from_scanner_keys(self) -> None:
         run = _run(
             "ip_scanner",
@@ -99,9 +106,9 @@ class ScannerReportInventoryTest(unittest.TestCase):
             },
             {"hosts_scanned": 3, "hosts_responsive": 1},
         )
-        sections = _discovery_inventory(run)
+        sections = self.reports._discovery_inventory(run)
         self.assertIsNotNone(sections)
-        section = _section(sections, _IP_INVENTORY_COLUMNS)
+        section = _section(sections, self.reports._IP_INVENTORY_COLUMNS)
         self.assertEqual(len(section["rows"]), 1)
         row = section["rows"][0]
         self.assertEqual(row["Address"], "10.0.0.5")
@@ -151,15 +158,15 @@ class ScannerReportInventoryTest(unittest.TestCase):
             },
             {"devices_discovered": 1},
         )
-        sections = _discovery_inventory(run)
-        device_section = _section(sections, _BACNET_DEVICE_COLUMNS)
+        sections = self.reports._discovery_inventory(run)
+        device_section = _section(sections, self.reports._BACNET_DEVICE_COLUMNS)
         device_row = device_section["rows"][0]
         self.assertEqual(device_row["Instance"], "100")
         # register_state renders where register_asset_name is absent.
         self.assertEqual(device_row["Register Asset"], "match")
         # Point count keys off asset_id == point.device_ref.
         self.assertEqual(device_row["Points"], "1")
-        point_section = _section(sections, _BACNET_POINT_COLUMNS)
+        point_section = _section(sections, self.reports._BACNET_POINT_COLUMNS)
         point_row = point_section["rows"][0]
         self.assertEqual(point_row["Device"], "bacnet-device-100")
         self.assertEqual(point_row["Value"], "21.5")
@@ -191,8 +198,8 @@ class ScannerReportInventoryTest(unittest.TestCase):
             # mqtt_scanner does not persist messages_captured.
             {"topics_discovered": 2},
         )
-        sections = _discovery_inventory(run)
-        section = _section(sections, _MQTT_TOPIC_COLUMNS)
+        sections = self.reports._discovery_inventory(run)
+        section = _section(sections, self.reports._MQTT_TOPIC_COLUMNS)
         self.assertEqual(len(section["rows"]), 2)
         self.assertEqual(section["rows"][0]["Topic"], "site/ahu/points")
         self.assertEqual(section["rows"][0]["Device Ref"], "ahu-1")

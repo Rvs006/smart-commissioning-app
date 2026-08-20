@@ -310,6 +310,10 @@ def configure_environment(root: Path, runtime_root: Path | None = None) -> None:
         candidate = scanners_root / app_dir
         if candidate.is_dir():
             os.environ.setdefault(env_name, str(candidate))
+    # The portable bundle wants the sidecars actually running; the backend
+    # lifespan only spawns them when this is set (tests and plain uvicorn leave
+    # it unset). setdefault so an operator can force it off.
+    os.environ.setdefault("SMART_COMMISSIONING_ENABLE_SIDECARS", "1")
     if (scanners_root / "node.exe").is_file():
         os.environ["PATH"] = str(scanners_root) + os.pathsep + os.environ.get("PATH", "")
     # ponytail: taskkill /F /T on lifespan stop covers Ctrl+C (the documented stop).

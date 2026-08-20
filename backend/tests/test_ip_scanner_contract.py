@@ -1,6 +1,6 @@
 """Golden-fixture contract test for the ip_scanner sidecar adapter.
 
-This is the Pete re-import gate: it pins the driving contract between the SCT
+This is the upstream re-import gate: it pins the driving contract between the SCT
 adapter and the vendored ``network-ip-scanner`` Node app. If the vendored app
 changes its health version, device-record fields, RAG/register vocabulary, SSE
 event names, or its 9-column register template — or if the adapter drifts from

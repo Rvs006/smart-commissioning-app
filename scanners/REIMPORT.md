@@ -1,9 +1,9 @@
-# Re-importing a Pete scanner drop
+# Re-importing an upstream scanner drop
 
-How to fold a new scanner drop from Pete into this repo with minimal friction.
+How to fold a new scanner drop from upstream into this repo with minimal friction.
 Target: an engineer follows this end to end in under half a day.
 
-Pete's tree is **authoritative**. We wholesale-replace, we never hand-merge.
+The upstream tree is **authoritative**. We wholesale-replace, we never hand-merge.
 SCT integrates through a thin adapter and a per-app contract test; if the
 contract stays green the drop is done, if it goes red the failure names the
 seam that moved.
@@ -39,7 +39,7 @@ ids, MAC addresses, or personnel may land in any file, comment, or sample.
 
 Grep the scratch tree (not the repo) first:
 ```
-grep -rniE "oxford|street|road|avenue|[0-9]{1,3}(\.[0-9]{1,3}){3}|mqtt\.|broker|[0-9a-f]{2}(:[0-9a-f]{2}){5}" <scratch>/<app>/
+grep -rniE "site-name|street|road|avenue|[0-9]{1,3}(\.[0-9]{1,3}){3}|mqtt\.|broker|[0-9a-f]{2}(:[0-9a-f]{2}){5}" <scratch>/<app>/
 ```
 Then eyeball, by hand, for anything the regex misses: real hostnames, staff
 names, customer identifiers, licence keys.
@@ -67,7 +67,7 @@ Scrub already applied to the vendored trees (match this bar on the next drop):
 Only a scrubbed tree proceeds to step 3.
 
 ### 3. VENDOR wholesale replace
-Never hand-merge Pete's code. Replace the whole tree:
+Never hand-merge the upstream code. Replace the whole tree:
 ```
 rm -rf scanners/vendor/<app>
 cp -r <scratch>/<app> scanners/vendor/<app>
@@ -75,7 +75,7 @@ cp -r <scratch>/<app> scanners/vendor/<app>
 Our integration lives entirely outside `vendor/` (in the adapter and the
 contract test), so blowing the tree away is safe and is the point. If you find
 yourself editing a file under `vendor/` to make the import work, stop: the fix
-belongs in the adapter or the contract test, not in Pete's code.
+belongs in the adapter or the contract test, not in the upstream code.
 
 `mqtt-discovery` vendors **source only**: its `node_modules/` and `dist/` are
 gitignored (Node runs `server.js` directly; the portable build regenerates the
@@ -118,12 +118,12 @@ change is a separate commit with its own one-line seam note (see agreements).
 
 ---
 
-## Standing agreements with Pete
+## Standing agreements with upstream
 
 1. **Bump `/api/health` version every drop.** The health endpoint reports the
    sidecar version. It changes on every drop so the adapter and contract test
    can assert the running sidecar matches the imported tree.
-2. **One-line note on any seam change.** If Pete moves anything the adapter
+2. **One-line note on any seam change.** If upstream moves anything the adapter
    reads (an endpoint, an output field, a status name), the drop carries a
    one-line note saying what moved. No silent reshaping of the contract.
 
@@ -131,7 +131,7 @@ change is a separate commit with its own one-line seam note (see agreements).
 
 ## SCT must NEVER couple to
 
-These belong to Pete's tree and change without notice. The adapter and SCT read
+These belong to the upstream tree and change without notice. The adapter and SCT read
 around them, never depend on their contents:
 
 - **Port-list contents** — which ports a scan probes.
