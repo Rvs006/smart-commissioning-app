@@ -42,6 +42,7 @@ from app.api.routes.discovery import (
     _dispatch,
     _load_discovery_run,
     _require_legacy_scan_authorization,
+    _resolve_source_interface,
     _settings_throttle,
     _stamp_legacy_authorizer,
     require_engineer,
@@ -206,6 +207,12 @@ def create_bacnet_scanner_run(
     _bind_scanner_register(
         request.project_id, request.site_id, parameters, import_type="bacnet_scanner_register"
     )
+    # Freeze the configured Source Interface into source_ip so the sidecar can pick
+    # its adapter index. Without this the BACnet adapter fails "No Source Interface
+    # is set" even when the operator selected an interface under Configuration -
+    # the sidecar route (unlike the sealed discovery.py lane) never resolved it.
+    # Mirrors discovery.py's per-run freeze; a dry run freezes identity only.
+    _resolve_source_interface(request.project_id, request.site_id, parameters)
 
     # Resolve the sidecar URL up front for a live scan; an unavailable sidecar
     # fails with 503 rather than starting a run that can only fail.
