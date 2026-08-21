@@ -28,10 +28,16 @@ from collections.abc import AsyncIterator
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from starlette.responses import Response, StreamingResponse
+from pydantic import BaseModel
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from app.api.routes.discovery import require_engineer
-from app.services.scanner_raw_policy import SIDECAR_BY_PROTO, classify
+from app.api.routes.discovery import require_engineer, service
+from app.core.auth import AuthPrincipal, get_principal
+from app.core.scopes import require_project_site_access
+from app.schemas.jobs import JobCreateRequest
+from app.services import scanner_raw_session
+from app.services.scanner_raw_policy import SIDECAR_BY_PROTO, classify, should_record
+from app.services.scanner_raw_session import COOKIE_NAME
 from app.services.sidecar_supervisor import SidecarUnavailable
 
 logger = logging.getLogger(__name__)
@@ -90,6 +96,73 @@ async def _relay(client: httpx.AsyncClient, upstream: httpx.Response, *, cap: bo
         await client.aclose()
 
 
+class PanelSessionRequest(BaseModel):
+    project_id: str
+    site_id: str
+
+
+# Registered BEFORE the catch-all so POST .../raw/session resolves here, not as a
+# proxied sidecar path.
+@router.post("/{proto}/raw/session", dependencies=[Depends(require_engineer)])
+def open_panel_session(
+    proto: str,
+    body: PanelSessionRequest,
+    principal: AuthPrincipal = Depends(get_principal),
+) -> JSONResponse:
+    """Open an Advanced-panel session: bind project/site + owner and set the
+    attribution cookie the proxy reads on the iframe's subresource requests."""
+    if proto not in SIDECAR_BY_PROTO:
+        raise HTTPException(status_code=404, detail="Unknown scanner protocol.")
+    require_project_site_access(principal, body.project_id, body.site_id, engine=service.engine)
+    session = scanner_raw_session.create(
+        owner=principal.username, project_id=body.project_id, site_id=body.site_id, proto=proto
+    )
+    response = JSONResponse(
+        {"session_id": session.session_id, "project_id": body.project_id, "site_id": body.site_id}
+    )
+    response.set_cookie(
+        COOKIE_NAME, session.session_id, httponly=True, samesite="strict", path="/api/v1/scanners/"
+    )
+    return response
+
+
+def _record_action(
+    session: scanner_raw_session.PanelSession,
+    proto: str,
+    method: str,
+    subpath: str,
+    query: str,
+    http_status: int,
+) -> None:
+    """Best-effort: land one terminal SCT run row for an evidence-worthy panel
+    action. Never raises into the proxy - a recording failure must not fail the
+    operator's scan. Records what crossed the wire (endpoint + scope + outcome),
+    not client-side interactions.
+    ponytail: no byte/frame counts yet - add them if the field wants soak metrics."""
+    try:
+        endpoint = "/" + subpath.split("?", 1)[0].strip("/")
+        record_request = JobCreateRequest(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            job_type="scanner_raw_action",
+            parameters={
+                "source": "advanced_panel",
+                "proto": proto,
+                "method": method.upper(),
+                "endpoint": endpoint,
+                "query": query or "",
+            },
+        )
+        run = service.create_job_run(
+            record_request, expected_job_type="scanner_raw_action", requesting_principal=session.owner
+        )
+        status = "succeeded" if 200 <= http_status < 400 else "failed"
+        service.update_run_status(run.run_id, status=status, stage="advanced_panel")
+        service.update_result_summary(run.run_id, {"http_status": http_status})
+    except Exception:  # noqa: BLE001 - evidence is best-effort, never breaks the action
+        logger.warning("advanced-panel evidence recording failed: %s %s", method, subpath, exc_info=True)
+
+
 @router.api_route(
     "/{proto}/raw/{path:path}",
     methods=["GET", "POST", "DELETE", "HEAD"],
@@ -128,6 +201,13 @@ async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response
     except httpx.HTTPError as error:
         await client.aclose()
         raise HTTPException(status_code=502, detail="The scanner sidecar did not respond.") from error
+
+    if should_record(request.method, path):
+        session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
+        if session is not None:
+            await asyncio.to_thread(
+                _record_action, session, proto, request.method, path, request.url.query, upstream.status_code
+            )
 
     is_sse = upstream.headers.get("content-type", "").startswith("text/event-stream")
     response_headers = {k: upstream.headers[k] for k in _COPIED_HEADERS if k in upstream.headers}

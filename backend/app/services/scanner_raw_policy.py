@@ -49,6 +49,31 @@ def is_api_path(subpath: str) -> bool:
     return _normalize(subpath).startswith("/api/")
 
 
+# Evidence-worthy actions: a scan/browse/compare/export/broker-session leaves an
+# SCT run row. Health/status/stream-snapshot/search/focus/subscribe/adapters/
+# template/register-GET are panel chatter with no evidence value, so they do not.
+_RECORD_PATHS = frozenset(
+    {
+        "/api/scan",
+        "/api/objects",
+        "/api/export",
+        "/api/export-archive",
+        "/api/compare",
+        "/api/connect",
+        "/api/disconnect",
+    }
+)
+
+
+def should_record(method: str, subpath: str) -> bool:
+    """True for actions worth an SCT evidence run row."""
+    path = _normalize(subpath)
+    if path in _RECORD_PATHS:
+        return True
+    # register import/clear (not a plain GET read of the current register).
+    return path == "/api/register" and method.upper() != "GET"
+
+
 def classify(method: str, subpath: str) -> str:
     """``"read"`` or ``"write"``.
 

@@ -8,6 +8,7 @@ spawned. Public-repo values only.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import httpx
 from harness import ApiTestCase
@@ -63,14 +64,20 @@ class ScannerRawApiTest(ApiTestCase):
 
     def setUp(self) -> None:
         from app.api.routes import scanner_raw
+        from app.services import scanner_raw_session
 
         self.scanner_raw = scanner_raw
+        self.sessions = scanner_raw_session
+        self.sessions.clear()
+        self.client.cookies.clear()
         self._orig = scanner_raw._proxy_client
         scanner_raw._proxy_client = _mock_client
         self.app.state.sidecar_supervisor = _StubSupervisor("http://127.0.0.1:9")
 
     def tearDown(self) -> None:
         self.scanner_raw._proxy_client = self._orig
+        self.sessions.clear()
+        self.client.cookies.clear()
         if hasattr(self.app.state, "sidecar_supervisor"):
             del self.app.state.sidecar_supervisor
 
@@ -112,6 +119,36 @@ class ScannerRawApiTest(ApiTestCase):
         del self.app.state.sidecar_supervisor
         resp = self.client.get("/api/v1/scanners/ip/raw/api/adapters")
         self.assertEqual(resp.status_code, 503)
+
+    def test_session_route_sets_the_attribution_cookie(self) -> None:
+        with patch.object(self.scanner_raw, "require_project_site_access", lambda *a, **k: None):
+            resp = self.client.post(
+                "/api/v1/scanners/ip/raw/session", json={"project_id": "p", "site_id": "s"}
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["project_id"], "p")
+        self.assertIn("sct_panel", self.client.cookies)
+
+    def test_recorded_read_creates_one_evidence_run(self) -> None:
+        from app.api.routes.discovery import service
+
+        session = self.sessions.create(
+            owner="tester", project_id="demo-project", site_id="demo-site", proto="ip"
+        )
+        self.client.cookies.set("sct_panel", session.session_id)
+        before = len(service.list_runs(job_types={"scanner_raw_action"}))
+        resp = self.client.get("/api/v1/scanners/ip/raw/api/scan?start=192.0.2.1")
+        self.assertEqual(resp.status_code, 200)
+        runs = service.list_runs(job_types={"scanner_raw_action"})
+        self.assertEqual(len(runs), before + 1)
+        self.assertEqual(runs[0].status, "succeeded")
+
+    def test_read_without_session_records_nothing(self) -> None:
+        from app.api.routes.discovery import service
+
+        before = len(service.list_runs(job_types={"scanner_raw_action"}))
+        self.client.get("/api/v1/scanners/ip/raw/api/scan?start=192.0.2.1")
+        self.assertEqual(len(service.list_runs(job_types={"scanner_raw_action"})), before)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,18 @@ class ScannerRawPolicyTest(unittest.TestCase):
         self.assertEqual(self.policy.classify("POST", "api/override"), "write")
         self.assertEqual(self.policy.classify("PUT", "api/anything"), "write")
 
+    def test_should_record_evidence_worthy_actions(self) -> None:
+        for path in ("api/scan", "api/objects", "api/export", "api/compare", "api/connect"):
+            self.assertTrue(self.policy.should_record("GET", path), path)
+        self.assertTrue(self.policy.should_record("POST", "api/register"))
+        self.assertTrue(self.policy.should_record("DELETE", "api/register"))
+
+    def test_should_not_record_chatter(self) -> None:
+        for path in ("api/health", "api/status", "api/stream", "api/search", "api/focus", "api/adapters"):
+            self.assertFalse(self.policy.should_record("GET", path), path)
+        # A plain read of the current register is not an import/clear.
+        self.assertFalse(self.policy.should_record("GET", "api/register"))
+
     def test_is_api_path(self) -> None:
         self.assertTrue(self.policy.is_api_path("api/scan"))
         self.assertFalse(self.policy.is_api_path("app.js"))

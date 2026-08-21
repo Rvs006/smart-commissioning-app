@@ -4787,7 +4787,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
       >
         {isSidecarDiscoveryModule && (
           <section className="surface" data-stepgroup="advanced">
-            <AdvancedScannerPanel proto={module.route.replace("-scanner", "")} />
+            <AdvancedScannerPanel
+              proto={module.route.replace("-scanner", "")}
+              projectId={workspaceRef.projectId}
+              siteId={workspaceRef.siteId}
+            />
           </section>
         )}
         {module.route !== "reports" && (
