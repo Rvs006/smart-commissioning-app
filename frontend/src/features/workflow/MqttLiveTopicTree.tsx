@@ -13,6 +13,16 @@ import type { MqttLiveTreeNode } from "../../api/client";
 
 const FLASH_MS = 700;
 
+// Stable display order: natural A-Z by name. The sidecar emits children
+// rate-desc (server.js `kids.sort((a,b) => b.r - a.r)`), so without this the
+// rows reshuffle on every ~1 Hz snapshot as message rates drift - a busy branch
+// keeps leaping around while the operator is trying to read it. Sorting by name
+// (which never changes) holds each row in place; the msg/s column still conveys
+// rate. Matches the standalone scanner's A-Z stability default.
+function orderNodes(nodes: MqttLiveTreeNode[]): MqttLiveTreeNode[] {
+  return nodes.slice().sort((a, b) => a.n.localeCompare(b.n, undefined, { numeric: true }));
+}
+
 type TreeProps = {
   tree: MqttLiveTreeNode[];
   treeShown: number;
@@ -83,7 +93,7 @@ function TreeNodeRows({
         </td>
       </tr>
       {hasChildren && isOpen
-        ? node.ch?.map((child) => (
+        ? orderNodes(node.ch ?? []).map((child) => (
             <TreeNodeRows
               expanded={expanded}
               flashing={flashing}
@@ -158,7 +168,7 @@ export function MqttLiveTopicTree({ tree, treeShown, totalTopics, lastActivity, 
             </tr>
           </thead>
           <tbody>
-            {tree.map((node) => (
+            {orderNodes(tree).map((node) => (
               <TreeNodeRows
                 expanded={expanded}
                 flashing={flashing}

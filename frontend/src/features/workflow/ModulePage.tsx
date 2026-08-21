@@ -612,6 +612,13 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const isDiscoveryModule = DISCOVERY_ROUTES.has(module.route);
   const isSealedNetworkDiscoveryModule =
     module.route === "ip-scanner-sct" || module.route === "bacnet-discovery-sct";
+  // The vendored standalone scanner lanes brought into SCT. They carry their own
+  // operator inputs (e.g. IP range) and deliberately drop the dry-run preview
+  // step the sealed lanes use.
+  const isSidecarDiscoveryModule =
+    module.route === "ip-scanner" ||
+    module.route === "bacnet-scanner" ||
+    module.route === "mqtt-scanner";
   const requestedRunId = searchParams.get("run")?.trim() || null;
   const comparisonRunId = searchParams.get("compare")?.trim() || null;
   const setScopedRunUrl = useCallback(
@@ -672,6 +679,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
   const scanAuthorized = authorizationEnforced ? scanAuthorizedChecked : true;
   const [scanDryRun, setScanDryRun] = useState(false);
   const [scanTarget, setScanTarget] = useState("");
+  // IP sidecar lane operator inputs (the vendored Network IP Scanner exposes a
+  // start/end target range on its own card). Fed into the run parameters as
+  // start_ip / end_ip; blank leaves the adapter to fail honestly ("no scan range").
+  const [ipScanRangeStart, setIpScanRangeStart] = useState("");
+  const [ipScanRangeEnd, setIpScanRangeEnd] = useState("");
   const [scanTargetRows, setScanTargetRows] = useState<IpTargetRow[]>([]);
   const [scanExclusionRows, setScanExclusionRows] = useState<IpTargetRow[]>([]);
   const [scanPreviewRunId, setScanPreviewRunId] = useState<string | null>(null);
@@ -2352,6 +2364,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               provider: scanProvider,
               nmapProfile,
               target: scanTarget,
+              scanRangeStart: ipScanRangeStart,
+              scanRangeEnd: ipScanRangeEnd,
             }),
             runKind: action.runKind,
             workspace: workspaceRef,
@@ -2368,6 +2382,8 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           provider: scanProvider,
           nmapProfile,
           target: scanTarget,
+          scanRangeStart: ipScanRangeStart,
+          scanRangeEnd: ipScanRangeEnd,
         });
         // The same header survives a transport retry of this submission. A new
         // button press creates a deliberate new IP run.
@@ -4999,14 +5015,41 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
 
               {isDiscoveryModule && (
                 <div className="form-stack scan-authorization">
-                  <label className="confirm-row">
-                    <input
-                      checked={scanDryRun}
-                      onChange={(event) => setScanDryRun(event.target.checked)}
-                      type="checkbox"
-                    />
-                    Dry run — preview the scan plan with no network I/O (no authorization needed).
-                  </label>
+                  {module.route === "ip-scanner" && (
+                    <div className="form-stack">
+                      <label>
+                        Start IP
+                        <input
+                          inputMode="decimal"
+                          onChange={(event) => setIpScanRangeStart(event.target.value)}
+                          placeholder="10.0.10.1"
+                          value={ipScanRangeStart}
+                        />
+                      </label>
+                      <label>
+                        End IP
+                        <input
+                          inputMode="decimal"
+                          onChange={(event) => setIpScanRangeEnd(event.target.value)}
+                          placeholder="10.0.10.254"
+                          value={ipScanRangeEnd}
+                        />
+                        <small>
+                          A start address is required. Leave the end blank to scan a single host.
+                        </small>
+                      </label>
+                    </div>
+                  )}
+                  {!isSidecarDiscoveryModule && (
+                    <label className="confirm-row">
+                      <input
+                        checked={scanDryRun}
+                        onChange={(event) => setScanDryRun(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Dry run — preview the scan plan with no network I/O (no authorization needed).
+                    </label>
+                  )}
                   {!scanDryRun && authorizationEnforced && (
                     <>
                       <label className="confirm-row">
@@ -9478,6 +9521,8 @@ function buildDiscoveryParameters(
     captureTopicFilter?: string;
     captureSeconds?: string;
     target?: string;
+    scanRangeStart?: string;
+    scanRangeEnd?: string;
   },
 ): Record<string, unknown> {
   const parameters: Record<string, unknown> = {};
@@ -9531,6 +9576,21 @@ function buildDiscoveryParameters(
       }
     } else {
       parameters.use_register_addresses = true;
+    }
+  }
+  // IP sidecar lane: forward the operator's target range as start_ip / end_ip
+  // (the adapter's _scan_query accepts either start_ip/end_ip or start/end and
+  // requires a start). A blank end scans from start; a blank start reaches the
+  // adapter's honest "No scan range was provided" failure rather than a silent
+  // register-only scan.
+  if (action.runKind === "ip_sidecar") {
+    const start = options.scanRangeStart?.trim();
+    const end = options.scanRangeEnd?.trim();
+    if (start) {
+      parameters.start_ip = start;
+    }
+    if (end) {
+      parameters.end_ip = end;
     }
   }
   // MQTT discovery: forward the operator's topic filter and capture window so

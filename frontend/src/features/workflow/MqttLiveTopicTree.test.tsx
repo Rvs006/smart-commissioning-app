@@ -61,4 +61,21 @@ describe("MqttLiveTopicTree", () => {
     fireEvent.click(screen.getByRole("button", { name: /Focus AHU-1/ }));
     expect(onFocus).toHaveBeenCalledWith("AHU-1");
   });
+
+  it("orders sibling rows A-Z regardless of the sidecar's rate-desc input order", () => {
+    // The sidecar emits children ranked by message rate, which reshuffles as
+    // rates drift. The tree must hold a stable name order so rows do not jump.
+    const rateDescTree: MqttLiveTreeNode[] = [
+      { n: "zulu", p: "zulu", t: 1, m: 90, r: 9, mt: 0 },
+      { n: "alpha", p: "alpha", t: 1, m: 10, r: 1, mt: 0 },
+      { n: "mike", p: "mike", t: 1, m: 50, r: 5, mt: 0 },
+    ];
+    const { container } = render(
+      <MqttLiveTopicTree lastActivity={null} totalTopics={3} tree={rateDescTree} treeShown={3} />,
+    );
+    const names = Array.from(container.querySelectorAll("tbody tr td:first-child")).map((cell) =>
+      cell.textContent?.trim(),
+    );
+    expect(names).toEqual(["alpha", "mike", "zulu"]);
+  });
 });
