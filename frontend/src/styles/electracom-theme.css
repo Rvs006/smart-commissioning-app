@@ -1351,8 +1351,60 @@
 
 .module-steps[data-step="setup"] > [data-stepgroup~="setup"],
 .module-steps[data-step="run"] > [data-stepgroup~="run"],
-.module-steps[data-step="results"] > [data-stepgroup~="results"] {
+.module-steps[data-step="results"] > [data-stepgroup~="results"],
+.module-steps[data-step="advanced"] > [data-stepgroup~="advanced"] {
   display: block;
+}
+
+/* Advanced tab: the embedded standalone scanner UI (its own look, deliberately). */
+.step-nav button.step-advanced {
+  margin-left: auto;
+}
+.advanced-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.advanced-panel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.advanced-panel-frame {
+  width: 100%;
+  height: 78vh;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.advanced-write-confirm {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 50;
+}
+.advanced-write-confirm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: calc(100% - 32px);
+  max-width: 520px;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+.advanced-write-payload {
+  max-height: 240px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  background: var(--surface-3);
+  border-radius: 8px;
+  font-size: 12px;
 }
 
 .module-steps[data-step="setup"] > .app-grid[data-stepgroup~="setup"],

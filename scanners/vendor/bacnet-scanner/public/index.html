@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>BACnet Scanner</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <div class="app">
@@ -59,7 +59,7 @@
         <div class="config-label">≋ BACNET DEVICE REGISTER</div>
         <div id="registerStatus" class="register-status none">No register loaded</div>
         <div class="register-actions">
-          <a href="/api/template" class="link-btn" download>⬇ Template</a>
+          <a href="api/template" class="link-btn" download>⬇ Template</a>
           <button id="importBtn" class="link-btn">⬆ Import CSV</button>
           <button id="clearBtn" class="link-btn danger hidden">✕ Clear</button>
           <input id="csvFile" type="file" accept=".csv,text/csv" hidden />
@@ -181,6 +181,7 @@
 
   <div id="detailBackdrop" class="detail-backdrop hidden"></div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js"></script>
+  <script src="app.js"></script>
+  <script src="sct-bridge.js" defer></script>
 </body>
 </html>

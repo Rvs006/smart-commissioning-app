@@ -110,7 +110,7 @@ window.collapseDetail = collapseDetail;
 // ---------------------------------------------------------------------------
 async function loadAdapters() {
   try {
-    const res = await fetch('/api/adapters');
+    const res = await fetch('api/adapters');
     const data = await res.json();
     state.adapters = data.adapters || [];
     const sel = $('adapterSelect');
@@ -143,7 +143,7 @@ function onAdapterChange() {
 // ---------------------------------------------------------------------------
 async function loadRegister() {
   try {
-    const res = await fetch('/api/register');
+    const res = await fetch('api/register');
     const data = await res.json();
     setRegisterCount((data.register || []).length);
   } catch (_) {}
@@ -166,7 +166,7 @@ function setRegisterCount(n) {
 
 async function clearRegister() {
   try {
-    await fetch('/api/register', { method: 'DELETE' });
+    await fetch('api/register', { method: 'DELETE' });
     setRegisterCount(0);
     toast('Register cleared — scans will run without RAG comparison');
     if (state.devices.length) recompare();
@@ -179,7 +179,7 @@ function onCsvChosen(e) {
   const reader = new FileReader();
   reader.onload = async () => {
     try {
-      const res = await fetch('/api/register', {
+      const res = await fetch('api/register', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ csv: reader.result }),
       });
@@ -227,7 +227,7 @@ function startScan() {
   $('resultsBody').innerHTML = '<tr class="empty-row"><td colspan="10">Broadcasting Who-Is…</td></tr>';
   clearDetail();
 
-  const es = new EventSource('/api/scan?' + params.toString());
+  const es = new EventSource('api/scan?' + params.toString());
   state.es = es;
 
   es.onmessage = (msg) => {
@@ -299,7 +299,7 @@ function finishScan() {
 
 async function recompare() {
   if (!state.devices.length) return;
-  const res = await fetch('/api/compare', {
+  const res = await fetch('api/compare', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ devices: state.devices }),
   });
@@ -466,7 +466,7 @@ async function runExport() {
 
   let failures = 0;
   try {
-    await postStream('/api/export', { devices }, (ev) => {
+    await postStream('api/export', { devices }, (ev) => {
       switch (ev.type) {
         case 'device':
           setProgress(5 + (ev.index / ev.total) * 85, `Reading ${ev.name || 'device ' + ev.instance} (${ev.index + 1}/${ev.total})…`);
@@ -714,7 +714,7 @@ function loadObjects(instance) {
   render();
 
   const params = new URLSearchParams({ instance: String(instance), ip, port: String(port), network: String(network), mac });
-  const es = new EventSource('/api/objects?' + params.toString());
+  const es = new EventSource('api/objects?' + params.toString());
   state.objEs = es;
   es.onmessage = (msg) => {
     const ev = JSON.parse(msg.data);

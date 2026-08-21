@@ -193,7 +193,9 @@ export type JobType =
   | "mqtt_publish"
   | "bacnet_validation"
   | "mapping_validation"
-  | "report_generation";
+  | "report_generation"
+  | "scanner_raw_action"
+  | "scanner_raw_write";
 
 export type JobAcceptedResponse = {
   run_id: string;
