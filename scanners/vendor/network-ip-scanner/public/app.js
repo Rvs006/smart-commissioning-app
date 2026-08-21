@@ -47,7 +47,7 @@ function bindEvents() {
 // ---------------------------------------------------------------------------
 async function loadAdapters() {
   try {
-    const res = await fetch('/api/adapters');
+    const res = await fetch('api/adapters');
     const data = await res.json();
     state.adapters = data.adapters || [];
     const sel = $('adapterSelect');
@@ -89,7 +89,7 @@ function onAdapterChange() {
 // ---------------------------------------------------------------------------
 async function loadRegister() {
   try {
-    const res = await fetch('/api/register');
+    const res = await fetch('api/register');
     const data = await res.json();
     setRegisterCount((data.register || []).length);
   } catch (_) {}
@@ -112,7 +112,7 @@ function setRegisterCount(n) {
 
 async function clearRegister() {
   try {
-    await fetch('/api/register', { method: 'DELETE' });
+    await fetch('api/register', { method: 'DELETE' });
     setRegisterCount(0);
     toast('Register cleared — scans will run without RAG comparison');
     if (state.rows.length) recompare();
@@ -127,7 +127,7 @@ function onCsvChosen(e) {
   const reader = new FileReader();
   reader.onload = async () => {
     try {
-      const res = await fetch('/api/register', {
+      const res = await fetch('api/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ csv: reader.result }),
@@ -174,7 +174,7 @@ function startScan() {
   clearDetail();
 
   const liveDevices = [];
-  const es = new EventSource('/api/scan?' + params.toString());
+  const es = new EventSource('api/scan?' + params.toString());
   state.es = es;
 
   es.onmessage = (msg) => {
@@ -238,7 +238,7 @@ function finishScan(liveDevices) {
 
 async function recompare() {
   if (!state._lastDevices || !state._lastDevices.length) return;
-  const res = await fetch('/api/compare', {
+  const res = await fetch('api/compare', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ devices: state._lastDevices }),
