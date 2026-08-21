@@ -51,6 +51,8 @@ def _handler(request: httpx.Request) -> httpx.Response:
             stream=_Bytes([b'data: {"type":"start"}\n\n', b'data: {"type":"complete"}\n\n']),
             headers={"content-type": "text/event-stream"},
         )
+    if path == "/api/publish":
+        return httpx.Response(200, stream=_Bytes([b'{"ok":true}']), headers={"content-type": "application/json"})
     return httpx.Response(404, text="not found")
 
 
@@ -149,6 +151,73 @@ class ScannerRawApiTest(ApiTestCase):
         before = len(service.list_runs(job_types={"scanner_raw_action"}))
         self.client.get("/api/v1/scanners/ip/raw/api/scan?start=192.0.2.1")
         self.assertEqual(len(service.list_runs(job_types={"scanner_raw_action"})), before)
+
+    # -- M4: write guard ------------------------------------------------------
+
+    def _open_session(self, proto: str = "mqtt") -> None:
+        session = self.sessions.create(
+            owner="tester", project_id="demo-project", site_id="demo-site", proto=proto
+        )
+        self.client.cookies.set("sct_panel", session.session_id)
+
+    def _confirm(self, body_str: str) -> str:
+        resp = self.client.post(
+            "/api/v1/scanners/mqtt/raw/confirm-write",
+            json={"method": "POST", "path": "api/publish", "body": body_str},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.json()["token"]
+
+    def test_write_without_a_token_is_403(self) -> None:
+        self._open_session()
+        resp = self.client.post("/api/v1/scanners/mqtt/raw/api/publish", json={"topic": "t", "payload": "1"})
+        self.assertEqual(resp.status_code, 403)
+
+    def test_confirmed_write_passes_and_records_evidence(self) -> None:
+        import json
+
+        from app.api.routes.discovery import service
+
+        self._open_session()
+        body_str = json.dumps({"topic": "demo/x", "payload": "1"})
+        token = self._confirm(body_str)
+        before = len(service.list_runs(job_types={"scanner_raw_write"}))
+        resp = self.client.post(
+            "/api/v1/scanners/mqtt/raw/api/publish",
+            content=body_str,
+            headers={"content-type": "application/json", "X-SCT-Write-Confirm": token},
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(len(service.list_runs(job_types={"scanner_raw_write"})), before + 1)
+
+    def test_write_token_is_single_use(self) -> None:
+        import json
+
+        self._open_session()
+        body_str = json.dumps({"topic": "t", "payload": "1"})
+        token = self._confirm(body_str)
+        headers = {"content-type": "application/json", "X-SCT-Write-Confirm": token}
+        self.assertEqual(
+            self.client.post("/api/v1/scanners/mqtt/raw/api/publish", content=body_str, headers=headers).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/scanners/mqtt/raw/api/publish", content=body_str, headers=headers).status_code,
+            403,
+        )
+
+    def test_write_token_rejects_a_tampered_body(self) -> None:
+        import json
+
+        self._open_session()
+        token = self._confirm(json.dumps({"topic": "t", "payload": "1"}))
+        tampered = json.dumps({"topic": "t", "payload": "TAMPERED"})
+        resp = self.client.post(
+            "/api/v1/scanners/mqtt/raw/api/publish",
+            content=tampered,
+            headers={"content-type": "application/json", "X-SCT-Write-Confirm": token},
+        )
+        self.assertEqual(resp.status_code, 403)
 
 
 if __name__ == "__main__":

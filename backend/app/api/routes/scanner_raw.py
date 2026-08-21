@@ -22,6 +22,8 @@ deployment actually needs the Advanced tab.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -36,7 +38,7 @@ from app.core.auth import AuthPrincipal, get_principal
 from app.core.scopes import require_project_site_access
 from app.schemas.jobs import JobCreateRequest
 from app.services import scanner_raw_session
-from app.services.scanner_raw_policy import SIDECAR_BY_PROTO, classify, should_record
+from app.services.scanner_raw_policy import SIDECAR_BY_PROTO, classify, should_record, write_digest
 from app.services.scanner_raw_session import COOKIE_NAME
 from app.services.sidecar_supervisor import SidecarUnavailable
 
@@ -53,10 +55,45 @@ MAX_STREAM_SECONDS = 600.0
 _COPIED_HEADERS = ("content-type", "content-disposition", "cache-control")
 
 # SCT-owned script the vendored index.html loads (tag injected by the embed
-# rewrite). Inert stub for now; the write-guard milestone fills it with a fetch
-# wrapper that routes device writes through SCT's confirm flow. Served here so the
-# tag resolves 200 instead of hitting the sidecar's static fallback.
-_BRIDGE_JS = "/* SCT Advanced-panel bridge. Write-guard wiring added in a later milestone. */\n"
+# rewrite). Wraps the iframe's fetch so a device write pauses and asks the SCT
+# parent to confirm: the parent shows the exact topic/value, mints a hash-bound
+# token, and the write is re-sent with it. Non-writes pass straight through.
+_BRIDGE_JS = """(function () {
+  var WRITES = ['/api/publish', '/api/config'];
+  function writePath(method, url) {
+    if ((method || 'GET').toUpperCase() === 'GET') return null;
+    try {
+      var abs = new URL(url, location.href).pathname;
+      var rel = abs.replace(/^.*\\/raw\\//, '');            // e.g. "api/publish"
+      var norm = '/' + rel.split('?')[0].replace(/^\\/+/, '');
+      return WRITES.indexOf(norm) >= 0 ? rel : null;
+    } catch (e) { return null; }
+  }
+  var orig = window.fetch;
+  var seq = 0;
+  window.fetch = function (input, init) {
+    init = init || {};
+    var url = typeof input === 'string' ? input : input.url;
+    var method = init.method || (typeof input !== 'string' && input.method) || 'GET';
+    var path = writePath(method, url);
+    if (!path) return orig(input, init);
+    var body = init.body != null ? String(init.body) : '';
+    var id = 'w' + (++seq);
+    return new Promise(function (resolve, reject) {
+      function onMsg(ev) {
+        var d = ev.data || {};
+        if (d.type !== 'sct-write-decision' || d.id !== id) return;
+        window.removeEventListener('message', onMsg);
+        if (!d.token) { reject(new Error('Write cancelled')); return; }
+        var headers = Object.assign({}, init.headers || {}, { 'X-SCT-Write-Confirm': d.token });
+        resolve(orig(url, Object.assign({}, init, { headers: headers, body: body })));
+      }
+      window.addEventListener('message', onMsg);
+      parent.postMessage({ type: 'sct-write-request', id: id, method: method, path: path, body: body }, '*');
+    });
+  };
+})();
+"""
 
 
 def _proxy_client() -> httpx.AsyncClient:
@@ -163,6 +200,76 @@ def _record_action(
         logger.warning("advanced-panel evidence recording failed: %s %s", method, subpath, exc_info=True)
 
 
+class WriteConfirmRequest(BaseModel):
+    method: str
+    path: str
+    body: str = ""
+
+
+@router.post("/{proto}/raw/confirm-write", dependencies=[Depends(require_engineer)])
+def confirm_panel_write(proto: str, body: WriteConfirmRequest, request: Request) -> JSONResponse:
+    """Mint a single-use, hash-bound token for one device write the panel is about
+    to send. The proxy accepts that write only with this token."""
+    if proto not in SIDECAR_BY_PROTO:
+        raise HTTPException(status_code=404, detail="Unknown scanner protocol.")
+    session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
+    if session is None:
+        raise HTTPException(status_code=403, detail="Open the Advanced panel before confirming a write.")
+    if classify(body.method, body.path) != "write":
+        raise HTTPException(status_code=400, detail="Not a device-write action.")
+    digest = write_digest(body.method, body.path, body.body.encode("utf-8"))
+    token = scanner_raw_session.mint_write_token(session_id=session.session_id, digest=digest)
+    return JSONResponse({"token": token})
+
+
+_SECRET_KEY_HINTS = ("password", "secret", "token", "key", "credential")
+
+
+def _redact_write_body(body: bytes) -> object:
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return {"_raw_bytes": len(body)}
+    if isinstance(data, dict):
+        return {k: ("***" if any(h in k.lower() for h in _SECRET_KEY_HINTS) else v) for k, v in data.items()}
+    return data
+
+
+def _record_write(
+    session: scanner_raw_session.PanelSession,
+    proto: str,
+    method: str,
+    subpath: str,
+    body: bytes,
+    http_status: int,
+) -> None:
+    """Best-effort: land one terminal scanner_raw_write run for a guarded device
+    write, carrying the redacted payload and its hash. Never raises into the proxy."""
+    try:
+        endpoint = "/" + subpath.split("?", 1)[0].strip("/")
+        record_request = JobCreateRequest(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            job_type="scanner_raw_write",
+            parameters={"source": "advanced_panel", "proto": proto, "method": method.upper(), "endpoint": endpoint},
+        )
+        run = service.create_job_run(
+            record_request, expected_job_type="scanner_raw_write", requesting_principal=session.owner
+        )
+        status = "succeeded" if 200 <= http_status < 400 else "failed"
+        service.update_run_status(run.run_id, status=status, stage="advanced_panel_write")
+        service.update_result_summary(
+            run.run_id,
+            {
+                "http_status": http_status,
+                "payload": _redact_write_body(body),
+                "payload_sha256": hashlib.sha256(body).hexdigest(),
+            },
+        )
+    except Exception:  # noqa: BLE001 - evidence is best-effort, never breaks the action
+        logger.warning("advanced-panel write evidence recording failed: %s %s", method, subpath, exc_info=True)
+
+
 @router.api_route(
     "/{proto}/raw/{path:path}",
     methods=["GET", "POST", "DELETE", "HEAD"],
@@ -174,12 +281,22 @@ async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response
         raise HTTPException(status_code=404, detail="Unknown scanner protocol.")
     if path == "sct-bridge.js":
         return Response(_BRIDGE_JS, media_type="text/javascript")
-    if classify(request.method, path) == "write":
-        # ponytail: hard-block until the write-guard milestone wires ack + confirm.
-        raise HTTPException(
-            status_code=403,
-            detail="Device writes from the Advanced panel are not enabled yet.",
-        )
+
+    body = await request.body()
+    session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
+    is_write = classify(request.method, path) == "write"
+    if is_write:
+        # A device write is allowed only with a single-use token bound to these
+        # exact bytes (minted by /confirm-write after the operator confirms).
+        token = request.headers.get("X-SCT-Write-Confirm")
+        digest = write_digest(request.method, path, body)
+        if session is None or not scanner_raw_session.consume_write_token(
+            token, session_id=session.session_id, digest=digest
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="This device write needs SCT confirmation. Confirm it in the panel and try again.",
+            )
 
     base_url = _resolve_base_url(request, name)
     target = f"{base_url}/{path}"
@@ -190,7 +307,6 @@ async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response
     content_type = request.headers.get("content-type")
     if content_type:
         headers["content-type"] = content_type
-    body = await request.body()
 
     client = _proxy_client()
     try:
@@ -202,9 +318,12 @@ async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response
         await client.aclose()
         raise HTTPException(status_code=502, detail="The scanner sidecar did not respond.") from error
 
-    if should_record(request.method, path):
-        session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
-        if session is not None:
+    if session is not None:
+        if is_write:
+            await asyncio.to_thread(
+                _record_write, session, proto, request.method, path, body, upstream.status_code
+            )
+        elif should_record(request.method, path):
             await asyncio.to_thread(
                 _record_action, session, proto, request.method, path, request.url.query, upstream.status_code
             )

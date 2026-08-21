@@ -11,6 +11,8 @@ No FastAPI, no I/O - just string classification, so it is unit-tested directly.
 
 from __future__ import annotations
 
+import hashlib
+
 from app.services.sidecar_supervisor import BACNET_SCANNER, IP_SCANNER, MQTT_SCANNER
 
 # URL path segment (``/scanners/{proto}/raw/...``) -> supervisor sidecar name.
@@ -72,6 +74,15 @@ def should_record(method: str, subpath: str) -> bool:
         return True
     # register import/clear (not a plain GET read of the current register).
     return path == "/api/register" and method.upper() != "GET"
+
+
+def write_digest(method: str, subpath: str, body: bytes) -> str:
+    """Bind a write-confirm token to the exact request. The confirm dialog and
+    the forwarded write must hash identically, so the dialog cannot show one
+    payload while different bytes reach the device."""
+    return hashlib.sha256(
+        method.upper().encode() + b"\n" + _normalize(subpath).encode() + b"\n" + body
+    ).hexdigest()
 
 
 def classify(method: str, subpath: str) -> str:

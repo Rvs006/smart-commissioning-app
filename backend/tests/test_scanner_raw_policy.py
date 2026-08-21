@@ -53,6 +53,12 @@ class ScannerRawPolicyTest(unittest.TestCase):
         self.assertFalse(self.policy.is_api_path("app.js"))
         self.assertFalse(self.policy.is_api_path(""))
 
+    def test_write_digest_binds_method_path_body(self) -> None:
+        base = self.policy.write_digest("POST", "api/publish", b'{"topic":"t"}')
+        self.assertEqual(base, self.policy.write_digest("post", "/api/publish", b'{"topic":"t"}'))
+        self.assertNotEqual(base, self.policy.write_digest("POST", "api/publish", b'{"topic":"x"}'))
+        self.assertNotEqual(base, self.policy.write_digest("POST", "api/config", b'{"topic":"t"}'))
+
 
 if __name__ == "__main__":
     unittest.main()
