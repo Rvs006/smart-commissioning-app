@@ -80,6 +80,7 @@ import {
   type ScanAuthorizationV1,
 } from "../../api/client";
 import { getModuleByRoute, type ModuleRunAction } from "./moduleData";
+import { AdvancedScannerPanel } from "./AdvancedScannerPanel";
 import { MqttLiveTopicTree } from "./MqttLiveTopicTree";
 import { MqttPublishModal } from "./MqttPublishModal";
 import { useMqttLiveSession } from "./useMqttLiveSession";
@@ -295,7 +296,7 @@ type RunSubmissionContext = {
 
 // The module page is split into three stages so the operator works one screen
 // at a time instead of scrolling a single long page of every control at once.
-type ModuleStep = "setup" | "run" | "results";
+type ModuleStep = "setup" | "run" | "results" | "advanced";
 
 type FrozenUdmiReportScope = {
   scope: UdmiReportScopeV1 | null;
@@ -4776,6 +4777,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
           onStep={setStep}
           hasRun={Boolean(activeRun)}
           terminal={activeRunTerminal}
+          showAdvanced={isSidecarDiscoveryModule}
         />
       )}
 
@@ -4783,6 +4785,11 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
         className={`module-steps${module.route === "reports" ? " reports-module-steps" : ""}`}
         data-step={step}
       >
+        {isSidecarDiscoveryModule && (
+          <section className="surface" data-stepgroup="advanced">
+            <AdvancedScannerPanel proto={module.route.replace("-scanner", "")} />
+          </section>
+        )}
         {module.route !== "reports" && (
           <section className="app-grid two-col" data-stepgroup="setup run">
             <article className="surface">
@@ -8253,11 +8260,13 @@ function StepNav({
   onStep,
   hasRun,
   terminal,
+  showAdvanced,
 }: {
   step: ModuleStep;
   onStep: (next: ModuleStep) => void;
   hasRun: boolean;
   terminal: boolean;
+  showAdvanced?: boolean;
 }) {
   const steps: { id: ModuleStep; label: string }[] = [
     { id: "setup", label: "Setup" },
@@ -8281,6 +8290,17 @@ function StepNav({
           </button>
         );
       })}
+      {showAdvanced && (
+        // Trailing tab, outside the numbered done-sequence: the raw standalone tool.
+        <button
+          aria-current={step === "advanced" ? "step" : undefined}
+          className={`step-advanced${step === "advanced" ? " active" : ""}`}
+          onClick={() => onStep("advanced")}
+          type="button"
+        >
+          Advanced
+        </button>
+      )}
     </nav>
   );
 }

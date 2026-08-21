@@ -1351,8 +1351,31 @@
 
 .module-steps[data-step="setup"] > [data-stepgroup~="setup"],
 .module-steps[data-step="run"] > [data-stepgroup~="run"],
-.module-steps[data-step="results"] > [data-stepgroup~="results"] {
+.module-steps[data-step="results"] > [data-stepgroup~="results"],
+.module-steps[data-step="advanced"] > [data-stepgroup~="advanced"] {
   display: block;
+}
+
+/* Advanced tab: the embedded standalone scanner UI (its own look, deliberately). */
+.step-nav button.step-advanced {
+  margin-left: auto;
+}
+.advanced-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.advanced-panel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.advanced-panel-frame {
+  width: 100%;
+  height: 78vh;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
 }
 
 .module-steps[data-step="setup"] > .app-grid[data-stepgroup~="setup"],
