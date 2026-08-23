@@ -7,7 +7,7 @@ const state = {
   status: {}, stats: {}, tree: [], focused: null,
   selectedAsset: '', selectedPath: '',
   registerLoaded: false, connected: false,
-  paused: false, tab: 'overview', sortMode: 'rate',
+  paused: false, tab: 'overview', sortMode: 'name', forceResort: true,
   histView: null, cfgTouched: false,
   es: null,
   expanded: loadExpanded(),
@@ -34,6 +34,7 @@ function bindEvents() {
   $('publishBtn').addEventListener('click', openPubModal);
   $('saveRegBtn').addEventListener('click', saveAsRegister);
   $('exportBtnGlobal').addEventListener('click', exportArchive);
+  $('copyPayloadBtn').addEventListener('click', copyPayload);
   $('pauseBtn').addEventListener('click', togglePause);
   $('applyFilterBtn').addEventListener('click', applyFilter);
   $('rootFilterInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') applyFilter(); });
@@ -41,7 +42,7 @@ function bindEvents() {
   // tree controls
   document.querySelectorAll('.sort-btn').forEach((b) => b.addEventListener('click', () => {
     document.querySelectorAll('.sort-btn').forEach((x) => x.classList.remove('active'));
-    b.classList.add('active'); state.sortMode = b.dataset.sort; renderTree();
+    b.classList.add('active'); state.sortMode = b.dataset.sort; state.forceResort = true; renderTree();
   }));
   $('expandTopBtn').addEventListener('click', expandTop);
   $('collapseAllBtn').addEventListener('click', () => { state.expanded.clear(); saveExpanded(); renderTree(); });
@@ -148,9 +149,25 @@ function fmtNum(n) { return Number(n).toLocaleString('en-US'); }
 // ---------------------------------------------------------------------------
 // Tree (incremental DOM, preserves expand state + flashes)
 // ---------------------------------------------------------------------------
-function sortNodes(nodes) {
-  if (state.sortMode === 'name') return nodes.slice().sort((a, b) => a.n.localeCompare(b.n));
-  return nodes; // server already sorts by rate desc
+// Decide the display order of a set of sibling nodes. The goal is STABILITY:
+//   - A–Z mode sorts by name. Names never change, so the order is identical on
+//     every update → nodes never jump as data streams in.
+//   - Rate mode ranks by current message rate ONLY when the user asks for it
+//     (forceResort, set on a sort-button click / first render). Between those,
+//     existing nodes keep their current position and new nodes are appended, so
+//     a busy branch no longer keeps leaping to the top mid-navigation.
+function computeOrder(parentEl, nodes, incoming) {
+  if (state.sortMode === 'name') {
+    return nodes.slice().sort((a, b) => a.n.localeCompare(b.n, undefined, { numeric: true })).map((n) => n.p);
+  }
+  const existingPaths = Array.from(parentEl.children)
+    .filter((el) => el.dataset && el.dataset.path != null && incoming.has(el.dataset.path))
+    .map((el) => el.dataset.path);
+  const byRate = (a, b) => b.r - a.r || a.n.localeCompare(b.n, undefined, { numeric: true });
+  if (state.forceResort || existingPaths.length === 0) return nodes.slice().sort(byRate).map((n) => n.p);
+  const have = new Set(existingPaths);
+  const fresh = nodes.filter((n) => !have.has(n.p)).sort(byRate).map((n) => n.p);
+  return existingPaths.concat(fresh);
 }
 
 function renderTree() {
@@ -160,17 +177,22 @@ function renderTree() {
     return;
   }
   if (container.querySelector('.tree-empty')) container.innerHTML = '';
-  reconcile(container, sortNodes(state.tree), 0);
+  reconcile(container, state.tree, 0);
+  state.forceResort = false;
 }
 
 function reconcile(parentEl, nodes, depth) {
+  const incoming = new Map(nodes.map((n) => [n.p, n]));
+  // remove nodes that are gone
+  for (const el of Array.from(parentEl.children)) if (el.dataset && el.dataset.path != null && !incoming.has(el.dataset.path)) el.remove();
   const existing = new Map();
   for (const el of Array.from(parentEl.children)) if (el.dataset && el.dataset.path != null) existing.set(el.dataset.path, el);
-  const seen = new Set();
+
+  const order = computeOrder(parentEl, nodes, incoming);
   let prev = null;
-  for (const nd of nodes) {
-    seen.add(nd.p);
-    let el = existing.get(nd.p);
+  for (const p of order) {
+    const nd = incoming.get(p);
+    let el = existing.get(p);
     if (!el) el = createNodeEl(nd);
     updateNodeEl(el, nd);
     if (prev) { if (prev.nextSibling !== el) parentEl.insertBefore(el, prev.nextSibling); }
@@ -178,14 +200,12 @@ function reconcile(parentEl, nodes, depth) {
     prev = el;
 
     const childrenEl = el._children;
-    const exp = state.expanded.has(nd.p);
-    const caret = el._caret;
+    const exp = state.expanded.has(p);
     const hasKids = !!(nd.ch && nd.ch.length);
-    caret.className = 'tcaret' + (nd.leaf || !hasKids ? ' leaf' : (exp ? ' open' : ''));
-    if (exp && hasKids) { childrenEl.style.display = ''; reconcile(childrenEl, sortNodes(nd.ch), depth + 1); }
-    else { childrenEl.style.display = 'none'; }
+    el._caret.className = 'tcaret' + (nd.leaf || !hasKids ? ' leaf' : (exp ? ' open' : ''));
+    if (exp && hasKids) { childrenEl.style.display = ''; reconcile(childrenEl, nd.ch, depth + 1); }
+    else childrenEl.style.display = 'none';
   }
-  for (const [p, el] of existing) if (!seen.has(p)) el.remove();
 }
 
 function createNodeEl(nd) {
@@ -360,6 +380,7 @@ function renderLive(f) {
   let payload;
   if (state.histView !== null && td && td.history[state.histView]) payload = td.history[state.histView].raw;
   else payload = f.lastPayload || '';
+  state.shownPayload = payload;
   if (!(state.paused && state.histView === null)) $('jsonView').innerHTML = highlightJson(payload);
 
   const pts = f.livePoints || [];
@@ -571,7 +592,19 @@ function clearDetail() {
   state.selectedAsset = ''; state.selectedPath = '';
   $('detailEmpty').classList.remove('hidden'); $('detailBody').classList.add('hidden');
 }
-function copyText(t) { if (!t) return; (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(() => toast('Copied: ' + t)).catch(() => { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('Copied: ' + t); } catch (_) {} ta.remove(); }); }
+function doCopy(text, okMsg) {
+  if (!text) return;
+  const done = () => toast(okMsg);
+  const fallback = () => { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); done(); } catch (_) { toast('Copy failed'); } ta.remove(); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(fallback);
+  else fallback();
+}
+function copyText(t) { if (!t) return; doCopy(t, 'Copied: ' + t); }
+function copyPayload() {
+  const p = state.shownPayload || (state.focused && state.focused.lastPayload) || '';
+  if (!p) return toast('No payload to copy');
+  doCopy(prettyJson(p), 'Payload copied to clipboard');
+}
 function showErr(id, msg) { const e = $(id); e.textContent = msg; e.classList.remove('hidden'); }
 function fmtVal(v) { if (v == null) return '—'; if (typeof v === 'number') return String(v); if (typeof v === 'boolean') return v ? 'true' : 'false'; return escapeHtml(String(v).slice(0, 40)); }
 function fmtTs(ts) { if (!ts) return ''; return new Date(ts).toLocaleTimeString('en-GB', { hour12: false }); }
