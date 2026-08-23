@@ -7,6 +7,8 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.52] - 2026-08-23
+
 ### Added
 
 - Advanced tab on the IP, BACnet, and MQTT discovery modules embeds the full
@@ -20,6 +22,19 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   authenticates via the local principal, so it is available in the portable and
   local deployments; a keyed hosted deployment needs the deferred panel-session
   credential.
+- IP Discovery (scanner lane) accepts an operator-entered target IP range, and
+  BACnet Discovery (scanner lane) freezes the configured Source Interface into the
+  run. Both sidecar scans now run without the earlier "no scan range provided" and
+  "no source interface" failures. The dry-run toggle is removed from the three
+  sidecar lanes; those runs go straight to live.
+
+### Fixed
+
+- The MQTT live topic tree holds a stable A-Z order instead of reshuffling on
+  every snapshot as message rates change, so rows no longer jump while an operator
+  reads them.
+- The embedded MQTT Advanced panel carries the standalone tool's latest
+  topic-order fix and copy-payload button (re-vendored mqtt-discovery UI).
 
 ## [0.1.51] - 2026-08-21
 

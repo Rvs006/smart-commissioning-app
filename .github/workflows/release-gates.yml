@@ -1,12 +1,12 @@
-name: v0.1.51 Release Gates
+name: v0.1.52 Release Gates
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: Release version, exactly v0.1.51
+        description: Release version, exactly v0.1.52
         required: true
-        default: v0.1.51
+        default: v0.1.52
       release_sha:
         description: Full 40-character SHA; must equal current origin/main
         required: true
@@ -24,27 +24,27 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.51.md"
+      - "docs/migration-rollback-v0.1.52.md"
       - "docs/release-notes-v0.1.29.md"
       - "docs/release-notes-v0.1.30.md"
       - "docs/release-notes-v0.1.31.md"
       - "docs/release-notes-v0.1.37.md"
-      - "docs/release-notes-v0.1.51.md"
+      - "docs/release-notes-v0.1.52.md"
       - "docs/release-validation-v0.1.29.md"
       - "docs/release-validation-v0.1.30.md"
       - "docs/release-validation-v0.1.31.md"
       - "docs/release-validation-v0.1.37.md"
-      - "docs/release-validation-v0.1.51.md"
+      - "docs/release-validation-v0.1.52.md"
       - "docs/docker-deployment-rollback-v0.1.28.md"
       - "docs/docker-deployment-rollback-v0.1.29.md"
       - "docs/docker-deployment-rollback-v0.1.30.md"
       - "docs/docker-deployment-rollback-v0.1.31.md"
       - "docs/docker-deployment-rollback-v0.1.37.md"
-      - "docs/docker-deployment-rollback-v0.1.51.md"
+      - "docs/docker-deployment-rollback-v0.1.52.md"
       - "docs/v0.1.31-field-acceptance-checklist.md"
       - "docs/v0.1.37-field-acceptance-checklist.md"
-      - "docs/v0.1.51-field-acceptance-checklist.md"
-      - "docs/v0.1.51-evidence-manifest.md"
+      - "docs/v0.1.52-field-acceptance-checklist.md"
+      - "docs/v0.1.52-evidence-manifest.md"
       - "docs/README.md"
       - "README.md"
       - "CHANGELOG.md"
@@ -64,7 +64,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.51' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.52' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha }}
 
 jobs:
@@ -81,7 +81,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$RELEASE_VERSION" = v0.1.51
+          test "$RELEASE_VERSION" = v0.1.52
           test "${#RELEASE_SHA}" -eq 40
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain)"
@@ -104,7 +104,7 @@ jobs:
       - name: Ruff and complete Python suites
         run: |
           ruff check backend worker core scripts/backup_rollback_smoke.py scripts/capture_mqtt_evidence.py scripts/check_v0126_release_contracts.py scripts/check_v0127_release_contracts.py scripts/check_v0128_docker_contracts.py scripts/check_v0128_release_contracts.py scripts/check_v0129_docker_contracts.py scripts/check_v0129_release_contracts.py scripts/check_v0130_docker_contracts.py scripts/check_v0130_release_contracts.py scripts/check_v0131_docker_contracts.py scripts/check_v0131_release_contracts.py scripts/check_v0137_docker_contracts.py scripts/check_v0137_release_contracts.py scripts/check_hosted_frontend.py scripts/check_hosted_mtls.py scripts/check_hosted_release_logs.py scripts/check_hosted_terminal_evidence.py scripts/generate_docker_image_evidence.py scripts/generate_release_evidence.py scripts/generate_sbom.py scripts/hosted_release_acceptance.py scripts/smoke_hosted_queue.py scripts/smoke_sync_v2.py scripts/smoke_windows_portable_release.py scripts/test_capture_mqtt_evidence.py scripts/test_check_hosted_frontend.py scripts/test_check_hosted_mtls.py scripts/test_check_hosted_release_logs.py scripts/test_check_hosted_terminal_evidence.py scripts/test_generate_docker_image_evidence.py scripts/test_hosted_release_acceptance.py scripts/test_smoke_sync_v2.py scripts/test_v0127_release_evidence.py scripts/test_v0128_release_evidence.py scripts/test_v0129_release_evidence.py scripts/test_v0130_release_evidence.py scripts/test_v0131_release_evidence.py scripts/test_v0137_release_evidence.py scripts/test_verify_local_docker_image.py scripts/test_verify_signed_release_tag.py scripts/test_windows_portable_release_smoke.py scripts/validate_release_evidence.py scripts/validate_v0127_release_evidence.py scripts/validate_v0128_release_evidence.py scripts/validate_v0129_release_evidence.py scripts/validate_v0130_release_evidence.py scripts/validate_v0131_release_evidence.py scripts/validate_v0137_release_evidence.py scripts/verify_local_docker_image.py scripts/verify_signed_release_tag.py
-          ruff check scripts/check_v0151_docker_contracts.py scripts/check_v0151_release_contracts.py scripts/scan_v0151_release_secrets.py scripts/test_v0151_real_mqtt_socket.py scripts/test_v0151_release_evidence.py scripts/test_v0151_security_scan.py scripts/test_v0151_version_identity.py scripts/validate_v0151_release_evidence.py
+          ruff check scripts/check_v0152_docker_contracts.py scripts/check_v0152_release_contracts.py scripts/scan_v0152_release_secrets.py scripts/test_v0152_real_mqtt_socket.py scripts/test_v0152_release_evidence.py scripts/test_v0152_security_scan.py scripts/test_v0152_version_identity.py scripts/validate_v0152_release_evidence.py
           python -m unittest discover -s core/tests
           (cd backend && python -m unittest discover -s tests)
           (cd worker && python -m unittest discover -s tests)
@@ -117,13 +117,13 @@ jobs:
           python scripts/test_v0137_acceptance_manifest.py
           python scripts/test_v0137_security_scan.py
           python scripts/scan_v0137_release_secrets.py
-          python scripts/test_v0151_release_evidence.py
-          python scripts/test_v0151_security_scan.py
-          python scripts/test_v0151_version_identity.py
-          python scripts/scan_v0151_release_secrets.py
-          docker run --rm -d --name sct-v0151-mqtt -p 18883:1883 eclipse-mosquitto:2
-          trap 'docker rm -f sct-v0151-mqtt || true' EXIT
-          PYTHONPATH="core:backend:backend/tests:worker" python scripts/test_v0151_real_mqtt_socket.py --host 127.0.0.1 --port 18883 -q
+          python scripts/test_v0152_release_evidence.py
+          python scripts/test_v0152_security_scan.py
+          python scripts/test_v0152_version_identity.py
+          python scripts/scan_v0152_release_secrets.py
+          docker run --rm -d --name sct-v0152-mqtt -p 18883:1883 eclipse-mosquitto:2
+          trap 'docker rm -f sct-v0152-mqtt || true' EXIT
+          PYTHONPATH="core:backend:backend/tests:worker" python scripts/test_v0152_real_mqtt_socket.py --host 127.0.0.1 --port 18883 -q
           PYTHONPATH="core:scripts" python scripts/test_capture_mqtt_evidence.py
           python scripts/test_generate_docker_image_evidence.py
           python scripts/test_hosted_release_acceptance.py
@@ -139,8 +139,8 @@ jobs:
       - name: Deployment contracts and migration/rollback fixture
         run: |
           python scripts/check_v0126_release_contracts.py
-          python scripts/check_v0151_docker_contracts.py
-          python scripts/check_v0151_release_contracts.py
+          python scripts/check_v0152_docker_contracts.py
+          python scripts/check_v0152_release_contracts.py
           python scripts/backup_rollback_smoke.py
           bash -n scripts/publish_docker_images.sh scripts/promote_docker_images.sh
           shellcheck scripts/publish_docker_images.sh scripts/promote_docker_images.sh
@@ -535,7 +535,7 @@ jobs:
           persist-credentials: false
       - name: Prove exact-main publication commit
         run: |
-          test "$RELEASE_VERSION" = v0.1.51
+          test "$RELEASE_VERSION" = v0.1.52
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           git fetch origin main --no-tags
           test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
@@ -653,19 +653,19 @@ jobs:
           path: build/release-evidence
       - name: Assemble and validate enriched hosted release evidence
         run: |
-          cp docs/migration-rollback-v0.1.51.md build/release-evidence/MIGRATION_ROLLBACK.md
+          cp docs/migration-rollback-v0.1.52.md build/release-evidence/MIGRATION_ROLLBACK.md
           cp docs/sync-v2-wire-format.md build/release-evidence/SYNC_V2_WIRE_FORMAT.md
           cp docs/sync-v2-credential-scope.md build/release-evidence/SYNC_V2_CREDENTIAL_SCOPE.md
           cp docs/sync-v2-operations.md build/release-evidence/SYNC_V2_OPERATIONS.md
-          cp docs/docker-deployment-rollback-v0.1.51.md build/release-evidence/DOCKER_DEPLOYMENT_ROLLBACK.md
+          cp docs/docker-deployment-rollback-v0.1.52.md build/release-evidence/DOCKER_DEPLOYMENT_ROLLBACK.md
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           artifact_name="$RELEASE_VERSION-release-evidence-$RELEASE_SHA"
           python scripts/generate_release_evidence.py --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-run-url "$run_url" --workflow-event "$GITHUB_EVENT_NAME" --output-dir build/release-evidence --artifact build/release-evidence/MIGRATION_ROLLBACK.md --artifact build/release-evidence/SYNC_V2_WIRE_FORMAT.md --artifact build/release-evidence/SYNC_V2_CREDENTIAL_SCOPE.md --artifact build/release-evidence/SYNC_V2_OPERATIONS.md --artifact build/release-evidence/DOCKER_DEPLOYMENT_ROLLBACK.md --artifact build/release-evidence/docker-image-evidence.json --sbom build/release-evidence/SBOM.python.cdx.json --sbom build/release-evidence/SBOM.npm.cdx.json --sbom build/release-evidence/SBOM.image-api.cdx.json --sbom build/release-evidence/SBOM.image-worker.cdx.json --sbom build/release-evidence/SBOM.image-frontend.cdx.json --gate python=passed --gate frontend=passed --gate hosted_compose=passed --gate hosted_queue=passed --gate hosted_inline=passed --gate sync_v2=passed --gate docker_publication=passed --gate docker_pull_by_digest=passed --gate worker_recovery=passed --gate api_restart=passed --gate redis_recovery=passed --gate database_recovery=passed --gate mtls_resolution=passed --gate frontend_runtime=passed --gate cleanup=passed --gate backup_rollback=passed --test ruff=passed --test core_unittest=passed --test backend_unittest=passed --test worker_unittest=passed --test frontend_lint=passed --test frontend_typecheck=passed --test frontend_vitest=passed --test frontend_build=passed --test migration_rollback=passed --test hosted_queue_smoke=passed --test hosted_inline_smoke=passed --test hosted_sync_v2_round_trip=passed --test hosted_long_capture=passed --test hosted_cancellation=passed --test hosted_worker_kill=passed --test hosted_duplicate_delivery=passed --test hosted_api_restart=passed --test hosted_redis_interruption=passed --test hosted_database_interruption=passed --test docker_oci_labels=passed --test docker_sbom_from_digest=passed --test browser_control_interaction=passed --test browser_console=passed --test hosted_log_inspection=passed
-          python scripts/validate_v0151_release_evidence.py --evidence build/release-evidence/release-evidence.json --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-event "$GITHUB_EVENT_NAME" --require-gate python --require-gate frontend --require-gate hosted_compose --require-gate hosted_queue --require-gate hosted_inline --require-gate sync_v2 --require-gate docker_publication --require-gate docker_pull_by_digest --require-gate worker_recovery --require-gate api_restart --require-gate redis_recovery --require-gate database_recovery --require-gate mtls_resolution --require-gate frontend_runtime --require-gate cleanup --require-gate backup_rollback --require-test ruff --require-test core_unittest --require-test backend_unittest --require-test worker_unittest --require-test frontend_lint --require-test frontend_typecheck --require-test frontend_vitest --require-test frontend_build --require-test migration_rollback --require-test hosted_queue_smoke --require-test hosted_inline_smoke --require-test hosted_sync_v2_round_trip --require-test hosted_long_capture --require-test hosted_cancellation --require-test hosted_worker_kill --require-test hosted_duplicate_delivery --require-test hosted_api_restart --require-test hosted_redis_interruption --require-test hosted_database_interruption --require-test docker_oci_labels --require-test docker_sbom_from_digest --require-test browser_control_interaction --require-test browser_console --require-test hosted_log_inspection
-          python scripts/scan_v0151_release_secrets.py --path build/release-evidence
+          python scripts/validate_v0152_release_evidence.py --evidence build/release-evidence/release-evidence.json --version "$RELEASE_VERSION" --product-version "$RELEASE_VERSION" --commit "$RELEASE_SHA" --evidence-kind hosted --repository "$GITHUB_REPOSITORY" --workflow-artifact-name "$artifact_name" --workflow-name "$GITHUB_WORKFLOW" --workflow-run-id "$GITHUB_RUN_ID" --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" --workflow-event "$GITHUB_EVENT_NAME" --require-gate python --require-gate frontend --require-gate hosted_compose --require-gate hosted_queue --require-gate hosted_inline --require-gate sync_v2 --require-gate docker_publication --require-gate docker_pull_by_digest --require-gate worker_recovery --require-gate api_restart --require-gate redis_recovery --require-gate database_recovery --require-gate mtls_resolution --require-gate frontend_runtime --require-gate cleanup --require-gate backup_rollback --require-test ruff --require-test core_unittest --require-test backend_unittest --require-test worker_unittest --require-test frontend_lint --require-test frontend_typecheck --require-test frontend_vitest --require-test frontend_build --require-test migration_rollback --require-test hosted_queue_smoke --require-test hosted_inline_smoke --require-test hosted_sync_v2_round_trip --require-test hosted_long_capture --require-test hosted_cancellation --require-test hosted_worker_kill --require-test hosted_duplicate_delivery --require-test hosted_api_restart --require-test hosted_redis_interruption --require-test hosted_database_interruption --require-test docker_oci_labels --require-test docker_sbom_from_digest --require-test browser_control_interaction --require-test browser_console --require-test hosted_log_inspection
+          python scripts/scan_v0152_release_secrets.py --path build/release-evidence
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: v0.1.51-release-evidence-${{ inputs.release_sha || github.event.pull_request.head.sha }}
+          name: v0.1.52-release-evidence-${{ inputs.release_sha || github.event.pull_request.head.sha }}
           path: build/release-evidence
           if-no-files-found: error
           retention-days: 30
@@ -685,7 +685,7 @@ jobs:
           persist-credentials: false
       - name: Prove exact-main promotion commit
         run: |
-          test "$RELEASE_VERSION" = v0.1.51
+          test "$RELEASE_VERSION" = v0.1.52
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           git fetch origin main --no-tags
           test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
@@ -699,7 +699,7 @@ jobs:
           path: build/release-evidence
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: v0.1.51-release-evidence-${{ inputs.release_sha }}
+          name: v0.1.52-release-evidence-${{ inputs.release_sha }}
           path: build/release-evidence
       - name: Restore the exact accepted image archive
         run: |
