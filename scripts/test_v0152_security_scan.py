@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 import zipfile
@@ -54,6 +55,26 @@ class V0152SecurityScanTests(unittest.TestCase):
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr("word/document.xml", 'api_key = "seeded-private-value"')
             self.assertTrue(scan.base.scan([path]))
+
+    def test_scans_credentials_inside_a_nested_archive(self) -> None:
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("notes.txt", "broker_password = seeded-private-value")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("nested-private.zip", inner.getvalue())
+            self.assertTrue(scan.base.scan([path]))
+
+    def test_clean_nested_archive_is_accepted(self) -> None:
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("readme.txt", "ordinary release notes with no secrets")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("nested-clean.zip", inner.getvalue())
+            self.assertEqual(scan.base.scan([path]), [])
 
 
 if __name__ == "__main__":

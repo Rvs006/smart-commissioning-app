@@ -67,11 +67,19 @@ _TEXT_SUFFIXES = {
 }
 _ARCHIVE_SUFFIXES = {".docx", ".tar", ".tgz", ".xlsx", ".zip"}
 _MAX_ARCHIVE_MEMBER_BYTES = 50 * 1024 * 1024
+# ponytail: fixed nesting cap; each level is also bounded to _MAX_ARCHIVE_MEMBER_BYTES
+# per member, so depth * member size bounds the work. Raise only if a real release
+# artifact ever nests archives deeper than this.
+_MAX_ARCHIVE_DEPTH = 8
 
 
 def _is_archive(path: Path) -> bool:
     name = path.name.casefold()
     return path.suffix.casefold() in _ARCHIVE_SUFFIXES or name.endswith(".tar.gz")
+
+
+def _is_zip_name(name: str) -> bool:
+    return name.casefold().endswith((".docx", ".xlsx", ".zip"))
 
 
 def _is_text_path(path: Path) -> bool:
@@ -151,33 +159,58 @@ def _scan_text(path_label: str, content: str, failures: list[str]) -> None:
         _scan_line(path_label, line_number, line, failures)
 
 
-def _scan_zip(path: Path, failures: list[str]) -> None:
+def _scan_member_bytes(
+    label: str, name: str, data: bytes, failures: list[str], depth: int
+) -> None:
+    """Scan one archive member: recurse into nested archives, else scan as text.
+
+    Decoding a nested archive's bytes as UTF-8 only ever yields garbage, so a
+    credential stored inside a nested archive would slip through. Re-open the
+    member as an archive (bounded by _MAX_ARCHIVE_DEPTH) so its own members are
+    inspected too.
+    """
+    if depth + 1 < _MAX_ARCHIVE_DEPTH and _is_archive(Path(name)):
+        source = io.BytesIO(data)
+        if _is_zip_name(name):
+            _scan_zip(source, label, failures, depth + 1)
+        else:
+            _scan_tar(source, label, failures, depth + 1)
+        return
+    _scan_text(label, data.decode("utf-8", errors="replace"), failures)
+
+
+def _scan_zip(source: Path | io.BytesIO, label_prefix: str, failures: list[str], depth: int = 0) -> None:
     try:
-        with zipfile.ZipFile(path) as archive:
+        with zipfile.ZipFile(source) as archive:
             for info in archive.infolist():
                 if info.is_dir():
                     continue
-                label = f"{path}!{info.filename}"
+                label = f"{label_prefix}!{info.filename}"
                 if info.file_size > _MAX_ARCHIVE_MEMBER_BYTES:
                     failures.append(f"{label}: archive member exceeds scan limit")
                     continue
                 try:
-                    content = archive.read(info).decode("utf-8", errors="replace")
+                    data = archive.read(info)
                 except (OSError, RuntimeError, ValueError, zipfile.BadZipFile) as error:
                     failures.append(f"{label}: cannot read archive member: {error}")
                     continue
-                _scan_text(label, content, failures)
+                _scan_member_bytes(label, info.filename, data, failures, depth)
     except (OSError, zipfile.BadZipFile) as error:
-        failures.append(f"{path}: cannot read archive: {error}")
+        failures.append(f"{label_prefix}: cannot read archive: {error}")
 
 
-def _scan_tar(path: Path, failures: list[str]) -> None:
+def _scan_tar(source: Path | io.BytesIO, label_prefix: str, failures: list[str], depth: int = 0) -> None:
     try:
-        with tarfile.open(path, mode="r:*") as archive:
+        opener = (
+            tarfile.open(source, mode="r:*")
+            if isinstance(source, (str, Path))
+            else tarfile.open(fileobj=source, mode="r:*")
+        )
+        with opener as archive:
             for member in archive.getmembers():
                 if not member.isfile():
                     continue
-                label = f"{path}!{member.name}"
+                label = f"{label_prefix}!{member.name}"
                 if member.size > _MAX_ARCHIVE_MEMBER_BYTES:
                     failures.append(f"{label}: archive member exceeds scan limit")
                     continue
@@ -186,20 +219,20 @@ def _scan_tar(path: Path, failures: list[str]) -> None:
                     failures.append(f"{label}: cannot read archive member")
                     continue
                 try:
-                    content = extracted.read().decode("utf-8", errors="replace")
+                    data = extracted.read()
                 except (OSError, EOFError, ValueError) as error:
                     failures.append(f"{label}: cannot read archive member: {error}")
                     continue
-                _scan_text(label, content, failures)
+                _scan_member_bytes(label, member.name, data, failures, depth)
     except (OSError, tarfile.TarError) as error:
-        failures.append(f"{path}: cannot read archive: {error}")
+        failures.append(f"{label_prefix}: cannot read archive: {error}")
 
 
 def _scan_archive(path: Path, failures: list[str]) -> None:
-    if path.suffix.casefold() in {".docx", ".xlsx", ".zip"}:
-        _scan_zip(path, failures)
+    if _is_zip_name(path.name):
+        _scan_zip(path, str(path), failures)
     else:
-        _scan_tar(path, failures)
+        _scan_tar(path, str(path), failures)
 
 
 def scan(paths: list[Path], *, explicit: bool = True) -> list[str]:
