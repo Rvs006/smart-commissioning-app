@@ -82,6 +82,28 @@ def _is_zip_name(name: str) -> bool:
     return name.casefold().endswith((".docx", ".xlsx", ".zip"))
 
 
+def _should_scan_member(name: str) -> bool:
+    """Whether an archive member should be scanned, mirroring _files().
+
+    A release bundle legitimately carries test fixtures (synthetic secret
+    markers by design) and binaries (DLLs, EXEs). The directory walk skips both;
+    archive scanning must skip them too, or scanning a packaged bundle floods
+    false positives on decoded binary bytes and intentional test markers.
+    """
+    parts = name.replace("\\", "/").split("/")
+    base = parts[-1]
+    if (
+        "tests" in parts
+        or base.startswith("test_")
+        or ".test." in base
+        or base.endswith("_test.py")
+        or base == "scan_v0137_release_secrets.py"
+    ):
+        return False
+    member = Path(base)
+    return _is_text_path(member) or _is_archive(member)
+
+
 def _is_text_path(path: Path) -> bool:
     return path.suffix.casefold() in _TEXT_SUFFIXES
 
@@ -185,6 +207,8 @@ def _scan_zip(source: Path | io.BytesIO, label_prefix: str, failures: list[str],
             for info in archive.infolist():
                 if info.is_dir():
                     continue
+                if not _should_scan_member(info.filename):
+                    continue
                 label = f"{label_prefix}!{info.filename}"
                 if info.file_size > _MAX_ARCHIVE_MEMBER_BYTES:
                     failures.append(f"{label}: archive member exceeds scan limit")
@@ -209,6 +233,8 @@ def _scan_tar(source: Path | io.BytesIO, label_prefix: str, failures: list[str],
         with opener as archive:
             for member in archive.getmembers():
                 if not member.isfile():
+                    continue
+                if not _should_scan_member(member.name):
                     continue
                 label = f"{label_prefix}!{member.name}"
                 if member.size > _MAX_ARCHIVE_MEMBER_BYTES:
