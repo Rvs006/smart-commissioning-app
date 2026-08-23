@@ -70,23 +70,28 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-21. The latest public release is
-  v0.1.50; v0.1.51 is the current candidate. v0.1.51 brings the standalone IP,
-  BACnet, and MQTT discovery tools into SCT as native modules on top of its
-  authorization, evidence, and reporting: BACnet router/BBMD visibility and
-  on-demand live object browse, IP save-scan-as-register, an MQTT live topic
-  tree with focus/subscribe/search, and a sealed one-message MQTT publish. It
-  adds a frictionless authorization mode: with `SCT_REQUIRE_SCAN_AUTHORIZATION=0`
-  scans and device writes run with no authorization checkbox and no sealed
-  two-person approval, evidence unchanged; the portable build ships frictionless
-  while the source and hosted/Docker defaults stay enforced. It also binds the
-  BACnet and MQTT sidecar registers (only IP bound before) and stops the IP scan
-  report dropping typed hosts. It retains the v0.1.49 run-isolation and
-  equivalent-retry behavior and adds no database migration. Built-in TCP connect
-  remains the default. Nmap stays optional, locally installed, and unbundled.
-  Field acceptance for v0.1.51 remains open until recorded privately. Keep
-  source, raw evidence, report bytes, EXE identity, Docker labels, and release
-  SHA bound to the same run or commit.
+- **Current handoff**: status as of 2026-08-23. The latest public release is
+  v0.1.51; v0.1.52 is the current candidate. v0.1.52 builds on the v0.1.51
+  sidecar work with an Advanced tab on the IP, BACnet, and MQTT discovery
+  modules that embeds each standalone scanner tool's own UI inside SCT through a
+  backend reverse proxy (`/api/v1/scanners/{proto}/raw/`): reads run freely for
+  the engineer role, device writes (MQTT publish and config) pause for an in-app
+  confirmation showing the exact topic and value and gated by a single-use token
+  bound to the request bytes, and every action records an SCT run row
+  (`scanner_raw_action` / `scanner_raw_write`). It adds the sidecar-lane operator
+  inputs the field needed: an IP target-range input and a frozen BACnet Source
+  Interface, with the dry-run step removed from those lanes. It fixes the MQTT
+  live topic tree to hold a stable order instead of reshuffling, and re-vendors
+  the mqtt-discovery standalone UI so the Advanced MQTT panel carries its latest
+  topic-order fix. The vendored UIs are rewritten to relative paths for the embed;
+  the sidecar contract is unchanged. It adds no database migration (Alembic head
+  a6b7c8d9e0f1, Sync v2 head a7b8c9d0e1f2). Built-in TCP connect remains the
+  default; Nmap stays optional, locally installed, and unbundled. The Advanced
+  panel authenticates via the local principal, so it is available in the portable
+  and local deployments; a keyed hosted deployment needs the deferred
+  panel-session credential. Field acceptance for v0.1.52 remains open until
+  recorded privately. Keep source, raw evidence, report bytes, EXE identity,
+  Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the
