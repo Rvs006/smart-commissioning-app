@@ -77,6 +77,8 @@ const jobTypeLabels: Record<JobType, string> = {
   bacnet_validation: "BACnet validation",
   mapping_validation: "Mapping validation",
   report_generation: "Report generation",
+  scanner_raw_action: "Advanced panel action",
+  scanner_raw_write: "Advanced panel write",
 };
 
 export function humanizeJobType(jobType: JobType): string {

@@ -71,7 +71,7 @@ function bindEvents() {
 // ---------------------------------------------------------------------------
 function openStream() {
   if (state.es) state.es.close();
-  const es = new EventSource('/api/stream');
+  const es = new EventSource('api/stream');
   state.es = es;
   es.onmessage = (msg) => {
     let d; try { d = JSON.parse(msg.data); } catch (_) { return; }
@@ -96,7 +96,7 @@ function applySnapshot() {
 }
 
 async function refreshStatus() {
-  try { const r = await fetch('/api/status'); const d = await r.json(); if (d.register) setRegisterLoaded(d.register.assets > 0, d.register); } catch (_) {}
+  try { const r = await fetch('api/status'); const d = await r.json(); if (d.register) setRegisterLoaded(d.register.assets > 0, d.register); } catch (_) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ async function focusAsset(asset) {
   state.selectedAsset = String(asset).toUpperCase();
   state.histView = null; state.cfgTouched = false;
   try {
-    const res = await fetch('/api/focus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset }) });
+    const res = await fetch('api/focus', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset }) });
     const d = await res.json();
     if (d.focused) { state.focused = d.focused; renderDetail(); }
   } catch (_) {}
@@ -274,7 +274,7 @@ async function pushSearch() {
   const q = $('topicSearch').value;
   const matchedOnly = $('matchedOnly').checked;
   try {
-    const res = await fetch('/api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q, matchedOnly }) });
+    const res = await fetch('api/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q, matchedOnly }) });
     const d = await res.json();
     if (d.type === 'snapshot') { state.tree = d.tree || []; state.treeShown = d.treeShown; state.totalTopics = d.totalTopics; state.filtered = d.filtered; renderTree(); renderFoot(); }
   } catch (_) {}
@@ -286,7 +286,7 @@ async function applyFilter() {
   const qos = Number($('qosSelect').value) || 0;
   const clear = $('clearOnChange').checked;
   try {
-    const res = await fetch('/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rootFilter, qos, clear }) });
+    const res = await fetch('api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rootFilter, qos, clear }) });
     const d = await res.json();
     if (d.ok) { if (clear) { state.selectedAsset = ''; state.selectedPath = ''; clearDetail(); } toast('Subscription changed to ' + rootFilter); }
     else toast('Change failed: ' + (d.error || ''));
@@ -314,7 +314,7 @@ function renderDetail() {
   if (f.schema) badges.push(`<span class="badge grey">${escapeHtml(f.schema)}</span>`);
   $('dBadges').innerHTML = badges.join(' ');
   $('dLive').innerHTML = `<span class="live-dot">●</span> Live &nbsp; ${f.rate ? f.rate.toFixed(1) : '0.0'} msg/s &nbsp; ${fmtNum(f.count)} msgs`;
-  $('exportBtn').href = `/api/export?asset=${encodeURIComponent(f.key)}`;
+  $('exportBtn').href = `api/export?asset=${encodeURIComponent(f.key)}`;
 
   renderOverview(f);
   renderLive(f);
@@ -439,7 +439,7 @@ function openCfgConfirm() {
 async function sendConfig() {
   const f = state.focused; if (!f) return;
   try {
-    const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset: f.key, payload: $('cfgPayload').value, qos: Number($('cfgQos').value) || 0, retain: $('cfgRetain').checked }) });
+    const res = await fetch('api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ asset: f.key, payload: $('cfgPayload').value, qos: Number($('cfgQos').value) || 0, retain: $('cfgRetain').checked }) });
     const d = await res.json();
     $('cfgModal').classList.add('hidden');
     if (d.ok) toast('Config sent to ' + d.topic);
@@ -458,7 +458,7 @@ function togglePause() {
 async function exportArchive() {
   toast('Building export…');
   try {
-    const res = await fetch('/api/export-archive');
+    const res = await fetch('api/export-archive');
     if (!res.ok) { const t = await res.text(); return toast('Export failed: ' + t); }
     const blob = await res.blob();
     const cd = res.headers.get('Content-Disposition') || '';
@@ -490,14 +490,14 @@ async function submitConnect() {
   if (!cfg.host) return showErr('connError', 'Host is required');
   $('doConnectBtn').disabled = true; $('doConnectBtn').textContent = 'Connecting…';
   try {
-    const res = await fetch('/api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+    const res = await fetch('api/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
     const d = await res.json();
     if (d.ok) { $('connModal').classList.add('hidden'); toast('Connected — subscribing to ' + cfg.rootFilter); }
     else showErr('connError', d.error || 'Connection failed');
   } catch (e) { showErr('connError', 'Connection failed: ' + e.message); }
   finally { $('doConnectBtn').disabled = false; $('doConnectBtn').textContent = 'Connect'; }
 }
-async function doDisconnect() { try { await fetch('/api/disconnect', { method: 'POST' }); toast('Disconnected'); state.focused = null; state.selectedAsset = ''; state.selectedPath = ''; clearDetail(); } catch (_) {} }
+async function doDisconnect() { try { await fetch('api/disconnect', { method: 'POST' }); toast('Disconnected'); state.focused = null; state.selectedAsset = ''; state.selectedPath = ''; clearDetail(); } catch (_) {} }
 
 function bindCertUploads() {
   document.querySelectorAll('.file-btn[data-cert]').forEach((btn) => {
@@ -526,7 +526,7 @@ function onCsvChosen(e) {
   const reader = new FileReader();
   reader.onload = async () => {
     try {
-      const res = await fetch('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csv: reader.result }) });
+      const res = await fetch('api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csv: reader.result }) });
       const d = await res.json(); setRegisterLoaded(d.imported > 0, { assets: d.imported, points: d.points });
       toast(`Imported ${d.imported} assets · ${d.points} expected points`);
     } catch (err) { toast('Import failed: ' + err.message); }
@@ -538,7 +538,7 @@ function setRegisterLoaded(loaded, info) {
   if (loaded) { el.textContent = `Register loaded (${info.assets})`; el.className = 'status-value ok'; $('clearRegBtn').classList.remove('hidden'); }
   else { el.textContent = 'No register'; el.className = 'status-value muted-value'; $('clearRegBtn').classList.add('hidden'); }
 }
-async function clearRegister() { try { await fetch('/api/register', { method: 'DELETE' }); setRegisterLoaded(false, {}); toast('Register cleared'); } catch (_) {} }
+async function clearRegister() { try { await fetch('api/register', { method: 'DELETE' }); setRegisterLoaded(false, {}); toast('Register cleared'); } catch (_) {} }
 
 // ---------------------------------------------------------------------------
 // Save as register + publish
@@ -546,7 +546,7 @@ async function clearRegister() { try { await fetch('/api/register', { method: 'D
 async function saveAsRegister() {
   if (!(state.stats.topicsDiscovered > 0)) return toast('Nothing discovered yet');
   try {
-    const res = await fetch('/api/generate-register'); const csv = await res.text();
+    const res = await fetch('api/generate-register'); const csv = await res.text();
     const blob = new Blob([csv], { type: 'text/csv' }); const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = 'mqtt-register-discovered.csv'; a.click(); URL.revokeObjectURL(a.href);
     toast(`Saved ${Math.max(0, csv.trim().split('\n').length - 1)} register rows`);
@@ -558,7 +558,7 @@ async function submitPublish() {
   const fmt = document.querySelector('input[name="pfmt"]:checked').value; const payload = $('pPayload').value;
   if (fmt === 'json' && payload.trim()) { try { JSON.parse(payload); } catch (e) { return showErr('pubError', 'Payload is not valid JSON: ' + e.message); } }
   try {
-    const res = await fetch('/api/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic, payload, qos: Number($('pQos').value) || 0, retain: $('pRetain').checked }) });
+    const res = await fetch('api/publish', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ topic, payload, qos: Number($('pQos').value) || 0, retain: $('pRetain').checked }) });
     const d = await res.json();
     if (d.ok) { $('pubModal').classList.add('hidden'); toast('Published to ' + topic); } else showErr('pubError', d.error || 'Publish failed');
   } catch (e) { showErr('pubError', 'Publish failed: ' + e.message); }

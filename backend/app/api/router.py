@@ -15,6 +15,7 @@ from app.api.routes import (
     raw_evidence,
     reports,
     runs,
+    scanner_raw,
     scanners,
     scanners_mqtt_live,
     system,
@@ -100,6 +101,11 @@ protected_router.include_router(scanners.router, prefix="/discovery", tags=["sca
 # MQTT live session (M4a): held broker connection streamed to the browser. Same
 # /discovery prefix; engineer-gated per-route; distinct from the capture run.
 protected_router.include_router(scanners_mqtt_live.router, prefix="/discovery", tags=["scanners", "mqtt-live"])
+# Advanced-panel reverse proxy (GET/POST /scanners/{proto}/raw/...): serves the
+# vendored standalone scanner UI inside SCT and forwards to the loopback sidecar.
+# Engineer-gated per-route; reads flow free, writes are hard-blocked until the
+# write-guard milestone.
+protected_router.include_router(scanner_raw.router, prefix="/scanners", tags=["scanners", "advanced-panel"])
 protected_router.include_router(
     raw_evidence.router,
     prefix="/discovery",

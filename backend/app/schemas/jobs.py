@@ -89,6 +89,8 @@ JobType = Literal[
     "bacnet_validation",
     "mapping_validation",
     "report_generation",
+    "scanner_raw_action",
+    "scanner_raw_write",
 ]
 
 JobStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MQTT Discovery</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <!-- Top navigation (SCA suite) -->
@@ -73,7 +73,7 @@
         <div class="status-label">⇆ IMPORT REGISTER <span class="i">ⓘ</span></div>
         <div id="registerStatus" class="status-value muted-value">No register</div>
         <div class="status-actions">
-          <a href="/api/template" class="mini-btn" download>⬇ Template</a>
+          <a href="api/template" class="mini-btn" download>⬇ Template</a>
           <button id="importBtn" class="mini-btn">⬆ Import</button>
           <button id="clearRegBtn" class="mini-btn hidden">✕</button>
           <input id="csvFile" type="file" accept=".csv,text/csv" hidden />
@@ -360,6 +360,7 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/app.js"></script>
+  <script src="app.js"></script>
+  <script src="sct-bridge.js" defer></script>
 </body>
 </html>

@@ -81,6 +81,21 @@ belongs in the adapter or the contract test, not in the upstream code.
 gitignored (Node runs `server.js` directly; the portable build regenerates the
 bundle). Copy the source tree, not a built drop with deps committed.
 
+### 3b. EMBED REWRITE (so the app runs inside the SCT Advanced panel)
+The Advanced-panel proxy serves each app's own UI from an SCT sub-path inside an
+iframe, so the UI must use RELATIVE URLs. Run the deterministic rewrite once after
+vendoring (it turns `fetch('/api/...')` and `<script src="/app.js">` into relative
+paths and injects the inert `sct-bridge.js` tag):
+```
+python scripts/rewrite_vendored_scanner_embed.py
+```
+Idempotent: a no-op if upstream already ships relative paths. `dist/bundle.js` is
+gitignored for all three apps and rebuilt from `public/` by the portable build, so
+no manual rebundle is needed. If a future drop uses a new URL-quoting pattern the
+rewrite misses, `tests/test_scanner_raw_embed_contract.py` goes red naming the
+seam - extend the rewrite there. (Standing ask for upstream: ship relative `api/`
+paths at source, which makes this step a no-op.)
+
 ### 4. Contract test = the gate
 Each app has its own contract suite (see the table above); together the three
 suites are the re-import gate. Run the one for the app you dropped (CI uses

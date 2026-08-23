@@ -7,6 +7,20 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- Advanced tab on the IP, BACnet, and MQTT discovery modules embeds the full
+  standalone scanner tool inside SCT through a backend reverse proxy
+  (`/api/v1/scanners/{proto}/raw/`). Reads run freely (engineer role only); device
+  writes (MQTT publish and config) pause for an in-app confirmation showing the
+  exact topic and value, guarded by a single-use token bound to the request bytes.
+  Scans, browses, exports, and writes record as SCT run rows (`scanner_raw_action`
+  and `scanner_raw_write`). The vendored UIs are rewritten to relative paths so
+  they run under the proxy; the sidecar contract is unchanged. The panel
+  authenticates via the local principal, so it is available in the portable and
+  local deployments; a keyed hosted deployment needs the deferred panel-session
+  credential.
+
 ## [0.1.51] - 2026-08-21
 
 ### Added
