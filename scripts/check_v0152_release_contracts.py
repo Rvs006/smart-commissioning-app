@@ -64,6 +64,11 @@ def main() -> int:
             failures.append(f"{label} does not execute the v0.1.52 repository secret scan")
         elif text.find("actions/upload-artifact@", text.index(command) + len(command)) < 0:
             failures.append(f"{label} does not upload an artifact after the v0.1.52 secret scan")
+    zip_scan = "python scripts/scan_v0152_release_secrets.py --path $releaseZip"
+    if zip_scan not in windows_workflow:
+        failures.append("Windows workflow does not scan the packaged release ZIP for credentials")
+    elif windows_workflow.find("actions/upload-artifact@", windows_workflow.index(zip_scan)) < 0:
+        failures.append("Windows workflow does not scan the release ZIP before upload")
     hosted = release_workflow[release_workflow.index("  evidence:") : release_workflow.index("  promote-images:")]
     scan = "python scripts/scan_v0152_release_secrets.py --path build/release-evidence"
     if not (hosted.index("python scripts/generate_release_evidence.py") < hosted.index(scan) < hosted.index("actions/upload-artifact@")):

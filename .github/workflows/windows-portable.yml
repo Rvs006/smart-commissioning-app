@@ -439,6 +439,8 @@ jobs:
           Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $bundle -Force).FullName `
             -DestinationPath $temporaryZip -CompressionLevel Optimal
           Move-Item -LiteralPath $temporaryZip -Destination $releaseZip
+          python scripts/scan_v0152_release_secrets.py --path $releaseZip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
             --sbom (Join-Path $bundle 'SBOM.python.cdx.json') `
             --sbom (Join-Path $bundle 'SBOM.npm.cdx.json')

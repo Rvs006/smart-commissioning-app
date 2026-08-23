@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 import zipfile
@@ -54,6 +55,45 @@ class V0152SecurityScanTests(unittest.TestCase):
             with zipfile.ZipFile(path, "w") as archive:
                 archive.writestr("word/document.xml", 'api_key = "seeded-private-value"')
             self.assertTrue(scan.base.scan([path]))
+
+    def test_scans_credentials_inside_a_nested_archive(self) -> None:
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("notes.txt", "broker_password = seeded-private-value")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("nested-private.zip", inner.getvalue())
+            self.assertTrue(scan.base.scan([path]))
+
+    def test_bundle_archive_skips_test_and_binary_members(self) -> None:
+        # A packaged bundle carries test fixtures (synthetic markers by design)
+        # and binaries; the archive scan must skip them like the directory walk,
+        # while still catching a real secret in a text member.
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "SmartCommissioningApp-windows-portable.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "backend/tests/test_sync.py", 'password = "seeded-test-marker"'
+                )
+                archive.writestr(
+                    "_internal/libpq-abc.dll", b"\x00secret_key = deadbeefcafebabe\x01"
+                )
+                archive.writestr("scanners/node.exe", b"MZ\x00\x00")
+                archive.writestr("README_FIRST.txt", "broker_password = real-leak-value")
+            failures = scan.base.scan([path])
+        self.assertEqual(len(failures), 1)
+        self.assertIn("README_FIRST.txt", failures[0])
+
+    def test_clean_nested_archive_is_accepted(self) -> None:
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w") as archive:
+            archive.writestr("readme.txt", "ordinary release notes with no secrets")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("nested-clean.zip", inner.getvalue())
+            self.assertEqual(scan.base.scan([path]), [])
 
 
 if __name__ == "__main__":
