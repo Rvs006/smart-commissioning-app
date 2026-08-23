@@ -126,8 +126,8 @@
         <div class="tree-toolbar">
           <div class="tree-sort">
             <span>Sort:</span>
-            <button class="sort-btn active" data-sort="rate">Rate</button>
-            <button class="sort-btn" data-sort="name">A–Z</button>
+            <button class="sort-btn active" data-sort="name" title="Alphabetical — stable order, nodes never move as data updates">A–Z</button>
+            <button class="sort-btn" data-sort="rate" title="Rank by current message rate once (top contributors), then hold — click again to refresh the ranking">Rate ↻</button>
           </div>
           <div class="tree-tools">
             <button id="expandTopBtn" class="link-mini" title="Expand the first level">⊕ Expand top</button>
@@ -179,7 +179,7 @@
           <div class="tabpane" data-pane="live">
             <div class="live-layout">
               <div class="live-main">
-                <div class="sub-title">Live Payload <span class="i">ⓘ</span></div>
+                <div class="sub-title" style="display:flex;align-items:center;gap:8px">Live Payload <span class="i">ⓘ</span><button id="copyPayloadBtn" class="link-mini" style="margin-left:auto" title="Copy the shown payload JSON to the clipboard">⧉ Copy payload</button></div>
                 <div id="histChips" class="hist-chips"></div>
                 <pre class="json-view" id="jsonView">—</pre>
               </div>
@@ -247,14 +247,14 @@
       </div>
       <div class="modal-body">
         <div class="form-grid">
-          <label class="fld span2"><span>Name</span><input id="cName" placeholder="example-broker" /></label>
+          <label class="fld span2"><span>Name</span><input id="cName" placeholder="electracom-broker" /></label>
           <label class="fld"><span>Protocol</span>
             <select id="cProto">
               <option value="mqtt">mqtt:// (TCP)</option>
               <option value="mqtts">mqtts:// (TLS)</option>
             </select>
           </label>
-          <label class="fld"><span>Host</span><input id="cHost" placeholder="192.0.2.20" /></label>
+          <label class="fld"><span>Host</span><input id="cHost" placeholder="192.168.4.20" /></label>
           <label class="fld"><span>Port</span><input id="cPort" type="number" placeholder="1883" /></label>
           <label class="fld"><span>Client ID</span><input id="cClientId" placeholder="auto" /></label>
           <label class="fld"><span>Username</span><input id="cUser" placeholder="(anonymous)" autocomplete="off" /></label>
@@ -314,7 +314,7 @@
         <button class="modal-close" data-close-pub>✕</button>
       </div>
       <div class="modal-body">
-        <label class="fld span2"><span>Topic</span><input id="pTopic" placeholder="udmi/site/example/ahu/01" /></label>
+        <label class="fld span2"><span>Topic</span><input id="pTopic" placeholder="udmi/site/oxf/ahu/l04/01" /></label>
         <div class="fmt-row">
           <span>Format:</span>
           <label class="radio"><input type="radio" name="pfmt" value="raw" /> raw</label>
