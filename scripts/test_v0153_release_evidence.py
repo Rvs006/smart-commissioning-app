@@ -219,6 +219,35 @@ class V0153BundleProvenanceTests(unittest.TestCase):
         self.assertEqual(code, 1)
         delegate.assert_not_called()
 
+    def _run_with_unreadable(self, target_name: str) -> tuple[int, object]:
+        # REV-3: model an unreadable bundle file (permission denied) by making
+        # Path.open raise PermissionError only for that file.
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle)
+            # The validator resolves bundle paths before opening them, so match
+            # against the resolved path.
+            target = (bundle / target_name).resolve()
+            real_open = Path.open
+
+            def denied(self, *args, **kwargs):
+                if self == target:
+                    raise PermissionError(13, "Permission denied", str(self))
+                return real_open(self, *args, **kwargs)
+
+            with patch.object(Path, "open", denied):
+                return self._run(_windows_args(bundle))
+
+    def test_unreadable_executable_is_rejected_without_traceback(self) -> None:
+        code, delegate = self._run_with_unreadable(_EXE_NAME)
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_unreadable_scanner_component_is_rejected_without_traceback(self) -> None:
+        code, delegate = self._run_with_unreadable("scanners/mqtt-discovery/dist/bundle.js")
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
     def test_hosted_evidence_skips_the_portable_provenance_check(self) -> None:
         code, delegate = self._run(
             ["--evidence-kind", "hosted", "--version", "v0.1.53", "--commit", _CLEAN_SHA]
