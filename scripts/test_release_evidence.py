@@ -126,6 +126,20 @@ class ReleaseEvidenceHardeningTests(unittest.TestCase):
             code = validate_release_evidence.main(_args(evidence_path))
         self.assertEqual(code, 1)
 
+    def test_non_list_files_is_a_controlled_failure(self) -> None:
+        for files in (None, "not-a-list", {"name": "x"}):
+            with tempfile.TemporaryDirectory() as directory:
+                evidence_path = Path(directory) / "evidence.json"
+                evidence = {
+                    "release_version": "v0.1.53",
+                    "source_commit": _COMMIT,
+                    "gates": {},
+                    "files": files,
+                }
+                evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+                code = validate_release_evidence.main(_args(evidence_path))
+            self.assertEqual(code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

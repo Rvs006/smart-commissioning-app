@@ -94,11 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     for gate in args.require_gate:
         if gates.get(gate) != "passed":
             failures.append(f"required gate is not passed: {gate}")
+    files = evidence.get("files", [])
+    if not isinstance(files, list):
+        failures.append("files is not a list")
+        files = []
 
     roots = [path.resolve() for path in args.search_root]
     roots.append(evidence_path.parent)
     seen_names: set[str] = set()
-    for record in evidence.get("files", []):
+    for record in files:
         if not isinstance(record, dict):
             failures.append("file record is not an object")
             continue
@@ -145,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             checksum_records[name] = digest
         expected_checksums = {
             record["name"]: record["sha256"]
-            for record in evidence.get("files", [])
+            for record in files
             if isinstance(record, dict)
             and isinstance(record.get("name"), str)
             and isinstance(record.get("sha256"), str)
