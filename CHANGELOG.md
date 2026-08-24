@@ -7,6 +7,24 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.53] - 2026-08-24
+
+### Security
+
+- Hardened the release-gate secret scanning so the release and Windows workflows
+  scan the assembled evidence and the packaged ZIP for credential material with a
+  stricter scanner and fail closed before any artifact upload.
+- Hardened portable-bundle provenance: a build from a dirty worktree is marked
+  non-publishable, and the release evidence contract requires a clean rebuild at
+  the authorized release commit before publication.
+- Scrubbed a placeholder identifier from the vendored mqtt-discovery page.
+
+### Unchanged
+
+- No functional change to discovery, reporting, evidence, or the Advanced scanner
+  panels. Reads still record `scanner_raw_action` and device writes still record
+  `scanner_raw_write`. No database migration (Alembic head `a6b7c8d9e0f1`).
+
 ## [0.1.52] - 2026-08-23
 
 ### Added

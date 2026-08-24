@@ -656,7 +656,7 @@ class UdmiV1ReportTests(ApiTestCase):
 
         provenance = validation["evidence_provenance"]["sources"][0]
         self.assertEqual(provenance["source_run_id"], source_id)
-        self.assertEqual(provenance["application_version"], "0.1.52")
+        self.assertEqual(provenance["application_version"], "0.1.53")
         self.assertEqual(provenance["source_commit"], "b" * 40)
         self.assertEqual(provenance["portable_exe_sha256"], "c" * 64)
         self.assertEqual(
@@ -678,7 +678,7 @@ class UdmiV1ReportTests(ApiTestCase):
         self.assertEqual(portable_provenance["application_version"], health.json()["version"])
         self.assertEqual(portable_provenance["source_run_ids"], [source_id])
         self.assertEqual(portable_provenance["sources"][0]["source_run_id"], source_id)
-        self.assertEqual(portable_provenance["sources"][0]["application_version"], "0.1.52")
+        self.assertEqual(portable_provenance["sources"][0]["application_version"], "0.1.53")
         self.assertEqual(portable_provenance["sources"][0]["source_commit"], "b" * 40)
         self.assertEqual(portable_provenance["sources"][0]["portable_exe_sha256"], "c" * 64)
         self.assertEqual(
@@ -714,7 +714,7 @@ class UdmiV1ReportTests(ApiTestCase):
         report_run = SimpleNamespace(
             parameters={
                 "report_snapshot_v2": {
-                    "renderer_version": "0.1.52",
+                    "renderer_version": "0.1.53",
                     "source_run_ids": [source_id],
                     "source_run_snapshots": [
                         {
