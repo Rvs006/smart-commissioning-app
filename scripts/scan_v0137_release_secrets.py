@@ -37,11 +37,17 @@ _SAFE_VALUE = re.compile(
     re.IGNORECASE,
 )
 _SIMPLE_BARE_REFERENCE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
-# A quoted value that is a plain field name (letters/underscore, no digits) or a
-# description with whitespace is a schema key or a label, not a secret literal:
-# `"mqtt_password": "password"`, `"MQTT Password": "Broker password (masked)"`.
-# Real leaked tokens carry digits, mixed case, or punctuation and still match.
-_FIELD_NAME_VALUE = re.compile(r"^[A-Za-z][A-Za-z_]*$")
+# A value that carries a credential keyword as a whole word AND no digit is a
+# schema field name or a label ABOUT the credential, not the secret itself:
+# `"mqtt_password": "password"`, `"MQTT Password": "Broker password (masked)"`,
+# `"Private Key": "Private key paired with the client certificate."`. An opaque
+# token, key, or passphrase does not spell out "password"/"secret"/"private key"
+# (and real tokens carry digits), so it still matches. Value shape alone never
+# suppresses: `"password": "correct horse battery staple"` and
+# `"password": "SomeIdentifier"` carry no keyword and are reported.
+_CREDENTIAL_KEYWORD = re.compile(
+    r"(?i)(?<![A-Za-z])(?:password|passwd|secret|private[_ -]?key|api[_ -]?key|access[_ -]?token)(?![A-Za-z])"
+)
 _TEXT_SUFFIXES = {
     ".bat",
     ".cmd",
@@ -170,17 +176,15 @@ def _scan_line(path_label: str, line_number: int, line: str, failures: list[str]
         and assignment.group("quoted") is None
         and _SIMPLE_BARE_REFERENCE.fullmatch(assignment_value or "")
     )
-    field_name_value = assignment_value is not None and _FIELD_NAME_VALUE.fullmatch(
-        assignment_value
-    )
-    descriptive_value = assignment_value is not None and any(
-        character.isspace() for character in assignment_value
+    schema_or_label_value = (
+        assignment_value is not None
+        and _CREDENTIAL_KEYWORD.search(assignment_value)
+        and not any(character.isdigit() for character in assignment_value)
     )
     if (
         assignment_value
         and not bare_reference
-        and not field_name_value
-        and not descriptive_value
+        and not schema_or_label_value
         and not _SAFE_VALUE.match(assignment_value.strip())
     ):
         failures.append(f"{path_label}:{line_number}: credential-like literal assignment")

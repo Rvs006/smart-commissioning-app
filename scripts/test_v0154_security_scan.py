@@ -112,6 +112,24 @@ class V0154SecurityScanTests(unittest.TestCase):
             )
             self.assertEqual(scan.base.scan([label]), [])
 
+    def test_flags_credential_values_without_a_keyword(self) -> None:
+        # Value shape alone must not suppress: letter-only, uppercase, underscore,
+        # a passphrase, and an identifier under a credential key are all reported
+        # (REV-2-passphrase-scan). Only a value that spells out a credential
+        # keyword with no digit (a field name or a label) is suppressed.
+        for payload in (
+            '{"password": "abcdefghijk"}',
+            '{"password": "ABCDEFGHIJK"}',
+            '{"password": "___________"}',
+            '{"password": "correct horse battery staple"}',
+            '{"password": "SomeIdentifier"}',
+            'api_key = "correct horse battery staple"',
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "release-evidence.json"
+                path.write_text(payload + "\n", encoding="utf-8")
+                self.assertTrue(scan.base.scan([path]), f"missed: {payload}")
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:
