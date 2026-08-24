@@ -83,6 +83,28 @@ def _bundle_provenance_failures(argv: list[str] | None) -> list[str]:
             failures.append(f"portable bundle executable {_BUNDLE_EXE_NAME} is missing")
         elif _file_sha256(exe_path) != recorded_exe_sha:
             failures.append("packaged executable does not match provenance portable_exe_sha256")
+    # Bind the bundled scanner components (the Node runtime and the scanner UI
+    # bundles the Advanced panels execute) to the same attestation. They are not
+    # listed in release-evidence.json or SHA256SUMS.txt, so provenance is their
+    # only recorded hash and nothing else enforces it - same tamper class as the
+    # executable above.
+    scanner_hashes = provenance.get("scanner_components_sha256")
+    if not isinstance(scanner_hashes, dict) or not scanner_hashes:
+        failures.append("portable bundle provenance has no scanner_components_sha256 map")
+    else:
+        root = provenance_path.parent
+        root_resolved = root.resolve()
+        for relative, recorded in sorted(scanner_hashes.items()):
+            if not (isinstance(recorded, str) and re.fullmatch(r"[0-9a-f]{64}", recorded)):
+                failures.append(f"scanner component has no valid recorded hash: {relative}")
+                continue
+            component = (root / relative).resolve()
+            if component != root_resolved and root_resolved not in component.parents:
+                failures.append(f"scanner component path escapes the bundle: {relative}")
+            elif not component.is_file():
+                failures.append(f"scanner component is missing: {relative}")
+            elif _file_sha256(component) != recorded:
+                failures.append(f"scanner component does not match provenance hash: {relative}")
     return failures
 
 
