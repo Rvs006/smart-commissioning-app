@@ -96,6 +96,36 @@ class ReleaseEvidenceHardeningTests(unittest.TestCase):
             code = validate_release_evidence.main(_args(evidence_path))
         self.assertEqual(code, 1)
 
+    def test_array_root_evidence_is_a_controlled_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence_path = Path(directory) / "evidence.json"
+            evidence_path.write_text("[]", encoding="utf-8")
+            code = validate_release_evidence.main(_args(evidence_path))
+        self.assertEqual(code, 1)
+
+    def test_array_root_sbom_is_a_controlled_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            sbom_bytes = b"[]"
+            (bundle / "sbom.json").write_bytes(sbom_bytes)
+            evidence = {
+                "release_version": "v0.1.53",
+                "source_commit": _COMMIT,
+                "gates": {},
+                "files": [
+                    {
+                        "name": "sbom.json",
+                        "sha256": hashlib.sha256(sbom_bytes).hexdigest(),
+                        "size": len(sbom_bytes),
+                        "kind": "sbom",
+                    }
+                ],
+            }
+            evidence_path = bundle / "evidence.json"
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+            code = validate_release_evidence.main(_args(evidence_path))
+        self.assertEqual(code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
