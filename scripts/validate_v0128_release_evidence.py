@@ -32,7 +32,7 @@ def _validate_docker_images(path: Path, version: str, commit: str, repository: s
     failures: list[str] = []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return [f"docker-image-evidence.json is invalid: {error}"]
     if not isinstance(payload, dict):
         return ["docker-image-evidence.json root is not an object"]
