@@ -24,12 +24,19 @@ _PEM_BLOCK = re.compile(
     r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
 )
 _CREDENTIAL_URL = re.compile(r"\b(?:mqtts?|redis|postgres(?:ql)?|amqps?)://[^\s/@:]+:[^\s/@]+@", re.IGNORECASE)
-_ASSIGNMENT = re.compile(
+_KEY_CORE = (
     r"(?i)(?<![\w.])(?:[A-Za-z][A-Za-z0-9]*(?:[_ -][A-Za-z0-9]+)*[_ -])?"
     r"(?:password|passwd|secret|private[_ -]?key|api[_ -]?key|access[_ -]?token)"
-    r"(?![_A-Za-z0-9])"
-    r"[\"']?\s*(?:=|:\s+|:\s*(?=[\"']))\s*"
-    r"(?:[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']|(?P<bare>[^\s,#,(){}\[\];\"']{8,}))"
+    r"(?![_A-Za-z0-9])[\"']?"
+)
+_VALUE = r"(?:[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']|(?P<bare>[^\s,#,(){}\[\];\"']{8,}))"
+_ASSIGNMENT = re.compile(_KEY_CORE + r"\s*(?:=|:\s+|:\s*(?=[\"']))\s*" + _VALUE)
+# Pretty-printed JSON puts the credential key and its quoted value on separate
+# lines (`"password":` then `"secret-value"`), so the per-line _ASSIGNMENT never
+# sees both. Match a quoted value on the line immediately after the key's colon,
+# bounded to a single newline so distant unrelated lines are not paired.
+_ASSIGNMENT_MULTILINE = re.compile(
+    _KEY_CORE + r"[ \t]*:[ \t]*\r?\n[ \t]*[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']"
 )
 _MOSQUITTO_SECRET = re.compile(r"(?i)\bmosquitto_(?:pub|sub)\b[^\r\n]*(?:\s-P|\s--password)\s+([^\s]+)")
 _SAFE_VALUE = re.compile(
@@ -162,31 +169,31 @@ def _files(root: Path, *, explicit: bool) -> list[Path]:
     return paths
 
 
+def _reportable_assignment(match: re.Match[str]) -> str | None:
+    """The credential value to report, or None when it is a bare reference, a
+    schema field name, a label, or a safe placeholder. Shared by the per-line and
+    multi-line passes so both classify a value identically."""
+    groups = match.groupdict()
+    quoted = groups.get("quoted")
+    value = quoted or groups.get("bare")
+    if not value:
+        return None
+    if quoted is None and _SIMPLE_BARE_REFERENCE.fullmatch(value):
+        return None
+    if _CREDENTIAL_KEYWORD.search(value) and not any(
+        character.isdigit() for character in value
+    ):
+        return None
+    if _SAFE_VALUE.match(value.strip()):
+        return None
+    return value
+
+
 def _scan_line(path_label: str, line_number: int, line: str, failures: list[str]) -> None:
     if _CREDENTIAL_URL.search(line):
         failures.append(f"{path_label}:{line_number}: private key or credential-bearing URL")
     assignment = _ASSIGNMENT.search(line)
-    assignment_value = (
-        assignment.group("quoted") or assignment.group("bare")
-        if assignment
-        else None
-    )
-    bare_reference = (
-        assignment is not None
-        and assignment.group("quoted") is None
-        and _SIMPLE_BARE_REFERENCE.fullmatch(assignment_value or "")
-    )
-    schema_or_label_value = (
-        assignment_value is not None
-        and _CREDENTIAL_KEYWORD.search(assignment_value)
-        and not any(character.isdigit() for character in assignment_value)
-    )
-    if (
-        assignment_value
-        and not bare_reference
-        and not schema_or_label_value
-        and not _SAFE_VALUE.match(assignment_value.strip())
-    ):
+    if assignment is not None and _reportable_assignment(assignment):
         failures.append(f"{path_label}:{line_number}: credential-like literal assignment")
     mosquitto = _MOSQUITTO_SECRET.search(line)
     if mosquitto and not _SAFE_VALUE.match(mosquitto.group(1).strip()):
@@ -200,6 +207,10 @@ def _scan_text(path_label: str, content: str, failures: list[str]) -> None:
         failures.append(f"{path_label}:{line_number}: private key or credential-bearing URL")
     for line_number, line in enumerate(io.StringIO(content), start=1):
         _scan_line(path_label, line_number, line, failures)
+    for match in _ASSIGNMENT_MULTILINE.finditer(content):
+        if _reportable_assignment(match):
+            line_number = content.count("\n", 0, match.start()) + 1
+            failures.append(f"{path_label}:{line_number}: credential-like literal assignment")
 
 
 def _scan_member_bytes(
