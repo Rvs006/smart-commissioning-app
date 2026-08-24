@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -14,9 +15,19 @@ import validate_v0153_release_evidence
 ROOT = Path(__file__).resolve().parents[1]
 
 _CLEAN_SHA = "a" * 40
+_EXE_NAME = "SmartCommissioningApp.exe"
+_EXE_BYTES = b"portable-app-bytes"
 
 
-def _write_provenance(bundle: Path, **overrides: object) -> Path:
+def _write_provenance(
+    bundle: Path,
+    *,
+    write_exe: bool = True,
+    exe_bytes: bytes = _EXE_BYTES,
+    **overrides: object,
+) -> Path:
+    if write_exe:
+        (bundle / _EXE_NAME).write_bytes(exe_bytes)
     payload = {
         "schema_version": "1.0",
         "application_version": "v0.1.53",
@@ -24,7 +35,7 @@ def _write_provenance(bundle: Path, **overrides: object) -> Path:
         "source_commit": _CLEAN_SHA,
         "source_tree_state": "clean",
         "publishable": True,
-        "portable_exe_sha256": None,
+        "portable_exe_sha256": hashlib.sha256(exe_bytes).hexdigest(),
     }
     payload.update(overrides)
     provenance = bundle / "BUILD_PROVENANCE.json"
@@ -115,6 +126,33 @@ class V0153BundleProvenanceTests(unittest.TestCase):
             code, delegate = self._run(_windows_args(bundle))
         self.assertEqual(code, 0)
         delegate.assert_called_once()
+
+    def test_tampered_executable_is_rejected_before_delegation(self) -> None:
+        # REV-2: provenance records the original exe hash; the exe bytes are
+        # changed afterwards. The validator must re-derive the digest and fail.
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle)
+            (bundle / _EXE_NAME).write_bytes(_EXE_BYTES + b"\x00")
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_missing_executable_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle, write_exe=False)
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_invalid_portable_exe_sha256_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle, portable_exe_sha256=None)
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
 
     def test_hosted_evidence_skips_the_portable_provenance_check(self) -> None:
         code, delegate = self._run(
