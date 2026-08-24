@@ -15,11 +15,20 @@ import validate_v0128_release_evidence as base
 _BUNDLE_EXE_NAME = "SmartCommissioningApp.exe"
 
 
-def _file_sha256(path: Path) -> str:
+def _file_sha256(path: Path) -> str | None:
+    """SHA-256 of a file, or None if it cannot be read.
+
+    Returns None on any OSError (permission denied, or a file that vanished
+    after an is_file() check) so callers report a controlled failure instead of
+    letting the traceback escape.
+    """
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
     return digest.hexdigest()
 
 
@@ -81,8 +90,12 @@ def _bundle_provenance_failures(argv: list[str] | None) -> list[str]:
         exe_path = provenance_path.parent / _BUNDLE_EXE_NAME
         if not exe_path.is_file():
             failures.append(f"portable bundle executable {_BUNDLE_EXE_NAME} is missing")
-        elif _file_sha256(exe_path) != recorded_exe_sha:
-            failures.append("packaged executable does not match provenance portable_exe_sha256")
+        else:
+            actual_exe_sha = _file_sha256(exe_path)
+            if actual_exe_sha is None:
+                failures.append(f"portable bundle executable {_BUNDLE_EXE_NAME} is unreadable")
+            elif actual_exe_sha != recorded_exe_sha:
+                failures.append("packaged executable does not match provenance portable_exe_sha256")
     # Bind the bundled scanner components (the Node runtime and the scanner UI
     # bundles the Advanced panels execute) to the same attestation. They are not
     # listed in release-evidence.json or SHA256SUMS.txt, so provenance is their
@@ -103,8 +116,12 @@ def _bundle_provenance_failures(argv: list[str] | None) -> list[str]:
                 failures.append(f"scanner component path escapes the bundle: {relative}")
             elif not component.is_file():
                 failures.append(f"scanner component is missing: {relative}")
-            elif _file_sha256(component) != recorded:
-                failures.append(f"scanner component does not match provenance hash: {relative}")
+            else:
+                actual = _file_sha256(component)
+                if actual is None:
+                    failures.append(f"scanner component is unreadable: {relative}")
+                elif actual != recorded:
+                    failures.append(f"scanner component does not match provenance hash: {relative}")
     return failures
 
 
