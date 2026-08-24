@@ -56,7 +56,7 @@ def _bundle_provenance_failures(argv: list[str] | None) -> list[str]:
     provenance_path = next(iter(matches.values()))
     try:
         provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return [f"BUILD_PROVENANCE.json is invalid: {error}"]
     if not isinstance(provenance, dict):
         return ["BUILD_PROVENANCE.json root is not an object"]

@@ -119,6 +119,21 @@ class V0153BundleProvenanceTests(unittest.TestCase):
         self.assertEqual(code, 1)
         delegate.assert_not_called()
 
+    def test_invalid_utf8_provenance_is_rejected_without_traceback(self) -> None:
+        # PROVENANCE-5: malformed encoding must return a controlled invalid
+        # failure, not escape as an uncaught UnicodeDecodeError traceback.
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            (bundle / "release-evidence.json").write_text("{}", encoding="utf-8")
+            (bundle / "BUILD_PROVENANCE.json").write_bytes(
+                b'{"source_tree_state":"clean"}\xff'
+            )
+            failures = validate_v0153_release_evidence._bundle_provenance_failures(
+                _windows_args(bundle)
+            )
+        self.assertEqual(len(failures), 1)
+        self.assertIn("BUILD_PROVENANCE.json is invalid", failures[0])
+
     def test_clean_matching_bundle_reaches_delegation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             bundle = Path(directory)
