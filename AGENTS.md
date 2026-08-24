@@ -71,17 +71,22 @@ collection order is alphabetical - keep it so.
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
 - **Current handoff**: status as of 2026-08-24. The latest public release is
-  v0.1.53; v0.1.54 is the current candidate. v0.1.54 is a release-tooling
-  hardening release on top of v0.1.53. It hardens the shared release-evidence
-  validator (`scripts/validate_release_evidence.py`) so malformed evidence JSON
-  fails closed with a controlled message instead of an uncaught traceback: a
-  non-object (array) evidence root, a CycloneDX SBOM payload whose root is not an
-  object, and a `files` field set to `null` or another non-list value each return
-  a clear validation failure; a missing `files` key still defaults to an empty
-  list. That validator runs in CI and the release ceremony and is not part of the
-  shipped application, so there is no functional change: the whole v0.1.53 surface
-  is carried forward unchanged, including the v0.1.53 release-gate secret scanning
-  and dirty-worktree provenance hardening, and the Advanced tab on the IP, BACnet,
+  v0.1.54; v0.1.55 is the current candidate. v0.1.55 is a release-tooling
+  hardening release on top of v0.1.54. It hardens the shared release secret
+  scanner (`scripts/scan_v0137_release_secrets.py`, which every
+  `scan_vXXXX_release_secrets.py` wrapper delegates to) so a credential written
+  as a quoted-key JSON field (`"password": "value"`) is caught in both the
+  assembled evidence directory and the packaged ZIP, where it previously slipped
+  through. Suppression is precise, not shape-based: a value is treated as a
+  schema field name or a label only when it spells a credential keyword as a whole
+  word with no digit (`"mqtt_password": "password"`, `"MQTT Password": "Broker
+  password (masked)"`); opaque tokens, keys, and passphrases (`abcdefghijk`,
+  `correct horse battery staple`) still fire. That scanner runs in CI and the
+  release ceremony and is not part of the shipped application, so there is no
+  functional change: the whole v0.1.54 surface is carried forward unchanged,
+  including the v0.1.54 release-evidence validator hardening and the v0.1.53
+  release-gate secret scanning and dirty-worktree provenance hardening, and the
+  Advanced tab on the IP, BACnet,
   and MQTT discovery modules that embeds each standalone scanner tool through the
   backend reverse proxy (`/api/v1/scanners/{proto}/raw/`) with reads free for the
   engineer role, device writes gated by an in-app confirmation and a single-use
@@ -92,7 +97,7 @@ collection order is alphabetical - keep it so.
   remains the default; Nmap stays optional, locally installed, and unbundled. The
   Advanced panel authenticates via the local principal, so it is available in the
   portable and local deployments; a keyed hosted deployment needs the deferred
-  panel-session credential. Field acceptance for v0.1.54 remains open until
+  panel-session credential. Field acceptance for v0.1.55 remains open until
   recorded privately. Keep source, raw evidence, report bytes, EXE identity,
   Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
