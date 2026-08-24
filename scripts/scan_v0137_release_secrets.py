@@ -28,7 +28,7 @@ _ASSIGNMENT = re.compile(
     r"(?i)(?<![\w.])(?:[A-Za-z][A-Za-z0-9]*(?:[_ -][A-Za-z0-9]+)*[_ -])?"
     r"(?:password|passwd|secret|private[_ -]?key|api[_ -]?key|access[_ -]?token)"
     r"(?![_A-Za-z0-9])"
-    r"\s*(?:=|:\s+|:\s*(?=[\"']))\s*"
+    r"[\"']?\s*(?:=|:\s+|:\s*(?=[\"']))\s*"
     r"(?:[\"'](?P<quoted>[^\"'\r\n]{8,})[\"']|(?P<bare>[^\s,#,(){}\[\];\"']{8,}))"
 )
 _MOSQUITTO_SECRET = re.compile(r"(?i)\bmosquitto_(?:pub|sub)\b[^\r\n]*(?:\s-P|\s--password)\s+([^\s]+)")
@@ -37,6 +37,11 @@ _SAFE_VALUE = re.compile(
     re.IGNORECASE,
 )
 _SIMPLE_BARE_REFERENCE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
+# A quoted value that is a plain field name (letters/underscore, no digits) or a
+# description with whitespace is a schema key or a label, not a secret literal:
+# `"mqtt_password": "password"`, `"MQTT Password": "Broker password (masked)"`.
+# Real leaked tokens carry digits, mixed case, or punctuation and still match.
+_FIELD_NAME_VALUE = re.compile(r"^[A-Za-z][A-Za-z_]*$")
 _TEXT_SUFFIXES = {
     ".bat",
     ".cmd",
@@ -165,7 +170,19 @@ def _scan_line(path_label: str, line_number: int, line: str, failures: list[str]
         and assignment.group("quoted") is None
         and _SIMPLE_BARE_REFERENCE.fullmatch(assignment_value or "")
     )
-    if assignment_value and not bare_reference and not _SAFE_VALUE.match(assignment_value.strip()):
+    field_name_value = assignment_value is not None and _FIELD_NAME_VALUE.fullmatch(
+        assignment_value
+    )
+    descriptive_value = assignment_value is not None and any(
+        character.isspace() for character in assignment_value
+    )
+    if (
+        assignment_value
+        and not bare_reference
+        and not field_name_value
+        and not descriptive_value
+        and not _SAFE_VALUE.match(assignment_value.strip())
+    ):
         failures.append(f"{path_label}:{line_number}: credential-like literal assignment")
     mosquitto = _MOSQUITTO_SECRET.search(line)
     if mosquitto and not _SAFE_VALUE.match(mosquitto.group(1).strip()):
