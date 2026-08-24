@@ -7,6 +7,30 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.55] - 2026-08-24
+
+### Changed
+
+- Hardened the shared release secret scanner
+  (`scripts/scan_v0137_release_secrets.py`, delegated to by every versioned
+  wrapper) so a credential written as a quoted-key JSON field
+  (`"password": "value"`) is caught in both the assembled evidence directory and
+  the packaged ZIP, where it previously slipped through. Suppression is precise:
+  a value is treated as a schema field name or a label only when it spells a
+  credential keyword as a whole word with no digit
+  (`"mqtt_password": "password"`, `"MQTT Password": "Broker password (masked)"`).
+  Opaque tokens, keys, and passphrases (`abcdefghijk`,
+  `correct horse battery staple`) still fire; value shape alone never suppresses.
+
+### Unchanged
+
+- Release-tooling change only, run in CI and the release ceremony and not part of
+  the shipped application. No functional change to discovery, reporting, evidence,
+  or the Advanced scanner panels: reads still record `scanner_raw_action` and
+  device writes still record `scanner_raw_write`. The v0.1.54 release-evidence
+  validator hardening and the v0.1.53 secret-scan and provenance hardening remain
+  in force. No database migration (Alembic head `a6b7c8d9e0f1`).
+
 ## [0.1.54] - 2026-08-24
 
 ### Changed
