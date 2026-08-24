@@ -7,6 +7,27 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+## [0.1.54] - 2026-08-24
+
+### Changed
+
+- Hardened the shared release-evidence validator
+  (`scripts/validate_release_evidence.py`) so malformed evidence JSON fails closed
+  with a controlled message instead of an uncaught traceback: a non-object (array)
+  evidence root, a CycloneDX SBOM payload whose root is not an object, and a
+  `files` field set to `null` or another non-list value each return a clear
+  validation failure. A missing `files` key still defaults to an empty list, so
+  well-formed evidence is unaffected. Regression tests cover all three shapes.
+
+### Unchanged
+
+- Release-tooling change only, run in CI and the release ceremony and not part of
+  the shipped application. No functional change to discovery, reporting, evidence,
+  or the Advanced scanner panels: reads still record `scanner_raw_action` and
+  device writes still record `scanner_raw_write`. The v0.1.53 release-gate secret
+  scanning and dirty-worktree provenance hardening remain in force. No database
+  migration (Alembic head `a6b7c8d9e0f1`).
+
 ## [0.1.53] - 2026-08-24
 
 ### Security

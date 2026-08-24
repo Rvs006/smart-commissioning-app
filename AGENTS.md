@@ -71,29 +71,30 @@ collection order is alphabetical - keep it so.
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
 - **Current handoff**: status as of 2026-08-24. The latest public release is
-  v0.1.52; v0.1.53 is the current candidate. v0.1.53 is a security-hardening
-  release on top of v0.1.52. It tightens the release-gate secret scanning so the
-  release and Windows workflows scan the assembled evidence and the packaged ZIP
-  for credential material with a stricter scanner and fail closed before any
-  artifact upload; it hardens portable-bundle provenance so a build from a dirty
-  worktree is marked non-publishable and the release evidence contract requires a
-  clean rebuild at the authorized release commit before publication; and it
-  scrubs a placeholder identifier from the vendored mqtt-discovery page. There is
-  no functional change: the whole v0.1.52 surface is carried forward unchanged,
-  including the Advanced tab on the IP, BACnet, and MQTT discovery modules that
-  embeds each standalone scanner tool through the backend reverse proxy
-  (`/api/v1/scanners/{proto}/raw/`) with reads free for the engineer role, device
-  writes gated by an in-app confirmation and a single-use request-bound token, and
-  every action recorded as an SCT run row (`scanner_raw_action` /
-  `scanner_raw_write`), plus the sidecar-lane operator inputs and the stable MQTT
-  live topic tree. It adds no database migration (Alembic head a6b7c8d9e0f1,
-  Sync v2 head a7b8c9d0e1f2). Built-in TCP connect remains the default; Nmap stays
-  optional, locally installed, and unbundled. The Advanced panel authenticates via
-  the local principal, so it is available in the portable and local deployments; a
-  keyed hosted deployment needs the deferred panel-session credential. Field
-  acceptance for v0.1.53 remains open until recorded privately. Keep source, raw
-  evidence, report bytes, EXE identity, Docker labels, and release SHA bound to the
-  same run or commit.
+  v0.1.53; v0.1.54 is the current candidate. v0.1.54 is a release-tooling
+  hardening release on top of v0.1.53. It hardens the shared release-evidence
+  validator (`scripts/validate_release_evidence.py`) so malformed evidence JSON
+  fails closed with a controlled message instead of an uncaught traceback: a
+  non-object (array) evidence root, a CycloneDX SBOM payload whose root is not an
+  object, and a `files` field set to `null` or another non-list value each return
+  a clear validation failure; a missing `files` key still defaults to an empty
+  list. That validator runs in CI and the release ceremony and is not part of the
+  shipped application, so there is no functional change: the whole v0.1.53 surface
+  is carried forward unchanged, including the v0.1.53 release-gate secret scanning
+  and dirty-worktree provenance hardening, and the Advanced tab on the IP, BACnet,
+  and MQTT discovery modules that embeds each standalone scanner tool through the
+  backend reverse proxy (`/api/v1/scanners/{proto}/raw/`) with reads free for the
+  engineer role, device writes gated by an in-app confirmation and a single-use
+  request-bound token, and every action recorded as an SCT run row
+  (`scanner_raw_action` / `scanner_raw_write`), plus the sidecar-lane operator
+  inputs and the stable MQTT live topic tree. It adds no database migration
+  (Alembic head a6b7c8d9e0f1, Sync v2 head a7b8c9d0e1f2). Built-in TCP connect
+  remains the default; Nmap stays optional, locally installed, and unbundled. The
+  Advanced panel authenticates via the local principal, so it is available in the
+  portable and local deployments; a keyed hosted deployment needs the deferred
+  panel-session credential. Field acceptance for v0.1.54 remains open until
+  recorded privately. Keep source, raw evidence, report bytes, EXE identity,
+  Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the
