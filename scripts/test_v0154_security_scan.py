@@ -85,6 +85,33 @@ class V0154SecurityScanTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("README_FIRST.txt", failures[0])
 
+    def test_rejects_json_credential_in_directory_and_zip(self) -> None:
+        # A quoted-key JSON credential must be caught in both the assembled
+        # evidence directory and the packaged ZIP (BF-INTEGRATION-2 false negative).
+        payload = '{"password": "hunter2-secret-value"}'
+        with tempfile.TemporaryDirectory() as directory:
+            json_path = Path(directory) / "release-evidence.json"
+            json_path.write_text(payload + "\n", encoding="utf-8")
+            self.assertTrue(scan.base.scan([json_path]))
+            zip_path = Path(directory) / "release-evidence.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                archive.writestr("evidence/release-evidence.json", payload)
+            self.assertTrue(scan.base.scan([zip_path]))
+
+    def test_accepts_json_field_name_maps_and_label_descriptions(self) -> None:
+        # A password key mapped to a plain field name or a human description is a
+        # schema/label, not a secret literal, and must not flood false positives.
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "aliases.json"
+            alias.write_text('{"mqtt_password": "password"}\n', encoding="utf-8")
+            self.assertEqual(scan.base.scan([alias]), [])
+            label = Path(directory) / "labels.json"
+            label.write_text(
+                '{"MQTT Password": "Broker password (stored masked)."}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(scan.base.scan([label]), [])
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:
