@@ -11,11 +11,15 @@ import sys
 from pathlib import Path
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path) -> str | None:
+    """SHA-256 of a file, or None if it cannot be read (OSError)."""
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
     return digest.hexdigest()
 
 
@@ -23,7 +27,7 @@ def _validate_cyclonedx(path: Path) -> list[str]:
     failures: list[str] = []
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return [f"{path.name}: invalid JSON: {error}"]
     if payload.get("bomFormat") != "CycloneDX":
         failures.append(f"{path.name}: bomFormat is not CycloneDX")
@@ -70,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     evidence_path = args.evidence.resolve()
     try:
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         print(f"FAIL: invalid evidence JSON: {error}", file=sys.stderr)
         return 1
 
@@ -107,7 +111,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         payload_path = matches[0]
         actual = _sha256(payload_path)
-        if actual != expected:
+        if actual is None:
+            failures.append(f"evidence payload is unreadable: {name}")
+        elif actual != expected:
             failures.append(f"SHA-256 mismatch for {name}")
         expected_size = record.get("size")
         if not isinstance(expected_size, int) or payload_path.stat().st_size != expected_size:
@@ -117,8 +123,13 @@ def main(argv: list[str] | None = None) -> int:
 
     checksums_path = evidence_path.parent / "SHA256SUMS.txt"
     if checksums_path.is_file():
+        try:
+            checksum_text = checksums_path.read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError) as error:
+            failures.append(f"SHA256SUMS.txt is unreadable or not ASCII: {error}")
+            checksum_text = ""
         checksum_records: dict[str, str] = {}
-        for line in checksums_path.read_text(encoding="ascii").splitlines():
+        for line in checksum_text.splitlines():
             match = re.fullmatch(r"([0-9a-f]{64})  ([^/\\]+)", line)
             if match is None:
                 failures.append(f"invalid SHA256SUMS line: {line!r}")
@@ -134,9 +145,13 @@ def main(argv: list[str] | None = None) -> int:
             and isinstance(record.get("name"), str)
             and isinstance(record.get("sha256"), str)
         }
-        expected_checksums[evidence_path.name] = _sha256(evidence_path)
-        if checksum_records != expected_checksums:
-            failures.append("SHA256SUMS entries do not match release evidence")
+        evidence_digest = _sha256(evidence_path)
+        if evidence_digest is None:
+            failures.append("release evidence file is unreadable")
+        else:
+            expected_checksums[evidence_path.name] = evidence_digest
+            if checksum_records != expected_checksums:
+                failures.append("SHA256SUMS entries do not match release evidence")
 
     if failures:
         for failure in failures:

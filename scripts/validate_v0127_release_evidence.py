@@ -30,11 +30,15 @@ REQUIRED_FILES: dict[str, dict[str, str]] = {
 }
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path) -> str | None:
+    """SHA-256 of a file, or None if it cannot be read (OSError)."""
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
     return digest.hexdigest()
 
 
@@ -63,7 +67,7 @@ def _validate_cyclonedx(path: Path) -> list[str]:
     failures: list[str] = []
     try:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return [f"{path.name}: invalid CycloneDX JSON: {error}"]
     if not isinstance(payload, dict) or payload.get("bomFormat") != "CycloneDX":
         failures.append(f"{path.name}: bomFormat is not CycloneDX")
@@ -194,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         evidence_path = args.evidence.resolve(strict=True)
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         print(f"FAIL: invalid evidence JSON: {error}", file=sys.stderr)
         return 1
     if not isinstance(evidence, dict):
@@ -285,7 +289,10 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"evidence payload is empty: {name}")
         if record.get("size") != size:
             failures.append(f"size mismatch for {name}")
-        if record.get("sha256") != _sha256(path):
+        actual_digest = _sha256(path)
+        if actual_digest is None:
+            failures.append(f"evidence payload is unreadable: {name}")
+        elif record.get("sha256") != actual_digest:
             failures.append(f"SHA-256 mismatch for {name}")
         # SBOM validation is selected from the required filename, never from the
         # caller-controlled `kind` field.
@@ -319,9 +326,13 @@ def main(argv: list[str] | None = None) -> int:
     expected_checksums = {
         name: str(record.get("sha256")) for name, record in valid_records.items()
     }
-    expected_checksums[evidence_path.name] = _sha256(evidence_path)
-    if checksum_records != expected_checksums:
-        failures.append("SHA256SUMS entries do not exactly match release evidence")
+    evidence_digest = _sha256(evidence_path)
+    if evidence_digest is None:
+        failures.append("release evidence file is unreadable")
+    else:
+        expected_checksums[evidence_path.name] = evidence_digest
+        if checksum_records != expected_checksums:
+            failures.append("SHA256SUMS entries do not exactly match release evidence")
 
     if failures:
         for failure in failures:
