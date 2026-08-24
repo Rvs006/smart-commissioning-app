@@ -29,6 +29,8 @@ def _validate_cyclonedx(path: Path) -> list[str]:
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         return [f"{path.name}: invalid JSON: {error}"]
+    if not isinstance(payload, dict):
+        return [f"{path.name}: root is not a JSON object"]
     if payload.get("bomFormat") != "CycloneDX":
         failures.append(f"{path.name}: bomFormat is not CycloneDX")
     if payload.get("specVersion") not in {"1.4", "1.5", "1.6"}:
@@ -76,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         print(f"FAIL: invalid evidence JSON: {error}", file=sys.stderr)
+        return 1
+    if not isinstance(evidence, dict):
+        print("FAIL: invalid evidence JSON: root must be an object", file=sys.stderr)
         return 1
 
     if evidence.get("release_version") != args.version:
