@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 _CLEAN_SHA = "a" * 40
 _EXE_NAME = "SmartCommissioningApp.exe"
 _EXE_BYTES = b"portable-app-bytes"
+_SCANNER_COMPONENTS = {
+    "scanners/node.exe": b"node-runtime-bytes",
+    "scanners/mqtt-discovery/dist/bundle.js": b"mqtt-scanner-bundle-bytes",
+}
 
 
 def _write_provenance(
@@ -24,10 +28,18 @@ def _write_provenance(
     *,
     write_exe: bool = True,
     exe_bytes: bytes = _EXE_BYTES,
+    write_scanners: bool = True,
     **overrides: object,
 ) -> Path:
     if write_exe:
         (bundle / _EXE_NAME).write_bytes(exe_bytes)
+    scanner_hashes = {}
+    for relative, data in _SCANNER_COMPONENTS.items():
+        scanner_hashes[relative] = hashlib.sha256(data).hexdigest()
+        if write_scanners:
+            component = bundle / relative
+            component.parent.mkdir(parents=True, exist_ok=True)
+            component.write_bytes(data)
     payload = {
         "schema_version": "1.0",
         "application_version": "v0.1.53",
@@ -36,6 +48,7 @@ def _write_provenance(
         "source_tree_state": "clean",
         "publishable": True,
         "portable_exe_sha256": hashlib.sha256(exe_bytes).hexdigest(),
+        "scanner_components_sha256": scanner_hashes,
     }
     payload.update(overrides)
     provenance = bundle / "BUILD_PROVENANCE.json"
@@ -165,6 +178,43 @@ class V0153BundleProvenanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             bundle = Path(directory)
             _write_provenance(bundle, portable_exe_sha256=None)
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_tampered_scanner_component_is_rejected_before_delegation(self) -> None:
+        # PROV-6: a scanner component changed after provenance is written must be
+        # caught the same way the executable is.
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle)
+            (bundle / "scanners/mqtt-discovery/dist/bundle.js").write_bytes(b"tampered")
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_missing_scanner_component_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle, write_scanners=False)
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_missing_scanner_component_map_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(bundle, scanner_components_sha256=None)
+            code, delegate = self._run(_windows_args(bundle))
+        self.assertEqual(code, 1)
+        delegate.assert_not_called()
+
+    def test_scanner_component_path_escape_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            _write_provenance(
+                bundle, scanner_components_sha256={"../escape.js": "a" * 64}
+            )
             code, delegate = self._run(_windows_args(bundle))
         self.assertEqual(code, 1)
         delegate.assert_not_called()
