@@ -70,28 +70,30 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-23. The latest public release is
-  v0.1.51; v0.1.52 is the current candidate. v0.1.52 builds on the v0.1.51
-  sidecar work with an Advanced tab on the IP, BACnet, and MQTT discovery
-  modules that embeds each standalone scanner tool's own UI inside SCT through a
-  backend reverse proxy (`/api/v1/scanners/{proto}/raw/`): reads run freely for
-  the engineer role, device writes (MQTT publish and config) pause for an in-app
-  confirmation showing the exact topic and value and gated by a single-use token
-  bound to the request bytes, and every action records an SCT run row
-  (`scanner_raw_action` / `scanner_raw_write`). It adds the sidecar-lane operator
-  inputs the field needed: an IP target-range input and a frozen BACnet Source
-  Interface, with the dry-run step removed from those lanes. It fixes the MQTT
-  live topic tree to hold a stable order instead of reshuffling, and re-vendors
-  the mqtt-discovery standalone UI so the Advanced MQTT panel carries its latest
-  topic-order fix. The vendored UIs are rewritten to relative paths for the embed;
-  the sidecar contract is unchanged. It adds no database migration (Alembic head
-  a6b7c8d9e0f1, Sync v2 head a7b8c9d0e1f2). Built-in TCP connect remains the
-  default; Nmap stays optional, locally installed, and unbundled. The Advanced
-  panel authenticates via the local principal, so it is available in the portable
-  and local deployments; a keyed hosted deployment needs the deferred
-  panel-session credential. Field acceptance for v0.1.52 remains open until
-  recorded privately. Keep source, raw evidence, report bytes, EXE identity,
-  Docker labels, and release SHA bound to the same run or commit.
+- **Current handoff**: status as of 2026-08-24. The latest public release is
+  v0.1.52; v0.1.53 is the current candidate. v0.1.53 is a security-hardening
+  release on top of v0.1.52. It tightens the release-gate secret scanning so the
+  release and Windows workflows scan the assembled evidence and the packaged ZIP
+  for credential material with a stricter scanner and fail closed before any
+  artifact upload; it hardens portable-bundle provenance so a build from a dirty
+  worktree is marked non-publishable and the release evidence contract requires a
+  clean rebuild at the authorized release commit before publication; and it
+  scrubs a placeholder identifier from the vendored mqtt-discovery page. There is
+  no functional change: the whole v0.1.52 surface is carried forward unchanged,
+  including the Advanced tab on the IP, BACnet, and MQTT discovery modules that
+  embeds each standalone scanner tool through the backend reverse proxy
+  (`/api/v1/scanners/{proto}/raw/`) with reads free for the engineer role, device
+  writes gated by an in-app confirmation and a single-use request-bound token, and
+  every action recorded as an SCT run row (`scanner_raw_action` /
+  `scanner_raw_write`), plus the sidecar-lane operator inputs and the stable MQTT
+  live topic tree. It adds no database migration (Alembic head a6b7c8d9e0f1,
+  Sync v2 head a7b8c9d0e1f2). Built-in TCP connect remains the default; Nmap stays
+  optional, locally installed, and unbundled. The Advanced panel authenticates via
+  the local principal, so it is available in the portable and local deployments; a
+  keyed hosted deployment needs the deferred panel-session credential. Field
+  acceptance for v0.1.53 remains open until recorded privately. Keep source, raw
+  evidence, report bytes, EXE identity, Docker labels, and release SHA bound to the
+  same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
   release is published, update this handoff in both `AGENTS.md` and `CLAUDE.md`
   in the same commit. Keep the two files byte-for-byte identical, and record the
