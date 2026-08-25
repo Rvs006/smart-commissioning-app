@@ -148,6 +148,25 @@ class V0154SecurityScanTests(unittest.TestCase):
             )
             self.assertEqual(scan.base.scan([placeholder]), [])
 
+    def test_archive_nested_past_depth_bound_fails_closed(self) -> None:
+        # A credential hidden past the archive-depth cap must be reported, not
+        # silently decoded as text and passed (BF-BOUND-1). Wrap a real leak in
+        # more layers than _MAX_ARCHIVE_DEPTH and expect a depth failure.
+        data = b'password = "hunter2-real-leak"\n'
+        name = "leak.txt"
+        for index in range(scan.base._MAX_ARCHIVE_DEPTH + 2):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                archive.writestr(name, data)
+            data = buffer.getvalue()
+            name = f"level-{index}.zip"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-evidence.zip"
+            path.write_bytes(data)
+            failures = scan.base.scan([path])
+        self.assertTrue(failures)
+        self.assertTrue(any("archive nesting exceeds" in failure for failure in failures))
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:

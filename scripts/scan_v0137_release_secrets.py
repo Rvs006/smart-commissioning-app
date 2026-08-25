@@ -221,9 +221,16 @@ def _scan_member_bytes(
     Decoding a nested archive's bytes as UTF-8 only ever yields garbage, so a
     credential stored inside a nested archive would slip through. Re-open the
     member as an archive (bounded by _MAX_ARCHIVE_DEPTH) so its own members are
-    inspected too.
+    inspected too. At the depth bound an archive member is NOT decoded as text
+    (that would silently miss its contents) but fails closed, so a credential
+    hidden past the nesting cap is reported rather than passed.
     """
-    if depth + 1 < _MAX_ARCHIVE_DEPTH and _is_archive(Path(name)):
+    if _is_archive(Path(name)):
+        if depth + 1 >= _MAX_ARCHIVE_DEPTH:
+            failures.append(
+                f"{label}: archive nesting exceeds the scan depth of {_MAX_ARCHIVE_DEPTH}"
+            )
+            return
         source = io.BytesIO(data)
         if _is_zip_name(name):
             _scan_zip(source, label, failures, depth + 1)
