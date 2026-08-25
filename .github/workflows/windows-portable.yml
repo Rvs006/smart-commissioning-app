@@ -8,7 +8,7 @@ on:
       version:
         description: Release version stamped into the exe, README_FIRST, and evidence
         required: true
-        default: v0.1.55
+        default: v0.1.54
       release_sha:
         description: Full 40-character commit SHA to build from current main
         required: true
@@ -23,8 +23,8 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.55.md"
-      - "docs/v0.1.55-evidence-manifest.md"
+      - "docs/migration-rollback-v0.1.54.md"
+      - "docs/v0.1.54-evidence-manifest.md"
       - "AGENTS.md"
       - "CLAUDE.md"
       - ".github/workflows/windows-portable.yml"
@@ -40,8 +40,8 @@ on:
       - "docs/migration-rollback-v0.1.30.md"
       - "docs/migration-rollback-v0.1.31.md"
       - "docs/migration-rollback-v0.1.37.md"
-      - "docs/migration-rollback-v0.1.55.md"
-      - "docs/v0.1.55-evidence-manifest.md"
+      - "docs/migration-rollback-v0.1.54.md"
+      - "docs/v0.1.54-evidence-manifest.md"
       - "AGENTS.md"
       - "CLAUDE.md"
       - ".github/workflows/windows-portable.yml"
@@ -54,7 +54,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  RELEASE_VERSION: ${{ inputs.version || 'v0.1.55' }}
+  RELEASE_VERSION: ${{ inputs.version || 'v0.1.54' }}
   RELEASE_SHA: ${{ inputs.release_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -79,8 +79,8 @@ jobs:
           if ($actual -cne $env:RELEASE_SHA.ToLowerInvariant()) {
             throw "Checkout $actual does not match requested $env:RELEASE_SHA"
           }
-          if ($env:RELEASE_VERSION -cne 'v0.1.55') {
-            throw "This workflow is pinned to v0.1.55, not '$env:RELEASE_VERSION'."
+          if ($env:RELEASE_VERSION -cne 'v0.1.54') {
+            throw "This workflow is pinned to v0.1.54, not '$env:RELEASE_VERSION'."
           }
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
             git fetch origin main --no-tags
@@ -223,7 +223,7 @@ jobs:
               Set-Content -LiteralPath $npmSbom -Encoding utf8
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.55.md' `
+          Copy-Item -LiteralPath 'docs\migration-rollback-v0.1.54.md' `
             -Destination (Join-Path $bundle 'MIGRATION_ROLLBACK.md')
           python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
             --sbom $pythonSbom --sbom $npmSbom
@@ -244,7 +244,7 @@ jobs:
           $env:SMART_COMMISSIONING_DATA_DIR = $stateRoot
           $env:RUN_LEASE_SECONDS = '15'
           $env:RUN_HEARTBEAT_SECONDS = '2'
-          # The one v0.1.55 portable must ignore the runner's parent Nmap
+          # The one v0.1.54 portable must ignore the runner's parent Nmap
           # setting and expose its built-in Global Admin approval capability.
           $env:SMART_COMMISSIONING_NMAP_INTERNAL_PROVIDER_ENABLED = '0'
           Set-Content -LiteralPath $stdin -Value '' -NoNewline
@@ -400,7 +400,7 @@ jobs:
             --test portable_sqlite_lease_configuration=passed `
             --test portable_sqlite_heartbeat_renewals=passed
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/validate_v0155_release_evidence.py `
+          python scripts/validate_v0154_release_evidence.py `
             --evidence (Join-Path $bundle 'release-evidence.json') `
             --version $env:RELEASE_VERSION --product-version $productVersion `
             --commit $env:RELEASE_SHA --evidence-kind windows `
@@ -427,7 +427,7 @@ jobs:
       - name: Scan Windows portable evidence for credential material
         shell: pwsh
         run: |
-          python scripts/scan_v0155_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
+          python scripts/scan_v0154_release_secrets.py --path build/Smart_Commissioning_App_Windows_Portable
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build and scan the exact portable release ZIP
@@ -439,7 +439,7 @@ jobs:
           Compress-Archive -LiteralPath (Get-ChildItem -LiteralPath $bundle -Force).FullName `
             -DestinationPath $temporaryZip -CompressionLevel Optimal
           Move-Item -LiteralPath $temporaryZip -Destination $releaseZip
-          python scripts/scan_v0155_release_secrets.py --path $releaseZip
+          python scripts/scan_v0154_release_secrets.py --path $releaseZip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/check_nmap_distribution_absence.py --bundle-dir $bundle `
             --sbom (Join-Path $bundle 'SBOM.python.cdx.json') `

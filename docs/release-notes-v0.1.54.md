@@ -1,11 +1,12 @@
-# v0.1.54 - release-evidence validator hardening
+# v0.1.54 - release-gate tooling hardening
 
-v0.1.54 hardens the shared release-evidence validator that the release gates run
-in CI. It is a release-tooling change on top of v0.1.53. There is no functional
-change to discovery, the Advanced scanner panels, reporting, or evidence: the
-whole v0.1.53 surface is carried forward unchanged, and the portable EXE and
-Docker images behave identically to v0.1.53. The version and release identity
-move so the published release is bound to the hardened tree.
+v0.1.54 hardens the two release-gate tools that run in CI: the shared
+release-evidence validator and the shared release secret scanner. It is a
+release-tooling change on top of v0.1.53. There is no functional change to
+discovery, the Advanced scanner panels, reporting, or evidence: the whole v0.1.53
+surface is carried forward unchanged, and the portable EXE and Docker images
+behave identically to v0.1.53. The version and release identity move so the
+published release is bound to the hardened tree.
 
 ## What changed
 
@@ -15,13 +16,21 @@ move so the published release is bound to the hardened tree.
   (array) evidence root, a CycloneDX SBOM payload whose root is not an object,
   and a `files` field set to `null` or another non-list value. Each returns exit
   1 with a clear "invalid" or "not a list" diagnostic.
+- `scripts/scan_v0137_release_secrets.py` (the base scanner every versioned
+  wrapper delegates to) now catches a credential written as a quoted-key JSON
+  field (`"password": "value"`) in the evidence directory and the packaged ZIP,
+  including when the key and value sit on separate pretty-printed lines. A value
+  is treated as a schema field name or a label, and skipped, only when it spells a
+  credential keyword as a whole word with no digit (`"mqtt_password": "password"`,
+  `"MQTT Password": "Broker password (masked)"`). Opaque tokens, keys, and
+  passphrases still report; value shape alone never suppresses a finding.
 - A missing `files` key still defaults to an empty list with no failure, so
-  well-formed evidence is unaffected. Regression tests cover the array root, the
-  non-object SBOM payload, and the null/string/object `files` cases.
+  well-formed evidence is unaffected. Regression tests cover the validator shapes
+  and the scanner same-line, multi-line, field-name, and passphrase cases.
 
-This validator runs during the release ceremony and CI. It is not part of the
-shipped application or the portable bundle, so the change does not alter the
-runtime behavior of the EXE or the Docker images.
+Both tools run during the release ceremony and CI. Neither is part of the shipped
+application or the portable bundle, so the change does not alter the runtime
+behavior of the EXE or the Docker images.
 
 ## Carried forward from v0.1.53 (unchanged)
 

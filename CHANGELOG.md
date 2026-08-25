@@ -7,30 +7,6 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
-## [0.1.55] - 2026-08-24
-
-### Changed
-
-- Hardened the shared release secret scanner
-  (`scripts/scan_v0137_release_secrets.py`, delegated to by every versioned
-  wrapper) so a credential written as a quoted-key JSON field
-  (`"password": "value"`) is caught in both the assembled evidence directory and
-  the packaged ZIP, where it previously slipped through. Suppression is precise:
-  a value is treated as a schema field name or a label only when it spells a
-  credential keyword as a whole word with no digit
-  (`"mqtt_password": "password"`, `"MQTT Password": "Broker password (masked)"`).
-  Opaque tokens, keys, and passphrases (`abcdefghijk`,
-  `correct horse battery staple`) still fire; value shape alone never suppresses.
-
-### Unchanged
-
-- Release-tooling change only, run in CI and the release ceremony and not part of
-  the shipped application. No functional change to discovery, reporting, evidence,
-  or the Advanced scanner panels: reads still record `scanner_raw_action` and
-  device writes still record `scanner_raw_write`. The v0.1.54 release-evidence
-  validator hardening and the v0.1.53 secret-scan and provenance hardening remain
-  in force. No database migration (Alembic head `a6b7c8d9e0f1`).
-
 ## [0.1.54] - 2026-08-24
 
 ### Changed
@@ -42,6 +18,16 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   `files` field set to `null` or another non-list value each return a clear
   validation failure. A missing `files` key still defaults to an empty list, so
   well-formed evidence is unaffected. Regression tests cover all three shapes.
+- Hardened the shared release secret scanner
+  (`scripts/scan_v0137_release_secrets.py`, delegated to by every versioned
+  wrapper) so a credential written as a quoted-key JSON field
+  (`"password": "value"`) is caught in the evidence directory and the packaged
+  ZIP, including when the key and value sit on separate pretty-printed lines.
+  Suppression is precise: a value is treated as a schema field name or a label
+  only when it spells a credential keyword as a whole word with no digit
+  (`"mqtt_password": "password"`). Opaque tokens and passphrases still report;
+  value shape alone never suppresses. Regression tests cover the same-line,
+  multi-line, field-name, and passphrase cases.
 
 ### Unchanged
 
