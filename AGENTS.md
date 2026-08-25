@@ -70,9 +70,9 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-24. The latest public release is
-  v0.1.53; v0.1.54 is the current candidate. v0.1.54 is a release-tooling
-  hardening release on top of v0.1.53. It hardens the shared release-evidence
+- **Current handoff**: status as of 2026-08-25. The latest public release is
+  v0.1.54, a release-tooling hardening release on top of v0.1.53 that hardens
+  the shared release-evidence
   validator (`scripts/validate_release_evidence.py`) so malformed evidence JSON
   fails closed with a controlled message instead of an uncaught traceback: a
   non-object (array) evidence root, a CycloneDX SBOM payload whose root is not an

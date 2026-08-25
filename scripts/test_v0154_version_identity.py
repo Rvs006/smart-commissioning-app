@@ -27,9 +27,8 @@ class V0154VersionIdentityTests(unittest.TestCase):
         agents = (ROOT / "AGENTS.md").read_bytes()
         self.assertEqual(agents, (ROOT / "CLAUDE.md").read_bytes())
         lineage = " ".join(agents.decode("utf-8").split())
-        self.assertIn("v0.1.54 is the current candidate", lineage)
-        self.assertIn("the latest public release is v0.1.53", lineage.lower())
-        self.assertIn("2026-08-24", lineage)
+        self.assertIn("the latest public release is v0.1.54", lineage.lower())
+        self.assertIn("2026-08-25", lineage)
         self.assertIn("[0.1.54]", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
 
     def test_every_runtime_surface_uses_the_validated_identity_resolver(self) -> None:

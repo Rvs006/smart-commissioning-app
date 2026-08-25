@@ -179,7 +179,7 @@ def main() -> int:
     if agents != (repo / "CLAUDE.md").read_bytes():
         failures.append("AGENTS.md and CLAUDE.md must be byte-identical")
     handoff = " ".join(agents.decode("utf-8").lower().split())
-    for value in ("2026-08-24", "latest public release is v0.1.53", "v0.1.54 is the current candidate"):
+    for value in ("2026-08-25", "latest public release is v0.1.54"):
         if value not in handoff:
             failures.append(f"v0.1.54 handoff omits: {value}")
     if failures:
