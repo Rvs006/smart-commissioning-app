@@ -130,6 +130,24 @@ class V0154SecurityScanTests(unittest.TestCase):
                 path.write_text(payload + "\n", encoding="utf-8")
                 self.assertTrue(scan.base.scan([path]), f"missed: {payload}")
 
+    def test_rejects_pretty_printed_json_credential_across_lines(self) -> None:
+        # Pretty-printed JSON splits the key and its quoted value onto separate
+        # physical lines; the per-line matcher never sees both (REV-1). The
+        # multi-line pass must catch it, while a field name or placeholder split
+        # the same way stays clean.
+        with tempfile.TemporaryDirectory() as directory:
+            secret = Path(directory) / "release-evidence.json"
+            secret.write_text('{\n  "password":\n  "hunter2secret"\n}\n', encoding="utf-8")
+            self.assertTrue(scan.base.scan([secret]))
+            field_name = Path(directory) / "aliases.json"
+            field_name.write_text('{\n  "mqtt_password":\n  "password"\n}\n', encoding="utf-8")
+            self.assertEqual(scan.base.scan([field_name]), [])
+            placeholder = Path(directory) / "template.json"
+            placeholder.write_text(
+                '{\n  "password":\n  "{{FROM_SECRET_MANAGER}}"\n}\n', encoding="utf-8"
+            )
+            self.assertEqual(scan.base.scan([placeholder]), [])
+
     def test_clean_nested_archive_is_accepted(self) -> None:
         inner = io.BytesIO()
         with zipfile.ZipFile(inner, "w") as archive:

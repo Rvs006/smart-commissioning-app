@@ -39,7 +39,7 @@
 
 .PARAMETER Version
     Optional release version shown in the portable README and Windows executable
-    properties (for example, ``v0.1.55``). It must match the version packaged in
+    properties (for example, ``v0.1.54``). It must match the version packaged in
     ``core/smart_commissioning_core/__init__.py``. When omitted, the build uses
     that canonical version with a ``v`` prefix. Git commit and dirty-tree state
     remain separate provenance fields.
