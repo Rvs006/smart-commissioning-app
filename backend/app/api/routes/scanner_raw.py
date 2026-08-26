@@ -96,6 +96,44 @@ _BRIDGE_JS = """(function () {
 """
 
 
+# SCT theme skin injected into each vendored scanner (the <link> tag is added by
+# the embed rewrite and loaded after the app's own styles.css, so it wins the
+# cascade). It remaps the app's palette variables and body font to the SCT
+# tokens; no JS or markup is touched, so every scanner function is preserved. The
+# IP scanner is fully skinned here; the sibling apps already pick up the shared
+# font and any common tokens, and get their remaining selectors as they are
+# brought over.
+_THEME_CSS = """:root {
+  --bg: #f5f5f7;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.16);
+  --text: #1d1d1f;
+  --muted: #86868b;
+  --muted-2: #a1a1a6;
+  --blue: #0071e3;
+  --blue-bg: rgba(0, 113, 227, 0.06);
+  --green: #248a3d;
+  --green-bg: rgba(52, 199, 89, 0.08);
+  --amber: #c77c00;
+  --amber-bg: rgba(255, 159, 10, 0.08);
+  --red: #d70015;
+  --red-bg: rgba(255, 59, 48, 0.08);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --radius: 10px;
+}
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+}
+.brand-mark { background: var(--blue); }
+.progress-fill { background: var(--blue); }
+.btn.primary:hover { background: #0077ed; }
+.chip.active { background: var(--blue); border-color: var(--blue); }
+.config-input:focus,
+.search-input:focus { outline: 2px solid rgba(0, 113, 227, 0.35); border-color: var(--blue); }
+.results-table thead th { background: #f2f2f7; }
+"""
+
+
 def _proxy_client() -> httpx.AsyncClient:
     # Rebindable at module scope so tests inject an httpx.MockTransport. No read
     # timeout: an SSE stream is idle between frames; the wall-clock cap bounds it.
@@ -281,6 +319,8 @@ async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response
         raise HTTPException(status_code=404, detail="Unknown scanner protocol.")
     if path == "sct-bridge.js":
         return Response(_BRIDGE_JS, media_type="text/javascript")
+    if path == "sct-theme.css":
+        return Response(_THEME_CSS, media_type="text/css")
 
     body = await request.body()
     session = scanner_raw_session.resolve(request.cookies.get(COOKIE_NAME))
