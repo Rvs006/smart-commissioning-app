@@ -26,7 +26,8 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from urllib.parse import parse_qs
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -112,18 +113,34 @@ def _resolve_base_url(request: Request, name: str) -> str:
         raise HTTPException(status_code=503, detail="Scanner sidecar is not available.") from error
 
 
-async def _relay(client: httpx.AsyncClient, upstream: httpx.Response, *, cap: bool) -> AsyncIterator[bytes]:
+async def _relay(
+    client: httpx.AsyncClient,
+    upstream: httpx.Response,
+    *,
+    cap: bool,
+    on_complete: Callable[[bytes], None] | None = None,
+) -> AsyncIterator[bytes]:
     """Stream the sidecar's response body to the browser. SSE responses get the
     wall-clock cap; finite responses (JSON, file downloads) stream to completion.
-    Honest close on upstream failure or client disconnect - never fabricates."""
+    Honest close on upstream failure or client disconnect - never fabricates.
+
+    When ``on_complete`` is set the body is teed into a buffer and, ONLY on a
+    clean end-of-stream (not a cap timeout, upstream failure, or client
+    disconnect), handed to ``on_complete`` off-thread. This is the results-out
+    capture: a truncated or failed stream must never persist a partial run."""
     deadline = time.monotonic() + MAX_STREAM_SECONDS
+    captured = bytearray() if on_complete is not None else None
+    completed = False
     try:
         # aiter_bytes yields content-decoded bytes, so we deliberately do NOT copy
         # the sidecar's content-encoding header - the browser gets plain bytes.
         async for chunk in upstream.aiter_bytes():
             if cap and time.monotonic() > deadline:
                 return
+            if captured is not None:
+                captured.extend(chunk)
             yield chunk
+        completed = True
     except httpx.HTTPError:
         return  # upstream died mid-stream; end the stream (browser sees it close)
     except asyncio.CancelledError:
@@ -131,6 +148,8 @@ async def _relay(client: httpx.AsyncClient, upstream: httpx.Response, *, cap: bo
     finally:
         await upstream.aclose()
         await client.aclose()
+    if completed and on_complete is not None and captured is not None:
+        await asyncio.to_thread(on_complete, bytes(captured))
 
 
 class PanelSessionRequest(BaseModel):
@@ -270,12 +289,65 @@ def _record_write(
         logger.warning("advanced-panel write evidence recording failed: %s %s", method, subpath, exc_info=True)
 
 
+def _parse_scan_result(raw: bytes) -> dict | None:
+    """Recover the final SSE ``result`` frame (``{rows, summary}``) from a captured
+    ``/api/scan`` body. Mirrors the sidecar's own SSE parse (``_stream_scan``)."""
+    result: dict | None = None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[len("data:") :].strip())
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            result = event
+    return result
+
+
+def _persist_ip_scan_result(
+    session: scanner_raw_session.PanelSession,
+    principal: AuthPrincipal,
+    query: str,
+    raw: bytes,
+) -> None:
+    """Results-out (pipe 3): after a real IP scan completes in the panel, persist
+    its results as a genuine ``ip_scanner`` discovery run so the Results tab, run
+    history, and reports light up - reusing the sidecar engine as the parser via a
+    one-shot client (no network I/O). Best-effort: never raised into the browser
+    stream, and only fires when the SSE carried a final ``result`` frame with rows."""
+    try:
+        result = _parse_scan_result(raw)
+        rows = result.get("rows") if isinstance(result, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return
+        start_values = parse_qs(query).get("start")
+        start_ip = start_values[0] if start_values else None
+        if not start_ip:
+            return
+        # Lazy import avoids any route-module import cycle at load time.
+        from app.api.routes.scanners import dispatch_captured_ip_scanner_run
+
+        dispatch_captured_ip_scanner_run(
+            project_id=session.project_id,
+            site_id=session.site_id,
+            principal=principal,
+            start_ip=start_ip,
+            captured={"rows": rows, "summary": result.get("summary") or {}},
+        )
+    except Exception:  # noqa: BLE001 - results-out is best-effort, never breaks the scan
+        logger.warning("results-out persistence failed: %s", session.session_id, exc_info=True)
+
+
 @router.api_route(
     "/{proto}/raw/{path:path}",
     methods=["GET", "POST", "DELETE", "HEAD"],
     dependencies=[Depends(require_engineer)],
 )
-async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response:
+async def proxy_scanner_raw(
+    proto: str, path: str, request: Request, principal: AuthPrincipal = Depends(get_principal)
+) -> Response:
     name = SIDECAR_BY_PROTO.get(proto)
     if name is None:
         raise HTTPException(status_code=404, detail="Unknown scanner protocol.")
@@ -334,8 +406,17 @@ async def proxy_scanner_raw(proto: str, path: str, request: Request) -> Response
         response_headers["cache-control"] = "no-store"
         response_headers["x-accel-buffering"] = "no"
 
+    # Results-out (pipe 3): when a real IP scan finishes in the panel, capture the
+    # completed SSE body and persist it as an ip_scanner run. GET /api/scan only.
+    on_complete: Callable[[bytes], None] | None = None
+    if session is not None and proto == "ip" and path == "api/scan" and is_sse and request.method == "GET":
+        capture_session, capture_principal, capture_query = session, principal, request.url.query
+
+        def on_complete(raw: bytes) -> None:
+            _persist_ip_scan_result(capture_session, capture_principal, capture_query, raw)
+
     return StreamingResponse(
-        _relay(client, upstream, cap=is_sse),
+        _relay(client, upstream, cap=is_sse, on_complete=on_complete),
         status_code=upstream.status_code,
         headers=response_headers,
         media_type=upstream.headers.get("content-type"),

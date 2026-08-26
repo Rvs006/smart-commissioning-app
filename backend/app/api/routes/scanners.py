@@ -178,6 +178,50 @@ def create_ip_scanner_run(
     return _dispatch(run, enqueue=None, run_inline=run_inline, label="IP scanner")
 
 
+def dispatch_captured_ip_scanner_run(
+    *,
+    project_id: str,
+    site_id: str,
+    principal: AuthPrincipal,
+    start_ip: str,
+    captured: dict,
+) -> object:
+    """Results-out (pipe 3): persist an already-completed embedded-panel IP scan as
+    a real ``ip_scanner`` discovery run by replaying the captured ``{rows, summary}``
+    through the sidecar engine with a one-shot client (no network I/O). Same
+    create/dispatch path as ``create_ip_scanner_run`` above, so the Results tab, run
+    history, and reports light up identically. The scan already ran in the panel, so
+    ``authorized`` is stamped to the panel owner - this replays captured results, it
+    does not start a new scan."""
+    parameters: dict = {
+        "project_id": project_id,
+        "site_id": site_id,
+        "authorized": True,
+        "start_ip": start_ip,
+    }
+    _require_legacy_scan_authorization(parameters)
+    _stamp_legacy_authorizer(parameters, principal)
+    request = JobCreateRequest(
+        project_id=project_id, site_id=site_id, job_type="ip_scanner", parameters=parameters
+    )
+    run = _create_run(request, "ip_scanner", principal)
+
+    def run_inline(run_store, frozen_parameters: dict) -> object:
+        return process_ip_scanner_run(
+            run.run_id,
+            frozen_parameters,
+            run_store=run_store,
+            execution_mode="inline_local_fallback",
+            throttle=_settings_throttle(frozen_parameters),
+            dry_run=False,
+            persist_records=run_store.replace_devices,
+            sidecar_client=lambda **_: captured,
+            import_loader=ImportRepository(service.engine).get_accepted_rows,
+        )
+
+    return _dispatch(run, enqueue=None, run_inline=run_inline, label="IP scanner (panel)")
+
+
 @router.post("/bacnet_sidecar/runs", response_model=JobAcceptedResponse, dependencies=[Depends(require_engineer)])
 def create_bacnet_scanner_run(
     request: JobCreateRequest,

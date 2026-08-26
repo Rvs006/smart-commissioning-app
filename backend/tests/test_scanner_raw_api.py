@@ -48,7 +48,15 @@ def _handler(request: httpx.Request) -> httpx.Response:
     if path == "/api/scan":
         return httpx.Response(
             200,
-            stream=_Bytes([b'data: {"type":"start"}\n\n', b'data: {"type":"complete"}\n\n']),
+            stream=_Bytes(
+                [
+                    b'data: {"type":"start"}\n\n',
+                    b'data: {"type":"result","rows":[{"ip":"192.0.2.10","register":"match",'
+                    b'"rag":"green","status":"reachable","hostname":"h-a","openPorts":[80]}],'
+                    b'"summary":{"reachable":1}}\n\n',
+                    b'data: {"type":"complete"}\n\n',
+                ]
+            ),
             headers={"content-type": "text/event-stream"},
         )
     if path == "/api/publish":
@@ -151,6 +159,22 @@ class ScannerRawApiTest(ApiTestCase):
         before = len(service.list_runs(job_types={"scanner_raw_action"}))
         self.client.get("/api/v1/scanners/ip/raw/api/scan?start=192.0.2.1")
         self.assertEqual(len(service.list_runs(job_types={"scanner_raw_action"})), before)
+
+    def test_completed_scan_persists_a_real_ip_scanner_run(self) -> None:
+        # Results-out (pipe 3): a completed panel scan lands a real ip_scanner run,
+        # not just the thin evidence row, so the Results tab / history / reports fill.
+        from app.api.routes.discovery import service
+
+        session = self.sessions.create(
+            owner="tester", project_id="demo-project", site_id="demo-site", proto="ip"
+        )
+        self.client.cookies.set("sct_panel", session.session_id)
+        before = len(service.list_runs(job_types={"ip_scanner"}))
+        resp = self.client.get("/api/v1/scanners/ip/raw/api/scan?start=192.0.2.1")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        runs = service.list_runs(job_types={"ip_scanner"})
+        self.assertEqual(len(runs), before + 1)
+        self.assertEqual(runs[0].status, "succeeded")
 
     # -- M4: write guard ------------------------------------------------------
 
