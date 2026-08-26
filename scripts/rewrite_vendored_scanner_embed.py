@@ -4,8 +4,8 @@ The vendored apps call their API and load their assets with ABSOLUTE paths
 (``fetch('/api/scan')``, ``<script src="/app.js">``). Served from an SCT sub-path
 (``/api/v1/scanners/ip/raw/``) inside an iframe, those resolve to the SCT origin
 root instead of the proxy. This rewrites them to RELATIVE paths (``api/scan``,
-``app.js``) so they resolve against the panel URL, and injects the (inert until
-the write-guard milestone) ``sct-bridge.js`` tag.
+``app.js``) so they resolve against the panel URL, and injects the SCT
+``sct-bridge.js`` (write-guard) and ``sct-theme.css`` (SCT skin) tags.
 
 Deterministic and idempotent: re-running after a fresh re-import is a no-op once
 already-relative. Pinned by ``test_scanner_raw_embed_contract.py`` so a future
@@ -31,6 +31,7 @@ VENDOR = ROOT / "scanners" / "vendor"
 APPS = ("network-ip-scanner", "bacnet-scanner", "mqtt-discovery")
 
 BRIDGE_TAG = '<script src="sct-bridge.js" defer></script>'
+THEME_TAG = '<link rel="stylesheet" href="sct-theme.css" />'
 
 # (find, replace) applied to every js/html asset. Quote-anchored so we only touch
 # real URL literals, never a stray "/api/" inside prose.
@@ -52,6 +53,8 @@ def _rewrite_text(text: str, *, is_html: bool) -> str:
     if is_html:
         for find, repl in _ASSET_REPLACEMENTS:
             text = text.replace(find, repl)
+        if THEME_TAG not in text and "</head>" in text:
+            text = text.replace("</head>", f"  {THEME_TAG}\n</head>", 1)
         if BRIDGE_TAG not in text and "</body>" in text:
             text = text.replace("</body>", f"  {BRIDGE_TAG}\n</body>", 1)
     return text

@@ -113,6 +113,12 @@ class ScannerRawApiTest(ApiTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("javascript", resp.headers["content-type"])
 
+    def test_serves_the_theme_without_forwarding(self) -> None:
+        self.scanner_raw._proxy_client = lambda: (_ for _ in ()).throw(AssertionError("forwarded theme"))
+        resp = self.client.get("/api/v1/scanners/ip/raw/sct-theme.css")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("css", resp.headers["content-type"])
+
     def test_unknown_protocol_is_404(self) -> None:
         resp = self.client.get("/api/v1/scanners/nope/raw/api/health")
         self.assertEqual(resp.status_code, 404)

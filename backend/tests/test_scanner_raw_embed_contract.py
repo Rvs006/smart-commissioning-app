@@ -25,6 +25,7 @@ def _assert_relative(test: unittest.TestCase, label: str, text: str, *, is_html:
         for token in _ABSOLUTE_ASSETS:
             test.assertNotIn(token, text, f"{label}: absolute asset {token!r} not rewritten")
         test.assertIn("sct-bridge.js", text, f"{label}: bridge tag missing")
+        test.assertIn("sct-theme.css", text, f"{label}: theme tag missing")
 
 
 class EmbedRewriteContractTest(unittest.TestCase):
