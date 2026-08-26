@@ -96,41 +96,167 @@ _BRIDGE_JS = """(function () {
 """
 
 
-# SCT theme skin injected into each vendored scanner (the <link> tag is added by
-# the embed rewrite and loaded after the app's own styles.css, so it wins the
-# cascade). It remaps the app's palette variables and body font to the SCT
-# tokens; no JS or markup is touched, so every scanner function is preserved. The
-# IP scanner is fully skinned here; the sibling apps already pick up the shared
-# font and any common tokens, and get their remaining selectors as they are
-# brought over.
+# SCT (Electracom) theme skin served to each vendored scanner (the <link> tag is
+# added by the embed rewrite and loaded after the app's own styles.css, so it
+# wins the cascade). One sheet covers all three apps: the shared :root + body
+# apply everywhere, and each per-app block matches only its own selectors. It
+# remaps the apps' palette variables and body font to the SCT brand tokens (warm
+# cream + teal); no JS or markup is touched, so every scanner function is
+# preserved. Light theme (the vendored apps have no dark toggle).
 _THEME_CSS = """:root {
-  --bg: #f5f5f7;
-  --border: rgba(0, 0, 0, 0.08);
-  --border-strong: rgba(0, 0, 0, 0.16);
-  --text: #1d1d1f;
-  --muted: #86868b;
-  --muted-2: #a1a1a6;
-  --blue: #0071e3;
-  --blue-bg: rgba(0, 113, 227, 0.06);
-  --green: #248a3d;
-  --green-bg: rgba(52, 199, 89, 0.08);
-  --amber: #c77c00;
-  --amber-bg: rgba(255, 159, 10, 0.08);
-  --red: #d70015;
-  --red-bg: rgba(255, 59, 48, 0.08);
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --bg: #faf7f2;
+  --surface: #ffffff;
+  --surface-2: #fdf9f3;
+  --surface-3: #eeebe5;
+  --card: #ffffff;
+  --border: #e5dfd6;
+  --border-soft: #eeebe5;
+  --border-strong: #d8d0c4;
+  --ink: #2c2a28;
+  --text: #6b6560;
+  --muted: #6f6963;
+  --muted-2: #8a847d;
+  --accent: #26718f;
+  --accent-hover: #226986;
+  --accent-bg: #e4f2f7;
+  --on-accent: #ffffff;
+  --blue: #26718f;
+  --blue-bg: #e4f2f7;
+  --green: #216f42;
+  --green-bg: #e8f5ee;
+  --amber: #865d0b;
+  --amber-bg: #faf1df;
+  --orange: #865d0b;
+  --orange-bg: #faf1df;
+  --red: #c0392b;
+  --red-bg: #fbeae7;
+  --purple: #8b5c9b;
+  --purple-bg: #f1e9f5;
+  --pink: #8b5c9b;
+  --pink-bg: #f1e9f5;
+  --shadow: 0 1px 2px rgba(44, 42, 40, 0.05);
   --radius: 10px;
+  --radius-sm: 8px;
+  --control-height: 44px;
 }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
-}
-.brand-mark { background: var(--blue); }
-.progress-fill { background: var(--blue); }
-.btn.primary:hover { background: #0077ed; }
-.chip.active { background: var(--blue); border-color: var(--blue); }
-.config-input:focus,
-.search-input:focus { outline: 2px solid rgba(0, 113, 227, 0.35); border-color: var(--blue); }
-.results-table thead th { background: #f2f2f7; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif; font-size: 13px; color: var(--ink); background: var(--bg); }
+
+/* ===== IP scanner (network-ip-scanner) ===== */
+.brand-mark { background: var(--accent); border-radius: var(--radius-sm); }
+.brand-title { color: var(--ink); font-weight: 760; }
+.brand-sub { color: var(--muted); }
+.banner { background: var(--accent-bg); border: 1px solid var(--border-soft); color: var(--text); border-radius: var(--radius); }
+.banner strong { color: var(--ink); }
+.banner-icon { color: var(--accent); }
+.config-card, .summary-card, .results-panel, .detail-panel { border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+.config-label { color: var(--muted); font-size: 10px; font-weight: 760; letter-spacing: 0.02em; text-transform: uppercase; }
+.config-input, .search-input { min-height: var(--control-height); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); }
+.config-input:focus, .search-input:focus { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
+.summary-title { color: var(--muted); font-size: 10px; font-weight: 760; letter-spacing: 0.02em; text-transform: uppercase; }
+.summary-title .i { color: var(--muted-2); }
+.summary-num { font-size: 28px; font-weight: 800; }
+.summary-num.blue { color: var(--accent); }
+.summary-sub { color: var(--muted); }
+.btn:not(.sm) { min-height: var(--control-height); padding: 8px 15px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px; font-weight: 700; }
+.btn.primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.btn.primary:hover { border-color: var(--accent-hover); background: var(--accent-hover); }
+.btn.ghost { background: var(--surface); color: var(--text); border-color: var(--border); }
+.btn.ghost:hover { border-color: var(--accent-hover); background: var(--accent-bg); color: var(--accent-hover); }
+.link-btn { min-height: 32px; padding: 6px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font-weight: 650; }
+.link-btn:hover { border-color: var(--accent-hover); background: var(--accent-bg); color: var(--accent-hover); }
+.link-btn.danger { color: var(--red); background: var(--surface); border-color: var(--border); }
+.link-btn.danger:hover { border-color: var(--red); background: var(--red-bg); color: var(--red); }
+.chip { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 980px; padding: 6px 11px; font-size: 11px; font-weight: 700; }
+.chip.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.scan-state { border-radius: 980px; font-size: 10px; font-weight: 760; padding: 5px 10px; }
+.scan-state.idle { background: var(--surface-2); color: var(--muted); }
+.scan-state.running { background: var(--accent-bg); color: var(--accent); }
+.scan-state.done { background: var(--green-bg); color: var(--green); }
+.scan-state.error { background: var(--red-bg); color: var(--red); }
+.results-title { color: var(--ink); font-weight: 700; }
+.results-table thead th { background: var(--surface-2); color: var(--muted); font-size: 10px; font-weight: 760; letter-spacing: 0.03em; text-transform: uppercase; border-bottom: 1px solid var(--border); }
+.results-table tbody td { border-bottom: 1px solid var(--border-soft); }
+.results-table tbody tr:hover { background: var(--surface-2); }
+.results-table tbody tr.selected { background: var(--accent-bg); }
+.ip-cell { color: var(--accent); }
+.badge { border-radius: 980px; font-size: 10px; font-weight: 760; padding: 5px 9px; }
+.progress-fill { background: var(--accent); }
+.toast { background: var(--ink); border-radius: var(--radius-sm); }
+
+/* ===== BACnet scanner (bacnet-scanner) ===== */
+.brand-mark { background: var(--accent); color: var(--on-accent); }
+.scan-state.idle { background: var(--surface-3); color: var(--muted); }
+.config-label { font-size: 10px; font-weight: 760; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.link-btn { border-color: var(--border); }
+.link-btn:hover { background: var(--accent-bg); border-color: var(--accent-hover); color: var(--accent-hover); }
+.link-btn.danger { border-color: var(--red-bg); }
+.link-btn.danger:hover { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+.btn.active-toggle { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.progress-bar { background: var(--surface-3); }
+.results-table tbody tr.rag-red-row,
+.results-table tbody tr.rag-red-row:hover { background: var(--red-bg); }
+.badge.grey { background: var(--surface-3); color: var(--muted); }
+.detail-backdrop { background: rgba(44, 42, 40, 0.45); }
+.detail-panel.expanded { box-shadow: 0 24px 70px rgba(44, 42, 40, 0.28); }
+.detail-section h4 { font-size: 10px; font-weight: 760; letter-spacing: 0.06em; color: var(--muted); }
+.svc-tag { background: var(--surface-3); }
+.svc-tag.udp { background: var(--accent-bg); color: var(--accent); }
+.svc-proto { background: var(--surface-3); }
+.svc-proto.udp { background: var(--accent-bg); color: var(--accent); }
+.export-bar { border-color: var(--border); }
+.export-info { color: var(--ink); }
+.networks-bar { background: var(--accent-bg); border-color: var(--border); color: var(--ink); }
+.net-chip { background: var(--accent-bg); color: var(--accent); font-size: 10px; font-weight: 760; padding: 5px 9px; border-radius: 980px; }
+.obj-row { border-bottom: 1px solid var(--border-soft); }
+.obj-row:nth-child(even) { background: var(--surface-2); }
+
+/* ===== MQTT discovery (mqtt-discovery) ===== */
+.topnav { background: var(--surface); border-bottom: 1px solid var(--border); }
+.nav-tab { background: var(--surface); border-radius: var(--radius-sm); }
+.nav-tab:hover { background: var(--surface-2); color: var(--ink); }
+.nav-tab.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); box-shadow: none; }
+.mini-btn { border-color: var(--border); border-radius: var(--radius-sm); }
+.mini-btn:hover { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.mini-btn.primary { color: var(--on-accent); border-color: var(--accent); }
+.mini-btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.filter-input,
+.fld input,
+.fld select,
+.fld textarea { min-height: var(--control-height); background: var(--surface); color: var(--ink); border-radius: var(--radius-sm); }
+.cfg-editor { background: var(--surface); color: var(--ink); }
+.filter-input:focus,
+.fld input:focus,
+.fld select:focus,
+.fld textarea:focus,
+.cfg-editor:focus { outline: 2px solid var(--accent); outline-offset: 2px; border-color: var(--accent); }
+.list-table thead th { background: var(--surface-2); }
+.list-table tbody td { border-bottom-color: var(--border-soft); }
+.list-table tbody tr:not(.selected):hover { background: var(--surface-2); }
+.points-table td { border-bottom-color: var(--border-soft); }
+.btn.sm { border-radius: var(--radius-sm); font-size: 12px; font-weight: 700; }
+.json-view { background: var(--surface-3); color: var(--ink); border: 1px solid var(--border-soft); }
+.json-view .jk { color: var(--accent); }
+.json-view .js { color: var(--green); }
+.json-view .jn { color: var(--amber); }
+.json-view .jb { color: var(--accent-hover); }
+.cmp-bar { background: var(--surface-3); }
+.modal-overlay { background: rgba(44, 42, 40, 0.45); }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(44, 42, 40, 0.16); }
+.certs .cert-hint code { background: var(--surface-3); }
+.file-btn { border-color: var(--border); }
+.file-btn:hover { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.conn-error { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+.cfg-warn { background: var(--amber-bg); border-color: var(--amber); color: var(--amber); }
+.sort-btn { background: var(--surface); }
+.sort-btn.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.trow:not(.selected):hover { background: var(--surface-2); }
+.tname.device { color: var(--accent); }
+.topic-line { background: var(--surface-2); }
+.hist-chip { background: var(--surface-3); }
+.hist-chip:hover { background: var(--accent-bg); }
+.hist-chip.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.cfg-topic code { background: var(--surface-3); color: var(--ink); }
+.toast { background: var(--ink); box-shadow: 0 6px 20px rgba(44, 42, 40, 0.22); }
 """
 
 
