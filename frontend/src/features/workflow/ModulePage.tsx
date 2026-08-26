@@ -12,6 +12,7 @@ import {
 import { flushSync } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router";
+import { hostRangeFromCidr } from "./ipRange";
 import {
   ApiError,
   approveDetectedNmap,
@@ -22,6 +23,7 @@ import {
   deleteReports,
   deleteUdmiSchemaSet,
   downloadFile,
+  getConfiguration,
   getDiscoveryResults,
   getDiscoveryComparison,
   getDiscoveryObservations,
@@ -978,6 +980,38 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: nmapCapabilityQueryKey,
     staleTime: 15_000,
   });
+
+  // Auto-subnet: prefill the IP scan range from the configured Source Interface's
+  // subnet (stored as a cidr, e.g. "10.0.10.5/24") the first time it loads, only
+  // when the operator has not already typed a range. Editable afterwards; an
+  // "Auto" / blank source interface (no cidr) leaves the fields untouched.
+  const configurationQuery = useQuery({
+    enabled: module.route === "ip-scanner",
+    queryFn: ({ signal }) => getConfiguration({ client: apiClient, signal }),
+    queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "configuration", "auto-subnet"],
+    staleTime: 30_000,
+  });
+  const autoSubnetApplied = useRef(false);
+  useEffect(() => {
+    if (module.route !== "ip-scanner" || autoSubnetApplied.current) return;
+    const config = configurationQuery.data;
+    if (!config) return;
+    autoSubnetApplied.current = true;
+    if (ipScanRangeStart || ipScanRangeEnd) return;
+    let cidr: string | undefined;
+    for (const section of Object.values(config)) {
+      if (section.values["Source Interface"]) {
+        cidr = section.values["Source Interface"];
+        break;
+      }
+    }
+    const range = cidr ? hostRangeFromCidr(cidr) : null;
+    if (range) {
+      setIpScanRangeStart(range.start);
+      setIpScanRangeEnd(range.end);
+    }
+  }, [module.route, configurationQuery.data, ipScanRangeStart, ipScanRangeEnd]);
+
   const approveNmapMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "nmap.approve_detected"),
     mutationFn: () =>
