@@ -991,6 +991,16 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     queryKey: [...queryKeys.workspace(sessionScopeId, workspaceRef), "configuration", "auto-subnet"],
     staleTime: 30_000,
   });
+  // The configured Source Interface cidr (e.g. "10.0.10.5/24"), shared by
+  // auto-subnet (prefill the range) and config-in (push the NIC into the panel).
+  const sourceInterfaceCidr = useMemo(() => {
+    const config = configurationQuery.data;
+    if (!config) return undefined;
+    for (const section of Object.values(config)) {
+      if (section.values["Source Interface"]) return section.values["Source Interface"];
+    }
+    return undefined;
+  }, [configurationQuery.data]);
   const autoSubnetApplied = useRef(false);
   useEffect(() => {
     if (module.route !== "ip-scanner" || autoSubnetApplied.current) return;
@@ -998,19 +1008,12 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
     if (!config) return;
     autoSubnetApplied.current = true;
     if (ipScanRangeStart || ipScanRangeEnd) return;
-    let cidr: string | undefined;
-    for (const section of Object.values(config)) {
-      if (section.values["Source Interface"]) {
-        cidr = section.values["Source Interface"];
-        break;
-      }
-    }
-    const range = cidr ? hostRangeFromCidr(cidr) : null;
+    const range = sourceInterfaceCidr ? hostRangeFromCidr(sourceInterfaceCidr) : null;
     if (range) {
       setIpScanRangeStart(range.start);
       setIpScanRangeEnd(range.end);
     }
-  }, [module.route, configurationQuery.data, ipScanRangeStart, ipScanRangeEnd]);
+  }, [module.route, configurationQuery.data, sourceInterfaceCidr, ipScanRangeStart, ipScanRangeEnd]);
 
   const approveNmapMutation = useMutation({
     mutationKey: mutationKeys.action(sessionScopeId, "nmap.approve_detected"),
@@ -4825,6 +4828,7 @@ export function ModulePage({ moduleRoute }: ModulePageProps) {
               proto={module.route.replace("-scanner", "")}
               projectId={workspaceRef.projectId}
               siteId={workspaceRef.siteId}
+              sourceInterfaceCidr={sourceInterfaceCidr}
             />
           </section>
         )}

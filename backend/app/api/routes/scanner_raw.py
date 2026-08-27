@@ -93,6 +93,40 @@ _BRIDGE_JS = """(function () {
       parent.postMessage({ type: 'sct-write-request', id: id, method: method, path: path, body: body }, '*');
     });
   };
+
+  // config-in (pipe 1): SCT pushes saved config so the tool starts pre-set. IP:
+  // pre-select the NIC that matches SCT's Source Interface, then dispatch a real
+  // change event - the vendored scan reads the range that change prefills, not the
+  // adapter. Pure DOM, so app.js is untouched; a no-op on apps without #adapterSelect.
+  function applyConfigIn(cfg) {
+    var cidr = cfg && cfg.sourceInterface;
+    if (!cidr) return;
+    var ip = String(cidr).split('/')[0];
+    var sel = document.getElementById('adapterSelect');
+    if (!sel) return;
+    function pick() {
+      var opts = sel.options || [];
+      for (var i = 0; i < opts.length; i++) {
+        if ((opts[i].textContent || '').indexOf(ip) >= 0) {
+          if (sel.value !== String(opts[i].value)) {
+            sel.value = opts[i].value;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          return true;
+        }
+      }
+      return false;
+    }
+    if (pick()) return;
+    var obs = new MutationObserver(function () { if (pick()) obs.disconnect(); });
+    obs.observe(sel, { childList: true });
+    setTimeout(function () { obs.disconnect(); }, 10000);
+  }
+  window.addEventListener('message', function (ev) {
+    var d = ev.data || {};
+    if (d.type === 'sct-config-in') applyConfigIn(d);
+  });
+  try { parent.postMessage({ type: 'sct-bridge-ready' }, '*'); } catch (e) {}
 })();
 """
 
