@@ -70,34 +70,30 @@ collection order is alphabetical - keep it so.
   root-cause investigation on **Fable (`claude-fable-5`)**; write the code on
   **Opus 4.8 (`claude-opus-4-8`)** - switch model for the implementation phase
   or delegate implementation subagents with `model: claude-opus-4-8`.
-- **Current handoff**: status as of 2026-08-25. The latest public release is
-  v0.1.54, a release-tooling hardening release on top of v0.1.53 that hardens
-  the shared release-evidence
-  validator (`scripts/validate_release_evidence.py`) so malformed evidence JSON
-  fails closed with a controlled message instead of an uncaught traceback: a
-  non-object (array) evidence root, a CycloneDX SBOM payload whose root is not an
-  object, and a `files` field set to `null` or another non-list value each return
-  a clear validation failure; a missing `files` key still defaults to an empty
-  list. It also hardens the shared release secret scanner
-  (`scripts/scan_v0137_release_secrets.py`) to catch quoted-key JSON credentials
-  in the evidence directory and the packaged ZIP, including pretty-printed
-  multi-line ones, with precise field-name and label suppression so real tokens
-  and passphrases still report while schema field names do not. Both tools run in
-  CI and the release ceremony and are not part of the shipped application, so
-  there is no functional change: the whole v0.1.53 surface
-  is carried forward unchanged, including the v0.1.53 release-gate secret scanning
-  and dirty-worktree provenance hardening, and the Advanced tab on the IP, BACnet,
-  and MQTT discovery modules that embeds each standalone scanner tool through the
-  backend reverse proxy (`/api/v1/scanners/{proto}/raw/`) with reads free for the
+- **Current handoff**: status as of 2026-08-27. The latest public release is
+  v0.1.55, which finishes the scanner "marriage": the embedded IP, BACnet, and
+  MQTT standalone scanners are reskinned to the SCT Electracom theme through an
+  injected stylesheet (their own `app.js` untouched) and wired end to end. A
+  completed panel scan is captured and persisted as a real `ip_scanner` /
+  `bacnet_scanner` / `mqtt_scanner` run so the Results tab, run history, and
+  reports fill in; IP and BACnet re-compare and a BACnet export are captured too.
+  The saved Source Interface pre-selects the matching NIC in the embedded IP and
+  BACnet tools and prefills the IP scan range and the MQTT broker. The IP, BACnet,
+  and MQTT sidecar modules now present the embedded scanner as one Scan surface,
+  with the built-in discovery modules unchanged. This release also binds a panel
+  session to the protocol it was opened for (a cross-protocol `scanner_raw_write`
+  is refused), preflights the session response and the sidecar health before
+  showing the embedded tool (a failure shows a Retry error, not a ready-looking
+  panel), and persists a BACnet export's discovered points. It builds on the
+  Advanced-panel reverse proxy from v0.1.53 and v0.1.54: reads free for the
   engineer role, device writes gated by an in-app confirmation and a single-use
   request-bound token, and every action recorded as an SCT run row
-  (`scanner_raw_action` / `scanner_raw_write`), plus the sidecar-lane operator
-  inputs and the stable MQTT live topic tree. It adds no database migration
+  (`scanner_raw_action` / `scanner_raw_write`). It adds no database migration
   (Alembic head a6b7c8d9e0f1, Sync v2 head a7b8c9d0e1f2). Built-in TCP connect
   remains the default; Nmap stays optional, locally installed, and unbundled. The
   Advanced panel authenticates via the local principal, so it is available in the
   portable and local deployments; a keyed hosted deployment needs the deferred
-  panel-session credential. Field acceptance for v0.1.54 remains open until
+  panel-session credential. Field acceptance for v0.1.55 remains open until
   recorded privately. Keep source, raw evidence, report bytes, EXE identity,
   Docker labels, and release SHA bound to the same run or commit.
 - **Version bookkeeping**: whenever the application version changes, or a
