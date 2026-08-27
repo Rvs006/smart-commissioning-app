@@ -83,6 +83,7 @@ from smart_commissioning_core.mqtt_transport import (
     MqttMessage,
     MqttTransportError,
     subscribe_and_capture,
+    subscribe_and_capture_with_outcome,
 )
 
 ENGINE_NAME = "mqtt_discovery"
@@ -374,9 +375,29 @@ def _run_mqtt_discovery(
     # the cap honestly next to a per-message delivery QoS.
     subscribe_qos = parse_int(ctx.parameters.get("qos"), default=0)
 
+    # The default real path is the list wrapper, which discards the transport's
+    # byte-cap termination — so the 256 MB retained-payload backstop would end a
+    # capture and still look like a normal completion. Route the default through
+    # the outcome-aware API and record the byte cap so the summary can flag an
+    # incomplete capture. Injected fakes keep the plain list seam unchanged.
+    capture_telemetry: dict[str, Any] = {}
+    effective_capture: LiveCapture = live_capture
+    if live_capture is subscribe_and_capture:
+        def _capture_with_outcome(settings: MqttConnectionSettings, **kwargs: Any) -> list[MqttMessage]:
+            outcome = subscribe_and_capture_with_outcome(settings, **kwargs)
+            capture_telemetry["byte_cap_reached"] = outcome.primary_byte_cap_reached
+            if outcome.termination == "broker_interruption":
+                raise MqttCaptureInterrupted(
+                    outcome.messages,
+                    outcome.interruption_cause or MqttTransportError("MQTT capture interrupted."),
+                )
+            return outcome.messages
+
+        effective_capture = _capture_with_outcome
+
     capture_error_status: str | None = None
     try:
-        messages = live_capture(
+        messages = effective_capture(
             settings,
             topics=topic_filters,
             # capture_seconds stays None in the summary (capture_mode
@@ -420,6 +441,7 @@ def _run_mqtt_discovery(
         observed_counts=observed_counts,
         messages_observed=messages_observed,
         subscribe_qos=subscribe_qos,
+        byte_cap_reached=bool(capture_telemetry.get("byte_cap_reached", False)),
     )
 
 
@@ -437,6 +459,7 @@ def _aggregate_capture(
     observed_counts: dict[str, int] | None = None,
     messages_observed: int = 0,
     subscribe_qos: int = 0,
+    byte_cap_reached: bool = False,
 ) -> EngineResult:
     """Aggregate captured messages into topics + assets + structured records.
 
@@ -545,10 +568,18 @@ def _aggregate_capture(
         # publisher's QoS.
         "subscribe_qos": subscribe_qos,
         "topic_limit_reached": len(order) >= max_messages,
+        # The 256 MB retained-payload backstop can end a capture before the topic
+        # cap, so a byte-truncated run must not read as a normal complete capture.
+        "byte_limit_reached": byte_cap_reached,
         "broker_status_detail": (
             "cancelled"
             if cancelled
-            else capture_error_status or ("messages_captured" if messages else "capture_window_empty")
+            else capture_error_status
+            or (
+                "byte_cap"
+                if byte_cap_reached and messages
+                else ("messages_captured" if messages else "capture_window_empty")
+            )
         ),
         # NOTE: under retain-latest len(messages) IS the distinct-topic count, so
         # this key now tracks the topic cap (same value as topic_limit_reached).

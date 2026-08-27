@@ -16,10 +16,14 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
   estate (hundreds of assets, ~3 topic families each, thousands of distinct
   topics) is captured in full by default rather than silently dropping every
   topic seen after the 500th. Retain-latest plus the transport byte bound still
-  cap memory, and `topic_limit_reached` still flags any run that reaches the
-  ceiling. Operators can still pass a smaller `max_messages` to bound a single
-  run. UDMI validation already scaled its capture to the register (v0.1.29); this
-  brings the discovery lane in line.
+  cap memory. A run cut short by that 256 MB retained-payload backstop now routes
+  the default capture through the outcome-aware transport and surfaces
+  `byte_limit_reached` with a `byte_cap` `broker_status_detail`, and
+  `topic_limit_reached` still flags a run that reaches the topic ceiling, so a
+  byte-truncated capture is no longer reported as a normal complete one.
+  Operators can still pass a smaller `max_messages` to bound a single run. UDMI
+  validation already scaled its capture to the register (v0.1.29); this brings
+  the discovery lane in line.
 
 ## [0.1.55] - 2026-08-27
 
