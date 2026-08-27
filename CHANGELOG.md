@@ -7,6 +7,13 @@ and this project aims to adhere to [Semantic Versioning](https://semver.org/spec
 
 ## [Unreleased]
 
+### Added
+
+- MQTT register import now accepts an optional `Section` column (UDMI
+  `system.location.section`), alongside `Room` and `Floor`. It appears in the
+  downloadable template and is captured on accepted rows; leaving it blank never
+  rejects a row. Registers without the column import exactly as before.
+
 ### Fixed
 
 - MQTT discovery (built-in engine) no longer truncates a full-site capture at 500

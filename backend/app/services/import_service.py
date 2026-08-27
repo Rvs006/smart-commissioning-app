@@ -705,6 +705,7 @@ PROFILES: dict[ImportType, ImportProfile] = {
             "Serial number",
             "Room",
             "Floor",
+            "Section",
             "GUID",
             "Make",
             "Model",
